@@ -72,6 +72,29 @@ modules and visibility, and `for` loops, which need iteration and therefore
 traits. A `.tr` "hello world" is expressible today only as an array of `t9`
 code units — which is what the chapter's own appendix shows.
 
+**G0.4 — Chapter 3 is written, and two earlier statements want updating.**
+`spec/language/03-references.md` defines ownership, moves, destructors,
+references, lifetimes, the borrow checker and slices. It is a **design** like
+the ISA and the syntax chapter, and it makes four choices worth review:
+lifetimes follow Rust (they are erased, not instantiated, so nothing about
+them waits on Chapter 4); the borrow checker is non-lexical; destructors are
+`fn drop(self: T)` until `impl` blocks exist; and `Box` is left to the library
+chapter.
+
+Two consequences for documents already written:
+
+- **Ch. 2 §6 understates the reference niche.** It says a reference excludes
+  the null address, "at least 1 niche". Ch. 3 §2.5 promises that *every*
+  non-positive value is invalid, which is (3²⁷+1)/2 niches, because an address
+  is a signed word and memory is non-negative. The implementation already
+  models it this way. Ch. 2 §6 wants one line changed.
+- **Ch. 2 §3's fused bounds check is wrong.** `tmin(sign(i), i <=> N)` is −1
+  for an in-bounds index as well as an out-of-bounds one, so it cannot
+  distinguish them. Ch. 3 §5.5 records the correction and gives a fusion that
+  works. The sentence is marked informative and the normative requirement is
+  unaffected, so nothing was ever mis-compiled — the frontend emits two
+  comparisons.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The
