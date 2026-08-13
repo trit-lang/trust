@@ -250,8 +250,12 @@ fn immutable_bindings_cannot_be_assigned() {
 #[test]
 fn the_deferred_features_say_what_they_are_waiting_for() {
     assert!(error("fn main() -> t27 { let s = \"hi\"; 0 }").contains("library chapter"));
-    assert!(error("fn main() -> t27 { for x in y { } 0 }").contains("reserved"));
     assert!(error("fn main() -> t27 { 1 ^ 2 }").contains("tmul"));
+    // Reserved for a chapter nobody has written…
+    assert!(error("fn main() -> t27 { mod m; 0 }").contains("not written yet"));
+    // …as against one that is written and not built.
+    assert!(error("fn main() -> t27 { for x in y { } 0 }").contains("Ch. 4"));
+    assert!(error("trait Shape { }").contains("Ch. 4"));
     // References are Chapter 3 and now work; generics are still Chapter 4.
     tir_of("fn f(x: &t27) -> t27 { *x }");
     assert!(error("fn f<T>(x: T) -> T { x }").contains("Chapter 4"));

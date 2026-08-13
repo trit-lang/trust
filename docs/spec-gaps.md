@@ -139,6 +139,51 @@ Three further approximations, all conservative:
 The chapter itself is unchanged: this is a staged implementation of a complete
 design, and each stage refuses what it cannot yet verify.
 
+**G0.6 — Chapter 4 is written, and it resolves one earlier ambiguity.**
+`spec/language/04-generics.md` defines traits, impl blocks, methods, generic
+type/lifetime/const parameters, bounds and `where` clauses, trait objects,
+closures, the language's own traits, `for` loops, and `derive`. It is a
+**design** like the ISA, the syntax chapter and Ch. 3, and it makes four
+choices worth review, all four picked deliberately over the Rust-shaped
+alternative where they differ:
+
+- **There is no `PartialOrd` above `Ord`.** Rust's ordering hierarchy is
+  shaped by floating point's `NaN`, and this language has no floating point.
+  `Ord::cmp(&self, &Self) -> trit` is the base trait; genuinely partial orders
+  get a separate, unrelated `PartialOrd::partial_cmp -> Option<trit>`, which
+  is one tryte by Ch. 2's own appendix. No operator calls it.
+- **Operator traits carry one method, and the overflow flavors of Ch. 1 §4 do
+  not enter the trait system.** `+.wrap` applies to Ch. 1's integer types and
+  nothing else, because `wrap` means "into this width" and a user type has no
+  width. Built-in indexing likewise does not go through `Index`, so Ch. 3
+  §5.5's bounds check stays a language guarantee rather than a library
+  convention.
+- **Generics monomorphize; `dyn Trait` is a fat pointer.** Data pointer then
+  vtable pointer, 6 trytes, alignment 3 — the same shape as Ch. 3 §5.2's slice
+  reference and for the same reason. Both words are strictly positive, so both
+  carry Ch. 3 §2.5's niches; the compiler uses the data pointer's.
+- **Closures are fully defined but cannot be returned.** `Fn`/`FnMut`/`FnOnce`,
+  capture inference and anonymous types are all specified; returning a closure
+  needs `impl Trait` in return position or `Box<dyn Fn…>`, and both wait for
+  an allocator. A consequence worth noting: `move` is not provided and is not
+  missed, because a closure that cannot escape never needs to force capture by
+  value.
+
+One consequence for a document already written:
+
+- **Ch. 3 §1.2's note on `Copy` is self-inconsistent.** It says the structural
+  copy rule will be restated as a trait "automatically derived… exactly as
+  Rust's `Copy` is", but Rust's `Copy` is *opted into*: a struct of integers is
+  not `Copy` until someone writes the derive. Only the automatic reading keeps
+  the sentence immediately after it, which promises the restatement changes
+  which programs compile "in no way at all". Ch. 4 §5.1 takes the automatic
+  reading and says so; opting out is `impl !Copy for T`, the only negative impl
+  in the language. Ch. 3 §1.2's note wants half a line changed.
+
+Nothing in Ch. 4 is implemented yet. The frontend still rejects `trait`,
+`impl`, `for`, `dyn` and `<…>` type parameters with the diagnostics Ch. 0 §1.3
+requires, which now name a chapter that exists.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

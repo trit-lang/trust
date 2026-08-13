@@ -61,11 +61,16 @@ pub const KEYWORDS: &[&str] = &[
     "match", "mut", "return", "self", "struct", "true", "while",
 ];
 
+/// Reserved by §1.3 and claimed by Ch. 4, which is written but not
+/// implemented (Ch. 4 Appendix C). The diagnostic says so, because "wait for
+/// a chapter that does not exist" and "wait for that chapter to be built" are
+/// different pieces of news.
+pub const CHAPTER_4: &[&str] = &["dyn", "for", "impl", "in", "Self", "trait", "type", "where"];
+
 /// Reserved for chapters that do not exist yet (§1.3). Using one is an error
 /// that names the reason, rather than a mysterious parse failure.
 pub const RESERVED: &[&str] = &[
-    "crate", "dyn", "for", "impl", "in", "mod", "move", "pub", "ref", "Self", "static", "trait",
-    "type", "union", "unsafe", "use", "where",
+    "crate", "mod", "move", "pub", "ref", "static", "union", "unsafe", "use",
 ];
 
 /// Operators and punctuation, longest first so that maximal munch is simply
@@ -184,6 +189,14 @@ pub fn lex(src: &str) -> Result<Vec<(Tok, Line)>, SyntaxError> {
                 out.push((Tok::Op("_"), line));
             } else if let Some(k) = KEYWORDS.iter().find(|k| **k == text) {
                 out.push((Tok::Kw(k), line));
+            } else if CHAPTER_4.contains(&text.as_str()) {
+                return Err(err(
+                    line,
+                    format!(
+                        "`{text}` belongs to Ch. 4, which is specified but not implemented \
+                         (Ch. 4 Appendix C)"
+                    ),
+                ));
             } else if RESERVED.contains(&text.as_str()) {
                 return Err(err(
                     line,
@@ -283,7 +296,8 @@ mod tests {
                 .message
                 .contains("library chapter")
         );
-        assert!(lex("for").unwrap_err().message.contains("reserved"));
+        assert!(lex("for").unwrap_err().message.contains("Ch. 4"));
+        assert!(lex("mod").unwrap_err().message.contains("reserved"));
         assert!(lex("a ^ b").unwrap_err().message.contains("tmul"));
     }
 }
