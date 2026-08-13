@@ -20,7 +20,7 @@ the source.
 | `vm/` — crate `tritium` | **implemented**: the reference TRISC-27 machine — encoder/decoder, ALU, memory, the negative-address device region, CLI |
 | assembler (`.t27`) | **implemented**: two-pass, exact balanced-ternary expressions, all directives and pseudo-instructions (`tritium asm`) |
 | backend (TIR → TRISC-27) | **implemented**: `trustc compile` emits assembly. No register allocator yet — every value lives in a stack slot |
-| `compiler/` — Trust frontend | **not started**: the surface syntax is explicitly provisional in the spec (`docs/spec-gaps.md` G0.3) |
+| `compiler/` — Trust frontend | **specified, not built**: `spec/language/00-syntax.md` defines the surface syntax; the lexer, parser, type checker and lowering to TIR are the next milestone |
 
 ## Building
 

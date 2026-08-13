@@ -49,13 +49,26 @@ a reserved I/O access all currently raise `F_TRAP`, whose AM §4 definition is
 encoding) and `F_ADDRESS` (access outside the address space). Adding fault
 codes is the AM's decision, so the ISA document reports rather than invents.
 
-**G0.3 — Trust surface syntax is undefined (blocking).** Language Ch. 1 §4
-defers "the rest of surface syntax", and the TIR appendix labels its own
-sample "syntax provisional". Chapters 3 (references/borrowing) and 4
-(traits/generics) are not written. There is consequently no `.tr` parser and
-no frontend; `trustc` currently consumes and executes `.tir` only. The type
-system rules of Ch. 1 and the layout rules of Ch. 2 that do not depend on
-syntax are implemented in `trit-core` and will be reused unchanged.
+**G0.3 — Trust surface syntax — RESOLVED as to specification.**
+`spec/language/00-syntax.md` defines the lexical structure, items,
+expressions, patterns and statements, and settles the four questions that were
+genuinely open: `& | ^` stay reserved rather than becoming `tmin`/`tmax`/
+`tmul`, comments are `//`, a function without a body is a declaration, and
+three-way dispatch is `match` and nothing else. Like the ISA, it is a
+**design** and wants review.
+
+What it cannot reach still waits on unwritten chapters: strings and characters
+(the library chapter, via AM §5's deferred text encoding), references and
+borrowing beyond the spelling `&T` (Ch. 3), generics and traits (Ch. 4),
+modules and visibility, and `for` loops, which need iteration and therefore
+traits. A `.tr` "hello world" is expressible today only as an array of `t9`
+code units — which is what the chapter's own appendix shows.
+
+**G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
+layout puts the chaptered language specification under `spec/language/`, but
+Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The
+new chapter follows the layout document (as `spec/isa/` does); moving the
+existing two is the author's call, not the implementation's.
 
 ---
 
