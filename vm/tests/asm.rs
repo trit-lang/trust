@@ -348,13 +348,28 @@ fn the_appendix_echo_program_assembles_and_runs() {
 }
 
 #[test]
-fn the_checked_in_image_matches_its_source() {
-    // `examples/trisc/echo.timg` is generated from `echo.t27`; if they drift,
-    // this catches it.
-    let src = include_str!("../../examples/trisc/echo.t27");
-    let checked_in = tritium::image::parse(include_str!("../../examples/trisc/echo.timg"))
-        .expect("the image parses");
-    assert_eq!(asm(src), checked_in);
+fn hello_world_assembles_and_prints() {
+    let src = include_str!("../../examples/trisc/hello.t27");
+    let (stop, out) = run(src, b"");
+    assert_eq!(stop, Stop::Halted(0));
+    assert_eq!(String::from_utf8(out).unwrap(), "Hello, world!\n");
+}
+
+#[test]
+fn the_checked_in_images_match_their_sources() {
+    for (source, image) in [
+        (
+            include_str!("../../examples/trisc/echo.t27"),
+            include_str!("../../examples/trisc/echo.timg"),
+        ),
+        (
+            include_str!("../../examples/trisc/hello.t27"),
+            include_str!("../../examples/trisc/hello.timg"),
+        ),
+    ] {
+        let checked_in = tritium::image::parse(image).expect("the image parses");
+        assert_eq!(asm(source), checked_in);
+    }
 }
 
 #[test]

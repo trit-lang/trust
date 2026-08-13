@@ -1,0 +1,32 @@
+; hello — the smallest interesting program, in TIR.
+;
+; The message is a global of UTF-8 code units, one per tryte (AM §5's interop
+; default), terminated by a zero tryte. `@putchar` is *declared* and not
+; defined: TIR §5 has no integer-to-pointer cast, so a device address cannot
+; be written in TIR at all, and a function with an external body is the way
+; the language reaches one. `examples/trisc/runtime.t27` supplies it.
+
+tir 0.1 target "tritium"
+
+global @msg : tryte[15] = [72, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100, 33, 10, 0]
+
+fn @putchar(%c: t9)
+
+fn @main() -> t27 {
+^entry:
+    br ^loop(const t27 0)
+
+^loop(%i: t27):
+    %p = offset @msg, %i
+    %c = load t9 %p
+    %z = cmp t9 %c, const t9 0
+    br3 %z, ^emit(%i, %c), ^done, ^emit(%i, %c)
+
+^emit(%j: t27, %ch: t9):
+    call @putchar(%ch)
+    %n = add.wrap t27 %j, const t27 1
+    br ^loop(%n)
+
+^done:
+    ret const t27 0
+}

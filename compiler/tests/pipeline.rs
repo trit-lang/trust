@@ -82,6 +82,37 @@ fn differential(src: &str, entry: &str, cases: &[&[i128]]) {
     }
 }
 
+/// Compile, append the hand-written runtime, assemble and run — returning
+/// what the program wrote. There is no linker (TRISC-27 §8), so "linking" is
+/// concatenation.
+fn compile_link_and_run(src: &str, entry: &str) -> (i128, String) {
+    let m = parse(src);
+    let legalized = tir::legalize_module(&m, &TargetDesc::tritium())
+        .unwrap_or_else(|e| panic!("legalization failed: {e:?}"));
+    let mut asm = codegen::compile(&legalized, entry)
+        .unwrap_or_else(|e| panic!("code generation failed: {e:?}"));
+    asm.push_str(include_str!("../../examples/trisc/runtime.t27"));
+
+    let image = tritium::assemble(&asm).unwrap_or_else(|e| panic!("assembly failed: {e:?}\n{asm}"));
+    let mut vm = tritium::Vm::with_default_memory();
+    vm.load_image(&image);
+    match vm.run(50_000_000) {
+        tritium::Stop::Halted(v) => (v, String::from_utf8(vm.io.output().to_vec()).unwrap()),
+        other => panic!("machine stopped: {other}"),
+    }
+}
+
+#[test]
+fn hello_world_compiles_from_tir_and_prints() {
+    // The whole stack, for the smallest interesting program: TIR through
+    // legalization, code generation, assembly and the machine, with a
+    // hand-written `putchar` standing in for the device access TIR cannot
+    // express (§5 has no integer-to-pointer cast).
+    let (status, out) = compile_link_and_run(include_str!("../../examples/tir/hello.tir"), "main");
+    assert_eq!(status, 0);
+    assert_eq!(out, "Hello, world!\n");
+}
+
 #[test]
 fn the_tir_appendix_example_compiles_and_runs() {
     differential(

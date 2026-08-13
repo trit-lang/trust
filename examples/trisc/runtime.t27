@@ -1,0 +1,24 @@
+; runtime — the bottom of the stack, hand-written in assembly.
+;
+; TIR cannot reach a memory-mapped device: §5 states that "ptr↔tN conversion
+; instructions deliberately do not exist in draft 0.1", so there is no way to
+; write the address −2 and store through it. What TIR *can* do is call a
+; function whose body is external (§1, "function declarations — signature
+; only, body external"), which is what these are.
+;
+; Concatenate this after generated code and assemble the two together; there
+; is no linker yet (TRISC-27 §8).
+
+.equ IO_IN,  -1
+.equ IO_OUT, -2
+
+; putchar(c: t9) — write one UTF-8 code unit. The argument arrives in a0 and
+; nothing is returned, per the tritium0 convention (TRISC-27 §6).
+f.putchar:
+    st.tryte a0, IO_OUT(zero)
+    ret
+
+; getchar() -> t9 — read one code unit, or −1 waiting, or −2 end of input.
+f.getchar:
+    ld.tryte a0, IO_IN(zero)
+    ret

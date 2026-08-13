@@ -1,0 +1,31 @@
+; hello — the smallest interesting program, in TRISC-27 assembly.
+;
+; Note what is *not* here: a string literal. Assembly §2.5 reserves character
+; and string literals, because AM §5 defers text encoding to the language
+; specification's library chapter, and until a carrier format is fixed there
+; is no defensible meaning for the trytes such a literal would emit. So the
+; message is written as what it actually is — one UTF-8 code unit per tryte,
+; which is AM §5's stated interop default.
+
+.equ IO_OUT, -2
+
+start:
+    la       t0, msg
+
+loop:
+    ld.tryte a0, 0(t0)
+    cmp      t1, a0, zero
+    br3      t1, write, done, write   ; a zero tryte ends the message
+
+write:
+    st.tryte a0, IO_OUT(zero)
+    addi     t0, t0, 1
+    j        loop
+
+done:
+    halt     zero
+
+msg:
+    ;      H   e    l    l    o    ,   ' '   w    o    r    l    d    !   \n
+    .tryte 72, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100, 33, 10
+    .tryte 0
