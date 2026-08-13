@@ -92,6 +92,10 @@ impl std::fmt::Display for Val {
 /// One allocation — a global or a `slot`.
 struct Alloc {
     name: String,
+    /// Set when this allocation *is* a function's address (TIR §1.2). It has
+    /// no trytes, so every load and store through it is out of range — which
+    /// is what §1.2 means by "loading or storing through one is UB".
+    function: Option<String>,
     /// One entry per tryte; `None` is uninitialized.
     trytes: Vec<Option<Tint>>,
     /// Pointers stored in this allocation, by tryte offset.
@@ -129,6 +133,8 @@ pub struct Interp<'m> {
     module: &'m Module,
     allocs: Vec<Alloc>,
     globals: HashMap<String, usize>,
+    /// The allocation that is each function's address (TIR §1.2).
+    functions: HashMap<String, usize>,
     fuel: u64,
     depth: u32,
 }
@@ -146,22 +152,70 @@ impl<'m> Interp<'m> {
             module,
             allocs: Vec::new(),
             globals: HashMap::new(),
+            functions: HashMap::new(),
             fuel: DEFAULT_FUEL,
             depth: 0,
         };
+        // One allocation per function, so that `addr @f` has something with
+        // provenance to point at (TIR §1.2).
+        for name in module
+            .funcs
+            .iter()
+            .map(|f| f.sig.name.clone())
+            .chain(module.decls.iter().map(|d| d.name.clone()))
+        {
+            let id = interp.allocs.len();
+            interp.allocs.push(Alloc {
+                name: format!("@{name}"),
+                function: Some(name.clone()),
+                trytes: Vec::new(),
+                pointers: std::collections::HashMap::new(),
+            });
+            interp.functions.insert(name, id);
+        }
+
         for g in &module.globals {
-            let trytes = match &g.init {
-                None => vec![None; g.trytes as usize],
-                Some(vals) => vals
-                    .iter()
-                    .map(|v| Some(Tint::wrapping(9, v.clone())))
-                    .collect(),
-            };
+            let mut trytes: Vec<Option<Tint>> = Vec::new();
+            let mut pointers = std::collections::HashMap::new();
+            match &g.init {
+                None => trytes = vec![None; g.trytes as usize],
+                Some(items) => {
+                    for item in items {
+                        match item {
+                            InitItem::Tryte(v) => trytes.push(Some(Tint::wrapping(9, v.clone()))),
+                            InitItem::Addr(name) => {
+                                // The address itself is a relocation the
+                                // target resolves, so the trytes hold nothing
+                                // and the provenance is kept beside them.
+                                if let Some(id) = interp.functions.get(name) {
+                                    pointers.insert(
+                                        trytes.len() as i128,
+                                        Ptr {
+                                            alloc: *id,
+                                            offset: 0,
+                                        },
+                                    );
+                                } else if let Some(id) = interp.globals.get(name) {
+                                    pointers.insert(
+                                        trytes.len() as i128,
+                                        Ptr {
+                                            alloc: *id,
+                                            offset: 0,
+                                        },
+                                    );
+                                }
+                                trytes.extend([None, None, None]);
+                            }
+                        }
+                    }
+                }
+            }
             let id = interp.allocs.len();
             interp.allocs.push(Alloc {
                 name: format!("@{}", g.name),
+                function: None,
                 trytes,
-                pointers: std::collections::HashMap::new(),
+                pointers,
             });
             interp.globals.insert(g.name.clone(), id);
         }
@@ -330,6 +384,7 @@ impl<'m> Interp<'m> {
                 let id = self.allocs.len();
                 self.allocs.push(Alloc {
                     name: format!("slot#{id}"),
+                    function: None,
                     trytes: vec![None; *trytes as usize],
                     pointers: std::collections::HashMap::new(),
                 });
@@ -395,7 +450,31 @@ impl<'m> Interp<'m> {
                     .iter()
                     .map(|a| self.operand(a, env))
                     .collect::<Result<_, _>>()?;
-                match self.call(callee, &args)? {
+                // TIR §4's fifth UB source: a call through anything that is
+                // not the address of a function.
+                let name = match callee {
+                    Callee::Direct(n) => n.clone(),
+                    Callee::Indirect(p) => match self.operand(p, env)? {
+                        Val::Ptr(ptr) => match &self.allocs[ptr.alloc].function {
+                            Some(n) if ptr.offset == 0 => n.clone(),
+                            _ => {
+                                return Err(Halt::Ub(
+                                    "indirect call through a pointer that is not a \
+                                     function's address (TIR §3.7)"
+                                        .into(),
+                                ));
+                            }
+                        },
+                        _ => {
+                            return Err(Halt::Ub(
+                                "indirect call through something that is not a pointer \
+                                 (TIR §3.7)"
+                                    .into(),
+                            ));
+                        }
+                    },
+                };
+                match self.call(&name, &args)? {
                     Some(v) => vec![v],
                     None => Vec::new(),
                 }

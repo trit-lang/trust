@@ -62,19 +62,46 @@ pub fn verify(m: &Module) -> Vec<VerifyError> {
     }
 
     for g in &m.globals {
-        if let Some(init) = &g.init {
-            for (i, v) in init.iter().enumerate() {
-                if !v.fits_width(9) {
+        let Some(init) = &g.init else { continue };
+        let mut at = 0u32;
+        for item in init {
+            match item {
+                InitItem::Tryte(v) if !v.fits_width(9) => errs.push(VerifyError {
+                    function: None,
+                    block: None,
+                    message: format!(
+                        "`@{}` initializer tryte {at} is {v}, which does not fit in one tryte",
+                        g.name
+                    ),
+                }),
+                // A relocation must name something this module has (§1.2).
+                InitItem::Addr(name)
+                    if m.signature(name).is_none()
+                        && !m.globals.iter().any(|g| &g.name == name) =>
+                {
                     errs.push(VerifyError {
                         function: None,
                         block: None,
                         message: format!(
-                            "`@{}` initializer tryte {i} is {v}, which does not fit in one tryte",
+                            "`@{}` takes the address of `@{name}`, which this module does \
+                             not define or declare",
                             g.name
                         ),
                     });
                 }
+                _ => {}
             }
+            at += item.trytes();
+        }
+        if at != g.trytes {
+            errs.push(VerifyError {
+                function: None,
+                block: None,
+                message: format!(
+                    "`@{}` initializer fills {at} trytes but the global is tryte[{}]",
+                    g.name, g.trytes
+                ),
+            });
         }
     }
 
@@ -299,7 +326,7 @@ fn result_types(m: &Module, inst: &Inst) -> Vec<(String, Type)> {
         InstKind::Call { callee, ret, .. } => {
             // Trust the module's signature when there is one; the call's own
             // annotation is checked against it in verify_inst.
-            match m.signature(callee).map(|s| s.ret).unwrap_or(*ret) {
+            match callee_signature(m, callee).map(|s| s.ret).unwrap_or(*ret) {
                 Some(t) => vec![t],
                 None => vec![],
             }
@@ -308,12 +335,24 @@ fn result_types(m: &Module, inst: &Inst) -> Vec<(String, Type)> {
     inst.results.iter().cloned().zip(tys).collect()
 }
 
+/// The signature a call is checked against: the callee's, when the callee is
+/// a symbol. An indirect call has none — TIR §3.7 makes the call site's own
+/// types the signature, and a mismatch UB rather than a diagnosable error.
+fn callee_signature<'a>(m: &'a Module, callee: &Callee) -> Option<&'a Signature> {
+    match callee {
+        Callee::Direct(name) => m.signature(name),
+        Callee::Indirect(_) => None,
+    }
+}
+
 fn verify_inst(inst: &Inst, ctx: &mut Ctx) {
     let expected_results = match &inst.kind {
         InstKind::Flavored { flavor, .. } if *flavor == Flavor::Flag => 2,
         InstKind::Store { .. } => 0,
         InstKind::Call { callee, ret, .. } => {
-            let declared = ctx.module.signature(callee).map(|s| s.ret).unwrap_or(*ret);
+            let declared = callee_signature(ctx.module, callee)
+                .map(|s| s.ret)
+                .unwrap_or(*ret);
             usize::from(declared.is_some())
         }
         _ => 1,
@@ -408,29 +447,41 @@ fn verify_inst(inst: &Inst, ctx: &mut Ctx) {
                 _ => ctx.err("`trunc` operates on integers"),
             }
         }
-        InstKind::Call { callee, args, ret } => match ctx.module.signature(callee) {
-            None => ctx.err(format!("`@{callee}` is neither declared nor defined")),
-            Some(sig) => {
-                let sig = sig.clone();
-                if sig.params.len() != args.len() {
-                    ctx.err(format!(
-                        "`@{callee}` takes {} arguments, {} given",
-                        sig.params.len(),
-                        args.len()
-                    ));
+        InstKind::Call { callee, args, ret } => {
+            let name = match callee {
+                Callee::Direct(n) => n.clone(),
+                // Indirect: TIR §3.7 makes the call site's own types the
+                // signature, so there is nothing here to check them against.
+                // The pointer itself must be one.
+                Callee::Indirect(p) => {
+                    ctx.expect(p, Type::Ptr, "callee");
+                    return;
                 }
-                for (arg, (_, want)) in args.iter().zip(&sig.params) {
-                    ctx.expect(arg, *want, "argument");
-                }
-                if *ret != sig.ret {
-                    ctx.err(format!(
-                        "call annotates `@{callee}` as returning {}, but it returns {}",
-                        show_ret(*ret),
-                        show_ret(sig.ret)
-                    ));
+            };
+            match ctx.module.signature(&name) {
+                None => ctx.err(format!("`@{name}` is neither declared nor defined")),
+                Some(sig) => {
+                    let sig = sig.clone();
+                    if sig.params.len() != args.len() {
+                        ctx.err(format!(
+                            "`@{name}` takes {} arguments, {} given",
+                            sig.params.len(),
+                            args.len()
+                        ));
+                    }
+                    for (arg, (_, want)) in args.iter().zip(&sig.params) {
+                        ctx.expect(arg, *want, "argument");
+                    }
+                    if *ret != sig.ret {
+                        ctx.err(format!(
+                            "call annotates `@{name}` as returning {}, but it returns {}",
+                            show_ret(*ret),
+                            show_ret(sig.ret)
+                        ));
+                    }
                 }
             }
-        },
+        }
     }
 }
 

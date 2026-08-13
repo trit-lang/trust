@@ -489,17 +489,28 @@ fn parse_global(p: &mut Parser) -> PResult<Global> {
             let mut vals = Vec::new();
             if !p.eat_punct(']') {
                 loop {
-                    vals.push(p.parse_literal_value()?);
+                    // `addr @name` — a relocation, one word wide (TIR §1.2).
+                    if p.eat_word("addr") {
+                        match p.bump() {
+                            Tok::Sym(s) => vals.push(InitItem::Addr(s)),
+                            other => {
+                                p.pos -= 1;
+                                return p.err(format!("expected `@name`, found {other}"));
+                            }
+                        }
+                    } else {
+                        vals.push(InitItem::Tryte(p.parse_literal_value()?));
+                    }
                     if p.eat_punct(']') {
                         break;
                     }
                     p.expect_punct(',')?;
                 }
             }
-            if vals.len() as u32 != trytes {
+            if vals.iter().map(|v| v.trytes()).sum::<u32>() != trytes {
                 return p.err(format!(
                     "initializer has {} trytes but `@{name}` is tryte[{trytes}]",
-                    vals.len()
+                    vals.iter().map(|v| v.trytes()).sum::<u32>()
                 ));
             }
             Some(vals)
@@ -823,12 +834,13 @@ fn parse_inst(p: &mut Parser) -> PResult<Inst> {
         "call" => {
             reject_flavor(&stem, flavor, line)?;
             let callee = match p.bump() {
-                Tok::Sym(s) => s,
+                Tok::Sym(s) => Callee::Direct(s),
+                // `call %p(…)` — indirect, through the function's address
+                // (TIR §3.7).
+                Tok::Val(v) => Callee::Indirect(Operand::Value(v)),
                 other => {
                     p.pos -= 1;
-                    return p.err(format!(
-                        "expected `@callee` (indirect calls are reserved), found {other}"
-                    ));
+                    return p.err(format!("expected `@callee` or `%pointer`, found {other}"));
                 }
             };
             let args = p.parse_arg_list()?;
@@ -912,7 +924,13 @@ pub fn print_module(m: &Module) -> String {
         match &g.init {
             None => s.push_str("zeroinit\n"),
             Some(vals) => {
-                let items: Vec<String> = vals.iter().map(|v| v.to_decimal()).collect();
+                let items: Vec<String> = vals
+                    .iter()
+                    .map(|v| match v {
+                        InitItem::Tryte(t) => t.to_decimal(),
+                        InitItem::Addr(n) => format!("addr @{n}"),
+                    })
+                    .collect();
                 let _ = writeln!(s, "[{}]", items.join(", "));
             }
         }
@@ -1030,7 +1048,11 @@ fn print_inst(i: &Inst) -> String {
         }
         InstKind::Call { callee, args, ret } => {
             let args: Vec<String> = args.iter().map(print_operand).collect();
-            let mut s = format!("call @{callee}({})", args.join(", "));
+            let target = match callee {
+                Callee::Direct(n) => format!("@{n}"),
+                Callee::Indirect(p) => print_operand(p),
+            };
+            let mut s = format!("call {target}({})", args.join(", "));
             if let Some(r) = ret {
                 let _ = write!(s, " -> {r}");
             }

@@ -236,8 +236,9 @@ pub enum InstKind {
     },
     /// `call @f(%a, %b) -> tN`.
     Call {
-        /// Callee symbol.
-        callee: String,
+        /// Callee: a symbol for a direct call, or a `ptr` operand for an
+        /// indirect one (TIR §3.7).
+        callee: Callee,
         /// Arguments.
         args: Vec<Operand>,
         /// Return type, absent for `()` functions.
@@ -326,9 +327,40 @@ pub struct Global {
     pub name: String,
     /// Size in trytes.
     pub trytes: u32,
-    /// Initializer, one value per tryte from the lowest address
-    /// (little-trytean, AM §2.2). Absent means zero-initialized.
-    pub init: Option<Vec<Bt>>,
+    /// Initializer items, from the lowest address (little-trytean, AM §2.2).
+    /// Absent means zero-initialized. (TIR §1.2.)
+    pub init: Option<Vec<InitItem>>,
+}
+
+/// What a `call` transfers to (TIR §3.7).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Callee {
+    /// `call @f(…)` — a module-scope symbol.
+    Direct(String),
+    /// `call %p(…)` — the function whose address the pointer holds.
+    Indirect(Operand),
+}
+
+/// One item of a global initializer (TIR §1.2).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum InitItem {
+    /// One tryte of data.
+    Tryte(Bt),
+    /// The address of a module-scope symbol, one word wide. Its value is not
+    /// known until the module is placed, so it is a relocation: TIR says
+    /// which symbol and the target decides the number.
+    Addr(String),
+}
+
+impl InitItem {
+    /// How many trytes it fills.
+    pub fn trytes(&self) -> u32 {
+        match self {
+            InitItem::Tryte(_) => 1,
+            // A word, which is what a `ptr` is (TIR §2).
+            InitItem::Addr(_) => 3,
+        }
+    }
 }
 
 /// A TIR module.

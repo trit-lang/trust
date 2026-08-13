@@ -26,7 +26,7 @@ TIR copies the state of the art rather than re-deriving it.
 A TIR module contains, in any order:
 
 - **global definitions** — `global @name : tryte[N] = <initializer>` —
-  named, tryte-addressed storage with optional constant initializer;
+  named, tryte-addressed storage with optional constant initializer (§1.2);
 - **function declarations** — signature only, body external;
 - **function definitions** — signature plus a body of basic blocks.
 
@@ -61,6 +61,40 @@ parameters** rather than phi instructions:
 chosen over classic phis because they make `br3` clean — a three-way branch
 carrying three argument lists is readable, whereas phis over three-way
 predecessors are not.)
+
+---
+
+### 1.2 Global initializers
+
+A global's initializer is a bracketed list of **items**, each of which fills
+a known number of trytes, and the total must be exactly the `tryte[N]` the
+global declares:
+
+| Item | Fills | Meaning |
+|---|---|---|
+| a literal | 1 tryte | that value |
+| `addr @name` | one word | the address of that module-scope symbol |
+| `zeroinit` (whole initializer) | N trytes | all zero |
+
+```
+global @message : tryte[3] = [72, 105, 10]
+global @vtable  : tryte[9] = [addr @Circle.area, addr @Circle.name, 0, 0, 0]
+```
+
+`addr @name` names a function or another global defined or declared in this
+module. Its value is not known until the module is placed in memory, so it
+is a **relocation**: TIR states which symbol, and the target decides the
+number.
+
+An address obtained this way carries the provenance (§5) of the thing it
+names. `addr` of a function yields a pointer that may only be called (§3.7);
+loading or storing through one is UB.
+
+> **Note (informative).** This is the smallest extension that lets TIR
+> express a virtual table, and a virtual table is the smallest thing a
+> language needs in order to have dynamic dispatch at all. Without it a
+> frontend must build its tables behind TIR's back, which puts them beyond
+> the reach of every pass and of the reference interpreter.
 
 ---
 
@@ -192,19 +226,34 @@ its edge).
 ### 3.7 Calls
 
 ```
-%r = call @f(%a, %b) -> tN
+%r = call @f(%a, %b) -> tN          ; direct: the callee is a symbol
+%r = call %p(%a, %b) -> tN          ; indirect: the callee is a ptr
 ```
 
-Direct calls only in draft 0.1; indirect calls (`call %p(...)`) are parsed
-but reserved — they become meaningful with the language's function-pointer
-chapter. Calling convention is a target-description property (§7); TIR
-itself is convention-agnostic.
+An indirect call transfers to the function whose address `%p` holds. The
+address of a function is obtained only from `addr @f` in a global
+initializer (§1.2); TIR has no instruction that takes one, because a
+language that needs one in an expression needs a function-pointer type
+first, and that is the language's business rather than TIR's.
+
+`%p` must be a `ptr` that is the address of a function definition or
+declaration in this module. Calling through any other pointer is UB — the
+fifth entry in §4's inventory, and the only one that is not about data.
+
+The signature is not recoverable from the pointer, so the call site's
+argument types and result type *are* the signature the callee is called
+with. Calling a function through a pointer with a signature other than its
+own is UB, not a fault: no target can check it, and every one of them would
+have to for it to be a fault.
+
+Calling convention is a target-description property (§7); TIR itself is
+convention-agnostic.
 
 ---
 
 ## 4. Undefined behavior inventory
 
-TIR has exactly four UB sources, listed exhaustively so every pass author
+TIR has exactly five UB sources, listed exhaustively so every pass author
 can enumerate them:
 
 1. executing `unreachable`;
@@ -212,7 +261,10 @@ can enumerate them:
 3. `load`/`store`/`offset` escaping an allocation's provenance (§5);
 4. reading uninitialized `slot` storage (yields *poison*, and branching on
    poison is UB — the poison model is the standard modern one, adopted
-   whole rather than re-invented).
+   whole rather than re-invented);
+5. an indirect call through a pointer that is not the address of a
+   function, or through one whose function has a different signature from
+   the call site's (§3.7).
 
 Everything else that can go wrong is a defined **fault** (AM §4): division
 by zero, trapping overflow, out-of-range shifts. Optimizations may not

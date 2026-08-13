@@ -303,3 +303,39 @@ fn @spill(%v: t27) -> t27 {
         &[&[0], &[1], &[-1], &[1_000_000], &[3_812_798_742_493]],
     );
 }
+
+#[test]
+fn a_vtable_and_an_indirect_call_agree_on_both_engines() {
+    // TIR §1.2 and §3.7, the two extensions dynamic dispatch needs: an
+    // initializer that holds the address of a function, and a call through
+    // it. The interpreter resolves the address through provenance; the
+    // machine resolves it as a relocation and a `jalr`. They must agree.
+    differential(
+        r#"tir 0.1 target "tritium"
+
+global @vtable : tryte[6] = [addr @twice, addr @thrice]
+
+fn @twice(%x: t27) -> t27 {
+^entry:
+    %r = mul.trap t27 %x, const t27 2
+    ret %r
+}
+
+fn @thrice(%x: t27) -> t27 {
+^entry:
+    %r = mul.trap t27 %x, const t27 3
+    ret %r
+}
+
+fn @dispatch(%which: t27, %x: t27) -> t27 {
+^entry:
+    %p = offset @vtable, %which
+    %f = load ptr %p
+    %r = call %f(%x) -> t27
+    ret %r
+}
+"#,
+        "dispatch",
+        &[&[0, 7], &[3, 7], &[0, -5], &[3, -5]],
+    );
+}

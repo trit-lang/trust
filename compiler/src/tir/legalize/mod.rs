@@ -860,22 +860,50 @@ fn legalize_inst(e: &mut Emit, inst: &Inst) {
         }
 
         InstKind::Call { callee, args, ret } => {
-            let Some(sig) = e.sigs.get(callee).cloned() else {
-                e.errs
-                    .push(format!("`@{callee}` has no legalized signature"));
-                return;
+            // A direct call takes its parameter types from the callee's
+            // legalized signature. An indirect one has no callee to ask, so
+            // TIR §3.7's rule applies: the call site's own types are the
+            // signature, and each argument is legalized on its own.
+            let (params, want_ret) = match callee {
+                Callee::Direct(name) => match e.sigs.get(name).cloned() {
+                    Some(sig) => (Some(sig.params), sig.ret),
+                    None => {
+                        e.errs.push(format!("`@{name}` has no legalized signature"));
+                        return;
+                    }
+                },
+                Callee::Indirect(_) => {
+                    let r = match ret {
+                        None => None,
+                        Some(t) => match t.width() {
+                            None => Some(*t),
+                            Some(w) => match width(e, w) {
+                                Ok(lw) => Some(Type::Int(lw)),
+                                Err(()) => return,
+                            },
+                        },
+                    };
+                    (None, r)
+                }
             };
-            let args = args
-                .iter()
-                .zip(&sig.params)
-                .map(|(a, (_, want))| e.coerce(a, *want))
-                .collect();
+            let args: Vec<Operand> = match &params {
+                Some(ps) => args
+                    .iter()
+                    .zip(ps)
+                    .map(|(a, (_, want))| e.coerce(a, *want))
+                    .collect(),
+                None => args.iter().map(|a| e.resolve(a)).collect(),
+            };
+            let callee = match callee {
+                Callee::Direct(n) => Callee::Direct(n.clone()),
+                Callee::Indirect(p) => Callee::Indirect(e.coerce(p, Type::Ptr)),
+            };
             let kind = InstKind::Call {
-                callee: callee.clone(),
+                callee,
                 args,
-                ret: sig.ret,
+                ret: want_ret,
             };
-            match (ret, sig.ret) {
+            match (ret, want_ret) {
                 (Some(_), Some(t)) => define(e, inst, 0, t, kind),
                 _ => e.push(Vec::new(), kind),
             }

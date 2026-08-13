@@ -110,8 +110,19 @@ pub fn compile(m: &Module, entry: &str) -> Result<String, Vec<CodegenError>> {
                 let _ = writeln!(out, "    .zero {}", g.trytes);
             }
             Some(vals) => {
-                let items: Vec<String> = vals.iter().map(|v| v.to_decimal()).collect();
-                let _ = writeln!(out, "    .tryte {}", items.join(", "));
+                // A relocation is emitted as a word holding the symbol's
+                // address, which is where TIR §1.2's "the target decides the
+                // number" is discharged.
+                for item in vals {
+                    match item {
+                        InitItem::Tryte(v) => {
+                            let _ = writeln!(out, "    .tryte {}", v.to_decimal());
+                        }
+                        InitItem::Addr(name) => {
+                            let _ = writeln!(out, "    .word f.{name}");
+                        }
+                    }
+                }
             }
         }
     }
@@ -478,7 +489,15 @@ fn emit_inst(g: &mut Gen, inst: &Inst, _calls: bool) {
                 let reg = format!("a{i}");
                 g.read(a, &reg);
             }
-            g.line(format!("call    f.{callee}"));
+            match callee {
+                Callee::Direct(name) => g.line(format!("call    f.{name}")),
+                // An indirect call is `jalr` through the pointer, which is
+                // the same linkage the direct form expands to.
+                Callee::Indirect(p) => {
+                    g.read(p, "t0");
+                    g.line("jalr    ra, 0(t0)");
+                }
+            }
             if let Some(r) = inst.results.first() {
                 g.write(r, "a0");
             }

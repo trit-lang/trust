@@ -1450,7 +1450,7 @@ fn derive_cmp(
             insts.push(Inst {
                 results: vec![c.clone()],
                 kind: InstKind::Call {
-                    callee: format!("{fname}.cmp"),
+                    callee: Callee::Direct(format!("{fname}.cmp")),
                     args: vec![Operand::Value(pa), Operand::Value(pb)],
                     ret: Some(Type::Int(1)),
                 },
@@ -1515,7 +1515,7 @@ fn derive_eq(name: &str) -> Function {
                 Inst {
                     results: vec!["c".to_string()],
                     kind: InstKind::Call {
-                        callee: format!("{name}.cmp"),
+                        callee: Callee::Direct(format!("{name}.cmp")),
                         args: vec![
                             Operand::Value("self".to_string()),
                             Operand::Value("other".to_string()),
@@ -1928,7 +1928,7 @@ fn const_item(c: &ast::ConstItem, module: &mut Module, types: &Types) -> R<Globa
                 // Little-trytean, like every other multi-tryte value.
                 let value = Bt::from_i128(v);
                 for i in 0..types.size(elem) {
-                    trytes.push(value.shr(i as u32 * 9).wrap_to(9));
+                    trytes.push(InitItem::Tryte(value.shr(i as u32 * 9).wrap_to(9)));
                 }
             }
             let name = format!("const.{}", c.name);
@@ -2535,7 +2535,7 @@ impl Fn<'_> {
             self.push(Inst {
                 results: Vec::new(),
                 kind: InstKind::Call {
-                    callee: format!("drop.{n}"),
+                    callee: Callee::Direct(format!("drop.{n}")),
                     args: vec![addr.clone()],
                     ret: None,
                 },
@@ -3646,7 +3646,7 @@ impl Fn<'_> {
             values.push(v);
         }
         let kind = InstKind::Call {
-            callee: name.to_string(),
+            callee: Callee::Direct(name.to_string()),
             args: values,
             ret: if ret == Ty::Unit || ret.is_aggregate() {
                 None
@@ -4019,7 +4019,7 @@ impl Fn<'_> {
             "c",
             Type::Int(1),
             InstKind::Call {
-                callee: key,
+                callee: Callee::Direct(key),
                 args: vec![va, vb],
                 ret: Some(Type::Int(1)),
             },

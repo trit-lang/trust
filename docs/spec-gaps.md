@@ -315,6 +315,45 @@ promotion renormalizes into the narrow type's own symmetric range after every
 operation, so the trits being dropped are already zero. The spec is unchanged;
 this was an implementation gap, not a specification one.
 
+**G0.10 — TIR 0.1 gains function addresses and indirect calls.** A spec
+change, made deliberately and with the author's agreement, because dynamic
+dispatch cannot be expressed without it.
+
+The gap: a virtual table is a constant holding function addresses, and TIR's
+global initializer was a list of tryte *values* — an address is not known
+until the module is placed, so it could not be written. And `InstKind::Call`
+carried a `String`, a name rather than a value, so dispatching through a table
+could not be expressed either. Between them these made `dyn Trait` (Ch. 4 §3)
+and closures (§4) unimplementable in TIR at all.
+
+Two additions, both minimal:
+
+- **§1.2, global initializers.** An initializer is now a list of items, each
+  filling a known number of trytes: a literal fills one, and `addr @name`
+  fills one word with the address of a module-scope symbol. That is a
+  relocation — TIR says which symbol, the target decides the number.
+- **§3.7, indirect calls.** `call %p(…)` was already "parsed but reserved" in
+  draft 0.1, so the syntax was anticipated; it is now defined. The signature
+  is not recoverable from a pointer, so the call site's own types *are* the
+  signature, and calling through a pointer with a different one is UB.
+
+§4's inventory therefore grows from four UB sources to five, and the fifth is
+the only one that is not about data: calling through something that is not a
+function's address.
+
+The alternative considered and rejected was to emit vtables and indirect
+calls in code generation only, leaving TIR unchanged. That would have put
+them beyond the reach of every pass *and* of the reference interpreter —
+and every end-to-end test in this repository works by running the same
+program on the interpreter and through the whole pipeline and demanding
+identical results. Dynamic dispatch is exactly where that check is worth
+most, so the check was kept and the IR was extended.
+
+The interpreter models a function's address as an allocation with no trytes,
+so loading or storing through one is out of range, which is what §1.2 says.
+`compiler/tests/pipeline.rs` builds a vtable, dispatches through it, and
+requires both engines to agree.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The
