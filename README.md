@@ -21,7 +21,7 @@ the source.
 | assembler (`.t27`) | **implemented**: two-pass, exact balanced-ternary expressions, all directives and pseudo-instructions (`tritium asm`) |
 | backend (TIR → TRISC-27) | **implemented**: `trustc compile` emits assembly. No register allocator yet — every value lives in a stack slot |
 | `compiler/` — Trust frontend | **implemented through Ch. 2**: lexer, parser, type checker and lowering to TIR — scalars, arrays, tuples, structs, enums with payloads and niches, both `repr`s, all control flow |
-| Ch. 3 — ownership and references | **built except the borrow checker**: `&T`/`&mut T`, deref and auto-deref, slices, bounds-checked indexing, erased lifetimes, moves through branches and loops, destructors with drop flags. Aliasing is unchecked and returning a reference is rejected, both because the region analysis of §4 is not built (G0.5) |
+| Ch. 3 — ownership and references | **built**: `&T`/`&mut T`, deref and auto-deref, slices, bounds-checked indexing, erased lifetimes, moves through branches and loops, destructors with drop flags, and a non-lexical borrow checker. A reference may be returned under elision rule 2; regions are not inferred, so rooting is checked syntactically and written lifetimes wait for Ch. 4 (G0.5) |
 
 ## Building
 

@@ -601,14 +601,78 @@ fn a_reference_survives_being_stored_and_copied() {
 }
 
 #[test]
-fn returning_a_reference_is_rejected_rather_than_unchecked() {
-    // The region check of Ch. 3 §4.1 is not implemented, and accepting a
-    // returned reference without it would let a dangling one through.
-    let e = error("fn first(xs: &[t27]) -> &t27 { &xs[0] } fn main() -> t27 { 0 }");
-    assert!(e.contains("region check"), "{e}");
+fn a_reference_may_be_returned_under_elision() {
+    // Ch. 3 §3.3 rule 2: one reference among the parameters, so the returned
+    // reference borrows from it.
+    assert_eq!(
+        run("fn first(xs: &[t27]) -> &t27 { &xs[0] } \
+             fn main() -> t27 { let a: [t27; 3] = [7, 8, 9]; *first(&a) }")
+            .0,
+        7
+    );
+    // A reference into a local would dangle.
+    let e = error("fn bad() -> &t27 { let a: t27 = 1; &a } fn main() -> t27 { 0 }");
+    assert!(e.contains("borrows from nothing"), "{e}");
+    // Two candidates, and elision cannot choose between them (§3.3).
+    let e = error("fn pick(a: &t27, b: &t27) -> &t27 { a } fn main() -> t27 { 0 }");
+    assert!(e.contains("elision cannot choose"), "{e}");
     // A reference as a parameter, a local, or a field of a local is fine.
     tir_of("fn f(x: &t27) -> t27 { *x }");
     tir_of("fn main() -> t27 { let a: t27 = 1; let r = &a; *r }");
+}
+
+#[test]
+fn a_returned_reference_keeps_its_caller_borrow_alive() {
+    // The loan on the argument must live as long as the result does, or the
+    // borrow checker would let the referent be written under it.
+    let e = error(
+        "struct P { x: t27 } fn get(p: &P) -> &t27 { &p.x } \
+         fn main() -> t27 { let mut p = P { x: 1 }; let r = get(&p); p.x = 9; *r }",
+    );
+    assert!(e.contains("cannot be written to"), "{e}");
+}
+
+#[test]
+fn the_aliasing_rule_is_enforced() {
+    // Ch. 3 §2.2: one exclusive borrow, or any number of shared ones.
+    let pre = "struct P { x: t27 } fn main() -> t27 { let mut p = P { x: 1 }; ";
+    tir_of(&format!("{pre} let r = &p; let s = &p; r.x + s.x }}"));
+    let e = error(&format!("{pre} let r = &p; let s = &mut p; r.x }}"));
+    assert!(e.contains("borrow"), "{e}");
+    let e = error(&format!("{pre} let r = &mut p; let s = &mut p; r.x }}"));
+    assert!(e.contains("borrow"), "{e}");
+    // The referent may not be written while it is borrowed…
+    let e = error(&format!("{pre} let r = &p; p.x = 9; r.x }}"));
+    assert!(e.contains("cannot be written to"), "{e}");
+    // …nor moved out of.
+    let e = error(
+        "struct B { x: t27 } fn drop(self: B) { } fn take(b: B) { } \
+         fn main() -> t27 { let a = B { x: 1 }; let r = &a; take(a); r.x }",
+    );
+    assert!(e.contains("moved"), "{e}");
+}
+
+#[test]
+fn a_borrow_lives_to_its_last_use_and_no_further() {
+    // Ch. 3 §4.2's own example, which a lexical rule would reject.
+    assert_eq!(
+        run("struct P { x: t27, y: t27 } \
+             fn main() -> t27 { \
+                 let mut p = P { x: 1, y: 2 }; \
+                 let r = &p; \
+                 let a = r.x; \
+                 p.x = 9; \
+                 a + p.x \
+             }")
+            .0,
+        10
+    );
+    // A borrow taken and used inside a loop body is fine.
+    tir_of(
+        "struct P { x: t27 } \
+         fn main() -> t27 { let p = P { x: 1 }; let mut i: t27 = 0; \
+                            while i < 3 { let r = &p; i += r.x; } 0 }",
+    );
 }
 
 #[test]

@@ -188,6 +188,54 @@ impl Ty {
     }
 }
 
+/// A place, as a root local and a path of projections (Ch. 3 §1.3).
+///
+/// Two places conflict when one is a prefix of the other, with an index
+/// matching any element — which is what makes `xs[0]` and `xs[1]` conflict
+/// here although they do not overlap. Distinguishing them needs to know the
+/// indices, and a checker that guesses is worse than one that is coarse.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct PlacePath {
+    root: String,
+    projections: Vec<Proj>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Proj {
+    Field(String),
+    Index,
+}
+
+impl PlacePath {
+    fn conflicts(&self, other: &PlacePath) -> bool {
+        if self.root != other.root {
+            return false;
+        }
+        let n = self.projections.len().min(other.projections.len());
+        self.projections[..n] == other.projections[..n]
+    }
+}
+
+/// A borrow that is still live (Ch. 3 §2.2).
+#[derive(Clone, Debug)]
+struct Loan {
+    place: PlacePath,
+    mutable: bool,
+    /// The statement after which this loan is dead. A borrow lives to its
+    /// last use, not to the end of its scope (Ch. 3 §4.2).
+    dies: u32,
+    line: Line,
+}
+
+/// What is being done to a place, for the aliasing rule.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Access {
+    Read,
+    Write,
+    Move,
+    Borrow(bool),
+}
+
 /// Whether a local still owns its value (Ch. 3 §1.2).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Owns {
@@ -363,8 +411,8 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
                 None => Ok(Ty::Unit),
                 Some(t) => resolve_ty(t, &types),
             };
-            if let Ok(r) = &ret
-                && let Err(e) = check_no_returned_reference(r, f.line)
+            if let (Ok(p), Ok(r)) = (&params, &ret)
+                && let Err(e) = check_returned_reference(p, r, f.line)
             {
                 errs.push(e);
                 continue;
@@ -442,21 +490,33 @@ fn fn_key(f: &ast::FnItem) -> String {
 /// An aggregate has no SSA representation (TIR §2), so one is passed by
 /// address and returned through a hidden leading pointer the caller supplies
 /// — the classic arrangement, and the only one TIR can express.
-/// A reference in a return position needs the region check of Ch. 3 §4.1,
-/// which is not implemented. Accepting it would let a dangling reference
-/// through, and this language's whole claim is that it does not.
-fn check_no_returned_reference(ty: &Ty, line: Line) -> R<()> {
-    if contains_reference(ty) {
-        return err(
+/// A returned reference is checked by elision rule 2 (Ch. 3 §3.3): with
+/// exactly one reference among the parameters, the returned reference borrows
+/// from it, and the caller's loan is extended to cover the result. With none
+/// or several, the signature is the one §3.3 calls ill-formed.
+fn check_returned_reference(params: &[Ty], ret: &Ty, line: Line) -> R<()> {
+    if !contains_reference(ret) {
+        return Ok(());
+    }
+    let sources = params.iter().filter(|t| contains_reference(t)).count();
+    match sources {
+        1 => Ok(()),
+        0 => err(
             line,
             format!(
-                "returning {ty} needs the region check for a returned reference, which is \
-                 not implemented yet: a reference may be a parameter, a local, or a field \
-                 of a local (docs/spec-gaps.md G0.5)"
+                "this function returns {ret} but borrows from nothing: the reference could \
+                 only point into a local, which dies when the function does (Ch. 3 §4.1)"
             ),
-        );
+        ),
+        n => err(
+            line,
+            format!(
+                "this function returns {ret} and has {n} reference parameters, so elision \
+                 cannot choose which one it borrows from; writing the lifetimes out needs \
+                 the region inference that is not implemented yet (Ch. 3 §3.3)"
+            ),
+        ),
     }
-    Ok(())
 }
 
 /// A dynamically sized type is never the type of a place (Ch. 3 §5.1): not a
@@ -752,6 +812,18 @@ struct Fn<'a> {
     loops: Vec<LoopCtx>,
     /// Ownership of every local that has a destructor, innermost last.
     owned: Vec<(String, Owns, usize)>,
+    /// Live borrows, and the statement each dies after (Ch. 3 §4.2).
+    loans: Vec<Loan>,
+    /// The statement being lowered, numbered in traversal order.
+    stmt: u32,
+    /// The running count, which must match the pre-pass's.
+    stmt_index: u32,
+    /// The last statement at which each local is used, from a pre-pass over
+    /// the same traversal.
+    last_use: HashMap<String, u32>,
+    /// The names of this function's parameters, for §4.1's check that a
+    /// returned reference does not point into a local.
+    params: Vec<String>,
     /// Set while lowering a destructor: the type whose `self` this is.
     ///
     /// Inside it, `self` is not dropped as a whole — that would call this
@@ -795,6 +867,11 @@ fn function(
         scopes: vec![HashMap::new()],
         loops: Vec::new(),
         owned: Vec::new(),
+        loans: Vec::new(),
+        stmt: 0,
+        stmt_index: 0,
+        last_use: last_use_of(body),
+        params: f.params.iter().map(|(n, _)| n.clone()).collect(),
         destructor_of,
         counter: 0,
         done: false,
@@ -811,6 +888,9 @@ fn function(
         fx.store_at(&slot, 0, ty, incoming, f.line)?;
     }
 
+    if let Some(tail) = &body.tail {
+        fx.check_return_root(tail, &ret, body.line)?;
+    }
     let (value, ty) = fx.block(body, Some(&ret))?;
     if !fx.done {
         // The parameters are this function's to drop too (Ch. 3 §1.1).
@@ -1010,10 +1090,16 @@ impl Fn<'_> {
         let depth = self.scopes.len();
         self.scopes.push(HashMap::new());
         for stmt in &b.stmts {
+            self.stmt_index += 1;
+            self.stmt = self.stmt_index;
             self.stmt(stmt)?;
         }
         let result = match &b.tail {
-            Some(e) => self.expr(e, expected)?,
+            Some(e) => {
+                self.stmt_index += 1;
+                self.stmt = self.stmt_index;
+                self.expr(e, expected)?
+            }
             None => (unit(), Ty::Unit),
         };
         self.drop_scope(depth, b.line)?;
@@ -1067,6 +1153,115 @@ impl Fn<'_> {
             }
         }
         Ok(())
+    }
+
+    // ---------------------------------------------------- the borrow rule
+
+    /// The place an expression names, syntactically. `None` where the
+    /// checker cannot see through — a dereference, or anything that is not a
+    /// place — in which case nothing is checked rather than something wrong.
+    fn path_of(&self, e: &ast::Expr) -> Option<PlacePath> {
+        match e {
+            ast::Expr::Path(name, _) => Some(PlacePath {
+                root: name.clone(),
+                projections: Vec::new(),
+            }),
+            ast::Expr::Field(base, name, _) => {
+                let mut p = self.path_of(base)?;
+                p.projections.push(Proj::Field(name.clone()));
+                Some(p)
+            }
+            ast::Expr::Index(base, ..) => {
+                let mut p = self.path_of(base)?;
+                p.projections.push(Proj::Index);
+                Some(p)
+            }
+            _ => None,
+        }
+    }
+
+    /// Retire the loans that are dead at this statement.
+    fn retire_loans(&mut self) {
+        let now = self.stmt;
+        self.loans.retain(|l| l.dies >= now);
+    }
+
+    /// Check an access against the live loans (Ch. 3 §2.2).
+    fn check_access(&mut self, path: &PlacePath, access: Access, line: Line) -> R<()> {
+        self.retire_loans();
+        for loan in &self.loans {
+            if !loan.place.conflicts(path) {
+                continue;
+            }
+            let borrowed = describe(&loan.place);
+            let kind = if loan.mutable { "exclusively" } else { "shared" };
+            let complaint = match access {
+                // While an exclusive reference is live, the place may not be
+                // read or written except through it.
+                Access::Read if loan.mutable => Some("read"),
+                Access::Read => None,
+                Access::Write => Some("written to"),
+                Access::Move => Some("moved out of"),
+                // One exclusive borrow, or any number of shared ones.
+                Access::Borrow(true) => Some("borrowed exclusively"),
+                Access::Borrow(false) if loan.mutable => Some("borrowed"),
+                Access::Borrow(false) => None,
+            };
+            if let Some(what) = complaint {
+                return err(
+                    line,
+                    format!(
+                        "`{borrowed}` cannot be {what} here: it is {kind} borrowed, \
+                         and that borrow is still live (Ch. 3 §2.2)"
+                    ),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Record a borrow. It dies after the last use of whatever holds it,
+    /// which the caller patches once the binding is known.
+    fn add_loan(&mut self, path: PlacePath, mutable: bool, line: Line) {
+        let dies = self.stmt;
+        self.loans.push(Loan {
+            place: path,
+            mutable,
+            dies,
+            line,
+        });
+    }
+
+    /// A returned reference must be rooted at a parameter. Rooted at a local
+    /// it would dangle, which is what §4.1 exists to prevent.
+    fn check_return_root(&mut self, e: &ast::Expr, ty: &Ty, line: Line) -> R<()> {
+        if !contains_reference(ty) {
+            return Ok(());
+        }
+        let Some(path) = self.borrow_root(e) else {
+            return Ok(()); // not a place the checker can see through
+        };
+        let is_param = self.params.contains(&path);
+        if !is_param {
+            return err(
+                line,
+                format!(
+                    "cannot return a reference into `{path}`: it is local to this function \
+                     and dies when the function returns (Ch. 3 §4.1)"
+                ),
+            );
+        }
+        Ok(())
+    }
+
+    /// The root local a borrow expression borrows from.
+    fn borrow_root(&self, e: &ast::Expr) -> Option<String> {
+        match e {
+            ast::Expr::Borrow(inner, ..) => self.path_of(inner).map(|p| p.root),
+            ast::Expr::Path(name, _) => Some(name.clone()),
+            ast::Expr::Field(base, ..) | ast::Expr::Index(base, ..) => self.borrow_root(base),
+            _ => None,
+        }
     }
 
     /// Drop everything this function still owns — its locals and its
@@ -1168,6 +1363,7 @@ impl Fn<'_> {
                     Some(t) => Some(resolve_ty(t, self.types)?),
                     None => None,
                 };
+                let loans_before = self.loans.len();
                 let (v, vt) = self.expr(value, declared.as_ref())?;
                 let ty = match declared {
                     Some(d) => {
@@ -1179,6 +1375,16 @@ impl Fn<'_> {
                     }
                     None => vt,
                 };
+                // Every loan the initializer created is held by this
+                // binding, and lives until its last use (Ch. 3 §4.2). That
+                // covers a borrow written here and a reference returned from
+                // a call, which by elision borrows from that call's argument.
+                if contains_reference(&ty) {
+                    let dies = self.last_use.get(name).copied().unwrap_or(self.stmt);
+                    for loan in self.loans[loans_before..].iter_mut() {
+                        loan.dies = loan.dies.max(dies);
+                    }
+                }
                 check_sized(&ty, *line, &format!("the binding `{name}`"))?;
                 if !ty.is_scalar() && !ty.is_aggregate() {
                     return err(*line, format!("cannot bind a value of type {ty}"));
@@ -1248,8 +1454,18 @@ impl Fn<'_> {
                             }
                             _ => {}
                         }
+                        let path = PlacePath {
+                            root: name.clone(),
+                            projections: Vec::new(),
+                        };
+                        self.check_access(&path, Access::Move, *line)?;
                         self.mark_moved(name);
                     }
+                    let path = PlacePath {
+                        root: name.clone(),
+                        projections: Vec::new(),
+                    };
+                    self.check_access(&path, Access::Read, *line)?;
                     if !local.ty.is_scalar() {
                         // An array's value is its address.
                         return Ok((Operand::Value(local.slot), local.ty));
@@ -1328,6 +1544,7 @@ impl Fn<'_> {
                 let ret = self.ret.clone();
                 match value {
                     Some(v) => {
+                        self.check_return_root(v, &self.ret.clone(), *line)?;
                         let (val, vt) = self.expr(v, Some(&ret))?;
                         self.check(&vt, &ret, *line, "returned value")?;
                         if ret.is_aggregate() {
@@ -1425,6 +1642,10 @@ impl Fn<'_> {
             // A borrow is the address of a place — which every local already
             // has, since every local lives in a slot.
             E::Borrow(place, mutable, line) => {
+                if let Some(path) = self.path_of(place) {
+                    self.check_access(&path, Access::Borrow(*mutable), *line)?;
+                    self.add_loan(path, *mutable, *line);
+                }
                 let (addr, ty) = self.place(place, *line)?;
                 // An array reference coerces to a slice reference, which is a
                 // pointer and a length (Ch. 3 §5.3).
@@ -1454,6 +1675,9 @@ impl Fn<'_> {
 
             E::Field(..) | E::Index(..) => {
                 let line = e.line();
+                if let Some(path) = self.path_of(e) {
+                    self.check_access(&path, Access::Read, line)?;
+                }
                 let (addr, ty) = self.place(e, line)?;
                 Ok((self.load_from(addr, &ty), ty))
             }
@@ -1667,6 +1891,9 @@ impl Fn<'_> {
         // Writing to a local needs `mut`; writing through a reference needs
         // that reference to be exclusive (Ch. 3 §2.1).
         self.check_writable(target, line)?;
+        if let Some(path) = self.path_of(target) {
+            self.check_access(&path, Access::Write, line)?;
+        }
         let (addr, ty) = self.place(target, line)?;
 
         let v = if op == "=" {
@@ -3226,6 +3453,119 @@ impl Fn<'_> {
             self.start(fail);
         }
         Ok(false)
+    }
+}
+
+/// A place, spelled for a diagnostic.
+fn describe(p: &PlacePath) -> String {
+    let mut s = p.root.clone();
+    for proj in &p.projections {
+        match proj {
+            Proj::Field(f) => {
+                s.push('.');
+                s.push_str(f);
+            }
+            Proj::Index => s.push_str("[…]"),
+        }
+    }
+    s
+}
+
+/// The last statement at which each name is used.
+///
+/// Statements are numbered in the order lowering visits them, and lowering
+/// keeps the same count — so the two agree without either knowing about the
+/// other's internals. A borrow is dead after its holder's last use, which is
+/// what makes the checking non-lexical (Ch. 3 §4.2).
+fn last_use_of(body: &ast::Block) -> HashMap<String, u32> {
+    let mut out = HashMap::new();
+    let mut index = 0;
+    walk_block(body, &mut index, &mut out);
+    out
+}
+
+fn walk_block(b: &ast::Block, index: &mut u32, out: &mut HashMap<String, u32>) {
+    for stmt in &b.stmts {
+        *index += 1;
+        match stmt {
+            ast::Stmt::Let { value, .. } => walk_expr(value, index, out),
+            ast::Stmt::Expr(e) => walk_expr(e, index, out),
+        }
+    }
+    if let Some(tail) = &b.tail {
+        *index += 1;
+        walk_expr(tail, index, out);
+    }
+}
+
+fn walk_expr(e: &ast::Expr, index: &mut u32, out: &mut HashMap<String, u32>) {
+    use ast::Expr as E;
+    let mut go = |x: &ast::Expr, i: &mut u32, o: &mut HashMap<String, u32>| walk_expr(x, i, o);
+    match e {
+        E::Path(name, _) => {
+            let at = *index;
+            out.entry(name.clone())
+                .and_modify(|v| *v = (*v).max(at))
+                .or_insert(at);
+        }
+        E::Int(..) | E::Trit(..) | E::Bool(..) | E::Unit(_) | E::Continue(_) => {}
+        E::Array(items, _) | E::Tuple(items, _) => {
+            for i in items {
+                go(i, index, out);
+            }
+        }
+        E::Aggregate(_, fields, _) => {
+            for (_, v) in fields {
+                go(v, index, out);
+            }
+        }
+        E::Repeat(a, b, _) | E::Binary(_, a, b, _) | E::Assign(_, a, b, _) | E::Index(a, b, _) => {
+            go(a, index, out);
+            go(b, index, out);
+        }
+        E::Unary(_, a, _)
+        | E::Cast(a, _, _)
+        | E::Field(a, _, _)
+        | E::Borrow(a, _, _)
+        | E::Deref(a, _) => go(a, index, out),
+        E::Call(_, args, _) => {
+            for a in args {
+                go(a, index, out);
+            }
+        }
+        E::Method(recv, _, args, _) => {
+            go(recv, index, out);
+            for a in args {
+                go(a, index, out);
+            }
+        }
+        E::Block(b) => walk_block(b, index, out),
+        E::If(c, then, els, _) => {
+            go(c, index, out);
+            walk_block(then, index, out);
+            if let Some(e) = els {
+                go(e, index, out);
+            }
+        }
+        E::Match(scrutinee, arms, _) => {
+            go(scrutinee, index, out);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    go(g, index, out);
+                }
+                go(&arm.body, index, out);
+            }
+        }
+        E::Loop(b, _) => walk_block(b, index, out),
+        E::While(c, b, _) => {
+            go(c, index, out);
+            walk_block(b, index, out);
+        }
+        E::Break(v, _) | E::Return(v, _) => {
+            if let Some(v) = v {
+                go(v, index, out);
+            }
+        }
     }
 }
 

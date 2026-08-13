@@ -95,28 +95,39 @@ Two consequences for documents already written:
   unaffected, so nothing was ever mis-compiled — the frontend emits two
   comparisons.
 
-**G0.5 — Ch. 3 is implemented as far as it can be checked.** References,
-exclusive references, dereference and auto-dereference, slices and their fat
-pointer, the array-to-slice coercion, bounds-checked slice indexing, and
-lifetime syntax (parsed and erased) all work end to end.
+**G0.5 — Ch. 3 is implemented.** References, exclusive references, dereference
+and auto-dereference, slices and their fat pointer, the array-to-slice
+coercion, bounds-checked slice indexing, and lifetime syntax (parsed and
+erased) all work end to end.
 
-Ownership is implemented too: the structural copy rule of §1.2, move tracking
+Ownership is implemented: the structural copy rule of §1.2, move tracking
 through branches and loops, destructors with their drop order, and drop flags
 where a branch leaves ownership undecided. A destructor's `self` is not
 dropped as a whole, which is how §1.4's recursion is closed.
 
-Two things remain unimplemented, and the frontend refuses what it cannot
-check rather than accepting it unsoundly:
+Borrowing is implemented as §4.2 describes it. A loan records the place it
+covers, whether it is exclusive, and the statement it dies at; two loans
+conflict when one place is a prefix of the other, with an index matching any
+element. Loans are non-lexical — a borrow dies at its last use, so §4.2's own
+example, where `p.x` is written after the last use of a shared borrow of `p`,
+is accepted. Reading, writing, moving and re-borrowing are each checked
+against the live loans.
 
-- **Returning a reference is rejected.** It needs the region check of §4.1,
-  and accepting it without one would let a dangling reference through — which
-  is the single thing this language claims not to do. A reference may be a
-  parameter, a local, or a field of a local.
-- **Aliasing is unchecked.** `&mut` and `&` to the same place at the same time
-  is accepted today. Nothing is miscompiled, but nothing is prevented either.
-  This is the borrow checker of §4.2, and it is the last piece.
+A reference may be returned under elision rule 2 of §3.3: exactly one
+reference among the parameters, and the result borrows from it. The loan on
+the argument is then extended to the last use of whatever the call was bound
+to, so the caller may not disturb the referent while the result lives. A
+function that returns a reference and has no reference parameter is rejected,
+because the reference could only point into a local; so is one with several,
+because elision cannot choose between them. Rooting is checked syntactically:
+a returned borrow must be rooted at a parameter.
 
-Three approximations inside what *is* implemented, all conservative:
+Regions are not inferred, so what §4.1 states as a subtyping relation is
+approximated by that syntactic rule. Every program it accepts is one a full
+region inference would accept; some it rejects would be accepted, and those
+are the ones needing written lifetimes, which arrive with Ch. 4.
+
+Three further approximations, all conservative:
 
 - Reading a non-copyable *field* moves the whole local, where §1.3 says only
   that place moves.
