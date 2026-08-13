@@ -100,18 +100,30 @@ exclusive references, dereference and auto-dereference, slices and their fat
 pointer, the array-to-slice coercion, bounds-checked slice indexing, and
 lifetime syntax (parsed and erased) all work end to end.
 
-What is **not** implemented is the checking half: move tracking, destructors,
-and the borrow checker of §4. In their absence the frontend rejects what it
-cannot check rather than accepting it unsoundly:
+Ownership is implemented too: the structural copy rule of §1.2, move tracking
+through branches and loops, destructors with their drop order, and drop flags
+where a branch leaves ownership undecided. A destructor's `self` is not
+dropped as a whole, which is how §1.4's recursion is closed.
+
+Two things remain unimplemented, and the frontend refuses what it cannot
+check rather than accepting it unsoundly:
 
 - **Returning a reference is rejected.** It needs the region check of §4.1,
   and accepting it without one would let a dangling reference through — which
   is the single thing this language claims not to do. A reference may be a
   parameter, a local, or a field of a local.
-- **`fn drop(self: T)` is parsed but has no effect**, because a destructor
-  without move tracking would run for a moved-out value.
 - **Aliasing is unchecked.** `&mut` and `&` to the same place at the same time
   is accepted today. Nothing is miscompiled, but nothing is prevented either.
+  This is the borrow checker of §4.2, and it is the last piece.
+
+Three approximations inside what *is* implemented, all conservative:
+
+- Reading a non-copyable *field* moves the whole local, where §1.3 says only
+  that place moves.
+- An enum's payload is not dropped by variant, so a droppable value inside an
+  enum payload is not dropped. The enum's own destructor still runs.
+- A destructor that moves a field out of `self` is not detected, so that field
+  is dropped anyway.
 
 The chapter itself is unchanged: this is a staged implementation of a complete
 design, and each stage refuses what it cannot yet verify.

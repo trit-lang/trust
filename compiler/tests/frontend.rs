@@ -629,3 +629,80 @@ fn a_slice_type_needs_a_reference() {
     let e = error("fn f(xs: [t27]) -> t27 { 0 }");
     assert!(!e.is_empty(), "a bare slice parameter should be rejected");
 }
+
+// -------------------------------------------------- ownership (Ch. 3 §1)
+
+#[test]
+fn the_ownership_example_runs() {
+    let (status, out) = run(include_str!("../../examples/trust/ownership.tr"));
+    assert_eq!(status, 0);
+    // "BA" in reverse declaration order, then C dropped inside `consume`,
+    // then D dropped at the end because the branch did not take it.
+    assert_eq!(out, "BA-C-\nD");
+}
+
+#[test]
+fn a_type_with_a_destructor_moves_rather_than_copies() {
+    // Ch. 3 §1.2: a type with a destructor is not copyable, and every type
+    // containing one moves too.
+    let e = error(
+        "struct B { x: t27 } fn drop(self: B) { } \
+         fn main() -> t27 { let a = B { x: 1 }; let b = a; let c = a; 0 }",
+    );
+    assert!(e.contains("moved out of"), "{e}");
+    // A type without one is copied, so the same shape is fine.
+    tir_of("struct P { x: t27 } fn main() -> t27 { let a = P { x: 1 }; let b = a; let c = a; 0 }");
+}
+
+#[test]
+fn a_move_on_one_path_does_not_poison_the_other() {
+    // The branches are checked from the same state, and joined afterwards.
+    tir_of(
+        "struct B { x: t27 } fn drop(self: B) { } fn take(b: B) { } \
+         fn main() -> t27 { let a = B { x: 1 }; if true { take(a); } else { take(a); } 0 }",
+    );
+    // …and a value moved on some path cannot be used after the join.
+    let e = error(
+        "struct B { x: t27 } fn drop(self: B) { } fn take(b: B) { } \
+         fn main() -> t27 { let a = B { x: 1 }; if true { take(a); } take(a); 0 }",
+    );
+    assert!(e.contains("may have been moved"), "{e}");
+}
+
+#[test]
+fn a_value_cannot_be_moved_out_of_inside_a_loop() {
+    let e = error(
+        "struct B { x: t27 } fn drop(self: B) { } fn take(b: B) { } \
+         fn main() -> t27 { let a = B { x: 1 }; let mut i: t27 = 0; \
+                            while i < 2 { take(a); i += 1; } 0 }",
+    );
+    assert!(e.contains("loop may reach this again"), "{e}");
+}
+
+#[test]
+fn a_destructor_is_checked_when_it_is_declared() {
+    assert!(error("fn drop(x: t27) { }").contains("named `self`"));
+    assert!(error("struct B { x: t27 } fn drop(self: B) -> t27 { 0 }").contains("returns nothing"));
+    assert!(
+        error("struct B { x: t27 } fn drop(self: B) { } fn drop(self: B) { }")
+            .contains("more than one destructor")
+    );
+    // A destructor's `self` is not dropped as a whole, or it would call
+    // itself for ever (Ch. 3 §1.4).
+    let (_, out) = run(
+        "fn putchar(c: t9); struct B { t: t9 } fn drop(self: B) { putchar(self.t); } \
+         fn main() -> t27 { let a = B { t: 88 }; 0 }",
+    );
+    assert_eq!(out, "X");
+}
+
+#[test]
+fn drops_nest_through_fields() {
+    // A struct containing a droppable field is itself droppable, and its
+    // fields are dropped after its own destructor (Ch. 3 §1.4).
+    let (_, out) = run("fn putchar(c: t9); \
+         struct Inner { t: t9 } fn drop(self: Inner) { putchar(self.t); } \
+         struct Outer { a: Inner, b: Inner } \
+         fn main() -> t27 { let o = Outer { a: Inner { t: 49 }, b: Inner { t: 50 } }; 0 }");
+    assert_eq!(out, "12"); // declaration order within the struct
+}

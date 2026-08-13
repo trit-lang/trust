@@ -1,0 +1,42 @@
+// ownership.tr — Chapter 3's ownership half.
+//
+// `Tag` has a destructor, so it is not copyable: reading it moves it, and a
+// moved-out place cannot be read again. A value is dropped when its owner's
+// scope ends, in reverse order of declaration — and a value moved into a
+// function is dropped by *that* function, which is the whole point of
+// tracking moves rather than treating a move as a fast copy.
+
+fn putchar(c: t9);
+
+struct Tag { mark: t9 }
+
+fn drop(self: Tag) {
+    putchar(self.mark);
+}
+
+fn consume(t: Tag) {
+    // `t` is dropped here, when this scope ends.
+}
+
+fn main() -> t27 {
+    {
+        let a = Tag { mark: 65 };       // 'A'
+        let b = Tag { mark: 66 };       // 'B'
+    }                                    // "BA" — reverse of declaration
+
+    putchar(45);                         // '-'
+
+    let c = Tag { mark: 67 };            // 'C'
+    consume(c);                          // dropped inside `consume`, not here
+
+    putchar(45);                         // '-'
+
+    // Ownership after a branch is not statically known, so a flag decides.
+    let d = Tag { mark: 68 };            // 'D'
+    if false {
+        consume(d);
+    }
+
+    putchar(10);
+    0
+}

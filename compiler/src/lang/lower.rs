@@ -188,6 +188,28 @@ impl Ty {
     }
 }
 
+/// Whether a local still owns its value (Ch. 3 §1.2).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Owns {
+    /// It does.
+    Yes,
+    /// It was moved out of.
+    No,
+    /// One path moved out of it and another did not; a drop needs a flag.
+    Maybe,
+}
+
+impl Owns {
+    /// Joining two paths: a value moved on either is not certainly owned.
+    fn join(self, other: Owns) -> Owns {
+        match (self, other) {
+            (Owns::Yes, Owns::Yes) => Owns::Yes,
+            (Owns::No, Owns::No) => Owns::No,
+            _ => Owns::Maybe,
+        }
+    }
+}
+
 /// A local binding.
 #[derive(Clone)]
 struct Local {
@@ -195,12 +217,17 @@ struct Local {
     slot: String,
     ty: Ty,
     mutable: bool,
+    /// A slot holding 1 while this local still owns its value, for the case
+    /// where control flow makes ownership uncertain (Ch. 3 §1.4).
+    drop_flag: Option<String>,
 }
 
 /// Everything the frontend knows about the nominal types in a file, plus the
 /// layout engine's answers about them.
 pub struct Types {
     db: layout::TypeDb,
+    /// Types with a destructor of their own.
+    destructors: std::collections::BTreeSet<String>,
     /// Field names and semantic types of each struct, in declaration order.
     structs: HashMap<String, Vec<(String, Ty)>>,
     /// Variants of each enum, in declaration order.
@@ -242,6 +269,32 @@ impl Types {
                 .collect(),
             _ => Vec::new(),
         }
+    }
+
+    /// True if this type has a destructor of its own or contains one
+    /// (Ch. 3 §1.2, §1.4).
+    fn needs_drop(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Struct(n) => {
+                self.destructors.contains(n)
+                    || self.structs[n].iter().any(|(_, t)| self.needs_drop(t))
+            }
+            Ty::Enum(n) => {
+                self.destructors.contains(n)
+                    || self.enums[n]
+                        .iter()
+                        .any(|v| v.fields.iter().any(|(_, t)| self.needs_drop(t)))
+            }
+            Ty::Array(t, n) => *n > 0 && self.needs_drop(t),
+            Ty::Tuple(ts) => ts.iter().any(|t| self.needs_drop(t)),
+            _ => false,
+        }
+    }
+
+    /// A type is copyable if it has no destructor and everything it contains
+    /// is copyable (Ch. 3 §1.2). Everything else moves.
+    fn is_copyable(&self, ty: &Ty) -> bool {
+        !self.needs_drop(ty)
     }
 
     /// The index of a variant by name.
@@ -318,7 +371,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
             }
             match (params, ret) {
                 (Ok(p), Ok(r)) => {
-                    if sigs.insert(f.name.clone(), (p, r)).is_some() {
+                    if sigs.insert(fn_key(f), (p, r)).is_some() {
                         errs.push(SyntaxError {
                             line: f.line,
                             message: format!("`{}` is defined more than once", f.name),
@@ -350,7 +403,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
 
     for item in &file.items {
         let ast::Item::Fn(f) = item else { continue };
-        if !sigs.contains_key(&f.name) {
+        if !sigs.contains_key(&fn_key(f)) {
             continue; // its signature was already reported
         }
         let signature = signature_of(f, &sigs);
@@ -374,6 +427,15 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
 
 /// The name of the hidden out-pointer for an aggregate return.
 const SRET: &str = "sret";
+
+/// The name a function is known by. A destructor is keyed by its type, since
+/// every type may have one and they would otherwise collide.
+fn fn_key(f: &ast::FnItem) -> String {
+    match (&f.name[..], f.params.first()) {
+        ("drop", Some((p, ast::Ty::Name(ty, _)))) if p == "self" => format!("drop.{ty}"),
+        _ => f.name.clone(),
+    }
+}
 
 /// The TIR signature of a function.
 ///
@@ -419,8 +481,9 @@ fn contains_reference(ty: &Ty) -> bool {
 }
 
 fn signature_of(f: &ast::FnItem, sigs: &HashMap<String, (Vec<Ty>, Ty)>) -> Signature {
+    let key = fn_key(f);
     let (params, ret) = sigs
-        .get(&f.name)
+        .get(&key)
         .cloned()
         .unwrap_or_else(|| (Vec::new(), Ty::Unit));
 
@@ -436,7 +499,7 @@ fn signature_of(f: &ast::FnItem, sigs: &HashMap<String, (Vec<Ty>, Ty)>) -> Signa
     );
 
     Signature {
-        name: f.name.clone(),
+        name: key,
         params: tir_params,
         ret: if ret == Ty::Unit || ret.is_aggregate() {
             None
@@ -450,6 +513,7 @@ fn signature_of(f: &ast::FnItem, sigs: &HashMap<String, (Vec<Ty>, Ty)>) -> Signa
 fn build_types(file: &ast::File) -> R<Types> {
     let mut types = Types {
         db: layout::TypeDb::new(),
+        destructors: std::collections::BTreeSet::new(),
         structs: HashMap::new(),
         enums: HashMap::new(),
     };
@@ -515,6 +579,37 @@ fn build_types(file: &ast::File) -> R<Types> {
                 types.enums.insert(en.name.clone(), infos);
             }
             _ => {}
+        }
+    }
+
+    // A function named `drop` whose one parameter is named `self` is that
+    // parameter's type's destructor (Ch. 3 §1.4).
+    for item in &file.items {
+        let ast::Item::Fn(f) = item else { continue };
+        if f.name != "drop" {
+            continue;
+        }
+        let [(param, ty)] = &f.params[..] else {
+            return err(f.line, "`drop` takes exactly one parameter, named `self`");
+        };
+        if param != "self" {
+            return err(f.line, "a destructor's parameter must be named `self`");
+        }
+        let ty = resolve_ty(ty, &types)?;
+        let name = match &ty {
+            Ty::Struct(n) | Ty::Enum(n) => n.clone(),
+            other => {
+                return err(
+                    f.line,
+                    format!("`{other}` cannot have a destructor: it is not declared in this file"),
+                );
+            }
+        };
+        if f.ret.is_some() {
+            return err(f.line, "a destructor returns nothing");
+        }
+        if !types.destructors.insert(name.clone()) {
+            return err(f.line, format!("`{name}` has more than one destructor"));
         }
     }
 
@@ -655,6 +750,14 @@ struct Fn<'a> {
     slots: Vec<Inst>,
     scopes: Vec<HashMap<String, Local>>,
     loops: Vec<LoopCtx>,
+    /// Ownership of every local that has a destructor, innermost last.
+    owned: Vec<(String, Owns, usize)>,
+    /// Set while lowering a destructor: the type whose `self` this is.
+    ///
+    /// Inside it, `self` is not dropped as a whole — that would call this
+    /// very destructor again. Its fields are dropped instead, which is what
+    /// Ch. 3 §1.4 means by the body running before the fields.
+    destructor_of: Option<String>,
     counter: u32,
     /// Set once the current block has been terminated.
     done: bool,
@@ -678,7 +781,8 @@ fn function(
     globals: &HashMap<String, Global>,
     types: &Types,
 ) -> R<Function> {
-    let (param_tys, ret) = sigs.get(&f.name).cloned().unwrap();
+    let (param_tys, ret) = sigs.get(&fn_key(f)).cloned().unwrap();
+    let destructor_of = fn_key(f).strip_prefix("drop.").map(|t| t.to_string());
     let mut fx = Fn {
         sigs,
         globals,
@@ -690,6 +794,8 @@ fn function(
         slots: Vec::new(),
         scopes: vec![HashMap::new()],
         loops: Vec::new(),
+        owned: Vec::new(),
+        destructor_of,
         counter: 0,
         done: false,
     };
@@ -707,15 +813,19 @@ fn function(
 
     let (value, ty) = fx.block(body, Some(&ret))?;
     if !fx.done {
+        // The parameters are this function's to drop too (Ch. 3 §1.1).
         if ret == Ty::Unit {
+            fx.drop_all(f.line)?;
             fx.finish(Terminator::Ret(None));
         } else {
             fx.check(&ty, &ret, body.line, "function body")?;
             if ret.is_aggregate() {
                 let dst = Operand::Value(SRET.to_string());
                 fx.copy_typed(dst, value, &ret, body.line)?;
+                fx.drop_all(f.line)?;
                 fx.finish(Terminator::Ret(None));
             } else {
+                fx.drop_all(f.line)?;
                 fx.finish(Terminator::Ret(Some(value)));
             }
         }
@@ -799,23 +909,83 @@ impl Fn<'_> {
 
     // ------------------------------------------------------------- scopes
 
-    fn declare(&mut self, name: &str, ty: Ty, _mutable: bool) -> Local {
+    fn declare(&mut self, name: &str, ty: Ty, mutable: bool) -> Local {
         let slot = self.fresh(&format!("{name}.slot"));
         let trytes = self.types.size(&ty).max(1) as u32;
         self.slots.push(Inst {
             results: vec![slot.clone()],
             kind: InstKind::Slot { trytes },
         });
+        // A local whose type has a destructor is dropped when its scope ends,
+        // unless it was moved out of (Ch. 3 §1.4).
+        let needs_drop = self.types.needs_drop(&ty);
+        let drop_flag = needs_drop.then(|| {
+            let flag = self.fresh(&format!("{name}.owns"));
+            self.slots.push(Inst {
+                results: vec![flag.clone()],
+                kind: InstKind::Slot { trytes: 1 },
+            });
+            flag
+        });
         let local = Local {
             slot,
             ty,
-            mutable: _mutable,
+            mutable,
+            drop_flag: drop_flag.clone(),
         };
-        self.scopes
-            .last_mut()
-            .expect("a scope")
-            .insert(name.to_string(), local.clone());
+        let scope = self.scopes.last_mut().expect("a scope");
+        scope.insert(name.to_string(), local.clone());
+        if let Some(flag) = &drop_flag {
+            let one = Operand::Const(Type::Int(1), Bt::from_i128(1));
+            let flag = flag.clone();
+            self.store_slot(&flag, &Ty::Bool, one);
+            self.owned
+                .push((name.to_string(), Owns::Yes, self.scopes.len() - 1));
+        }
         local
+    }
+
+    /// Record that a place was moved out of (Ch. 3 §1.2).
+    fn mark_moved(&mut self, name: &str) {
+        if let Some(entry) = self.owned.iter_mut().rev().find(|(n, _, _)| n == name) {
+            entry.1 = Owns::No;
+        }
+        if let Some(local) = self.lookup(name)
+            && let Some(flag) = local.drop_flag
+        {
+            let zero = Operand::Const(Type::Int(1), Bt::ZERO);
+            self.store_slot(&flag, &Ty::Bool, zero);
+        }
+    }
+
+    /// The ownership state, for saving across a branch.
+    fn owned_snapshot(&self) -> Vec<(String, Owns, usize)> {
+        self.owned.clone()
+    }
+
+    /// Join two paths' ownership: a value moved on either is not certainly
+    /// owned afterwards, and its drop is decided by its flag.
+    fn owned_join(&mut self, a: Vec<(String, Owns, usize)>, b: Vec<(String, Owns, usize)>) {
+        self.owned = a
+            .into_iter()
+            .map(|(n, o, d)| {
+                let other = b
+                    .iter()
+                    .find(|(m, _, _)| *m == n)
+                    .map(|(_, o, _)| *o)
+                    .unwrap_or(o);
+                (n, o.join(other), d)
+            })
+            .collect();
+    }
+
+    /// Whether a local is known to still own its value.
+    fn ownership(&self, name: &str) -> Option<Owns> {
+        self.owned
+            .iter()
+            .rev()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, o, _)| *o)
     }
 
     fn lookup(&self, name: &str) -> Option<Local> {
@@ -837,6 +1007,7 @@ impl Fn<'_> {
     // --------------------------------------------------------------- items
 
     fn block(&mut self, b: &ast::Block, expected: Option<&Ty>) -> R<(Operand, Ty)> {
+        let depth = self.scopes.len();
         self.scopes.push(HashMap::new());
         for stmt in &b.stmts {
             self.stmt(stmt)?;
@@ -845,8 +1016,143 @@ impl Fn<'_> {
             Some(e) => self.expr(e, expected)?,
             None => (unit(), Ty::Unit),
         };
+        self.drop_scope(depth, b.line)?;
         self.scopes.pop();
         Ok(result)
+    }
+
+    /// Drop every local of this scope that still owns its value, in reverse
+    /// order of declaration (Ch. 3 §1.4).
+    fn drop_scope(&mut self, depth: usize, line: Line) -> R<()> {
+        if self.done {
+            // Control left by another path; whatever terminated it is
+            // responsible for its own drops.
+            self.owned.retain(|(_, _, d)| *d < depth);
+            return Ok(());
+        }
+        let mine: Vec<(String, Owns)> = self
+            .owned
+            .iter()
+            .filter(|(_, _, d)| *d >= depth)
+            .map(|(n, o, _)| (n.clone(), *o))
+            .collect();
+        self.owned.retain(|(_, _, d)| *d < depth);
+
+        for (name, owns) in mine.into_iter().rev() {
+            if owns == Owns::No {
+                continue;
+            }
+            let Some(local) = self.lookup(&name) else {
+                continue;
+            };
+            // Inside a destructor, `self` is not dropped as a whole.
+            let fields_only = name == "self" && self.destructor_of.is_some();
+            match (owns, local.drop_flag.clone()) {
+                (Owns::Yes, _) if fields_only => {
+                    let addr = Operand::Value(local.slot.clone());
+                    self.drop_fields(addr, &local.ty, line, 0)?;
+                }
+                (Owns::Yes, _) => self.emit_drop(&local.slot, &local.ty, line)?,
+                // Ownership depends on the path taken, so the flag decides.
+                (_, Some(flag)) => {
+                    let f = self.load_slot(&flag, &Ty::Bool);
+                    let (yes, join) = (self.fresh("drop.yes"), self.fresh("drop.join"));
+                    self.br3(f, &join, &join, &yes);
+                    self.start(yes);
+                    self.emit_drop(&local.slot, &local.ty, line)?;
+                    self.jump(&join);
+                    self.start(join);
+                }
+                _ => self.emit_drop(&local.slot, &local.ty, line)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop everything this function still owns — its locals and its
+    /// parameters — on the way out.
+    fn drop_all(&mut self, line: Line) -> R<()> {
+        self.drop_scope(0, line)
+    }
+
+    /// A value moved out of inside a loop would be moved again on the next
+    /// iteration.
+    fn check_no_move_in_loop(&mut self, before: &[(String, Owns, usize)], line: Line) -> R<()> {
+        for (name, was, _) in before {
+            if *was != Owns::Yes {
+                continue;
+            }
+            if let Some(now) = self.ownership(name)
+                && now != Owns::Yes
+            {
+                return err(
+                    line,
+                    format!("`{name}` is moved out of here, and the loop may reach this again"),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The drop glue of a type: its own destructor, then its fields'.
+    fn emit_drop(&mut self, addr: &str, ty: &Ty, line: Line) -> R<()> {
+        self.drop_at(Operand::Value(addr.to_string()), ty, line, 0)
+    }
+
+    fn drop_at(&mut self, addr: Operand, ty: &Ty, line: Line, depth: u32) -> R<()> {
+        if depth > 8 {
+            return err(line, "drop glue nested too deeply");
+        }
+        if !self.types.needs_drop(ty) {
+            return Ok(());
+        }
+        // The destructor runs first, then the fields it did not move out of
+        // (Ch. 3 §1.4).
+        if let Ty::Struct(n) | Ty::Enum(n) = ty
+            && self.types.destructors.contains(n)
+        {
+            self.push(Inst {
+                results: Vec::new(),
+                kind: InstKind::Call {
+                    callee: format!("drop.{n}"),
+                    args: vec![addr.clone()],
+                    ret: None,
+                },
+            });
+        }
+        self.drop_fields(addr, ty, line, depth)
+    }
+
+    /// The second half of dropping a value: its fields, without its own
+    /// destructor. This is what a destructor's `self` gets.
+    fn drop_fields(&mut self, addr: Operand, ty: &Ty, line: Line, depth: u32) -> R<()> {
+        if depth > 8 {
+            return err(line, "drop glue nested too deeply");
+        }
+        match ty {
+            Ty::Struct(_) | Ty::Tuple(_) => {
+                for (_, ft, off) in self.types.fields(ty) {
+                    if self.types.needs_drop(&ft) {
+                        let at = self.offset(addr.clone(), off);
+                        self.drop_at(at, &ft, line, depth + 1)?;
+                    }
+                }
+            }
+            Ty::Array(elem, n) => {
+                let size = self.types.size(elem);
+                let (elem, n) = ((**elem).clone(), *n);
+                if self.types.needs_drop(&elem) {
+                    for i in 0..n {
+                        let at = self.offset(addr.clone(), i * size);
+                        self.drop_at(at, &elem, line, depth + 1)?;
+                    }
+                }
+            }
+            // An enum's payload varies by variant, so dropping it needs a
+            // dispatch this milestone does not emit; its own destructor ran.
+            _ => {}
+        }
+        Ok(())
     }
 
     fn stmt(&mut self, s: &ast::Stmt) -> R<()> {
@@ -922,6 +1228,28 @@ impl Fn<'_> {
 
             E::Path(name, line) => {
                 if let Some(local) = self.lookup(name) {
+                    // Reading a value that is not copyable moves it, and a
+                    // moved-out place may not be read (Ch. 3 §1.2).
+                    if !self.types.is_copyable(&local.ty) {
+                        match self.ownership(name) {
+                            Some(Owns::No) => {
+                                return err(
+                                    *line,
+                                    format!("`{name}` was moved out of and cannot be used again"),
+                                );
+                            }
+                            Some(Owns::Maybe) => {
+                                return err(
+                                    *line,
+                                    format!(
+                                        "`{name}` may have been moved out of on some path here"
+                                    ),
+                                );
+                            }
+                            _ => {}
+                        }
+                        self.mark_moved(name);
+                    }
                     if !local.ty.is_scalar() {
                         // An array's value is its address.
                         return Ok((Operand::Value(local.slot), local.ty));
@@ -1005,13 +1333,16 @@ impl Fn<'_> {
                         if ret.is_aggregate() {
                             let dst = Operand::Value(SRET.to_string());
                             self.copy_typed(dst, val, &ret, *line)?;
+                            self.drop_all(*line)?;
                             self.finish(Terminator::Ret(None));
                         } else {
+                            self.drop_all(*line)?;
                             self.finish(Terminator::Ret(Some(val)));
                         }
                     }
                     None => {
                         self.check(&Ty::Unit, &ret, *line, "`return` with no value")?;
+                        self.drop_all(*line)?;
                         self.finish(Terminator::Ret(None));
                     }
                 }
@@ -2415,6 +2746,7 @@ impl Fn<'_> {
         // edge in a register.
         let mut result: Option<(String, Ty)> = None;
 
+        let before = self.owned_snapshot();
         self.start(then_l);
         let (tv, tt) = self.block(then, expected)?;
         if tt != Ty::Never && tt != Ty::Unit {
@@ -2423,7 +2755,9 @@ impl Fn<'_> {
             result = Some((slot, tt.clone()));
         }
         self.jump(&join_l);
+        let after_then = self.owned_snapshot();
 
+        self.owned = before;
         self.start(else_l);
         let et = match els {
             None => Ty::Unit,
@@ -2440,6 +2774,8 @@ impl Fn<'_> {
             }
         };
         self.jump(&join_l);
+        let after_else = self.owned_snapshot();
+        self.owned_join(after_then, after_else);
 
         self.start(join_l);
         match result {
@@ -2471,6 +2807,7 @@ impl Fn<'_> {
         self.br3(c, &exit, &exit, &body_l);
 
         self.start(body_l);
+        let before = self.owned_snapshot();
         self.loops.push(LoopCtx {
             exit: exit.clone(),
             head: head.clone(),
@@ -2478,6 +2815,7 @@ impl Fn<'_> {
         });
         self.block(body, None)?;
         self.loops.pop();
+        self.check_no_move_in_loop(&before, line)?;
         self.jump(&head);
 
         self.start(exit);
@@ -2499,6 +2837,7 @@ impl Fn<'_> {
 
         self.jump(&head);
         self.start(head.clone());
+        let before = self.owned_snapshot();
         self.loops.push(LoopCtx {
             exit: exit.clone(),
             head: head.clone(),
@@ -2506,6 +2845,7 @@ impl Fn<'_> {
         });
         self.block(body, None)?;
         self.loops.pop();
+        self.check_no_move_in_loop(&before, _line)?;
         self.jump(&head);
 
         self.start(exit);

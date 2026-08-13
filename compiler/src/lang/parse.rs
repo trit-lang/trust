@@ -648,6 +648,10 @@ impl Parser {
                 self.bump();
                 Ok(Expr::Trit(t, line))
             }
+            Tok::Kw("self") => {
+                self.bump();
+                Ok(Expr::Path("self".to_string(), line))
+            }
             Tok::Kw("true") => {
                 self.bump();
                 Ok(Expr::Bool(true, line))
