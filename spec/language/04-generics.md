@@ -578,13 +578,20 @@ automatically** for every type meeting the rule. It is not opted into. A Rust
 programmer will notice the difference; a Trust program written against Ch. 3
 will not.
 
-> **Note (informative).** Ch. 3 §1.2's note says the restatement will be
-> "automatically derived… exactly as Rust's `Copy` is", and those two clauses
-> disagree: Rust's `Copy` is derived but opted into, so a struct of integers is
-> not `Copy` until someone says so. Only the automatic reading keeps the
-> sentence that follows it, which promises no program changes meaning. This
-> chapter takes the automatic reading, and the phrase "exactly as Rust's" is
-> to be read as naming the derivation, not the opt-in.
+> **Note (informative).** Rust makes `Copy` opt-in for a reason worth naming:
+> it is an API promise. A type that becomes copyable by accident stops being
+> copyable the day someone adds a field with a destructor, and every caller
+> changes from copying to moving without having asked for it — a breaking
+> change that fires at a distance. Rust makes the author write `Copy` down so
+> that the author owns it.
+>
+> That hazard cannot fire in draft 0.1, which has one file and therefore no
+> caller the author cannot see. It will fire once modules exist, and the
+> answer then is that a *published* type's copyability is part of its
+> signature and can be required to be written there — a rule that can be added
+> without changing any program that predates modules. Making `Copy` opt-in
+> now, on the other hand, would break every program written against Ch. 3 §1.2
+> today.
 
 Ch. 3 §1.2 also observed that draft 0.1 had no way to opt *out*, and that
 opting out "needs a trait to opt out of". Here it is:

@@ -55,13 +55,16 @@ So all of Ch. 1's scalars are copyable, as are arrays, tuples, structs and
 enums built only from copyable types. A type with a `drop` is not copyable,
 and neither is anything containing one.
 
-> **Note (informative).** Ch. 4 will restate this as an automatically derived
-> trait, exactly as Rust's `Copy` is. The structural rule was chosen so that
-> restating it changes which programs compile in no way at all: the derived
-> trait's rule is this rule.
+> **Note (informative).** Ch. 4 §5.1 restates this as a trait, `Copy`, which
+> the compiler implements for every type meeting the rule above without being
+> asked. It is deliberately *not* Rust's `Copy`, which must be opted into with
+> a derive: an automatic one is what makes restating the rule change which
+> programs compile in no way at all, and that is why the rule was written
+> structurally here in the first place.
 
 Draft 0.1 has no way to *opt out* of copying for a type that would otherwise
-be copyable. That needs a trait to opt out of.
+be copyable. That needs a trait to opt out of, and Ch. 4 §5.1 supplies it:
+`impl !Copy for T`, the only negative implementation in the language.
 
 ### 1.3 Places and paths
 

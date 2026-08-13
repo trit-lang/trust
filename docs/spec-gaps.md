@@ -171,14 +171,25 @@ alternative where they differ:
 
 One consequence for a document already written:
 
-- **Ch. 3 §1.2's note on `Copy` is self-inconsistent.** It says the structural
-  copy rule will be restated as a trait "automatically derived… exactly as
-  Rust's `Copy` is", but Rust's `Copy` is *opted into*: a struct of integers is
-  not `Copy` until someone writes the derive. Only the automatic reading keeps
-  the sentence immediately after it, which promises the restatement changes
-  which programs compile "in no way at all". Ch. 4 §5.1 takes the automatic
-  reading and says so; opting out is `impl !Copy for T`, the only negative impl
-  in the language. Ch. 3 §1.2's note wants half a line changed.
+- **Ch. 3 §1.2's note on `Copy` was self-inconsistent, and is now fixed.** It
+  said the structural copy rule would be restated as a trait "automatically
+  derived… exactly as Rust's `Copy` is", but Rust's `Copy` is *opted into*: a
+  struct of integers is not `Copy` until someone writes the derive. The two
+  clauses cannot both hold. The deciding argument is the implementation: the
+  structural rule is already normative and already built, so the automatic
+  reading costs zero lines and the opt-in reading would repeal a rule that is
+  in force. Ch. 3 §1.2's note has been reworded to say "not Rust's `Copy`" and
+  to point at the opt-out it lacked; Ch. 4 §5.1 supplies that opt-out as
+  `impl !Copy for T`, the only negative impl in the language.
+
+  **Left open:** Rust's opt-in exists because `Copy` is an API promise — a type
+  that becomes copyable by accident stops being copyable the day a field
+  acquires a destructor, silently turning every caller's copy into a move. That
+  cannot bite a one-file draft, and it will bite once modules exist. The
+  intended answer, recorded here rather than specified: a *published* type's
+  copyability becomes part of its signature and must be written there. That
+  rule can be added later without invalidating any program that predates
+  modules, which is why it is deferred rather than guessed at now. Ch. 3 §1.2's note wants half a line changed.
 
 Nothing in Ch. 4 is implemented yet. The frontend still rejects `trait`,
 `impl`, `for`, `dyn` and `<…>` type parameters with the diagnostics Ch. 0 §1.3
