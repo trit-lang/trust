@@ -20,12 +20,12 @@ the source.
 | `vm/` — crate `tritium` | **implemented**: the reference TRISC-27 machine — encoder/decoder, ALU, memory, the negative-address device region, CLI |
 | assembler (`.t27`) | **implemented**: two-pass, exact balanced-ternary expressions, all directives and pseudo-instructions (`tritium asm`) |
 | backend (TIR → TRISC-27) | **implemented**: `trustc compile` emits assembly. No register allocator yet — every value lives in a stack slot |
-| `compiler/` — Trust frontend | **implemented**: lexer, parser, type checker and lowering to TIR, for scalars, arrays, functions, constants and all control flow. Structs, enums, references, generics and strings wait on unwritten chapters |
+| `compiler/` — Trust frontend | **implemented**: lexer, parser, type checker and lowering to TIR. Everything Language Ch. 0–2 specifies — scalars, arrays, tuples, structs, enums with payloads and niches, both `repr`s, all control flow. References, generics and strings wait on unwritten chapters |
 
 ## Building
 
 ```
-cargo test          # 224 tests
+cargo test          # 235 tests
 cargo build
 ```
 

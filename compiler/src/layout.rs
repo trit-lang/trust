@@ -296,7 +296,63 @@ pub enum Tag {
         offset: u32,
         /// How many niche values this enum consumes.
         used: u128,
+        /// The scalar whose invalid values encode the discriminant.
+        spot: Niche,
     },
+}
+
+/// Where an enclosing enum may hide a discriminant, and in what values.
+///
+/// A count alone is not enough to generate code against: a lowering needs to
+/// know *which* patterns are invalid. The scalars that offer niches — `bool`
+/// and `trit` — have a contiguous valid range, so the invalid values are
+/// everything else in the scalar's storage, taken from above the range first
+/// and then from below it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Niche {
+    /// Offset in trytes of the scalar holding the niche.
+    pub offset: u32,
+    /// Storage width of that scalar, in trits.
+    pub trits: u32,
+    /// The lowest valid value.
+    pub lo: i128,
+    /// The highest valid value.
+    pub hi: i128,
+}
+
+impl Niche {
+    /// How many invalid values this scalar has.
+    pub fn count(&self) -> u128 {
+        capacity(self.trits.div_ceil(TRITS_PER_TRYTE))
+            .saturating_sub((self.hi - self.lo + 1) as u128)
+    }
+
+    /// The `i`th invalid value: above the valid range first, then below it.
+    pub fn nth(&self, i: u128) -> Option<i128> {
+        let max = (3i128.pow(self.trits) - 1) / 2;
+        let above = (max - self.hi) as u128;
+        if i < above {
+            return Some(self.hi + 1 + i as i128);
+        }
+        let below = i - above;
+        let v = self.lo - 1 - below as i128;
+        (v >= -max).then_some(v)
+    }
+
+    /// Shrink the valid range to record that `used` niches have been taken,
+    /// so that an enclosing type sees only what is left.
+    fn consume(&self, used: u128) -> Niche {
+        let max = (3i128.pow(self.trits) - 1) / 2;
+        let above = (max - self.hi).max(0) as u128;
+        let take_above = used.min(above) as i128;
+        let take_below = used.saturating_sub(above) as i128;
+        Niche {
+            offset: self.offset,
+            trits: self.trits,
+            lo: self.lo - take_below,
+            hi: self.hi + take_above,
+        }
+    }
 }
 
 /// The computed layout of a type.
@@ -315,6 +371,9 @@ pub struct Layout {
     /// How many of this type's representations are invalid and therefore
     /// available to an enclosing enum (§6). Saturates rather than overflowing.
     pub niches: u128,
+    /// Where those invalid representations are, when a lowering needs to put
+    /// a discriminant in one.
+    pub niche: Option<Niche>,
 }
 
 /// The enum-specific part of a layout.
@@ -377,7 +436,20 @@ fn scalar(size: u32, align: u32, valid: u128) -> Layout {
         offsets: Vec::new(),
         enum_layout: None,
         niches: capacity(size).saturating_sub(valid),
+        niche: None,
     }
+}
+
+/// A scalar whose valid values are the contiguous range `lo..=hi`.
+fn ranged(size: u32, lo: i128, hi: i128) -> Layout {
+    let mut l = scalar(size, size, (hi - lo + 1) as u128);
+    l.niche = Some(Niche {
+        offset: 0,
+        trits: size * TRITS_PER_TRYTE,
+        lo,
+        hi,
+    });
+    l
 }
 
 fn compute(db: &TypeDb, ty: &Ty, visiting: &mut BTreeSet<String>) -> Result<Layout, LayoutError> {
@@ -388,8 +460,8 @@ fn compute(db: &TypeDb, ty: &Ty, visiting: &mut BTreeSet<String>) -> Result<Layo
         // A trit and a bool each occupy a full tryte, and their unused
         // capacity is not observable in safe code (Ch. 1 §7) — but it is
         // exactly what an enclosing enum may use (§6).
-        Ty::Trit => scalar(1, 1, 3),
-        Ty::Bool => scalar(1, 1, 2),
+        Ty::Trit => ranged(1, -1, 1),
+        Ty::Bool => ranged(1, 0, 1),
 
         Ty::Int(i) => {
             let trytes = i.trits().div_ceil(TRITS_PER_TRYTE);
@@ -406,7 +478,12 @@ fn compute(db: &TypeDb, ty: &Ty, visiting: &mut BTreeSet<String>) -> Result<Layo
             // behind an indirection is not silently accepted.
             check_names(db, inner)?;
             let trytes = IntTy::TAddr.trits().div_ceil(TRITS_PER_TRYTE);
-            scalar(trytes, trytes, capacity(trytes).saturating_sub(1))
+            // A reference holds an address, which is non-negative and never
+            // null (§6). Treating 1…MAX as the valid range is a safe
+            // under-count of the niches and puts the *null* address first
+            // among them, which is the one every `Option<&T>` uses.
+            let max = (3i128.pow(IntTy::TAddr.trits()) - 1) / 2;
+            ranged(trytes, 1, max)
         }
 
         Ty::Array(elem, n) => {
@@ -429,6 +506,8 @@ fn compute(db: &TypeDb, ty: &Ty, visiting: &mut BTreeSet<String>) -> Result<Layo
                 offsets: (0..n).map(|i| i * e.size).collect(),
                 enum_layout: None,
                 niches: capacity(size).saturating_sub(valid),
+                // An element's niche is the array's, at that element's offset.
+                niche: (n > 0).then(|| e.niche.clone()).flatten(),
             }
         }
 
@@ -521,12 +600,25 @@ fn aggregate(fields: &[Layout], repr: Repr) -> Layout {
     let padding = size - fields.iter().map(|f| f.size).sum::<u32>().min(size);
     let valid = payload.saturating_mul(capacity(padding));
 
+    // A product's niche is the widest one among its fields, moved to that
+    // field's offset.
+    let niche = order
+        .iter()
+        .filter_map(|&i| {
+            fields[i].niche.as_ref().map(|n| Niche {
+                offset: offsets[i] + n.offset,
+                ..n.clone()
+            })
+        })
+        .max_by_key(Niche::count);
+
     Layout {
         size,
         align,
         offsets,
         enum_layout: None,
         niches: capacity(size).saturating_sub(valid),
+        niche,
     }
 }
 
@@ -610,6 +702,13 @@ fn enum_layout(
                 variant_offsets: vec![Vec::new(); def.variants.len()],
             }),
             niches: capacity(1) - 3,
+            // Representation-identical to `trit`, niches included.
+            niche: Some(Niche {
+                offset: 0,
+                trits: TRITS_PER_TRYTE,
+                lo: -1,
+                hi: 1,
+            }),
         });
     }
 
@@ -628,6 +727,7 @@ fn enum_layout(
                 variant_offsets: vec![payload.offsets.clone()],
             }),
             niches: payload.niches,
+            niche: payload.niche.clone(),
         });
     }
 
@@ -641,7 +741,11 @@ fn enum_layout(
         let untagged = carriers[0];
         let (payload, fields) = &payloads[untagged];
         let needed = (def.variants.len() - 1) as u128;
-        if payload.niches >= needed && payload.size > 0 {
+        if payload.niches >= needed
+            && payload.size > 0
+            && let Some(spot) = payload.niche.clone()
+            && spot.count() >= needed
+        {
             let mut variant_offsets = vec![Vec::new(); def.variants.len()];
             variant_offsets[untagged] = payload.offsets.clone();
             let _ = fields;
@@ -652,8 +756,9 @@ fn enum_layout(
                 enum_layout: Some(EnumLayout {
                     tag: Tag::Niche {
                         untagged,
-                        offset: 0,
+                        offset: spot.offset,
                         used: needed,
+                        spot: spot.clone(),
                     },
                     discriminants: discs,
                     variant_offsets,
@@ -662,6 +767,7 @@ fn enum_layout(
                 // whatever encloses it — which is why nesting up to the
                 // budget adds no size (§6, guarantee 3).
                 niches: payload.niches - needed,
+                niche: Some(spot.consume(needed)),
             });
         }
     }
@@ -696,5 +802,9 @@ fn enum_layout(
             variant_offsets,
         }),
         niches: tag_niches,
+        // The tag's unused values are themselves niches, but they are
+        // contiguous only if the discriminants are — not worth assuming, so
+        // an enclosing type is offered none.
+        niche: None,
     })
 }

@@ -14,6 +14,7 @@ pub fn parse(src: &str) -> R<File> {
     let mut p = Parser {
         toks: lex(src)?,
         pos: 0,
+        no_struct: false,
     };
     let mut file = File::default();
     while !p.at(&Tok::Eof) {
@@ -25,6 +26,9 @@ pub fn parse(src: &str) -> R<File> {
 struct Parser {
     toks: Vec<(Tok, Line)>,
     pos: usize,
+    /// Set while parsing a condition, where a struct literal's `{` would be
+    /// read as the block that follows (§2.8).
+    no_struct: bool,
 }
 
 /// §2.1's table, loosest level first, indexed by level so that the
@@ -121,34 +125,165 @@ impl Parser {
 
     fn item(&mut self) -> R<Item> {
         // Attributes attach to the item that follows (§3.4). Draft 0.1
-        // defines only `repr`, which applies to types this chapter's grammar
-        // does not yet admit, so any attribute here is parsed and rejected.
-        if self.at_op("#") {
+        // defines exactly one, `repr`, taking `lang` or `linear`.
+        let mut repr = Repr::Lang;
+        while self.at_op("#") {
             let line = self.line();
             self.bump();
             self.expect_op("[")?;
             let name = self.expect_ident()?;
-            return Err(SyntaxError {
-                line,
-                message: format!(
-                    "`#[{name}]` has nothing to attach to: draft 0.1 defines only `repr`, \
-                     and structs and enums are not in this milestone"
-                ),
-            });
+            if name != "repr" {
+                return Err(SyntaxError {
+                    line,
+                    message: format!("`{name}` is not an attribute; draft 0.1 defines only `repr`"),
+                });
+            }
+            self.expect_op("(")?;
+            let arg = self.expect_ident()?;
+            repr = match arg.as_str() {
+                "lang" => Repr::Lang,
+                "linear" => Repr::Linear,
+                other => {
+                    return Err(SyntaxError {
+                        line,
+                        message: format!(
+                            "`repr({other})` is not a layout regime; use `lang` or `linear`"
+                        ),
+                    });
+                }
+            };
+            self.expect_op(")")?;
+            self.expect_op("]")?;
         }
+
         if self.at_kw("fn") {
             return Ok(Item::Fn(self.fn_item()?));
         }
         if self.at_kw("const") {
             return Ok(Item::Const(self.const_item()?));
         }
-        if self.at_kw("struct") || self.at_kw("enum") {
-            return self.err(
-                "structs and enums parse but are not lowered yet; this milestone covers \
-                 scalars, arrays, functions and constants",
-            );
+        if self.at_kw("struct") {
+            return Ok(Item::Struct(self.struct_item(repr)?));
+        }
+        if self.at_kw("enum") {
+            return Ok(Item::Enum(self.enum_item(repr)?));
         }
         self.err(format!("expected an item, found {}", self.peek()))
+    }
+
+    /// `struct Name { … }`, `struct Name(…);`, `struct Name;` (§3.3).
+    fn struct_item(&mut self, repr: Repr) -> R<StructItem> {
+        let line = self.line();
+        self.bump(); // struct
+        let name = self.expect_ident()?;
+        let fields = if self.at_op("{") {
+            self.named_fields()?
+        } else if self.at_op("(") {
+            let tys = self.type_list("(", ")")?;
+            self.expect_op(";")?;
+            tys.into_iter()
+                .enumerate()
+                .map(|(i, t)| (i.to_string(), t))
+                .collect()
+        } else {
+            self.expect_op(";")?;
+            Vec::new()
+        };
+        Ok(StructItem {
+            name,
+            repr,
+            fields,
+            line,
+        })
+    }
+
+    fn enum_item(&mut self, repr: Repr) -> R<EnumItem> {
+        let line = self.line();
+        self.bump(); // enum
+        let name = self.expect_ident()?;
+        self.expect_op("{")?;
+        let mut variants = Vec::new();
+        while !self.eat_op("}") {
+            if self.at(&Tok::Eof) {
+                return self.err("unterminated enum");
+            }
+            let vline = self.line();
+            let vname = self.expect_ident()?;
+            let fields = if self.at_op("{") {
+                self.named_fields()?
+            } else if self.at_op("(") {
+                self.type_list("(", ")")?
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, t)| (i.to_string(), t))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            // An explicit discriminant may be negative (Ch. 2 §5.1).
+            let discriminant = if self.eat_op("=") {
+                let negative = self.eat_op("-");
+                match self.bump() {
+                    Tok::Int(v) => {
+                        let v = v
+                            .to_i128()
+                            .ok_or(())
+                            .or_else(|()| self.err::<i128>("discriminant is too large"))?;
+                        Some(if negative { -v } else { v })
+                    }
+                    other => return self.err(format!("expected a discriminant, found {other}")),
+                }
+            } else {
+                None
+            };
+            variants.push(Variant {
+                name: vname,
+                fields,
+                discriminant,
+                line: vline,
+            });
+            if !self.eat_op(",") && !self.at_op("}") {
+                return self.err("expected `,` between variants");
+            }
+        }
+        Ok(EnumItem {
+            name,
+            repr,
+            variants,
+            line,
+        })
+    }
+
+    fn named_fields(&mut self) -> R<Vec<(String, Ty)>> {
+        self.expect_op("{")?;
+        let mut fields = Vec::new();
+        while !self.eat_op("}") {
+            if self.at(&Tok::Eof) {
+                return self.err("unterminated field list");
+            }
+            let name = self.expect_ident()?;
+            self.expect_op(":")?;
+            fields.push((name, self.ty()?));
+            if !self.eat_op(",") && !self.at_op("}") {
+                return self.err("expected `,` between fields");
+            }
+        }
+        Ok(fields)
+    }
+
+    fn type_list(&mut self, open: &str, close: &str) -> R<Vec<Ty>> {
+        self.expect_op(open)?;
+        let mut tys = Vec::new();
+        while !self.eat_op(close) {
+            if self.at(&Tok::Eof) {
+                return self.err("unterminated type list");
+            }
+            tys.push(self.ty()?);
+            if !self.eat_op(",") && !self.at_op(close) {
+                return self.err(format!("expected `,` or `{close}`"));
+            }
+        }
+        Ok(tys)
     }
 
     fn fn_item(&mut self) -> R<FnItem> {
@@ -213,9 +348,13 @@ impl Parser {
 
     fn ty(&mut self) -> R<Ty> {
         let line = self.line();
-        if self.eat_op("(") {
-            self.expect_op(")")?;
-            return Ok(Ty::Unit(line));
+        if self.at_op("(") {
+            let tys = self.type_list("(", ")")?;
+            return Ok(if tys.is_empty() {
+                Ty::Unit(line)
+            } else {
+                Ty::Tuple(tys, line)
+            });
         }
         if self.eat_op("[") {
             let elem = self.ty()?;
@@ -395,15 +534,20 @@ impl Parser {
         loop {
             let line = self.line();
             if self.eat_op(".") {
-                let name = self.expect_ident()?;
-                if !self.at_op("(") {
-                    return self.err(
-                        "field access needs structs, which are not in this milestone; \
-                         method calls are written `x.method(…)`",
-                    );
+                // `x.0` is a tuple index; `x.f` is a field; `x.f(…)` a method.
+                if let Tok::Int(v) = self.peek().clone() {
+                    self.bump();
+                    let index = v.to_i128().unwrap_or(-1);
+                    e = Expr::Field(Box::new(e), index.to_string(), line);
+                    continue;
                 }
-                let args = self.args()?;
-                e = Expr::Method(Box::new(e), name, args, line);
+                let name = self.expect_ident()?;
+                if self.at_op("(") {
+                    let args = self.args()?;
+                    e = Expr::Method(Box::new(e), name, args, line);
+                } else {
+                    e = Expr::Field(Box::new(e), name, line);
+                }
                 continue;
             }
             if self.at_op("[") {
@@ -458,27 +602,64 @@ impl Parser {
             }
             Tok::Ident(name) => {
                 self.bump();
+                let mut segments = vec![name];
+                while self.eat_op("::") {
+                    segments.push(self.expect_ident()?);
+                }
+                let path = Path { segments, line };
+
+                // `Name(args)` is a call when the name is a function and a
+                // tuple-struct or variant literal when it is a type; the two
+                // are told apart during lowering, where the names are known.
                 if self.at_op("(") {
                     let args = self.args()?;
-                    return Ok(Expr::Call(name, args, line));
+                    if path.segments.len() == 1 {
+                        return Ok(Expr::Call(path.segments[0].clone(), args, line));
+                    }
+                    let fields = args
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, e)| (i.to_string(), e))
+                        .collect();
+                    return Ok(Expr::Aggregate(path, fields, line));
                 }
-                if self.at_op("::") {
-                    return self
-                        .err("paths need enums or modules, neither of which is in this milestone");
+                // A struct literal is ambiguous with a block in a condition
+                // position, and is not permitted there without parentheses
+                // (§2.8).
+                if self.at_op("{") && !self.no_struct {
+                    let fields = self.field_values()?;
+                    return Ok(Expr::Aggregate(path, fields, line));
                 }
-                Ok(Expr::Path(name, line))
+                if path.segments.len() > 1 {
+                    return Ok(Expr::Aggregate(path, Vec::new(), line));
+                }
+                Ok(Expr::Path(path.segments[0].clone(), line))
             }
             Tok::Op("(") => {
                 self.bump();
+                // A struct literal is legal again inside parentheses.
+                let outer = std::mem::replace(&mut self.no_struct, false);
                 if self.eat_op(")") {
+                    self.no_struct = outer;
                     return Ok(Expr::Unit(line));
                 }
-                let e = self.expr()?;
-                if self.at_op(",") {
-                    return self.err("tuples are not in this milestone");
-                }
-                self.expect_op(")")?;
-                Ok(e)
+                let first = self.expr()?;
+                let result = if self.at_op(",") {
+                    let mut items = vec![first];
+                    while self.eat_op(",") {
+                        if self.at_op(")") {
+                            break;
+                        }
+                        items.push(self.expr()?);
+                    }
+                    self.expect_op(")")?;
+                    Expr::Tuple(items, line)
+                } else {
+                    self.expect_op(")")?;
+                    first
+                };
+                self.no_struct = outer;
+                Ok(result)
             }
             Tok::Op("[") => {
                 self.bump();
@@ -542,7 +723,34 @@ impl Parser {
     /// The condition of `if`, `while` and `match`, where a struct literal
     /// would be ambiguous with the block that follows (§2.8).
     fn no_struct_expr(&mut self) -> R<Expr> {
-        self.expr()
+        let outer = std::mem::replace(&mut self.no_struct, true);
+        let e = self.expr();
+        self.no_struct = outer;
+        e
+    }
+
+    /// `{ name: value, … }`, or `{ name, … }` where the field and the local
+    /// share a name.
+    fn field_values(&mut self) -> R<Vec<(String, Expr)>> {
+        self.expect_op("{")?;
+        let mut fields = Vec::new();
+        while !self.eat_op("}") {
+            if self.at(&Tok::Eof) {
+                return self.err("unterminated struct literal");
+            }
+            let line = self.line();
+            let name = self.expect_ident()?;
+            let value = if self.eat_op(":") {
+                self.expr()?
+            } else {
+                Expr::Path(name.clone(), line)
+            };
+            fields.push((name, value));
+            if !self.eat_op(",") && !self.at_op("}") {
+                return self.err("expected `,` between fields");
+            }
+        }
+        Ok(fields)
     }
 
     fn if_expr(&mut self) -> R<Expr> {
@@ -599,6 +807,43 @@ impl Parser {
         Ok(Expr::Match(Box::new(scrutinee), arms, line))
     }
 
+    fn pattern_list(&mut self, open: &str, close: &str) -> R<Vec<Pattern>> {
+        self.expect_op(open)?;
+        let mut out = Vec::new();
+        while !self.eat_op(close) {
+            if self.at(&Tok::Eof) {
+                return self.err("unterminated pattern list");
+            }
+            out.push(self.pattern()?);
+            if !self.eat_op(",") && !self.at_op(close) {
+                return self.err(format!("expected `,` or `{close}`"));
+            }
+        }
+        Ok(out)
+    }
+
+    fn field_patterns(&mut self) -> R<Vec<(String, Pattern)>> {
+        self.expect_op("{")?;
+        let mut out = Vec::new();
+        while !self.eat_op("}") {
+            if self.at(&Tok::Eof) {
+                return self.err("unterminated field pattern");
+            }
+            let line = self.line();
+            let name = self.expect_ident()?;
+            let pat = if self.eat_op(":") {
+                self.pattern()?
+            } else {
+                Pattern::Bind(name.clone(), line)
+            };
+            out.push((name, pat));
+            if !self.eat_op(",") && !self.at_op("}") {
+                return self.err("expected `,` between field patterns");
+            }
+        }
+        Ok(out)
+    }
+
     fn pattern(&mut self) -> R<Pattern> {
         let line = self.line();
         match self.peek().clone() {
@@ -635,7 +880,45 @@ impl Parser {
             }
             Tok::Ident(name) => {
                 self.bump();
-                Ok(Pattern::Bind(name, line))
+                let mut segments = vec![name];
+                while self.eat_op("::") {
+                    segments.push(self.expect_ident()?);
+                }
+                let path = Path { segments, line };
+
+                if self.at_op("(") {
+                    let inner = self.pattern_list("(", ")")?;
+                    let fields = inner
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, p)| (i.to_string(), p))
+                        .collect();
+                    return Ok(Pattern::Aggregate(path, fields, line));
+                }
+                if self.at_op("{") {
+                    let fields = self.field_patterns()?;
+                    return Ok(Pattern::Aggregate(path, fields, line));
+                }
+                if path.segments.len() > 1 {
+                    return Ok(Pattern::Aggregate(path, Vec::new(), line));
+                }
+                // `name @ pattern` binds the whole while matching (§4).
+                if self.eat_op("@") {
+                    let inner = self.pattern()?;
+                    return Ok(Pattern::Aggregate(
+                        Path {
+                            segments: vec![path.segments[0].clone()],
+                            line,
+                        },
+                        vec![("@".to_string(), inner)],
+                        line,
+                    ));
+                }
+                Ok(Pattern::Bind(path.segments[0].clone(), line))
+            }
+            Tok::Op("(") => {
+                let inner = self.pattern_list("(", ")")?;
+                Ok(Pattern::Tuple(inner, line))
             }
             other => self.err(format!("expected a pattern, found {other}")),
         }

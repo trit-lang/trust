@@ -1,0 +1,73 @@
+// shapes.tr — the composite types of Language Ch. 2, exercised.
+//
+// Three things worth watching here. `Sign` is a three-variant fieldless enum
+// with discriminants −1, 0, +1, so it is representation-identical to `trit`
+// and matching over it is a single `br3` (Ch. 2 §5.2). `Maybe` wraps a `trit`
+// in an enum with one extra fieldless variant, and costs one tryte because
+// the discriminant hides in a niche (Ch. 2 §6). And `Header` asks for
+// `repr(linear)`, so its offsets are the documented function of its
+// declaration rather than whatever the compiler prefers.
+
+fn putchar(c: t9);
+
+struct Point { x: t27, y: t27 }
+
+#[repr(linear)]
+struct Header { magic: t9, len: t27 }
+
+enum Sign { Neg = -1, Zero = 0, Pos = 1 }
+
+enum Shape { Dot, Line(t27), Rect { w: t27, h: t27 } }
+
+enum Maybe { Nothing, Just(trit) }
+
+fn area(s: Shape) -> t27 {
+    match s {
+        Shape::Dot => 0,
+        Shape::Line(n) => n,
+        Shape::Rect { w, h } => w * h,
+    }
+}
+
+fn classify(v: t27) -> Sign {
+    match v <=> 0 {
+        -1t => Sign::Neg,
+         0t => Sign::Zero,
+         1t => Sign::Pos,
+    }
+}
+
+fn unwrap_or(m: Maybe, fallback: trit) -> trit {
+    match m {
+        Maybe::Nothing => fallback,
+        Maybe::Just(t) => t,
+    }
+}
+
+fn describe(s: Sign) -> t9 {
+    match s {
+        Sign::Neg  => 45,   // '-'
+        Sign::Zero => 48,   // '0'
+        Sign::Pos  => 43,   // '+'
+    }
+}
+
+fn main() -> t27 {
+    let p = Point { x: 3, y: 4 };
+    let origin_distance = p.x * p.x + p.y * p.y;
+
+    let boxed = area(Shape::Rect { w: 5, h: 6 });
+    let line = area(Shape::Line(7));
+
+    let pair = (origin_distance, boxed);
+
+    putchar(describe(classify(-1)));
+    putchar(describe(classify(0)));
+    putchar(describe(classify(9)));
+    putchar(10);
+
+    let known = unwrap_or(Maybe::Just(1t), 0t);
+    let unknown = unwrap_or(Maybe::Nothing, -1t);
+
+    pair.0 + pair.1 + line + (known as t27) + (unknown as t27)
+}

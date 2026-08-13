@@ -275,3 +275,207 @@ fn a_declaration_has_no_body_and_lowers_to_one() {
     assert_eq!(m.decls[0].name, "putchar");
     assert!(m.function("putchar").is_none());
 }
+
+// ---------------------------------------------------- composites (Ch. 2)
+
+#[test]
+fn the_composites_example_runs() {
+    let (status, out) = run(include_str!("../../examples/trust/shapes.tr"));
+    // 25 + 30 + 7 + 1 − 1, and the three signs printed on the way.
+    assert_eq!(status, 62);
+    assert_eq!(out, "-0+\n");
+}
+
+#[test]
+fn structs_and_tuples_have_fields() {
+    assert_eq!(
+        run("struct Point { x: t27, y: t27 } \
+             fn main() -> t27 { let p = Point { x: 3, y: 4 }; p.x * 10 + p.y }")
+        .0,
+        34
+    );
+    assert_eq!(
+        run("fn main() -> t27 { let t = (1, 2, 3); t.0 * 100 + t.1 * 10 + t.2 }").0,
+        123
+    );
+    // A tuple struct's fields are positional.
+    assert_eq!(
+        run("struct Trip(t9, t9, t9); \
+             fn main() -> t27 { let t = Trip(4, 5, 6); (t.0 as t27) + (t.2 as t27) }")
+        .0,
+        10
+    );
+}
+
+#[test]
+fn an_aggregate_binding_is_a_copy() {
+    // Ch. 2's value semantics: `q` gets its own storage.
+    assert_eq!(
+        run("struct P { a: t27 } \
+             fn main() -> t27 { let p = P { a: 1 }; let mut q = p; q = P { a: 2 }; p.a }")
+        .0,
+        1
+    );
+}
+
+#[test]
+fn a_trit_shaped_enum_dispatches_with_one_branch() {
+    // Ch. 2 §5.2: three fieldless variants with discriminants −1, 0, +1 are
+    // representation-identical to `trit`, and `match` lowers to one `br3`.
+    let m = tir_of(
+        "enum Sign { Neg = -1, Zero = 0, Pos = 1 } \
+         fn f(s: Sign) -> t27 { match s { Sign::Neg => 1, Sign::Zero => 2, Sign::Pos => 3, } }",
+    );
+    let printed = tir::print_module(&m);
+    assert!(printed.contains("br3"), "{printed}");
+    assert_eq!(
+        printed.matches("cmp").count(),
+        0,
+        "a trit-shaped enum needs no comparison:\n{printed}"
+    );
+}
+
+#[test]
+fn enum_payloads_are_bound_by_patterns() {
+    let src = "enum Shape { Dot, Line(t27), Rect { w: t27, h: t27 } } \
+               fn area(s: Shape) -> t27 { \
+                   match s { \
+                       Shape::Dot => 0, \
+                       Shape::Line(n) => n, \
+                       Shape::Rect { w, h } => w * h, \
+                   } \
+               }";
+    assert_eq!(
+        run(&format!(
+            "{src} fn main() -> t27 {{ area(Shape::Rect {{ w: 6, h: 7 }}) }}"
+        ))
+        .0,
+        42
+    );
+    assert_eq!(
+        run(&format!(
+            "{src} fn main() -> t27 {{ area(Shape::Line(9)) }}"
+        ))
+        .0,
+        9
+    );
+    assert_eq!(
+        run(&format!("{src} fn main() -> t27 {{ area(Shape::Dot) }}")).0,
+        0
+    );
+}
+
+#[test]
+fn a_niche_encoded_enum_costs_nothing_over_its_payload() {
+    // Ch. 2 §6, guaranteed rather than merely observed: an enum wrapping a
+    // `trit` with one extra fieldless variant is one tryte.
+    use trustc::layout::{Repr, Ty, TypeDb, Variant, layout_of};
+    let mut db = TypeDb::new();
+    db.enum_(
+        "Maybe",
+        Repr::Lang,
+        vec![Variant::unit("Nothing"), Variant::payload("Just", Ty::Trit)],
+    );
+    let l = layout_of(&db, &Ty::named("Maybe")).unwrap();
+    assert_eq!((l.size, l.align), (1, 1));
+
+    // And it still round-trips through the machine.
+    let src = "enum Maybe { Nothing, Just(trit) } \
+               fn get(m: Maybe, fallback: trit) -> trit { \
+                   match m { Maybe::Nothing => fallback, Maybe::Just(t) => t, } \
+               } \
+               fn main() -> t27 { \
+                   let a = get(Maybe::Just(1t), 0t) as t27; \
+                   let b = get(Maybe::Nothing, -1t) as t27; \
+                   a * 10 + b \
+               }";
+    assert_eq!(run(src).0, 9); // 1*10 + (−1)
+}
+
+#[test]
+fn a_fieldless_enum_casts_to_its_discriminant() {
+    // Ch. 2 §5.3, and there is no cast the other way.
+    assert_eq!(
+        run("enum E { A = -4, B = 0, C = 7 } fn main() -> t27 { (E::C as t27) - (E::A as t27) }").0,
+        11
+    );
+    // There is no cast in the reverse direction: it is fallible, and library
+    // `try_from` territory.
+    let e = error("enum E { A } fn main() -> t27 { let x: E = 0 as E; 0 }");
+    assert!(e.contains("no cast from") && e.contains("try_from"), "{e}");
+}
+
+#[test]
+fn repr_linear_lays_fields_out_in_declaration_order() {
+    // Ch. 2 §1: `repr(linear)` is a documented function of the declaration.
+    use trustc::layout::{IntTy, Repr, Ty, TypeDb, layout_of};
+    let mut db = TypeDb::new();
+    db.struct_(
+        "H",
+        Repr::Linear,
+        vec![("a", Ty::Int(IntTy::T9)), ("b", Ty::Int(IntTy::T27))],
+    );
+    let l = layout_of(&db, &Ty::named("H")).unwrap();
+    assert_eq!(l.offsets, vec![0, 3]);
+    assert_eq!((l.size, l.align), (6, 3));
+    // The source form is accepted too.
+    tir_of("#[repr(linear)] struct H { a: t9, b: t27 } fn main() -> t27 { 0 }");
+}
+
+#[test]
+fn aggregates_cross_function_boundaries() {
+    assert_eq!(
+        run("struct P { x: t27, y: t27 } \
+             fn make(a: t27) -> P { P { x: a, y: a * 2 } } \
+             fn sum(p: P) -> t27 { p.x + p.y } \
+             fn main() -> t27 { sum(make(7)) }")
+        .0,
+        21
+    );
+}
+
+#[test]
+fn an_enum_match_must_cover_every_variant() {
+    let e = error("enum E { A, B, C } fn f(e: E) -> t27 { match e { E::A => 1, E::B => 2, } }");
+    assert!(e.contains("not exhaustive"), "{e}");
+    tir_of("enum E { A, B, C } fn f(e: E) -> t27 { match e { E::A => 1, _ => 2, } }");
+}
+
+#[test]
+fn saturating_and_overflowing_are_available() {
+    // Ch. 1 §4 carries the whole family over.
+    let max = 3_812_798_742_493i128;
+    assert_eq!(
+        run(&format!(
+            "fn main() -> t27 {{ let n: t27 = {max}; n.saturating_add(1) }}"
+        ))
+        .0,
+        max
+    );
+    assert_eq!(
+        run(&format!(
+            "fn main() -> t27 {{ let n: t27 = -{max}; n.saturating_sub(1) }}"
+        ))
+        .0,
+        -max
+    );
+    assert_eq!(
+        run("fn main() -> t27 { let n: t27 = 5; n.saturating_add(1) }").0,
+        6
+    );
+    // `overflowing_*` hands back the wrapped value and whether it wrapped.
+    assert_eq!(
+        run(&format!(
+            "fn main() -> t27 {{ let n: t27 = {max}; let r = n.overflowing_add(1); \
+             if r.1 {{ 1 }} else {{ 0 }} }}"
+        ))
+        .0,
+        1
+    );
+    assert_eq!(
+        run("fn main() -> t27 { let r = (5).overflowing_add(1); r.0 }").0,
+        6
+    );
+    // `checked_*` needs Option, and so needs generics.
+    assert!(error("fn main() -> t27 { (1).checked_add(2) }").contains("Chapter 4"));
+}

@@ -52,9 +52,9 @@ codes is the AM's decision, so the ISA document reports rather than invents.
 **G0.3 — Trust surface syntax — RESOLVED, and implemented.** The frontend in
 `compiler/src/lang/` lexes, parses, type-checks and lowers to TIR, and a
 Trust program now runs on the machine. What it covers is what the
-specification covers: scalars, arrays, functions (including body-less
-declarations), constants, and every control-flow form. Structs, enums,
-references, generics and strings are rejected with diagnostics that name the
+specification covers: scalars, arrays, tuples, structs, enums, functions
+(including body-less declarations), constants, and every control-flow form.
+References, generics and strings are rejected with diagnostics that name the
 chapter they are waiting for.
 
 
@@ -335,15 +335,25 @@ pad, and the appendix's own counter-example — `struct { a: t9, b: t27 }`
 staying at size 6 — still holds, because size must be a multiple of
 alignment.
 
-**G7.3 — Which niche an enum uses.** §6 guarantees the *outcomes* (`Option<&T>`
-pointer-sized, `Option<bool>`/`Option<trit>` one tryte, nesting free) without
-specifying the rule that produces them.
+**G7.3 — Which niche an enum uses, and which values encode it.** §6 guarantees
+the *outcomes* (`Option<&T>` pointer-sized, `Option<bool>`/`Option<trit>` one
+tryte, nesting free) without specifying the rule that produces them — and a
+count of niches is not enough to generate code against, which needs to know
+*which* patterns are invalid.
 
 *Decision:* an enum is niche-encoded when exactly one variant carries a
 payload, every other variant is fieldless, and the payload has at least as
 many niches as there are fieldless variants. The encoding consumes that many
 niches and the rest stay available to an enclosing type, which is what makes
 guarantee 3 (nesting) fall out rather than being special-cased.
+
+The niche-bearing scalars — `bool` and `trit` — have a contiguous valid
+range, so the invalid values are taken from above that range first and then
+from below it: `Option<trit>`'s `None` is the tryte 2. A reference's valid
+range is treated as 1…MAX, which under-counts its niches but puts the *null*
+address first among them, which is the one every `Option<&T>` uses. The
+untagged variant is recognized by elimination rather than by a stored value,
+so its arm is tested last whatever order it was written in.
 
 **G7.4 — Padding contributes no niches.** §1 says padding trytes have
 unspecified contents. Unspecified means every pattern is acceptable, so
@@ -373,9 +383,11 @@ Specified well enough to build, simply not built yet:
   emits obvious redundancies — a mask after an operation that provably cannot
   overflow, a `select3` merging two carries at most one of which is nonzero —
   that a canonicalizer should clean up.
-- **The rest of the frontend** — the layout engine of Ch. 2 is implemented
-  (`compiler/src/layout.rs`); name resolution, type checking and lowering to
-  TIR wait on the surface syntax (G0.3).
+- **Nothing of Ch. 2 remains unimplemented.** Structs, tuples, enums with
+  payloads and explicit discriminants, both `repr`s, field access, variant
+  patterns and niche optimization all run end to end. `checked_*` is the one
+  method of Ch. 1 §4 still missing, because it returns `Option<T>` and
+  generics are Ch. 4.
 - **Indirect calls** (TIR §3.7) — rejected with a diagnostic that says they
   are reserved, which is as far as "parsed but reserved" can go before the
   function-pointer chapter exists.

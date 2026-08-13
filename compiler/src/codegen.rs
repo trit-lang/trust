@@ -210,7 +210,9 @@ impl Gen<'_> {
 
     fn fresh(&mut self, what: &str) -> String {
         self.counter += 1;
-        format!(".L{what}{}", self.counter)
+        // The function's name is part of it: a local label is file-scoped,
+        // and the counter restarts with every function.
+        format!(".L{}.{what}{}", self.func.sig.name, self.counter)
     }
 
     fn slot(&mut self, name: &str) -> i128 {

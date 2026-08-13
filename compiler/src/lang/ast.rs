@@ -19,6 +19,60 @@ pub enum Item {
     Fn(FnItem),
     /// `const NAME: T = expr;`
     Const(ConstItem),
+    /// `struct Name { … }`, `struct Name(…);` or `struct Name;` (§3.3).
+    Struct(StructItem),
+    /// `enum Name { … }` (§3.3).
+    Enum(EnumItem),
+}
+
+/// How a nominal type is laid out (§3.4, Ch. 2 §1).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Repr {
+    /// The default: the compiler may order, pad and exploit niches.
+    #[default]
+    Lang,
+    /// Declaration order, documented offsets.
+    Linear,
+}
+
+/// A struct item.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct StructItem {
+    /// Its name.
+    pub name: String,
+    /// Its layout regime.
+    pub repr: Repr,
+    /// Fields in declaration order. A tuple struct's fields are named `0`,
+    /// `1`, …; a unit struct has none.
+    pub fields: Vec<(String, Ty)>,
+    /// Where it was written.
+    pub line: Line,
+}
+
+/// An enum item.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct EnumItem {
+    /// Its name.
+    pub name: String,
+    /// Its layout regime.
+    pub repr: Repr,
+    /// Its variants, in declaration order.
+    pub variants: Vec<Variant>,
+    /// Where it was written.
+    pub line: Line,
+}
+
+/// One enum variant.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Variant {
+    /// Its name.
+    pub name: String,
+    /// Its payload fields; empty for a fieldless variant.
+    pub fields: Vec<(String, Ty)>,
+    /// An explicit discriminant, which may be negative (Ch. 2 §5.1).
+    pub discriminant: Option<i128>,
+    /// Where it was written.
+    pub line: Line,
 }
 
 /// A function item.
@@ -59,13 +113,15 @@ pub enum Ty {
     Unit(Line),
     /// `[T; N]`.
     Array(Box<Ty>, Box<Expr>, Line),
+    /// `(T, U, …)`.
+    Tuple(Vec<Ty>, Line),
 }
 
 impl Ty {
     /// Where it was written.
     pub fn line(&self) -> Line {
         match self {
-            Ty::Name(_, l) | Ty::Unit(l) | Ty::Array(_, _, l) => *l,
+            Ty::Name(_, l) | Ty::Unit(l) | Ty::Array(_, _, l) | Ty::Tuple(_, l) => *l,
         }
     }
 }
@@ -134,6 +190,12 @@ pub enum Expr {
     Method(Box<Expr>, String, Vec<Expr>, Line),
     /// `base[index]`.
     Index(Box<Expr>, Box<Expr>, Line),
+    /// `x.field` or `x.0`.
+    Field(Box<Expr>, String, Line),
+    /// `(a, b, …)`.
+    Tuple(Vec<Expr>, Line),
+    /// `Name { field: value, … }` or `Name(a, b)` or `Name::Variant …`.
+    Aggregate(Path, Vec<(String, Expr)>, Line),
     /// A block used as an expression.
     Block(Block),
     /// `if cond { … } else { … }`.
@@ -171,6 +233,9 @@ impl Expr {
             | Call(_, _, l)
             | Method(_, _, _, l)
             | Index(_, _, l)
+            | Field(_, _, l)
+            | Tuple(_, l)
+            | Aggregate(_, _, l)
             | If(_, _, _, l)
             | Match(_, _, l)
             | Loop(_, l)
@@ -196,6 +261,22 @@ pub struct Arm {
     pub line: Line,
 }
 
+/// A path: one name, or a type and a variant (`Sign::Neg`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Path {
+    /// The segments, in order.
+    pub segments: Vec<String>,
+    /// Where it was written.
+    pub line: Line,
+}
+
+impl Path {
+    /// The last segment.
+    pub fn last(&self) -> &str {
+        self.segments.last().expect("a path has segments")
+    }
+}
+
 /// A pattern (§4).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Pattern {
@@ -209,6 +290,11 @@ pub enum Pattern {
     Trit(Trit, Line),
     /// `true` or `false`.
     Bool(bool, Line),
+    /// A struct or variant pattern: `Sign::Neg`, `Shape::Line(n)`,
+    /// `Point { x, y }`.
+    Aggregate(Path, Vec<(String, Pattern)>, Line),
+    /// `(a, b)`.
+    Tuple(Vec<Pattern>, Line),
 }
 
 impl Pattern {
@@ -219,7 +305,9 @@ impl Pattern {
             | Pattern::Bind(_, l)
             | Pattern::Int(_, l)
             | Pattern::Trit(_, l)
-            | Pattern::Bool(_, l) => *l,
+            | Pattern::Bool(_, l)
+            | Pattern::Aggregate(_, _, l)
+            | Pattern::Tuple(_, l) => *l,
         }
     }
 }
