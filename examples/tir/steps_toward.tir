@@ -1,0 +1,22 @@
+; The end-to-end example from the TIR spec appendix, verbatim.
+;
+; Language source (syntax provisional):
+;
+;     fn steps_toward(target: t27, pos: t27) -> t27 {
+;         match pos <=> target {
+;             -1t =>  1,
+;              0t =>  0,
+;              1t => -1,
+;         }
+;     }
+;
+; The `match` became a `select3` — no branching, all arms are constants.
+
+tir 0.1 target "tritium"
+
+fn @steps_toward(%target: t27, %pos: t27) -> t27 {
+^entry:
+    %t = cmp t27 %pos, %target
+    %r = select3 %t, t27 const t27 1, const t27 0, const t27 -1
+    ret %r
+}

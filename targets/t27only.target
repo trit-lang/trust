@@ -1,0 +1,13 @@
+; A machine with one arithmetic width: the word, and nothing narrower.
+; Legal by TIR §7's constraints (`legal` contains `word` and a width at least
+; `ptr_width`), and the sharpest test of legalization's promotion direction —
+; every t9 and every t1 operation a frontend emits has to be promoted and
+; renormalized.
+
+target "t27only" {
+    addr_unit   = 9
+    ptr_width   = 27
+    legal       = [27]
+    word        = 27
+    call_conv   = "tritium0"
+}

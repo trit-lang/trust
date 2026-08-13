@@ -1,0 +1,28 @@
+; A loop with block parameters (the phi-equivalent) and a three-way branch
+; that dispatches the negative, zero and positive cases of one comparison.
+;
+; The multiply uses the `.trap` flavor, so an overflowing factorial is a
+; defined fault rather than a wrong answer.
+
+tir 0.1 target "tritium"
+
+fn @factorial(%n: t27) -> t27 {
+^entry:
+    %c = cmp t27 %n, const t27 0
+    br3 %c, ^negative, ^one, ^loop(%n, const t27 1)
+
+^negative:
+    trap F_TRAP
+
+^one:
+    ret const t27 1
+
+^loop(%i: t27, %acc: t27):
+    %acc2 = mul.trap t27 %acc, %i
+    %i2 = sub.trap t27 %i, const t27 1
+    %d = cmp t27 %i2, const t27 0
+    br3 %d, ^done(%acc2), ^done(%acc2), ^loop(%i2, %acc2)
+
+^done(%r: t27):
+    ret %r
+}

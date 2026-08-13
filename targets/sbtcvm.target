@@ -1,0 +1,13 @@
+; A 12-trit-word target, kept in tree because TIR §7 insists that `word` need
+; not be a power of three and that no pass may assume otherwise — the SBTCVM
+; Gen 3 lesson. Nothing generates code for it yet; it exists so that
+; legalization and the target-description checker are exercised against a
+; target shaped unlike the reference one.
+
+target "sbtcvm" {
+    addr_unit   = 6
+    ptr_width   = 12
+    legal       = [1, 6, 12]
+    word        = 12
+    call_conv   = "sbtcvm0"
+}

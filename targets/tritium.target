@@ -1,0 +1,10 @@
+; The reference target: the Tritium VM, implementing TRISC-27.
+; TIR §7.
+
+target "tritium" {
+    addr_unit   = 9          ; trits per addressable unit (tryte)
+    ptr_width   = 27         ; trits in an address
+    legal       = [1, 9, 27] ; widths with native operation support
+    word        = 27         ; preferred/register width
+    call_conv   = "tritium0" ; symbolic; defined in the target's own doc
+}

@@ -1,0 +1,10 @@
+[package]
+name = "trit-core"
+description = "Balanced ternary arithmetic: the shared numeric core of trustc and tritium"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints.rust]
+missing_docs = "warn"

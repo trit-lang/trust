@@ -1,0 +1,26 @@
+; Multi-part arithmetic by hand: what legalization (TIR §6) generates when a
+; t54 add meets a target whose widest legal width is t27.
+;
+; The `.flag` flavor exists chiefly for this — the carry out of a part is the
+; overflow trit of that part's `add.flag`, widened and fed into the next part.
+; Note there is no zero-extension to get wrong: `widen` is the only extension
+; there is.
+
+tir 0.1 target "tritium"
+
+; Adds (ahi:alo) + (bhi:blo) as a 54-trit value, returning the high part.
+fn @add54_hi(%alo: t27, %ahi: t27, %blo: t27, %bhi: t27) -> t27 {
+^entry:
+    %lo, %carry = add.flag t27 %alo, %blo
+    %carry27 = widen t1 %carry -> t27
+    %hi0, %o1 = add.flag t27 %ahi, %bhi
+    %hi, %o2 = add.flag t27 %hi0, %carry27
+    ret %hi
+}
+
+; The low part of the same addition.
+fn @add54_lo(%alo: t27, %blo: t27) -> t27 {
+^entry:
+    %lo, %carry = add.flag t27 %alo, %blo
+    ret %lo
+}

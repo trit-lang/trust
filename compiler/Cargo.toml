@@ -1,0 +1,21 @@
+[package]
+name = "trustc"
+description = "The Trust compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+trit-core.workspace = true
+
+[lib]
+name = "trustc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "trustc"
+path = "src/main.rs"
+
+[lints.rust]
+missing_docs = "warn"
