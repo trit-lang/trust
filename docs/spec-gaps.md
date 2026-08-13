@@ -49,7 +49,15 @@ a reserved I/O access all currently raise `F_TRAP`, whose AM §4 definition is
 encoding) and `F_ADDRESS` (access outside the address space). Adding fault
 codes is the AM's decision, so the ISA document reports rather than invents.
 
-**G0.3 — Trust surface syntax — RESOLVED as to specification.**
+**G0.3 — Trust surface syntax — RESOLVED, and implemented.** The frontend in
+`compiler/src/lang/` lexes, parses, type-checks and lowers to TIR, and a
+Trust program now runs on the machine. What it covers is what the
+specification covers: scalars, arrays, functions (including body-less
+declarations), constants, and every control-flow form. Structs, enums,
+references, generics and strings are rejected with diagnostics that name the
+chapter they are waiting for.
+
+
 `spec/language/00-syntax.md` defines the lexical structure, items,
 expressions, patterns and statements, and settles the four questions that were
 genuinely open: `& | ^` stay reserved rather than becoming `tmin`/`tmax`/

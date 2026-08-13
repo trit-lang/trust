@@ -48,8 +48,16 @@ pub struct Io {
     pending: std::collections::VecDeque<u8>,
     /// True once no further input will ever arrive.
     closed: bool,
+    /// A source read one code unit at a time, when the program asks for one.
+    ///
+    /// Lazily, on purpose: a program that never touches `IO_IN` must not
+    /// block on a stream that may never close.
+    source: Option<Box<dyn std::io::Read>>,
     /// Everything written to `IO_OUT`.
     output: Vec<u8>,
+    /// An optional pass-through for output, so a long-running program's
+    /// writing is seen as it happens rather than at the end.
+    sink: Option<Box<dyn std::io::Write>>,
 }
 
 impl Io {
@@ -58,13 +66,46 @@ impl Io {
         Io {
             pending: bytes.iter().copied().collect(),
             closed: true,
-            output: Vec::new(),
+            ..Io::default()
         }
+    }
+
+    /// Draw input from a stream, one code unit at a time as the program asks.
+    pub fn with_source(source: Box<dyn std::io::Read>) -> Io {
+        Io {
+            source: Some(source),
+            ..Io::default()
+        }
+    }
+
+    /// Also write everything the program writes to this sink.
+    pub fn with_sink(mut self, sink: Box<dyn std::io::Write>) -> Io {
+        self.sink = Some(sink);
+        self
     }
 
     /// Everything the program has written.
     pub fn output(&self) -> &[u8] {
         &self.output
+    }
+
+    /// The next code unit, or `None` if none is available yet.
+    fn next_unit(&mut self) -> Option<u8> {
+        if let Some(b) = self.pending.pop_front() {
+            return Some(b);
+        }
+        let source = self.source.as_mut()?;
+        let mut byte = [0u8; 1];
+        match source.read(&mut byte) {
+            Ok(1) => Some(byte[0]),
+            _ => {
+                // End of stream, or an error we cannot report to a machine
+                // that has no error port: either way, no more input.
+                self.closed = true;
+                self.source = None;
+                None
+            }
+        }
     }
 }
 
@@ -379,7 +420,7 @@ impl Vm {
 
     fn device_load(&mut self, addr: i128, width: Width) -> Result<i128, Stop> {
         match (addr, width) {
-            (device::IO_IN, Width::Tryte) => Ok(match self.io.pending.pop_front() {
+            (device::IO_IN, Width::Tryte) => Ok(match self.io.next_unit() {
                 Some(b) => b as i128,
                 None if self.io.closed => -2,
                 None => -1,
@@ -403,6 +444,10 @@ impl Vm {
                     ));
                 }
                 self.io.output.push(unit as u8);
+                if let Some(sink) = self.io.sink.as_mut() {
+                    let _ = sink.write_all(&[unit as u8]);
+                    let _ = sink.flush();
+                }
                 Ok(())
             }
             _ => Err(fault(

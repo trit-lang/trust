@@ -1,0 +1,18 @@
+// hello.tr — the smallest interesting program in Trust.
+//
+// The message is an array of UTF-8 code units, one per t9, because Ch. 0 §1.4
+// has no string literal to offer and will not pretend otherwise.
+
+fn putchar(c: t9);          // declared here, defined outside the language
+
+const MESSAGE: [t9; 14] =
+    [72, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100, 33, 10];
+
+fn main() -> t27 {
+    let mut i: taddr = 0;
+    while i < 14 {
+        putchar(MESSAGE[i]);
+        i += 1;
+    }
+    0
+}

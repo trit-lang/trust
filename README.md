@@ -20,12 +20,12 @@ the source.
 | `vm/` — crate `tritium` | **implemented**: the reference TRISC-27 machine — encoder/decoder, ALU, memory, the negative-address device region, CLI |
 | assembler (`.t27`) | **implemented**: two-pass, exact balanced-ternary expressions, all directives and pseudo-instructions (`tritium asm`) |
 | backend (TIR → TRISC-27) | **implemented**: `trustc compile` emits assembly. No register allocator yet — every value lives in a stack slot |
-| `compiler/` — Trust frontend | **specified, not built**: `spec/language/00-syntax.md` defines the surface syntax; the lexer, parser, type checker and lowering to TIR are the next milestone |
+| `compiler/` — Trust frontend | **implemented**: lexer, parser, type checker and lowering to TIR, for scalars, arrays, functions, constants and all control flow. Structs, enums, references, generics and strings wait on unwritten chapters |
 
 ## Building
 
 ```
-cargo test          # 199 tests
+cargo test          # 224 tests
 cargo build
 ```
 
@@ -43,28 +43,49 @@ trustc run <file.tir> [@fn] [args…]        interpret a TIR function
 trustc legalize <file.tir> [file.target]   legalize for a target (TIR §6)
 trustc target <file.target>                parse and check a target description
 
-trustc compile <file.tir> [@fn]            legalize and emit TRISC-27 assembly
+trustc build <file.tr>                     compile Trust source to TIR
+trustc compile <file.tr|.tir> [@fn]        the whole way to TRISC-27 assembly
 
 tritium asm <file.t27> [-o <image>]        assemble source into an image
 tritium run <image> [--mem N]              run a TRISC-27 image
 tritium dump <image>                       disassemble an image
 ```
 
-The pipeline runs end to end:
+The whole pipeline runs, from Trust source to the machine:
 
 ```
-$ trustc compile examples/tir/sum_global.tir @sum_data > sum.t27
-$ tritium asm sum.t27 -o sum.timg
-$ trustc run examples/tir/sum_global.tir @sum_data     # the TIR interpreter
-45  (0t00001TT00, 0hDF4)
-$ tritium run sum.timg                                  # the machine
-tritium: halted with status 45
+$ cat examples/trust/hello.tr
+fn putchar(c: t9);          // declared here, defined outside the language
+
+const MESSAGE: [t9; 14] =
+    [72, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100, 33, 10];
+
+fn main() -> t27 {
+    let mut i: taddr = 0;
+    while i < 14 {
+        putchar(MESSAGE[i]);
+        i += 1;
+    }
+    0
+}
+
+$ trustc compile examples/trust/hello.tr > hello.t27
+$ cat examples/trisc/runtime.t27 >> hello.t27   # "linking" is concatenation
+$ tritium asm hello.t27 -o hello.timg
+$ tritium run hello.timg
+Hello, world!
 ```
 
-Both answers come from the same source by different routes, and
-`compiler/tests/pipeline.rs` holds them to it: every end-to-end test runs a
-function on the TIR interpreter *and* through legalization, code generation,
-assembly and the machine, and demands the same result — faults included.
+There is no string literal because there is no text encoding yet (AM §5 defers
+it to the library chapter), and no `println!` because there is nothing for it
+to print through — `putchar` is *declared* in Trust and *defined* in assembly,
+since TIR §5 has no integer-to-pointer cast and so cannot name a device
+address at all.
+
+Correctness is held to the TIR spec's own criterion. Every test in
+`compiler/tests/pipeline.rs` runs a function on the TIR interpreter *and*
+through legalization, code generation, assembly and the machine, and demands
+the same result — faults included.
 
 The machine runs. `examples/trisc/echo.timg` is the worked program from the
 ISA's own appendix, and both of its branches are three-way:

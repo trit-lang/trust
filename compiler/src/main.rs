@@ -12,7 +12,8 @@ usage:
     trustc fmt <file.tir>                      print a module in canonical form
     trustc run <file.tir> [@fn] [args…]        interpret a TIR function
     trustc legalize <file.tir> [file.target]   legalize for a target (TIR §6)
-    trustc compile <file.tir> [@fn]            legalize and emit TRISC-27 assembly
+    trustc build <file.tr>                     compile Trust source to TIR
+    trustc compile <file.tr|.tir> [@fn]        the whole way to TRISC-27 assembly
     trustc target <file.target>                parse and check a target description
 
 `run` defaults to `@main`; arguments are decimal, `0t` or `0h` literals and
@@ -32,6 +33,7 @@ fn main() -> ExitCode {
         "fmt" => cmd_fmt(rest),
         "run" => cmd_run(rest),
         "legalize" => cmd_legalize(rest),
+        "build" => cmd_build(rest),
         "compile" => cmd_compile(rest),
         "target" => cmd_target(rest),
         "-h" | "--help" | "help" => {
@@ -171,13 +173,44 @@ fn cmd_legalize(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Compile Trust source to a TIR module, reporting every diagnostic.
+fn front_end(path: &str) -> Result<tir::Module, String> {
+    let src = read(path)?;
+    let module = trustc::lang::compile(&src).map_err(|errs| {
+        let mut msg = format!("{} error(s) in `{path}`:", errs.len());
+        for e in &errs {
+            msg.push_str(&format!("\n  {path}:{e}"));
+        }
+        msg
+    })?;
+    let errs = tir::verify(&module);
+    if !errs.is_empty() {
+        let mut msg = "the frontend produced ill-formed TIR:".to_string();
+        for e in &errs {
+            msg.push_str(&format!("\n  {e}"));
+        }
+        return Err(msg);
+    }
+    Ok(module)
+}
+
+fn cmd_build(args: &[String]) -> Result<(), String> {
+    let path = args.first().ok_or("build: expected a file")?;
+    print!("{}", tir::print_module(&front_end(path)?));
+    Ok(())
+}
+
 fn cmd_compile(args: &[String]) -> Result<(), String> {
     let path = args.first().ok_or("compile: expected a file")?;
     let entry = match args.get(1) {
         Some(a) => a.trim_start_matches('@').to_string(),
         None => "main".to_string(),
     };
-    let module = load(path)?;
+    let module = if path.ends_with(".tr") {
+        front_end(path)?
+    } else {
+        load(path)?
+    };
     let target = tir::TargetDesc::tritium();
 
     // The backend consumes legalized TIR only, so the pipeline runs the

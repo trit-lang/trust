@@ -1,6 +1,6 @@
 //! The `tritium` command line.
 
-use std::io::{IsTerminal, Read, Write};
+use std::io::Write;
 use std::process::ExitCode;
 use tritium::{Io, Stop, Vm, image};
 
@@ -87,17 +87,14 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
     let mem = flag(args, "--mem", tritium::DEFAULT_MEM_SIZE)?;
     let steps = flag(args, "--steps", 100_000_000)? as u64;
 
-    let mut input = Vec::new();
-    if !std::io::stdin().is_terminal() {
-        let _ = std::io::stdin().read_to_end(&mut input);
-    }
-
+    // Input is read only when the program asks for a code unit, so a program
+    // that never touches the port does not wait on a stream that may never
+    // close. Output passes through as it is written.
     let mut vm = Vm::new(mem);
-    vm.io = Io::with_input(&input);
+    vm.io = Io::with_source(Box::new(std::io::stdin())).with_sink(Box::new(std::io::stdout()));
     vm.load_image(&trytes);
 
     let stop = vm.run(steps);
-    let _ = std::io::stdout().write_all(vm.io.output());
     let _ = std::io::stdout().flush();
 
     match stop {

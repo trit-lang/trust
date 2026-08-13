@@ -1105,6 +1105,17 @@ fn emit(stmt: &Stmt, syms: &Symbols, image: &mut Vec<i16>) -> R<()> {
         }
 
         Kind::Inst(form, _) => {
+            // Every instruction is one word at a word-aligned address
+            // (TRISC-27 §3.1). Data of a length that is not a multiple of
+            // three, followed by code, is the way this goes wrong.
+            if here.rem_euclid(3) != 0 {
+                return err(
+                    line,
+                    format!(
+                        "an instruction must be word-aligned, but this one is at {here};                          add `.align 3` after the preceding data"
+                    ),
+                );
+            }
             for w in resolve(form, line, here, syms)? {
                 image.extend(word::word_trytes(w));
             }

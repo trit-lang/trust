@@ -11,5 +11,6 @@
 //! is stated in terms of types, not syntax. See `docs/spec-gaps.md`.
 
 pub mod codegen;
+pub mod lang;
 pub mod layout;
 pub mod tir;

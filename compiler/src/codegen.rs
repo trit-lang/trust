@@ -268,6 +268,9 @@ fn function(f: &Function) -> Result<String, Vec<String>> {
 
     let name = f.sig.name.clone();
     let _ = writeln!(g.out, "\n; {} — frame {} trytes", name, g.frame.size);
+    // Instructions are word-aligned (TRISC-27 §3.1), and data of a length
+    // that is not a multiple of three may precede this.
+    let _ = writeln!(g.out, ".align 3");
     g.label(format!("f.{name}"));
 
     // Prologue. `sp` grows downward and stays word-aligned (§6.2).
