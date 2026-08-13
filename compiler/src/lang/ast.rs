@@ -105,6 +105,8 @@ pub struct StructItem {
     pub name: String,
     /// Its generic parameters (Ch. 4 §2.1).
     pub generics: Vec<GenericParam>,
+    /// Traits derived for it (Ch. 4 §6).
+    pub derives: Vec<String>,
     /// Its layout regime.
     pub repr: Repr,
     /// Fields in declaration order. A tuple struct's fields are named `0`,
@@ -121,6 +123,8 @@ pub struct EnumItem {
     pub name: String,
     /// Its generic parameters (Ch. 4 §2.1).
     pub generics: Vec<GenericParam>,
+    /// Traits derived for it (Ch. 4 §6).
+    pub derives: Vec<String>,
     /// Its layout regime.
     pub repr: Repr,
     /// Its variants, in declaration order.

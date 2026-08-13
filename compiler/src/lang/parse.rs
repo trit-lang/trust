@@ -127,31 +127,57 @@ impl Parser {
         // Attributes attach to the item that follows (§3.4). Draft 0.1
         // defines exactly one, `repr`, taking `lang` or `linear`.
         let mut repr = Repr::Lang;
+        let mut derives: Vec<String> = Vec::new();
         while self.at_op("#") {
             let line = self.line();
             self.bump();
             self.expect_op("[")?;
             let name = self.expect_ident()?;
-            if name != "repr" {
-                return Err(SyntaxError {
-                    line,
-                    message: format!("`{name}` is not an attribute; draft 0.1 defines only `repr`"),
-                });
-            }
             self.expect_op("(")?;
-            let arg = self.expect_ident()?;
-            repr = match arg.as_str() {
-                "lang" => Repr::Lang,
-                "linear" => Repr::Linear,
+            match name.as_str() {
+                "repr" => {
+                    let arg = self.expect_ident()?;
+                    repr = match arg.as_str() {
+                        "lang" => Repr::Lang,
+                        "linear" => Repr::Linear,
+                        other => {
+                            return Err(SyntaxError {
+                                line,
+                                message: format!(
+                                    "`repr({other})` is not a layout regime; use `lang` or \
+                                     `linear`"
+                                ),
+                            });
+                        }
+                    };
+                }
+                // Ch. 4 §6: the second attribute the language defines.
+                "derive" => loop {
+                    let t = self.expect_ident()?;
+                    if !matches!(t.as_str(), "Eq" | "Ord" | "Clone") {
+                        return Err(SyntaxError {
+                            line,
+                            message: format!(
+                                "`{t}` is not derivable; Ch. 4 §6 derives `Eq`, `Ord` and \
+                                 `Clone`, and says why `Copy`, `Sized` and `Drop` are not"
+                            ),
+                        });
+                    }
+                    derives.push(t);
+                    if !self.eat_op(",") || self.at_op(")") {
+                        break;
+                    }
+                },
                 other => {
                     return Err(SyntaxError {
                         line,
                         message: format!(
-                            "`repr({other})` is not a layout regime; use `lang` or `linear`"
+                            "`{other}` is not an attribute; draft 0.1 defines `repr` (Ch. 2 §1) \
+                             and `derive` (Ch. 4 §6)"
                         ),
                     });
                 }
-            };
+            }
             self.expect_op(")")?;
             self.expect_op("]")?;
         }
@@ -163,10 +189,13 @@ impl Parser {
             return Ok(Item::Const(self.const_item()?));
         }
         if self.at_kw("struct") {
-            return Ok(Item::Struct(self.struct_item(repr)?));
+            return Ok(Item::Struct(self.struct_item(repr, derives)?));
         }
         if self.at_kw("enum") {
-            return Ok(Item::Enum(self.enum_item(repr)?));
+            return Ok(Item::Enum(self.enum_item(repr, derives)?));
+        }
+        if !derives.is_empty() {
+            return self.err("`derive` attaches to a struct or an enum (Ch. 4 §6)");
         }
         if self.at_kw("trait") {
             return Ok(Item::Trait(self.trait_item()?));
@@ -178,7 +207,7 @@ impl Parser {
     }
 
     /// `struct Name { … }`, `struct Name(…);`, `struct Name;` (§3.3).
-    fn struct_item(&mut self, repr: Repr) -> R<StructItem> {
+    fn struct_item(&mut self, repr: Repr, derives: Vec<String>) -> R<StructItem> {
         let line = self.line();
         self.bump(); // struct
         let name = self.expect_ident()?;
@@ -199,13 +228,14 @@ impl Parser {
         Ok(StructItem {
             name,
             generics,
+            derives,
             repr,
             fields,
             line,
         })
     }
 
-    fn enum_item(&mut self, repr: Repr) -> R<EnumItem> {
+    fn enum_item(&mut self, repr: Repr, derives: Vec<String>) -> R<EnumItem> {
         let line = self.line();
         self.bump(); // enum
         let name = self.expect_ident()?;
@@ -258,6 +288,7 @@ impl Parser {
         Ok(EnumItem {
             name,
             generics,
+            derives,
             repr,
             variants,
             line,

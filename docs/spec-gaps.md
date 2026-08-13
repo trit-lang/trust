@@ -260,9 +260,35 @@ Two fixes fell out of building it, both pre-existing:
   for `.`, and a scrutinee reads the same way; without it a `&self` method
   could not match on `self`, which is most of what a method on an enum does.
 
+**G0.9 — `derive`, and the comparison operators on user types.**
+`#[derive(Eq, Ord, Clone)]` works, `<` `<=` `>` `>=` `<=>` on a nominal type
+call `Ord::cmp` and `==` `!=` call `Eq::eq`, and a type with neither gets a
+diagnostic naming the trait and offering the derive.
+
+**§5.3.3's codegen guarantee holds, and is asserted rather than claimed.** A
+derived `cmp` over scalar fields compiles to one `cmp` per field, one `sel3`
+per field after the first, and **no branch at all** — the test reads the
+emitted assembly between `f.V.cmp.entry:` and its `ret` and fails if a `br3`
+or a jump appears in it. The combination of two field results is "the first
+that is nonzero", which is exactly `sel3 rd, c1, c1, c2, c1`.
+
+That guarantee is why the derived functions are emitted as **TIR rather than
+as source**: the language has no expression that spells a three-way select,
+so a derived `cmp` written in Trust would have had to branch.
+
+Limits: deriving for a generic type is not implemented (the derived impl needs
+the bound §6 puts on every parameter); nor is deriving for an enum with a
+payload (§6 orders it by discriminant and then by payload, and only the first
+half is built). Both say so.
+
+**A pre-existing bug this uncovered.** Comparing two enums produced ill-formed
+TIR — `cmp` applied to a pointer — rather than a diagnostic, because every
+enum is passed by address and the built-in comparison path never checked. It
+is now either a call to `Ord::cmp` or an error that names the missing trait.
+
 Not implemented, and rejected by name: `dyn Trait`, closures, `for` loops,
-`derive`, associated types and constants, generic traits, `::<>`, and
-`impl !Copy`. Those are what is left of the chapter.
+associated types and constants, generic traits, `::<>`, and `impl !Copy`.
+Those are what is left of the chapter.
 
 Two limits worth naming:
 

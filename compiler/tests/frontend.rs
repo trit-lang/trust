@@ -1203,3 +1203,93 @@ fn a_match_scrutinee_auto_dereferences() {
         7
     );
 }
+
+// ------------------------------------------------ Chapter 4: derive, Ord
+
+#[test]
+fn a_derived_comparison_drives_the_operators() {
+    // Ch. 4 §5.3.1: `==` and `!=` call `eq`; the ordering forms and `<=>`
+    // call `cmp`, projected exactly as Ch. 1 §5 requires.
+    let src = "#[derive(Ord)] struct V { major: t27, minor: t27 } \
+               fn main() -> t27 { \
+                   let a = V { major: 1, minor: 5 }; \
+                   let b = V { major: 1, minor: 9 }; \
+                   let mut n: t27 = 0; \
+                   if a < b { n += 1; } \
+                   if a == a { n += 10; } \
+                   if a != b { n += 100; } \
+                   if b >= a { n += 1000; } \
+                   match a <=> b { -1t => n += 10000, 0t => n += 20000, 1t => n += 30000, } \
+                   n \
+               }";
+    assert_eq!(run(src).0, 11111);
+    // Deriving `Ord` derives `Eq` too, since §1.6 makes `Eq` its supertrait.
+    let m = tir_of(src);
+    let printed = tir::print_module(&m);
+    assert!(printed.contains("@V.eq"), "{printed}");
+}
+
+#[test]
+fn a_derived_comparison_over_scalars_has_no_branch() {
+    // Ch. 4 §5.3.3, which is a codegen guarantee of the same kind as Ch. 1
+    // §5's: one `cmp` per field, one `sel3` per field after the first, and
+    // no branch at all.
+    let module = tir_of(
+        "#[derive(Ord)] struct V { a: t27, b: t27, c: t27 } \
+         fn main() -> t27 { let x = V { a: 1, b: 2, c: 3 }; if x < x { 1 } else { 0 } }",
+    );
+    let legalized = tir::legalize_module(&module, &tir::TargetDesc::tritium()).unwrap();
+    let asm = trustc::codegen::compile(&legalized, "main").unwrap();
+
+    // The body of `V.cmp`, from its entry label to its `ret`.
+    let start = asm.find("f.V.cmp.entry:").expect("the derived cmp");
+    let body = &asm[start..];
+    let body = &body[..body.find("\n    ret").expect("a return")];
+    for branch in ["br3", "    j ", "beq"] {
+        assert!(
+            !body.contains(branch),
+            "`{branch}` in a derived cmp:\n{body}"
+        );
+    }
+    assert_eq!(body.matches("cmp ").count(), 3, "{body}");
+    assert_eq!(body.matches("sel3").count(), 2, "{body}");
+}
+
+#[test]
+fn derive_says_what_it_will_not_do() {
+    // §6: `Copy` and `Sized` are automatic and `Drop` is nobody else's to
+    // write, so none of the three is derivable.
+    for t in ["Copy", "Drop", "Sized", "Hash"] {
+        let e = error(&format!("#[derive({t})] struct S {{ x: t27 }}"));
+        assert!(e.contains("not derivable"), "{t}: {e}");
+    }
+    // A payload-carrying enum orders by discriminant and then by payload,
+    // and only the first half is built.
+    let e = error("#[derive(Ord)] enum E { A, B(t27) } fn main() -> t27 { 0 }");
+    assert!(e.contains("payload"), "{e}");
+    // Without an impl or a derive, the operator says which trait is missing.
+    let e = error(
+        "struct S { x: t27 } fn main() -> t27 { let a = S { x: 1 }; if a < a { 1 } else { 0 } }",
+    );
+    assert!(e.contains("needs `Ord`"), "{e}");
+}
+
+#[test]
+fn a_fieldless_enum_derives_a_comparison_over_its_discriminants() {
+    // §6 orders an enum by discriminant, and Ch. 2 §5.1 lets one be
+    // negative — so `Back` sorts before `Stay` for the reason it reads.
+    assert_eq!(
+        run(
+            "#[derive(Ord)] enum Step { Back = -1, Stay = 0, Forward = 1 } \
+             fn main() -> t27 { \
+                 let mut n: t27 = 0; \
+                 if Step::Back < Step::Stay { n += 1; } \
+                 if Step::Forward > Step::Stay { n += 10; } \
+                 if Step::Stay == Step::Stay { n += 100; } \
+                 n \
+             }"
+        )
+        .0,
+        111
+    );
+}

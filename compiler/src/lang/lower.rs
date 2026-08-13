@@ -638,6 +638,29 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
         }
     }
 
+    // Derived impls (Ch. 4 §6). They are TIR, not source, so they are added
+    // to the module directly; their signatures go into the table so that a
+    // call to one checks like any other.
+    let (derived, derived_on, derive_errs) = derived_functions(file, &types);
+    errs.extend(derive_errs);
+    for ty in &derived_on {
+        let r = Ty::Ref(Box::new(ty.clone()), false);
+        let name = nominal_name(ty).expect("a nominal type");
+        for f in &derived {
+            if f.sig.name == format!("{name}.cmp") {
+                sigs.borrow_mut()
+                    .insert(f.sig.name.clone(), (vec![r.clone(), r.clone()], Ty::Trit));
+            } else if f.sig.name == format!("{name}.eq") {
+                sigs.borrow_mut()
+                    .insert(f.sig.name.clone(), (vec![r.clone(), r.clone()], Ty::Bool));
+            } else if f.sig.name == format!("{name}.clone") {
+                sigs.borrow_mut()
+                    .insert(f.sig.name.clone(), (vec![r.clone()], ty.clone()));
+            }
+        }
+    }
+    module.funcs.extend(derived);
+
     let pending: RefCell<Vec<Job>> = RefCell::new(Vec::new());
     let world = World {
         sigs: &sigs,
@@ -1277,6 +1300,292 @@ fn unify(written: &ast::Ty, got: &Ty, params: &[ast::GenericParam], env: &mut Ha
             let _ = (name, wargs);
         }
         _ => {}
+    }
+}
+
+/// Build the functions a `#[derive(…)]` asks for (Ch. 4 §6).
+///
+/// These are emitted as TIR directly rather than as source, because §5.3.3
+/// makes a promise source cannot keep: a derived `cmp` over scalar fields
+/// must be straight-line code. The combination of two field results is "the
+/// first that is nonzero", which is one `select3` and therefore one `sel3` —
+/// and the language has no expression that spells that.
+fn derived_functions(file: &ast::File, types: &Types) -> (Vec<Function>, Vec<Ty>, Vec<Error>) {
+    let mut funcs = Vec::new();
+    let mut on = Vec::new();
+    let mut errs = Vec::new();
+
+    for item in &file.items {
+        let (name, derives, line, generics) = match item {
+            ast::Item::Struct(s) => (&s.name, &s.derives, s.line, &s.generics),
+            ast::Item::Enum(e) => (&e.name, &e.derives, e.line, &e.generics),
+            _ => continue,
+        };
+        if derives.is_empty() {
+            continue;
+        }
+        if !generics.is_empty() {
+            errs.push(SyntaxError {
+                line,
+                message: "deriving for a generic type is not implemented; the derived \
+                          impl would need the bound §6 puts on every parameter"
+                    .into(),
+            });
+            continue;
+        }
+        let ty = if matches!(item, ast::Item::Struct(_)) {
+            Ty::Struct(name.clone())
+        } else {
+            Ty::Enum(name.clone())
+        };
+
+        let fields: Vec<(String, Ty, i128)> = match &ty {
+            Ty::Struct(_) => types.fields(&ty),
+            _ => {
+                let variants = types.enums.borrow()[name].clone();
+                if variants.iter().any(|v| !v.fields.is_empty()) {
+                    errs.push(SyntaxError {
+                        line,
+                        message: "deriving for an enum with a payload is not implemented; \
+                                  §6 orders it by discriminant and then by payload, and \
+                                  only the discriminant half is built"
+                            .into(),
+                    });
+                    continue;
+                }
+                Vec::new()
+            }
+        };
+
+        for d in derives {
+            match d.as_str() {
+                "Ord" => match derive_cmp(name, &ty, &fields, types) {
+                    Ok(f) => funcs.push(f),
+                    Err(e) => errs.push(SyntaxError { line, message: e }),
+                },
+                "Eq" => funcs.push(derive_eq(name)),
+                "Clone" => funcs.push(derive_clone(name, &ty, types)),
+                _ => {}
+            }
+        }
+        if derives.iter().any(|d| d == "Ord") && !derives.iter().any(|d| d == "Eq") {
+            // §1.6: `Ord: Eq`, so deriving one derives the other.
+            funcs.push(derive_eq(name));
+        }
+        on.push(ty);
+    }
+    (funcs, on, errs)
+}
+
+/// `fn cmp(&self, other: &Self) -> trit`, lexicographic by declaration
+/// order, and branchless when every field is a Ch. 1 scalar (§5.3.3).
+fn derive_cmp(
+    name: &str,
+    ty: &Ty,
+    fields: &[(String, Ty, i128)],
+    types: &Types,
+) -> Result<Function, String> {
+    let mut insts = Vec::new();
+    let mut n = 0u32;
+    let mut fresh = |p: &str| {
+        n += 1;
+        format!("{p}.{n}")
+    };
+
+    // An enum with no payload compares by its discriminant, which for a
+    // fieldless enum is the whole value.
+    let parts: Vec<(Ty, i128)> = if fields.is_empty() {
+        let l = types.layout(ty);
+        vec![(
+            match l.size {
+                1 => Ty::T9,
+                _ => Ty::T27,
+            },
+            0,
+        )]
+    } else {
+        fields.iter().map(|(_, t, o)| (t.clone(), *o)).collect()
+    };
+
+    let mut results = Vec::new();
+    for (fty, offset) in &parts {
+        let (pa, pb) = (fresh("pa"), fresh("pb"));
+        for (p, base) in [(&pa, "self"), (&pb, "other")] {
+            insts.push(Inst {
+                results: vec![p.clone()],
+                kind: InstKind::Offset {
+                    p: Operand::Value(base.to_string()),
+                    d: Operand::Const(Type::Int(27), Bt::from_i128(*offset)),
+                },
+            });
+        }
+        let c = fresh("c");
+        if fty.is_scalar() {
+            let (va, vb) = (fresh("va"), fresh("vb"));
+            for (v, p) in [(&va, &pa), (&vb, &pb)] {
+                insts.push(Inst {
+                    results: vec![v.clone()],
+                    kind: InstKind::Load {
+                        ty: fty.tir(),
+                        p: Operand::Value(p.clone()),
+                    },
+                });
+            }
+            insts.push(Inst {
+                results: vec![c.clone()],
+                kind: InstKind::Cmp {
+                    ty: fty.tir(),
+                    a: Operand::Value(va),
+                    b: Operand::Value(vb),
+                },
+            });
+        } else {
+            // A field that is itself nominal compares with its own `cmp`,
+            // which is what makes the derivation recursive.
+            let Some(fname) = nominal_name(fty) else {
+                return Err(format!(
+                    "`{name}` has a field of type {fty}, which has no `cmp`"
+                ));
+            };
+            insts.push(Inst {
+                results: vec![c.clone()],
+                kind: InstKind::Call {
+                    callee: format!("{fname}.cmp"),
+                    args: vec![Operand::Value(pa), Operand::Value(pb)],
+                    ret: Some(Type::Int(1)),
+                },
+            });
+        }
+        results.push(c);
+    }
+
+    // Fold from the right: the first nonzero result decides, which is one
+    // `select3` per field after the first, and no branch at all (§5.3.3).
+    let mut acc = Operand::Value(results.pop().expect("at least one part"));
+    while let Some(c) = results.pop() {
+        let r = fresh("r");
+        insts.push(Inst {
+            results: vec![r.clone()],
+            kind: InstKind::Select3 {
+                t: Operand::Value(c.clone()),
+                ty: Type::Int(1),
+                neg: Operand::Value(c.clone()),
+                zero: acc,
+                pos: Operand::Value(c),
+            },
+        });
+        acc = Operand::Value(r);
+    }
+
+    Ok(Function {
+        sig: Signature {
+            name: format!("{name}.cmp"),
+            params: vec![
+                ("self".to_string(), Type::Ptr),
+                ("other".to_string(), Type::Ptr),
+            ],
+            ret: Some(Type::Int(1)),
+        },
+        blocks: vec![Block {
+            label: "entry".to_string(),
+            params: Vec::new(),
+            insts,
+            term: Terminator::Ret(Some(acc)),
+        }],
+    })
+}
+
+/// `fn eq(&self, other: &Self) -> bool`, defined as `cmp(…) == 0t`, which
+/// is the agreement §5.3.1 requires between the two.
+fn derive_eq(name: &str) -> Function {
+    let k = |v: i128| Operand::Const(Type::Int(1), Bt::from_i128(v));
+    Function {
+        sig: Signature {
+            name: format!("{name}.eq"),
+            params: vec![
+                ("self".to_string(), Type::Ptr),
+                ("other".to_string(), Type::Ptr),
+            ],
+            ret: Some(Type::Int(1)),
+        },
+        blocks: vec![Block {
+            label: "entry".to_string(),
+            params: Vec::new(),
+            insts: vec![
+                Inst {
+                    results: vec!["c".to_string()],
+                    kind: InstKind::Call {
+                        callee: format!("{name}.cmp"),
+                        args: vec![
+                            Operand::Value("self".to_string()),
+                            Operand::Value("other".to_string()),
+                        ],
+                        ret: Some(Type::Int(1)),
+                    },
+                },
+                Inst {
+                    results: vec!["b".to_string()],
+                    kind: InstKind::Select3 {
+                        t: Operand::Value("c".to_string()),
+                        ty: Type::Int(1),
+                        neg: k(0),
+                        zero: k(1),
+                        pos: k(0),
+                    },
+                },
+            ],
+            term: Terminator::Ret(Some(Operand::Value("b".to_string()))),
+        }],
+    }
+}
+
+/// `fn clone(&self) -> Self` — field-wise, which for a copyable type is the
+/// copy the language would have made anyway (§5.5).
+fn derive_clone(name: &str, ty: &Ty, types: &Types) -> Function {
+    let size = types.size(ty);
+    let mut insts = Vec::new();
+    for i in 0..size {
+        let (pa, pb, v) = (format!("pa.{i}"), format!("pb.{i}"), format!("v.{i}"));
+        for (p, base) in [(&pa, "self"), (&pb, SRET)] {
+            insts.push(Inst {
+                results: vec![p.clone()],
+                kind: InstKind::Offset {
+                    p: Operand::Value(base.to_string()),
+                    d: Operand::Const(Type::Int(27), Bt::from_i128(i)),
+                },
+            });
+        }
+        insts.push(Inst {
+            results: vec![v.clone()],
+            kind: InstKind::Load {
+                ty: Type::Int(9),
+                p: Operand::Value(pa),
+            },
+        });
+        insts.push(Inst {
+            results: Vec::new(),
+            kind: InstKind::Store {
+                ty: Type::Int(9),
+                v: Operand::Value(v),
+                p: Operand::Value(pb),
+            },
+        });
+    }
+    Function {
+        sig: Signature {
+            name: format!("{name}.clone"),
+            params: vec![
+                (SRET.to_string(), Type::Ptr),
+                ("self".to_string(), Type::Ptr),
+            ],
+            ret: None,
+        },
+        blocks: vec![Block {
+            label: "entry".to_string(),
+            params: Vec::new(),
+            insts,
+            term: Terminator::Ret(None),
+        }],
     }
 }
 
@@ -2656,6 +2965,17 @@ impl Fn<'_> {
         // Mixed-width arithmetic is a compile-time error (Ch. 1, P2).
         self.check(&tb, &ta, line, "right operand")?;
 
+        // A comparison of two nominal values goes through `Ord` and `Eq`
+        // (Ch. 4 §5.3), which is the only place an operator on a user type
+        // means a call. Both operands are aggregates, so both are already
+        // the addresses the comparison wants.
+        if matches!(op, "==" | "!=" | "<" | "<=" | ">" | ">=" | "<=>") && ta.is_aggregate() {
+            let Some(name) = nominal_name(&ta) else {
+                return err(line, format!("`{op}` does not apply to {ta}"));
+            };
+            return self.compare_nominal(op, &name, va, vb, line);
+        }
+
         let tir = ta.tir();
         match op {
             "+" | "-" | "*" | "<<" => {
@@ -3660,6 +3980,92 @@ impl Fn<'_> {
     /// Resolve a written type in this function's generic environment.
     fn resolve(&self, t: &ast::Ty) -> R<Ty> {
         resolve_ty_env(t, self.types, &self.env)
+    }
+
+    /// `a < b` and its relatives on a nominal type (Ch. 4 §5.3.1).
+    ///
+    /// `==` and `!=` call `eq`; the ordering forms and `<=>` call `cmp`, and
+    /// the two-way ones are the same projection of it that Ch. 1 §5 requires
+    /// of the built-in comparison.
+    fn compare_nominal(
+        &mut self,
+        op: &str,
+        name: &str,
+        va: Operand,
+        vb: Operand,
+        line: Line,
+    ) -> R<(Operand, Ty)> {
+        let (trait_name, method) = match op {
+            "==" | "!=" => ("Eq", "eq"),
+            _ => ("Ord", "cmp"),
+        };
+        let key = format!("{name}.{method}");
+        if !self.sigs.borrow().contains_key(&key) {
+            return err(
+                line,
+                format!(
+                    "`{op}` on {name} needs `{trait_name}`, which it does not implement; \
+                     write `impl {trait_name} for {name}` or `#[derive({trait_name})]` \
+                     (Ch. 4 §5.3)"
+                ),
+            );
+        }
+        let ret = if op == "==" || op == "!=" {
+            Ty::Bool
+        } else {
+            Ty::Trit
+        };
+        let v = self.emit(
+            "c",
+            Type::Int(1),
+            InstKind::Call {
+                callee: key,
+                args: vec![va, vb],
+                ret: Some(Type::Int(1)),
+            },
+        );
+        match op {
+            "==" => Ok((v, ret)),
+            // `eq` answers with a bool, so `!=` is its negation and not a
+            // projection of a comparison trit.
+            "!=" => {
+                let k = |x: i128| Operand::Const(Type::Int(1), Bt::from_i128(x));
+                let r = self.emit(
+                    "b",
+                    Type::Int(1),
+                    InstKind::Select3 {
+                        t: v,
+                        ty: Type::Int(1),
+                        neg: k(1),
+                        zero: k(1),
+                        pos: k(0),
+                    },
+                );
+                Ok((r, Ty::Bool))
+            }
+            "<=>" => Ok((v, Ty::Trit)),
+            _ => {
+                let k = |x: i128| Operand::Const(Type::Int(1), Bt::from_i128(x));
+                let (n, z, p) = match op {
+                    "<" => (1, 0, 0),
+                    "<=" => (1, 1, 0),
+                    ">" => (0, 0, 1),
+                    _ => (0, 1, 1),
+                };
+                let r = self.emit(
+                    "b",
+                    Type::Int(1),
+                    InstKind::Select3 {
+                        t: v,
+                        ty: Type::Int(1),
+                        neg: k(n),
+                        zero: k(z),
+                        pos: k(p),
+                    },
+                );
+                Ok((r, Ty::Bool))
+            }
+        }
     }
 
     /// The function a method call resolves to.
