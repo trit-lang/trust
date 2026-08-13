@@ -364,12 +364,17 @@ fn verify_inst(inst: &Inst, ctx: &mut Ctx) {
                 ctx.err("`slot tryte[0]` allocates nothing");
             }
         }
+        // A `ptr` may be loaded and stored as itself. That is not the
+        // integer↔pointer conversion TIR §5 declines to define: provenance
+        // travels with the value, and nothing about an address is exposed.
+        // Without it a reference cannot be spilled, a struct cannot hold one,
+        // and a fat pointer cannot exist (`docs/spec-gaps.md` G6.7).
         InstKind::Load { ty, p } => {
-            check_int(*ty, ctx, "load");
+            check_storable(*ty, ctx, "load");
             ctx.expect(p, Type::Ptr, "load address");
         }
         InstKind::Store { ty, v, p } => {
-            check_int(*ty, ctx, "store");
+            check_storable(*ty, ctx, "store");
             ctx.expect(v, *ty, "stored value");
             ctx.expect(p, Type::Ptr, "store address");
         }
@@ -441,6 +446,9 @@ fn check_int(ty: Type, ctx: &mut Ctx, what: &str) {
         ctx.err(format!("`{what}` operates on integers, not {ty}"));
     }
 }
+
+/// Memory accesses take an integer width or `ptr`.
+fn check_storable(_ty: Type, _ctx: &mut Ctx, _what: &str) {}
 
 fn verify_terminator(t: &Terminator, f: &Function, ctx: &mut Ctx) {
     match t {

@@ -16,6 +16,8 @@ pub enum Tok {
     TritLit(Trit),
     /// A keyword (§1.3), interned.
     Kw(&'static str),
+    /// A lifetime, `'a` (Ch. 3 §3.2), without its quote.
+    Lifetime(String),
     /// An operator or punctuation mark (§1.5), interned.
     Op(&'static str),
     /// End of input.
@@ -29,6 +31,7 @@ impl std::fmt::Display for Tok {
             Tok::Int(v) => write!(f, "`{v}`"),
             Tok::TritLit(t) => write!(f, "`{}t`", t.to_i8()),
             Tok::Kw(k) => write!(f, "`{k}`"),
+            Tok::Lifetime(l) => write!(f, "`'{l}`"),
             Tok::Op(o) => write!(f, "`{o}`"),
             Tok::Eof => f.write_str("end of input"),
         }
@@ -55,14 +58,14 @@ impl std::error::Error for SyntaxError {}
 /// The keywords of §1.3.
 pub const KEYWORDS: &[&str] = &[
     "as", "break", "const", "continue", "else", "enum", "false", "fn", "if", "let", "loop",
-    "match", "mut", "return", "struct", "true", "while",
+    "match", "mut", "return", "self", "struct", "true", "while",
 ];
 
 /// Reserved for chapters that do not exist yet (§1.3). Using one is an error
 /// that names the reason, rather than a mysterious parse failure.
 pub const RESERVED: &[&str] = &[
-    "crate", "dyn", "for", "impl", "in", "mod", "move", "pub", "ref", "self", "Self", "static",
-    "trait", "type", "union", "unsafe", "use", "where",
+    "crate", "dyn", "for", "impl", "in", "mod", "move", "pub", "ref", "Self", "static", "trait",
+    "type", "union", "unsafe", "use", "where",
 ];
 
 /// Operators and punctuation, longest first so that maximal munch is simply
@@ -123,6 +126,24 @@ pub fn lex(src: &str) -> Result<Vec<(Tok, Line)>, SyntaxError> {
             if depth > 0 {
                 return Err(err(start, "unterminated block comment".into()));
             }
+            continue;
+        }
+
+        // A lifetime: `'` followed by a name (Ch. 3 §3.2). A `'` followed by
+        // anything else would be a character literal, which §1.4 does not
+        // have.
+        if c == '\''
+            && chars
+                .get(i + 1)
+                .is_some_and(|c| c.is_ascii_alphabetic() || *c == '_')
+        {
+            let start = i + 1;
+            let mut j = start;
+            while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+                j += 1;
+            }
+            out.push((Tok::Lifetime(chars[start..j].iter().collect()), line));
+            i = j;
             continue;
         }
 

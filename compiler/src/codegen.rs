@@ -582,6 +582,10 @@ fn check_width(g: &mut Gen, ty: Type) {
 /// The access width of a load or store. Memory widths are not promoted by
 /// legalization (`docs/spec-gaps.md` G6.3), so they arrive as written.
 fn access_width(g: &mut Gen, ty: Type) -> &'static str {
+    // An address is a word (TRISC-27 §2.1).
+    if ty == Type::Ptr {
+        return "word";
+    }
     match ty.width() {
         Some(27) => "word",
         Some(w) if w <= 9 => "tryte",

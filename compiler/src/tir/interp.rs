@@ -94,6 +94,14 @@ struct Alloc {
     name: String,
     /// One entry per tryte; `None` is uninitialized.
     trytes: Vec<Option<Tint>>,
+    /// Pointers stored in this allocation, by tryte offset.
+    ///
+    /// A pointer is not a number here: it carries the provenance of TIR §5.
+    /// Storing one to memory therefore stores it beside the trytes rather
+    /// than into them, so that loading it back yields the same provenance.
+    /// A real machine keeps the address and nothing else; the interpreter
+    /// keeps more so that it can *check* what the machine may assume.
+    pointers: std::collections::HashMap<i128, Ptr>,
 }
 
 /// Trytes occupied by a `tN` access.
@@ -153,6 +161,7 @@ impl<'m> Interp<'m> {
             interp.allocs.push(Alloc {
                 name: format!("@{}", g.name),
                 trytes,
+                pointers: std::collections::HashMap::new(),
             });
             interp.globals.insert(g.name.clone(), id);
         }
@@ -322,6 +331,7 @@ impl<'m> Interp<'m> {
                 self.allocs.push(Alloc {
                     name: format!("slot#{id}"),
                     trytes: vec![None; *trytes as usize],
+                    pointers: std::collections::HashMap::new(),
                 });
                 vec![Val::Ptr(Ptr {
                     alloc: id,
@@ -330,13 +340,19 @@ impl<'m> Interp<'m> {
             }
             InstKind::Load { ty, p } => {
                 let p = self.operand(p, env)?;
-                let width = ty.width().expect("verified: load is on integers");
-                vec![self.load(&p, width)?]
+                match ty.width() {
+                    Some(width) => vec![self.load(&p, width)?],
+                    None => vec![self.load_pointer(&p)?],
+                }
             }
             InstKind::Store { ty, v, p } => {
                 let v = self.operand(v, env)?;
                 let p = self.operand(p, env)?;
-                let width = ty.width().expect("verified: store is on integers");
+                if ty.width().is_none() {
+                    self.store_pointer(&p, &v)?;
+                    return Ok(());
+                }
+                let width = ty.width().expect("checked just above");
                 self.store(&p, width, &v)?;
                 Vec::new()
             }
@@ -486,6 +502,48 @@ impl<'m> Interp<'m> {
         Ok(Val::Int(Tint::wrapping(width, v)))
     }
 
+    /// Load a pointer, with the provenance it was stored with.
+    fn load_pointer(&self, p: &Val) -> Result<Val, Halt> {
+        if matches!(p, Val::Poison) {
+            return Err(Halt::Ub("`load` through a poison address".into()));
+        }
+        let p = self.check_access(p, 27, "load")?;
+        match self.allocs[p.alloc].pointers.get(&p.offset) {
+            Some(q) => Ok(Val::Ptr(*q)),
+            // Nothing was stored here as a pointer, so whatever is here is
+            // not one: reading it as a pointer yields poison rather than a
+            // fabricated provenance.
+            None => Ok(Val::Poison),
+        }
+    }
+
+    /// Store a pointer, keeping its provenance.
+    fn store_pointer(&mut self, p: &Val, v: &Val) -> Result<(), Halt> {
+        if matches!(p, Val::Poison) {
+            return Err(Halt::Ub("`store` through a poison address".into()));
+        }
+        let p = self.check_access(p, 27, "store")?;
+        let alloc = &mut self.allocs[p.alloc];
+        match v {
+            Val::Ptr(q) => {
+                alloc.pointers.insert(p.offset, *q);
+                // The trytes are initialized too, so a later integer read
+                // sees something defined rather than poison.
+                for i in 0..3 {
+                    alloc.trytes[(p.offset + i) as usize] = Some(Tint::zero(9));
+                }
+                Ok(())
+            }
+            Val::Poison => {
+                alloc.pointers.remove(&p.offset);
+                Ok(())
+            }
+            Val::Int(_) => Err(Halt::Ub(
+                "storing an integer where a pointer is expected".into(),
+            )),
+        }
+    }
+
     fn store(&mut self, p: &Val, width: u32, v: &Val) -> Result<(), Halt> {
         if matches!(p, Val::Poison) {
             return Err(Halt::Ub("`store` through a poison address".into()));
@@ -503,6 +561,8 @@ impl<'m> Interp<'m> {
         for (i, t) in trytes.into_iter().enumerate() {
             alloc.trytes[p.offset as usize + i] = t;
         }
+        // Writing bytes over a stored pointer destroys it.
+        alloc.pointers.remove(&p.offset);
         Ok(())
     }
 }

@@ -61,6 +61,11 @@ pub enum Ty {
     Struct(String),
     /// A named enum.
     Enum(String),
+    /// `&T` or `&mut T`. A reference to a sized type is one word; a reference
+    /// to a slice is two (Ch. 3 §5.2).
+    Ref(Box<Ty>, bool),
+    /// `[T]` — dynamically sized, and never the type of a place.
+    Slice(Box<Ty>),
     /// The type of an expression that never produces a value: `break`,
     /// `continue`, `return`.
     Never,
@@ -81,6 +86,9 @@ impl std::fmt::Display for Ty {
                 write!(f, "({})", parts.join(", "))
             }
             Ty::Struct(n) | Ty::Enum(n) => f.write_str(n),
+            Ty::Ref(t, true) => write!(f, "&mut {t}"),
+            Ty::Ref(t, false) => write!(f, "&{t}"),
+            Ty::Slice(t) => write!(f, "[{t}]"),
             Ty::Never => f.write_str("!"),
         }
     }
@@ -93,9 +101,17 @@ impl Ty {
             Ty::Trit | Ty::Bool => Type::Int(1),
             Ty::T9 => Type::Int(9),
             Ty::T27 | Ty::TAddr | Ty::Never | Ty::Unit => Type::Int(27),
+            // A thin reference is an address — a word-sized value.
+            Ty::Ref(t, _) if !t.is_unsized() => Type::Ptr,
             // An aggregate is never an SSA value (TIR §2); it lives in
-            // memory and its value is its address.
-            Ty::Array(..) | Ty::Tuple(_) | Ty::Struct(_) | Ty::Enum(_) => Type::Ptr,
+            // memory and its value is its address. A fat reference is two
+            // words and travels the same way.
+            Ty::Array(..)
+            | Ty::Tuple(_)
+            | Ty::Struct(_)
+            | Ty::Enum(_)
+            | Ty::Ref(..)
+            | Ty::Slice(_) => Type::Ptr,
         }
     }
 
@@ -116,19 +132,35 @@ impl Ty {
 
     /// Whether a value of this type is held in a register or in memory.
     fn is_scalar(&self) -> bool {
-        !matches!(
-            self,
-            Ty::Array(..) | Ty::Tuple(_) | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Never
-        )
+        match self {
+            Ty::Ref(t, _) => !t.is_unsized(),
+            Ty::Array(..)
+            | Ty::Tuple(_)
+            | Ty::Struct(_)
+            | Ty::Enum(_)
+            | Ty::Unit
+            | Ty::Never
+            | Ty::Slice(_) => false,
+            _ => true,
+        }
+    }
+
+    /// True for the dynamically sized types, which are never the type of a
+    /// place and appear only behind a reference (Ch. 3 §5.1).
+    fn is_unsized(&self) -> bool {
+        matches!(self, Ty::Slice(_))
     }
 
     /// True for the aggregates, which live in memory and are named by their
     /// address.
     fn is_aggregate(&self) -> bool {
-        matches!(
-            self,
-            Ty::Array(..) | Ty::Tuple(_) | Ty::Struct(_) | Ty::Enum(_)
-        )
+        match self {
+            // A fat reference is two words and travels like an aggregate:
+            // by address, and copied field by field (Ch. 3 §5.2).
+            Ty::Ref(t, _) => t.is_unsized(),
+            Ty::Array(..) | Ty::Tuple(_) | Ty::Struct(_) | Ty::Enum(_) => true,
+            _ => false,
+        }
     }
 
     /// The layout-engine spelling of this type.
@@ -143,6 +175,15 @@ impl Ty {
             Ty::Array(t, n) => layout::Ty::array(t.layout_ty(), *n),
             Ty::Tuple(ts) => layout::Ty::Tuple(ts.iter().map(Ty::layout_ty).collect()),
             Ty::Struct(n) | Ty::Enum(n) => layout::Ty::named(n),
+            // A thin reference has the layout of a reference; a fat one is a
+            // pointer and a length (Ch. 3 §5.2).
+            Ty::Ref(t, _) if !t.is_unsized() => layout::Ty::reference(layout::Ty::Unit),
+            Ty::Ref(..) => layout::Ty::Tuple(vec![
+                layout::Ty::reference(layout::Ty::Unit),
+                layout::Ty::Int(layout::IntTy::TAddr),
+            ]),
+            // A slice has no layout of its own; only `&[T]` does.
+            Ty::Slice(_) => layout::Ty::Unit,
         }
     }
 }
@@ -259,12 +300,22 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
             let params: Result<Vec<Ty>, Error> = f
                 .params
                 .iter()
-                .map(|(_, t)| resolve_ty(t, &types))
+                .map(|(n, t)| {
+                    let ty = resolve_ty(t, &types)?;
+                    check_sized(&ty, t.line(), &format!("the parameter `{n}`"))?;
+                    Ok(ty)
+                })
                 .collect();
             let ret = match &f.ret {
                 None => Ok(Ty::Unit),
                 Some(t) => resolve_ty(t, &types),
             };
+            if let Ok(r) = &ret
+                && let Err(e) = check_no_returned_reference(r, f.line)
+            {
+                errs.push(e);
+                continue;
+            }
             match (params, ret) {
                 (Ok(p), Ok(r)) => {
                     if sigs.insert(f.name.clone(), (p, r)).is_some() {
@@ -299,6 +350,9 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
 
     for item in &file.items {
         let ast::Item::Fn(f) = item else { continue };
+        if !sigs.contains_key(&f.name) {
+            continue; // its signature was already reported
+        }
         let signature = signature_of(f, &sigs);
         match &f.body {
             // A function without a body is a declaration, and lowers to TIR's
@@ -326,6 +380,44 @@ const SRET: &str = "sret";
 /// An aggregate has no SSA representation (TIR §2), so one is passed by
 /// address and returned through a hidden leading pointer the caller supplies
 /// — the classic arrangement, and the only one TIR can express.
+/// A reference in a return position needs the region check of Ch. 3 §4.1,
+/// which is not implemented. Accepting it would let a dangling reference
+/// through, and this language's whole claim is that it does not.
+fn check_no_returned_reference(ty: &Ty, line: Line) -> R<()> {
+    if contains_reference(ty) {
+        return err(
+            line,
+            format!(
+                "returning {ty} needs the region check for a returned reference, which is \
+                 not implemented yet: a reference may be a parameter, a local, or a field \
+                 of a local (docs/spec-gaps.md G0.5)"
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// A dynamically sized type is never the type of a place (Ch. 3 §5.1): not a
+/// parameter, not a local, not a field. It appears only behind a reference.
+fn check_sized(ty: &Ty, line: Line, what: &str) -> R<()> {
+    if ty.is_unsized() {
+        return err(
+            line,
+            format!("{what} cannot have type {ty}: it has no size, so it lives only behind `&`"),
+        );
+    }
+    Ok(())
+}
+
+fn contains_reference(ty: &Ty) -> bool {
+    match ty {
+        Ty::Ref(..) | Ty::Slice(_) => true,
+        Ty::Array(t, _) => contains_reference(t),
+        Ty::Tuple(ts) => ts.iter().any(contains_reference),
+        _ => false,
+    }
+}
+
 fn signature_of(f: &ast::FnItem, sigs: &HashMap<String, (Vec<Ty>, Ty)>) -> Signature {
     let (params, ret) = sigs
         .get(&f.name)
@@ -381,7 +473,11 @@ fn build_types(file: &ast::File) -> R<Types> {
                 let fields: Vec<(String, Ty)> = st
                     .fields
                     .iter()
-                    .map(|(n, t)| Ok((n.clone(), resolve_ty(t, &types)?)))
+                    .map(|(n, t)| {
+                        let ty = resolve_ty(t, &types)?;
+                        check_sized(&ty, t.line(), &format!("the field `{n}`"))?;
+                        Ok((n.clone(), ty))
+                    })
                     .collect::<R<_>>()?;
                 types.db.struct_(
                     &st.name,
@@ -451,6 +547,14 @@ fn resolve_ty(t: &ast::Ty, types: &Types) -> R<Ty> {
         ast::Ty::Tuple(ts, _) => Ok(Ty::Tuple(
             ts.iter().map(|t| resolve_ty(t, types)).collect::<R<_>>()?,
         )),
+        ast::Ty::Ref(t, mutable, _) => Ok(Ty::Ref(Box::new(resolve_ty(t, types)?), *mutable)),
+        ast::Ty::Slice(t, line) => {
+            let elem = resolve_ty(t, types)?;
+            if elem.is_unsized() {
+                return err(*line, "a slice element must have a size");
+            }
+            Ok(Ty::Slice(Box::new(elem)))
+        }
         ast::Ty::Name(name, line) => match name.as_str() {
             "trit" => Ok(Ty::Trit),
             "bool" => Ok(Ty::Bool),
@@ -608,9 +712,8 @@ fn function(
         } else {
             fx.check(&ty, &ret, body.line, "function body")?;
             if ret.is_aggregate() {
-                let size = types.size(&ret);
                 let dst = Operand::Value(SRET.to_string());
-                fx.copy(dst, value, size, body.line)?;
+                fx.copy_typed(dst, value, &ret, body.line)?;
                 fx.finish(Terminator::Ret(None));
             } else {
                 fx.finish(Terminator::Ret(Some(value)));
@@ -770,6 +873,7 @@ impl Fn<'_> {
                     }
                     None => vt,
                 };
+                check_sized(&ty, *line, &format!("the binding `{name}`"))?;
                 if !ty.is_scalar() && !ty.is_aggregate() {
                     return err(*line, format!("cannot bind a value of type {ty}"));
                 }
@@ -846,7 +950,6 @@ impl Fn<'_> {
             E::Binary(op, a, b, line) => self.binary(op, a, b, expected, *line),
             E::Assign(op, target, value, line) => self.assign(op, target, value, *line),
             E::Cast(inner, ty, line) => self.cast(inner, ty, *line),
-            E::Index(base, index, line) => self.index(base, index, *line),
             E::Call(name, args, line) => self.call(name, args, *line),
             E::Method(recv, name, args, line) => self.method(recv, name, args, *line),
 
@@ -900,9 +1003,8 @@ impl Fn<'_> {
                         let (val, vt) = self.expr(v, Some(&ret))?;
                         self.check(&vt, &ret, *line, "returned value")?;
                         if ret.is_aggregate() {
-                            let size = self.types.size(&ret);
                             let dst = Operand::Value(SRET.to_string());
-                            self.copy(dst, val, size, *line)?;
+                            self.copy_typed(dst, val, &ret, *line)?;
                             self.finish(Terminator::Ret(None));
                         } else {
                             self.finish(Terminator::Ret(Some(val)));
@@ -916,10 +1018,54 @@ impl Fn<'_> {
                 Ok((unit(), Ty::Never))
             }
 
-            E::Array(_, line) | E::Repeat(_, _, line) => err(
-                *line,
-                "array expressions are supported only as constant initializers in this milestone",
-            ),
+            // An array literal builds its storage and fills it, like any
+            // other aggregate.
+            E::Array(items, line) => {
+                let hint = match expected {
+                    Some(Ty::Array(t, _)) => Some((**t).clone()),
+                    _ => None,
+                };
+                let mut values = Vec::new();
+                let mut elem = hint.clone();
+                for item in items {
+                    let (v, t) = self.expr(item, elem.as_ref())?;
+                    if let Some(want) = &elem {
+                        self.check(&t, want, item.line(), "array element")?;
+                    } else {
+                        elem = Some(t);
+                    }
+                    values.push(v);
+                }
+                let Some(elem) = elem else {
+                    return err(*line, "an empty array literal needs a written type");
+                };
+                let ty = Ty::Array(Box::new(elem.clone()), values.len() as i128);
+                let slot = self.temp_slot(&ty);
+                let size = self.types.size(&elem);
+                for (i, v) in values.into_iter().enumerate() {
+                    self.store_at(&slot, i as i128 * size, &elem, v, *line)?;
+                }
+                Ok((Operand::Value(slot), ty))
+            }
+
+            E::Repeat(value, count, line) => {
+                let hint = match expected {
+                    Some(Ty::Array(t, _)) => Some((**t).clone()),
+                    _ => None,
+                };
+                let n = const_int(count)?;
+                if n < 0 {
+                    return err(*line, format!("array length {n} is negative"));
+                }
+                let (v, elem) = self.expr(value, hint.as_ref())?;
+                let ty = Ty::Array(Box::new(elem.clone()), n);
+                let slot = self.temp_slot(&ty);
+                let size = self.types.size(&elem);
+                for i in 0..n {
+                    self.store_at(&slot, i * size, &elem, v.clone(), *line)?;
+                }
+                Ok((Operand::Value(slot), ty))
+            }
 
             E::Tuple(items, line) => {
                 let mut tys = Vec::new();
@@ -945,14 +1091,40 @@ impl Fn<'_> {
 
             E::Aggregate(path, fields, line) => self.aggregate(path, fields, *line),
 
-            E::Field(base, name, line) => {
-                let (addr, bt) = self.expr(base, None)?;
-                let fields = self.types.fields(&bt);
-                let Some((_, ft, off)) = fields.into_iter().find(|(n, _, _)| n == name) else {
-                    return err(*line, format!("{bt} has no field `{name}`"));
+            // A borrow is the address of a place — which every local already
+            // has, since every local lives in a slot.
+            E::Borrow(place, mutable, line) => {
+                let (addr, ty) = self.place(place, *line)?;
+                // An array reference coerces to a slice reference, which is a
+                // pointer and a length (Ch. 3 §5.3).
+                if let Ty::Array(elem, n) = &ty {
+                    let slice = Ty::Ref(Box::new(Ty::Slice(elem.clone())), *mutable);
+                    let slot = self.temp_slot(&slice);
+                    let len = Operand::Const(Type::Int(27), Bt::from_i128(*n));
+                    // A fat pointer is a pointer and a length (Ch. 3 §5.2).
+                    let at = Operand::Value(slot.clone());
+                    self.store_ptr(at, addr);
+                    self.store_at(&slot, 3, &Ty::TAddr, len, *line)?;
+                    return Ok((Operand::Value(slot), slice));
+                }
+                Ok((addr, Ty::Ref(Box::new(ty), *mutable)))
+            }
+
+            E::Deref(inner, line) => {
+                let (v, ty) = self.expr(inner, None)?;
+                let Ty::Ref(target, _) = ty else {
+                    return err(*line, format!("`*` applies to a reference, not {ty}"));
                 };
-                let p = self.offset(addr, off);
-                Ok((self.load_from(p, &ft), ft))
+                if target.is_unsized() {
+                    return err(*line, format!("cannot read a value of type {target}"));
+                }
+                Ok((self.load_from(v, &target), *target))
+            }
+
+            E::Field(..) | E::Index(..) => {
+                let line = e.line();
+                let (addr, ty) = self.place(e, line)?;
+                Ok((self.load_from(addr, &ty), ty))
             }
         }
     }
@@ -1161,34 +1333,84 @@ impl Fn<'_> {
         value: &ast::Expr,
         line: Line,
     ) -> R<(Operand, Ty)> {
-        let ast::Expr::Path(name, _) = target else {
-            return err(line, "only a local may be assigned in this milestone");
-        };
-        let Some(local) = self.lookup(name) else {
-            return err(line, format!("`{name}` is not in scope"));
-        };
-        if !local.mutable {
-            return err(
-                line,
-                format!("`{name}` is not mutable; declare it `let mut {name}`"),
-            );
-        }
+        // Writing to a local needs `mut`; writing through a reference needs
+        // that reference to be exclusive (Ch. 3 §2.1).
+        self.check_writable(target, line)?;
+        let (addr, ty) = self.place(target, line)?;
 
-        let ty = local.ty.clone();
         let v = if op == "=" {
             let (v, vt) = self.expr(value, Some(&ty))?;
             self.check(&vt, &ty, line, "assigned value")?;
             v
         } else {
-            // `a op= b` is `a = a op b`, with `a` evaluated once (§2.2).
+            // `a op= b` is `a = a op b`, with `a` evaluated once (Ch. 0 §2.2).
             let binop = &op[..op.len() - 1];
-            let current = self.load_slot(&local.slot, &ty);
+            let current = self.load_from(addr.clone(), &ty);
             let (rhs, rt) = self.expr(value, Some(&ty))?;
             self.check(&rt, &ty, line, "assigned value")?;
             self.apply_binary(binop, current, rhs, &ty, line)?
         };
-        self.store_slot(&local.slot, &ty, v);
+
+        if ty.is_aggregate() {
+            self.copy_typed(addr, v, &ty, line)?;
+        } else {
+            self.push(Inst {
+                results: Vec::new(),
+                kind: InstKind::Store {
+                    ty: ty.tir(),
+                    v,
+                    p: addr,
+                },
+            });
+        }
         Ok((unit(), Ty::Unit))
+    }
+
+    /// The root of a place decides whether it may be written to.
+    fn check_writable(&mut self, target: &ast::Expr, line: Line) -> R<()> {
+        match target {
+            ast::Expr::Path(name, l) => match self.lookup(name) {
+                None => err(*l, format!("`{name}` is not in scope")),
+                Some(local) if !local.mutable => err(
+                    *l,
+                    format!("`{name}` is not mutable; declare it `let mut {name}`"),
+                ),
+                Some(_) => Ok(()),
+            },
+            ast::Expr::Field(base, ..) | ast::Expr::Index(base, ..) => {
+                // Indexing or projecting through a reference is writable iff
+                // that reference is exclusive; otherwise the root decides.
+                let base_ty = self.type_of_place(base)?;
+                match base_ty {
+                    Some(Ty::Ref(_, false)) => err(
+                        line,
+                        "cannot write through a shared reference; it would need `&mut`",
+                    ),
+                    Some(Ty::Ref(_, true)) => Ok(()),
+                    _ => self.check_writable(base, line),
+                }
+            }
+            ast::Expr::Deref(inner, l) => {
+                let ty = self.type_of_place(inner)?;
+                match ty {
+                    Some(Ty::Ref(_, true)) => Ok(()),
+                    Some(Ty::Ref(_, false)) => err(
+                        *l,
+                        "cannot write through a shared reference; it would need `&mut`",
+                    ),
+                    _ => err(*l, "`*` applies to a reference"),
+                }
+            }
+            _ => err(line, "this expression is not a place"),
+        }
+    }
+
+    /// The type of a place, without emitting anything.
+    fn type_of_place(&mut self, e: &ast::Expr) -> R<Option<Ty>> {
+        Ok(match e {
+            ast::Expr::Path(name, _) => self.lookup(name).map(|l| l.ty),
+            _ => None,
+        })
     }
 
     /// The arithmetic half of `binary`, for compound assignment.
@@ -1335,67 +1557,6 @@ impl Fn<'_> {
             std::cmp::Ordering::Equal => v,
         };
         Ok((value, to))
-    }
-
-    /// `base[index]` — with the bounds check Ch. 2 §3 requires.
-    fn index(&mut self, base: &ast::Expr, index: &ast::Expr, line: Line) -> R<(Operand, Ty)> {
-        let (addr, bt) = self.expr(base, None)?;
-        let Ty::Array(elem, n) = bt else {
-            return err(line, format!("{bt} cannot be indexed"));
-        };
-        let (idx, it) = self.expr(index, Some(&Ty::TAddr))?;
-        self.check(&it, &Ty::TAddr, line, "index")?;
-
-        let word = Type::Int(27);
-        let k = |v: i128| Operand::Const(word, Bt::from_i128(v));
-
-        // Two checks, not the fused one Ch. 2 §3 suggests — see the note in
-        // docs/spec-gaps.md: `tmin(sign(i), i <=> N)` is −1 for an in-bounds
-        // index as well as an out-of-bounds one, so it cannot distinguish
-        // them.
-        let low = self.emit(
-            "c",
-            Type::Int(1),
-            InstKind::Cmp {
-                ty: word,
-                a: idx.clone(),
-                b: k(0),
-            },
-        );
-        let (ok_low, fault) = (self.fresh("idx.lo"), self.fresh("idx.fault"));
-        self.br3(low, &fault, &ok_low, &ok_low);
-
-        self.start(fault.clone());
-        self.finish(Terminator::Trap(FaultCode::Trap));
-
-        self.start(ok_low);
-        let high = self.emit(
-            "c",
-            Type::Int(1),
-            InstKind::Cmp {
-                ty: word,
-                a: idx.clone(),
-                b: k(n),
-            },
-        );
-        let ok = self.fresh("idx.ok");
-        self.br3(high, &ok, &fault, &fault);
-
-        self.start(ok);
-        let scale = self.emit(
-            "a",
-            word,
-            InstKind::Flavored {
-                op: FlavoredOp::Mul,
-                flavor: Flavor::Trap,
-                ty: word,
-                a: idx,
-                b: k(self.types.size(&elem)),
-            },
-        );
-        let p = self.emit("p", Type::Ptr, InstKind::Offset { p: addr, d: scale });
-        let v = self.emit("v", elem.tir(), InstKind::Load { ty: elem.tir(), p });
-        Ok((v, *elem))
     }
 
     fn call(&mut self, name: &str, args: &[ast::Expr], line: Line) -> R<(Operand, Ty)> {
@@ -1685,6 +1846,146 @@ impl Fn<'_> {
         }
     }
 
+    // ------------------------------------------------------------ places
+
+    /// The address of a place, and its type (Ch. 3 §1.3). A place is a local,
+    /// a field of a place, an element of a place, or a dereference.
+    fn place(&mut self, e: &ast::Expr, line: Line) -> R<(Operand, Ty)> {
+        match e {
+            ast::Expr::Path(name, l) => {
+                if let Some(local) = self.lookup(name) {
+                    return Ok((Operand::Value(local.slot), local.ty));
+                }
+                if let Some(Global::Array(sym, ty)) = self.globals.get(name) {
+                    return Ok((Operand::Global(sym.clone()), ty.clone()));
+                }
+                err(*l, format!("`{name}` is not a place"))
+            }
+
+            ast::Expr::Field(base, name, l) => {
+                let (addr, bt) = self.place_or_deref(base, *l)?;
+                let fields = self.types.fields(&bt);
+                let Some((_, ft, off)) = fields.into_iter().find(|(n, _, _)| n == name) else {
+                    return err(*l, format!("{bt} has no field `{name}`"));
+                };
+                Ok((self.offset(addr, off), ft))
+            }
+
+            ast::Expr::Index(base, index, l) => {
+                let (addr, bt) = self.place_or_deref(base, *l)?;
+                let (elem, len) = match &bt {
+                    Ty::Array(elem, n) => ((**elem).clone(), Length::Fixed(*n)),
+                    Ty::Ref(inner, _) if matches!(**inner, Ty::Slice(_)) => {
+                        let Ty::Slice(elem) = &**inner else {
+                            unreachable!()
+                        };
+                        ((**elem).clone(), Length::Dynamic)
+                    }
+                    other => return err(*l, format!("{other} cannot be indexed")),
+                };
+                let (base_addr, len_value) = match len {
+                    Length::Fixed(n) => (addr, Operand::Const(Type::Int(27), Bt::from_i128(n))),
+                    // A fat reference: the pointer, then the length.
+                    Length::Dynamic => {
+                        let p = self.load_ptr(addr.clone());
+                        let l2 = self.offset(addr, 3);
+                        let n = self.load_from(l2, &Ty::TAddr);
+                        (p, n)
+                    }
+                };
+                let (idx, it) = self.expr(index, Some(&Ty::TAddr))?;
+                self.check(&it, &Ty::TAddr, *l, "index")?;
+                let addr = self.checked_element(base_addr, idx, len_value, &elem, *l)?;
+                Ok((addr, elem))
+            }
+
+            ast::Expr::Deref(inner, l) => {
+                let (v, ty) = self.expr(inner, None)?;
+                let Ty::Ref(target, _) = ty else {
+                    return err(*l, format!("`*` applies to a reference, not {ty}"));
+                };
+                Ok((v, *target))
+            }
+
+            _ => err(line, "this expression is not a place"),
+        }
+    }
+
+    /// A place, dereferencing automatically through a reference — which is
+    /// what makes `r.x` mean `(*r).x` (Ch. 3 §2.3).
+    fn place_or_deref(&mut self, e: &ast::Expr, line: Line) -> R<(Operand, Ty)> {
+        let (mut addr, mut ty) = self.place(e, line)?;
+        while let Ty::Ref(target, _) = ty.clone() {
+            if target.is_unsized() {
+                break; // a fat reference is indexed, not dereferenced
+            }
+            addr = self.load_ptr(addr);
+            ty = *target;
+        }
+        Ok((addr, ty))
+    }
+
+    /// Bounds-check an index and produce the element's address (Ch. 3 §5.5).
+    ///
+    /// Two comparisons rather than the fused single branch: the fusion needs
+    /// `len − 1 − i`, which can overflow for an extreme index, and Ch. 2 §3's
+    /// suggested fusion is incorrect outright.
+    fn checked_element(
+        &mut self,
+        base: Operand,
+        idx: Operand,
+        len: Operand,
+        elem: &Ty,
+        line: Line,
+    ) -> R<Operand> {
+        let word = Type::Int(27);
+        let zero = Operand::Const(word, Bt::ZERO);
+
+        let low = self.emit(
+            "c",
+            Type::Int(1),
+            InstKind::Cmp {
+                ty: word,
+                a: idx.clone(),
+                b: zero,
+            },
+        );
+        let (ok_low, fault) = (self.fresh("idx.lo"), self.fresh("idx.fault"));
+        self.br3(low, &fault, &ok_low, &ok_low);
+
+        self.start(fault.clone());
+        self.finish(Terminator::Trap(FaultCode::Trap));
+
+        self.start(ok_low);
+        let high = self.emit(
+            "c",
+            Type::Int(1),
+            InstKind::Cmp {
+                ty: word,
+                a: idx.clone(),
+                b: len,
+            },
+        );
+        let ok = self.fresh("idx.ok");
+        self.br3(high, &ok, &fault, &fault);
+
+        self.start(ok);
+        let size = self.types.size(elem);
+        let scale = self.emit(
+            "a",
+            word,
+            InstKind::Flavored {
+                op: FlavoredOp::Mul,
+                flavor: Flavor::Trap,
+                ty: word,
+                a: idx,
+                b: Operand::Const(word, Bt::from_i128(size)),
+            },
+        );
+        let _ = line;
+        Ok(self.emit("p", Type::Ptr, InstKind::Offset { p: base, d: scale }))
+    }
+
     // -------------------------------------------------------- aggregates
 
     /// `base + offset` as an address.
@@ -1694,6 +1995,23 @@ impl Fn<'_> {
         }
         let d = Operand::Const(Type::Int(27), Bt::from_i128(off));
         self.emit("p", Type::Ptr, InstKind::Offset { p: base, d })
+    }
+
+    /// Load a pointer, keeping its provenance (TIR §5).
+    fn load_ptr(&mut self, p: Operand) -> Operand {
+        self.emit("p", Type::Ptr, InstKind::Load { ty: Type::Ptr, p })
+    }
+
+    /// Store a pointer.
+    fn store_ptr(&mut self, at: Operand, v: Operand) {
+        self.push(Inst {
+            results: Vec::new(),
+            kind: InstKind::Store {
+                ty: Type::Ptr,
+                v,
+                p: at,
+            },
+        });
     }
 
     /// Read a value of type `ty` from an address. An aggregate is *named* by
@@ -1709,8 +2027,7 @@ impl Fn<'_> {
     fn store_at(&mut self, slot: &str, off: i128, ty: &Ty, v: Operand, line: Line) -> R<()> {
         let dst = self.offset(Operand::Value(slot.to_string()), off);
         if ty.is_aggregate() {
-            let size = self.types.size(ty);
-            self.copy(dst, v, size, line)?;
+            self.copy_typed(dst, v, ty, line)?;
         } else {
             self.push(Inst {
                 results: Vec::new(),
@@ -1724,9 +2041,86 @@ impl Fn<'_> {
         Ok(())
     }
 
-    /// Copy `size` trytes. Tryte at a time: every address is one-tryte
-    /// aligned, so no alignment reasoning is needed (AM §2.3).
-    fn copy(&mut self, dst: Operand, src: Operand, size: i128, line: Line) -> R<()> {
+    /// Copy a value of known type from one address to another.
+    ///
+    /// Field by field rather than tryte by tryte, because a pointer is not a
+    /// number: it carries provenance (TIR §5), and a byte-wise copy would
+    /// deliver the address without it. The type says where the pointers are,
+    /// so the copy follows the type.
+    fn copy_typed(&mut self, dst: Operand, src: Operand, ty: &Ty, line: Line) -> R<()> {
+        match ty {
+            // A thin reference is a pointer, and is copied as one.
+            Ty::Ref(t, _) if !t.is_unsized() => {
+                let v = self.load_ptr(src);
+                self.store_ptr(dst, v);
+                Ok(())
+            }
+
+            // A fat reference is a pointer and a length (Ch. 3 §5.2).
+            Ty::Ref(..) => {
+                let p = self.load_ptr(src.clone());
+                self.store_ptr(dst.clone(), p);
+                let from = self.offset(src, 3);
+                let to = self.offset(dst, 3);
+                let n = self.load_from(from, &Ty::TAddr);
+                self.store_scalar(to, &Ty::TAddr, n);
+                Ok(())
+            }
+
+            Ty::Array(elem, n) => {
+                let size = self.types.size(elem);
+                let (elem, n) = ((**elem).clone(), *n);
+                for i in 0..n {
+                    let from = self.offset(src.clone(), i * size);
+                    let to = self.offset(dst.clone(), i * size);
+                    self.copy_typed(to, from, &elem, line)?;
+                }
+                Ok(())
+            }
+
+            Ty::Tuple(_) | Ty::Struct(_) => {
+                for (_, ft, off) in self.types.fields(ty) {
+                    let from = self.offset(src.clone(), off);
+                    let to = self.offset(dst.clone(), off);
+                    self.copy_typed(to, from, &ft, line)?;
+                }
+                Ok(())
+            }
+
+            // An enum's payload varies by variant, so its storage is copied
+            // as raw trytes. A reference inside a payload therefore loses its
+            // provenance in the interpreter — see docs/spec-gaps.md G6.7.
+            Ty::Enum(_) => {
+                let size = self.types.size(ty);
+                self.copy_trytes(dst, src, size, line)
+            }
+
+            _ => {
+                let v = self.load_from(src, ty);
+                self.store_scalar(dst, ty, v);
+                Ok(())
+            }
+        }
+    }
+
+    /// Store a scalar at an address, as a pointer when it is one.
+    fn store_scalar(&mut self, at: Operand, ty: &Ty, v: Operand) {
+        if matches!(ty, Ty::Ref(t, _) if !t.is_unsized()) {
+            self.store_ptr(at, v);
+            return;
+        }
+        self.push(Inst {
+            results: Vec::new(),
+            kind: InstKind::Store {
+                ty: ty.tir(),
+                v,
+                p: at,
+            },
+        });
+    }
+
+    /// Copy raw storage, a tryte at a time.
+    fn copy_trytes(&mut self, dst: Operand, src: Operand, size: i128, line: Line) -> R<()> {
         if size > 243 {
             return err(
                 line,
@@ -1971,9 +2365,9 @@ impl Fn<'_> {
     /// agree on.
     fn store_slot(&mut self, slot: &str, ty: &Ty, v: Operand) {
         if ty.is_aggregate() {
-            let size = self.types.size(ty);
             let dst = Operand::Value(slot.to_string());
-            let _ = self.copy(dst, v, size, 0);
+            let ty = ty.clone();
+            let _ = self.copy_typed(dst, v, &ty, 0);
             return;
         }
         self.push(Inst {
@@ -2493,6 +2887,14 @@ impl Fn<'_> {
         }
         Ok(false)
     }
+}
+
+/// Where an indexable thing's length comes from.
+enum Length {
+    /// An array: from the type.
+    Fixed(i128),
+    /// A slice reference: from the second word of the fat pointer.
+    Dynamic,
 }
 
 /// A unit value: never read, but TIR operands are always typed.

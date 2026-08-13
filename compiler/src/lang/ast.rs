@@ -115,13 +115,22 @@ pub enum Ty {
     Array(Box<Ty>, Box<Expr>, Line),
     /// `(T, U, …)`.
     Tuple(Vec<Ty>, Line),
+    /// `&T` or `&mut T`; the lifetime, if written, is erased (Ch. 3 §3.1).
+    Ref(Box<Ty>, bool, Line),
+    /// `[T]` — dynamically sized, and legal only behind a reference.
+    Slice(Box<Ty>, Line),
 }
 
 impl Ty {
     /// Where it was written.
     pub fn line(&self) -> Line {
         match self {
-            Ty::Name(_, l) | Ty::Unit(l) | Ty::Array(_, _, l) | Ty::Tuple(_, l) => *l,
+            Ty::Name(_, l)
+            | Ty::Unit(l)
+            | Ty::Array(_, _, l)
+            | Ty::Tuple(_, l)
+            | Ty::Ref(_, _, l)
+            | Ty::Slice(_, l) => *l,
         }
     }
 }
@@ -192,6 +201,10 @@ pub enum Expr {
     Index(Box<Expr>, Box<Expr>, Line),
     /// `x.field` or `x.0`.
     Field(Box<Expr>, String, Line),
+    /// `&place` or `&mut place`.
+    Borrow(Box<Expr>, bool, Line),
+    /// `*r`.
+    Deref(Box<Expr>, Line),
     /// `(a, b, …)`.
     Tuple(Vec<Expr>, Line),
     /// `Name { field: value, … }` or `Name(a, b)` or `Name::Variant …`.
@@ -234,6 +247,8 @@ impl Expr {
             | Method(_, _, _, l)
             | Index(_, _, l)
             | Field(_, _, l)
+            | Borrow(_, _, l)
+            | Deref(_, l)
             | Tuple(_, l)
             | Aggregate(_, _, l)
             | If(_, _, _, l)

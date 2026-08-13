@@ -95,6 +95,27 @@ Two consequences for documents already written:
   unaffected, so nothing was ever mis-compiled — the frontend emits two
   comparisons.
 
+**G0.5 — Ch. 3 is implemented as far as it can be checked.** References,
+exclusive references, dereference and auto-dereference, slices and their fat
+pointer, the array-to-slice coercion, bounds-checked slice indexing, and
+lifetime syntax (parsed and erased) all work end to end.
+
+What is **not** implemented is the checking half: move tracking, destructors,
+and the borrow checker of §4. In their absence the frontend rejects what it
+cannot check rather than accepting it unsoundly:
+
+- **Returning a reference is rejected.** It needs the region check of §4.1,
+  and accepting it without one would let a dangling reference through — which
+  is the single thing this language claims not to do. A reference may be a
+  parameter, a local, or a field of a local.
+- **`fn drop(self: T)` is parsed but has no effect**, because a destructor
+  without move tracking would run for a moved-out value.
+- **Aliasing is unchecked.** `&mut` and `&` to the same place at the same time
+  is accepted today. Nothing is miscompiled, but nothing is prevented either.
+
+The chapter itself is unchanged: this is a staged implementation of a complete
+design, and each stage refuses what it cannot yet verify.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The
@@ -336,6 +357,31 @@ not: §3.1 has only same-width `mul`, and `.flag` reports the direction of an
 overflow rather than its high half. Adding a widening multiply to TIR §3.1 is
 the remaining change, and it is now a change with a known hardware
 counterpart rather than a speculative one.
+
+---
+
+**G6.7 — TIR could not hold a pointer in memory.** §3.4's `load`/`store` take
+an integer width, and §5 deliberately has no integer↔pointer conversion.
+Between them, draft 0.1 as written cannot spill a reference, put one in a
+struct, or represent a fat pointer — which makes Language Ch. 3 inexpressible.
+
+*Decision:* `load` and `store` accept `ptr` as an access type. This is **not**
+the conversion §5 declines to define: nothing about an address is exposed, and
+provenance travels with the value. The interpreter keeps a stored pointer's
+provenance beside the trytes rather than in them, so that loading it back
+yields the same allocation; writing integers over that storage destroys the
+pointer, as it should. On the machine a pointer is a word and `ld.word` moves
+it.
+
+One consequence the implementation had to follow: an aggregate must be copied
+**field by field, not tryte by tryte**, or a pointer inside it arrives without
+its provenance. An enum's payload varies by variant, so its storage is still
+copied as trytes — a reference inside an enum payload therefore loses
+provenance in the interpreter, which is a limitation of the checking, not of
+the machine.
+
+*Suggested:* TIR §3.4 gains a sentence permitting `ptr` as an access type, and
+§5 a note distinguishing that from the integer↔pointer casts it declines.
 
 ---
 

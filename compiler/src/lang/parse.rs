@@ -176,6 +176,7 @@ impl Parser {
         let line = self.line();
         self.bump(); // struct
         let name = self.expect_ident()?;
+        self.lifetime_params()?;
         let fields = if self.at_op("{") {
             self.named_fields()?
         } else if self.at_op("(") {
@@ -201,6 +202,7 @@ impl Parser {
         let line = self.line();
         self.bump(); // enum
         let name = self.expect_ident()?;
+        self.lifetime_params()?;
         self.expect_op("{")?;
         let mut variants = Vec::new();
         while !self.eat_op("}") {
@@ -254,6 +256,40 @@ impl Parser {
         })
     }
 
+    /// `<'a, 'b>` — parsed and discarded, since lifetimes are erased before
+    /// TIR (Ch. 3 §3.1). Ch. 4 will put type parameters in the same list.
+    fn lifetime_params(&mut self) -> R<()> {
+        if !self.at_op("<") {
+            return Ok(());
+        }
+        self.bump();
+        loop {
+            match self.bump() {
+                Tok::Lifetime(_) => {}
+                Tok::Op(">") => return Ok(()),
+                other => {
+                    return self.err(format!(
+                        "expected a lifetime, found {other}; type parameters are Chapter 4"
+                    ));
+                }
+            }
+            // `'a: 'b` outlives, also erased.
+            if self.eat_op(":") {
+                while matches!(self.peek(), Tok::Lifetime(_)) {
+                    self.bump();
+                    if !self.eat_op("+") {
+                        break;
+                    }
+                }
+            }
+            if self.eat_op(",") {
+                continue;
+            }
+            self.expect_op(">")?;
+            return Ok(());
+        }
+    }
+
     fn named_fields(&mut self) -> R<Vec<(String, Ty)>> {
         self.expect_op("{")?;
         let mut fields = Vec::new();
@@ -290,11 +326,16 @@ impl Parser {
         let line = self.line();
         self.bump(); // fn
         let name = self.expect_ident()?;
+        self.lifetime_params()?;
         self.expect_op("(")?;
         let mut params = Vec::new();
         if !self.eat_op(")") {
             loop {
-                let pname = self.expect_ident()?;
+                let pname = if self.eat_kw("self") {
+                    "self".to_string()
+                } else {
+                    self.expect_ident()?
+                };
                 self.expect_op(":")?;
                 params.push((pname, self.ty()?));
                 if self.eat_op(",") {
@@ -358,13 +399,24 @@ impl Parser {
         }
         if self.eat_op("[") {
             let elem = self.ty()?;
+            // `[T]` is a slice — dynamically sized, legal only behind a
+            // reference (Ch. 3 §5.1). `[T; N]` is an array.
+            if self.eat_op("]") {
+                return Ok(Ty::Slice(Box::new(elem), line));
+            }
             self.expect_op(";")?;
             let n = self.expr()?;
             self.expect_op("]")?;
             return Ok(Ty::Array(Box::new(elem), Box::new(n), line));
         }
-        if self.at_op("&") {
-            return self.err("references are Chapter 3, which is not written yet");
+        if self.eat_op("&") {
+            // A lifetime is erased before TIR (Ch. 3 §3.1), so it is parsed
+            // and dropped rather than carried through the compiler.
+            if let Tok::Lifetime(_) = self.peek() {
+                self.bump();
+            }
+            let mutable = self.eat_kw("mut");
+            return Ok(Ty::Ref(Box::new(self.ty()?), mutable, line));
         }
         Ok(Ty::Name(self.expect_ident()?, line))
     }
@@ -523,8 +575,12 @@ impl Parser {
                 return Ok(Expr::Unary(op, Box::new(self.unary()?), line));
             }
         }
-        if self.at_op("&") {
-            return self.err("borrowing is Chapter 3, which is not written yet");
+        if self.eat_op("&") {
+            let mutable = self.eat_kw("mut");
+            return Ok(Expr::Borrow(Box::new(self.unary()?), mutable, line));
+        }
+        if self.eat_op("*") {
+            return Ok(Expr::Deref(Box::new(self.unary()?), line));
         }
         self.postfix()
     }

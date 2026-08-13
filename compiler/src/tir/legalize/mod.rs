@@ -756,9 +756,12 @@ fn legalize_inst(e: &mut Emit, inst: &Inst) {
             define(e, inst, 0, Type::Ptr, InstKind::Slot { trytes: *trytes });
         }
 
+        // A `ptr` access has no arithmetic width to legalize: it moves an
+        // address, which is one word on every target that can hold one.
         InstKind::Load { ty, p } => {
-            let w = ty.width().expect("verified");
-            if !memory_width_ok(e, w) {
+            if let Some(w) = ty.width()
+                && !memory_width_ok(e, w)
+            {
                 return;
             }
             let p = e.coerce(p, Type::Ptr);
@@ -766,8 +769,9 @@ fn legalize_inst(e: &mut Emit, inst: &Inst) {
         }
 
         InstKind::Store { ty, v, p } => {
-            let w = ty.width().expect("verified");
-            if !memory_width_ok(e, w) {
+            if let Some(w) = ty.width()
+                && !memory_width_ok(e, w)
+            {
                 return;
             }
             let v = e.coerce(v, *ty);

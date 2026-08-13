@@ -252,7 +252,9 @@ fn the_deferred_features_say_what_they_are_waiting_for() {
     assert!(error("fn main() -> t27 { let s = \"hi\"; 0 }").contains("library chapter"));
     assert!(error("fn main() -> t27 { for x in y { } 0 }").contains("reserved"));
     assert!(error("fn main() -> t27 { 1 ^ 2 }").contains("tmul"));
-    assert!(error("fn f(x: &t27) -> t27 { 0 }").contains("Chapter 3"));
+    // References are Chapter 3 and now work; generics are still Chapter 4.
+    tir_of("fn f(x: &t27) -> t27 { *x }");
+    assert!(error("fn f<T>(x: T) -> T { x }").contains("Chapter 4"));
 }
 
 #[test]
@@ -478,4 +480,152 @@ fn saturating_and_overflowing_are_available() {
     );
     // `checked_*` needs Option, and so needs generics.
     assert!(error("fn main() -> t27 { (1).checked_add(2) }").contains("Chapter 4"));
+}
+
+// ------------------------------------------- references and slices (Ch. 3)
+
+#[test]
+fn the_references_example_runs() {
+    // 25 + 4 + (1+2+3+4)·10
+    assert_eq!(run(include_str!("../../examples/trust/refs.tr")).0, 129);
+}
+
+#[test]
+fn a_shared_reference_reads_and_auto_dereferences() {
+    assert_eq!(
+        run("struct P { x: t27, y: t27 } \
+             fn get(p: &P) -> t27 { p.x + p.y } \
+             fn main() -> t27 { let a = P { x: 3, y: 4 }; get(&a) }")
+        .0,
+        7
+    );
+    // `*r` is available too, and reads the same place.
+    assert_eq!(
+        run("fn main() -> t27 { let a: t27 = 5; let r = &a; *r + 1 }").0,
+        6
+    );
+}
+
+#[test]
+fn an_exclusive_reference_writes_through() {
+    assert_eq!(
+        run("struct P { x: t27 } \
+             fn bump(p: &mut P) { p.x += 1; } \
+             fn main() -> t27 { let mut a = P { x: 7 }; bump(&mut a); bump(&mut a); a.x }")
+        .0,
+        9
+    );
+    assert_eq!(
+        run("fn set(r: &mut t27, v: t27) { *r = v; } \
+             fn main() -> t27 { let mut a: t27 = 1; set(&mut a, 42); a }")
+        .0,
+        42
+    );
+}
+
+#[test]
+fn a_shared_reference_cannot_be_written_through() {
+    // Ch. 3 §2.1: a shared reference permits reading, and that is all.
+    let e = error("fn set(r: &t27) { *r = 1; } fn main() -> t27 { 0 }");
+    assert!(e.contains("shared reference"), "{e}");
+    let e = error("struct P { x: t27 } fn set(p: &P) { p.x = 1; } fn main() -> t27 { 0 }");
+    assert!(e.contains("shared reference"), "{e}");
+}
+
+#[test]
+fn an_array_reference_coerces_to_a_slice() {
+    // Ch. 3 §5.3, and the length comes from the type.
+    assert_eq!(
+        run("fn total(xs: &[t27]) -> t27 { xs[0] + xs[1] + xs[2] } \
+             fn main() -> t27 { let a: [t27; 3] = [10, 20, 30]; total(&a) }")
+        .0,
+        60
+    );
+    // A slice carries its length, so a shorter array works with the same
+    // function.
+    assert_eq!(
+        run("fn head(xs: &[t9]) -> t27 { xs[0] as t27 } \
+             fn main() -> t27 { let a: [t9; 2] = [7, 8]; head(&a) }")
+        .0,
+        7
+    );
+}
+
+#[test]
+fn a_slice_write_goes_through_an_exclusive_reference() {
+    assert_eq!(
+        run("fn zero(xs: &mut [t27]) { xs[0] = 0; } \
+             fn main() -> t27 { let mut a: [t27; 2] = [5, 6]; zero(&mut a); a[0] + a[1] }")
+        .0,
+        6
+    );
+}
+
+#[test]
+fn slice_indices_are_bounds_checked_against_the_length() {
+    // Ch. 3 §5.5: out of bounds faults and never proceeds, and a negative
+    // index is out of bounds rather than end-relative.
+    for index in ["3", "0 - 1"] {
+        let src = format!(
+            "fn get(xs: &[t27], i: taddr) -> t27 {{ xs[i] }} \
+             fn main() -> t27 {{ let a: [t27; 3] = [1, 2, 3]; get(&a, {index}) }}"
+        );
+        let module = tir_of(&src);
+        let legalized = tir::legalize_module(&module, &tir::TargetDesc::tritium()).unwrap();
+        let asm = trustc::codegen::compile(&legalized, "main").unwrap();
+        let image = tritium::assemble(&asm).unwrap();
+        let mut vm = tritium::Vm::with_default_memory();
+        vm.load_image(&image);
+        assert!(
+            matches!(vm.run(1_000_000), tritium::Stop::Fault(..)),
+            "index {index} should fault"
+        );
+    }
+}
+
+#[test]
+fn a_reference_survives_being_stored_and_copied() {
+    // TIR could not hold a pointer in memory until this chapter needed it;
+    // provenance travels with the value (docs/spec-gaps.md G6.7).
+    assert_eq!(
+        run("struct Holder { r: t27 } \
+             fn main() -> t27 { \
+                 let a: t27 = 41; \
+                 let r = &a; \
+                 let s = r; \
+                 *s + 1 \
+             }")
+        .0,
+        42
+    );
+}
+
+#[test]
+fn returning_a_reference_is_rejected_rather_than_unchecked() {
+    // The region check of Ch. 3 §4.1 is not implemented, and accepting a
+    // returned reference without it would let a dangling one through.
+    let e = error("fn first(xs: &[t27]) -> &t27 { &xs[0] } fn main() -> t27 { 0 }");
+    assert!(e.contains("region check"), "{e}");
+    // A reference as a parameter, a local, or a field of a local is fine.
+    tir_of("fn f(x: &t27) -> t27 { *x }");
+    tir_of("fn main() -> t27 { let a: t27 = 1; let r = &a; *r }");
+}
+
+#[test]
+fn lifetimes_parse_and_are_erased() {
+    // Ch. 3 §3.1: no lifetime reaches TIR.
+    let m = tir_of("fn f<'a>(x: &'a t27) -> t27 { *x }");
+    let printed = tir::print_module(&m);
+    assert!(
+        !printed.contains('\''),
+        "a lifetime reached TIR:\n{printed}"
+    );
+}
+
+#[test]
+fn a_slice_type_needs_a_reference() {
+    // Ch. 3 §5.1: `[T]` is dynamically sized and is never the type of a
+    // place. It reaches the frontend only behind `&`.
+    let e = error("fn f(xs: [t27]) -> t27 { 0 }");
+    assert!(!e.is_empty(), "a bare slice parameter should be rejected");
 }

@@ -21,12 +21,12 @@ the source.
 | assembler (`.t27`) | **implemented**: two-pass, exact balanced-ternary expressions, all directives and pseudo-instructions (`tritium asm`) |
 | backend (TIR → TRISC-27) | **implemented**: `trustc compile` emits assembly. No register allocator yet — every value lives in a stack slot |
 | `compiler/` — Trust frontend | **implemented through Ch. 2**: lexer, parser, type checker and lowering to TIR — scalars, arrays, tuples, structs, enums with payloads and niches, both `repr`s, all control flow |
-| Ch. 3 — ownership and references | **specified, not built**: `spec/language/03-references.md`. Moves, destructors, `&T`/`&mut T`, lifetimes, a non-lexical borrow checker, slices |
+| Ch. 3 — ownership and references | **partly built**: `&T`, `&mut T`, deref and auto-deref, slices and their fat pointer, bounds-checked indexing, erased lifetime syntax. The checking half — moves, destructors, the borrow checker — is not built, and the frontend rejects what it cannot check (G0.5) |
 
 ## Building
 
 ```
-cargo test          # 235 tests
+cargo test          # 246 tests
 cargo build
 ```
 
