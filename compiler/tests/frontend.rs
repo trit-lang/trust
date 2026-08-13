@@ -283,7 +283,10 @@ fn the_deferred_features_say_what_they_are_waiting_for() {
     // Reserved for a chapter nobody has written…
     assert!(error("fn main() -> t27 { mod m; 0 }").contains("not written yet"));
     // …as against one that is written and only partly built.
-    assert!(error("fn main() -> t27 { let x: dyn Shape = 0; 0 }").contains("Ch. 4"));
+    assert!(
+        error("trait Shape { fn a(&self) -> t27; } fn main() -> t27 { let x: dyn Shape = 0; 0 }")
+            .contains("has no size")
+    );
     assert!(error("fn main() -> t27 { for x in y { } 0 }").contains("§5.7"));
     // References are Chapter 3; traits and generics are Chapter 4; all now
     // work. What is left of Ch. 4 says which section it is waiting for.
@@ -1291,5 +1294,123 @@ fn a_fieldless_enum_derives_a_comparison_over_its_discriminants() {
         )
         .0,
         111
+    );
+}
+
+// ------------------------------------------------ Chapter 4: trait objects
+
+#[test]
+fn a_trait_object_dispatches_through_its_vtable() {
+    // Ch. 4 §3: one copy of `total`, an indirect call per element.
+    let src = "trait Shape { fn area(&self) -> t27; } \
+               struct Circle { r: t27 } \
+               struct Rect { w: t27, h: t27 } \
+               impl Shape for Circle { fn area(&self) -> t27 { self.r * self.r * 3 } } \
+               impl Shape for Rect { fn area(&self) -> t27 { self.w * self.h } } \
+               fn total(shapes: &[&dyn Shape]) -> t27 { \
+                   let mut sum: t27 = 0; \
+                   let mut i: taddr = 0; \
+                   while i < shapes.len() { sum += shapes[i].area(); i += 1; } \
+                   sum \
+               } \
+               fn main() -> t27 { \
+                   let c = Circle { r: 2 }; \
+                   let r = Rect { w: 3, h: 4 }; \
+                   let shapes: [&dyn Shape; 2] = [&c, &r]; \
+                   total(&shapes) \
+               }";
+    assert_eq!(run(src).0, 24);
+
+    // The vtable is a real global holding real addresses (§3.3), laid out
+    // size, align, drop, then the methods.
+    let printed = tir::print_module(&tir_of(src));
+    assert!(printed.contains("global @vt.Circle.Shape"), "{printed}");
+    assert!(printed.contains("addr @Circle.area"), "{printed}");
+    // And the dispatch is an indirect call, not a direct one.
+    assert!(printed.contains("call %"), "{printed}");
+}
+
+#[test]
+fn a_trait_objects_vtable_holds_its_supertraits_methods_first() {
+    // Ch. 4 §3.3's order, which the table and the dispatch must agree on or
+    // every call through a supertrait method goes to the wrong function.
+    assert_eq!(
+        run("trait Shape { fn area(&self) -> t27; } \
+             trait Named: Shape { fn initial(&self) -> t27; } \
+             struct C { r: t27 } \
+             impl Shape for C { fn area(&self) -> t27 { self.r * 2 } } \
+             impl Named for C { fn initial(&self) -> t27 { 67 } } \
+             fn both(n: &dyn Named) -> t27 { n.area() + n.initial() } \
+             fn main() -> t27 { let c = C { r: 5 }; both(&c) }")
+        .0,
+        77
+    );
+}
+
+#[test]
+fn a_trait_object_is_two_words_and_keeps_its_niches() {
+    // Ch. 4 §3.2: the same shape as Ch. 3 §5.2's slice, data pointer first.
+    let m = tir_of(
+        "trait Shape { fn area(&self) -> t27; } \
+         struct Circle { r: t27 } \
+         impl Shape for Circle { fn area(&self) -> t27 { self.r } } \
+         fn main() -> t27 { let c = Circle { r: 1 }; let s: &dyn Shape = &c; s.area() }",
+    );
+    let printed = tir::print_module(&m);
+    assert!(printed.contains("slot tryte[6]"), "{printed}");
+}
+
+#[test]
+fn object_safety_is_checked_and_says_why() {
+    // §3.4: a signature that needs the erased type back cannot be called.
+    let base = "struct C { x: t27 } ";
+    for (method, why) in [
+        ("fn cmp(&self, other: &Self) -> trit;", "mentions `Self`"),
+        ("fn make() -> t27;", "takes no `self`"),
+        (
+            "fn go<T>(&self, x: T) -> t27;",
+            "type parameters of its own",
+        ),
+        ("fn clone(&self) -> Self;", "returns `Self`"),
+    ] {
+        let e = error(&format!(
+            "{base} trait T {{ {method} }} \
+             fn f(x: &dyn T) -> t27 {{ 0 }} fn main() -> t27 {{ 0 }}"
+        ));
+        assert!(
+            e.contains("not object-safe") && e.contains(why),
+            "{method}: {e}"
+        );
+    }
+    // A type that does not implement the trait is not one of its objects.
+    let e = error(
+        "trait Shape { fn area(&self) -> t27; } struct C { x: t27 } \
+         fn f(s: &dyn Shape) -> t27 { 0 } \
+         fn main() -> t27 { let c = C { x: 1 }; f(&c) }",
+    );
+    assert!(e.contains("does not implement"), "{e}");
+    // Only the trait's own methods are reachable through an object (§3.1).
+    let e = error(
+        "trait Shape { fn area(&self) -> t27; } struct C { x: t27 } \
+         impl Shape for C { fn area(&self) -> t27 { self.x } } \
+         impl C { fn extra(&self) -> t27 { 9 } } \
+         fn f(s: &dyn Shape) -> t27 { s.extra() } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("has no method `extra`"), "{e}");
+}
+
+#[test]
+fn a_slice_reports_its_length() {
+    // Ch. 3 §5.4, which the frontend had never implemented.
+    assert_eq!(
+        run("fn n(xs: &[t27]) -> taddr { xs.len() } \
+             fn main() -> t27 { let a: [t27; 3] = [1, 2, 3]; n(&a) as t27 }")
+        .0,
+        3
+    );
+    assert_eq!(
+        run("fn main() -> t27 { let a: [t9; 7] = [0; 7]; a.len() as t27 }").0,
+        7
     );
 }

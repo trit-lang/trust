@@ -67,6 +67,9 @@ pub enum Ty {
     Ref(Box<Ty>, bool),
     /// `[T]` — dynamically sized, and never the type of a place.
     Slice(Box<Ty>),
+    /// `dyn Trait` — dynamically sized, and never the type of a place
+    /// (Ch. 4 §3.1).
+    Dyn(String),
     /// The type of an expression that never produces a value: `break`,
     /// `continue`, `return`.
     Never,
@@ -81,6 +84,7 @@ impl std::fmt::Display for Ty {
             Ty::T27 => f.write_str("t27"),
             Ty::TAddr => f.write_str("taddr"),
             Ty::Unit => f.write_str("()"),
+            Ty::Dyn(t) => write!(f, "dyn {t}"),
             Ty::Array(t, n) => write!(f, "[{t}; {n}]"),
             Ty::Tuple(ts) => {
                 let parts: Vec<String> = ts.iter().map(Ty::to_string).collect();
@@ -102,6 +106,8 @@ impl Ty {
             Ty::Trit | Ty::Bool => Type::Int(1),
             Ty::T9 => Type::Int(9),
             Ty::T27 | Ty::TAddr | Ty::Never | Ty::Unit => Type::Int(27),
+            // Unsized on its own; only a reference to one is a value.
+            Ty::Dyn(_) => Type::Ptr,
             // A thin reference is an address — a word-sized value.
             Ty::Ref(t, _) if !t.is_unsized() => Type::Ptr,
             // An aggregate is never an SSA value (TIR §2); it lives in
@@ -149,7 +155,7 @@ impl Ty {
     /// True for the dynamically sized types, which are never the type of a
     /// place and appear only behind a reference (Ch. 3 §5.1).
     fn is_unsized(&self) -> bool {
-        matches!(self, Ty::Slice(_))
+        matches!(self, Ty::Slice(_) | Ty::Dyn(_))
     }
 
     /// True for the aggregates, which live in memory and are named by their
@@ -183,8 +189,10 @@ impl Ty {
                 layout::Ty::reference(layout::Ty::Unit),
                 layout::Ty::Int(layout::IntTy::TAddr),
             ]),
-            // A slice has no layout of its own; only `&[T]` does.
-            Ty::Slice(_) => layout::Ty::Unit,
+            // A slice and a trait object have no layout of their own; only a
+            // reference to one does, and both are two words (Ch. 3 §5.2,
+            // Ch. 4 §3.2).
+            Ty::Slice(_) | Ty::Dyn(_) => layout::Ty::Unit,
         }
     }
 }
@@ -287,6 +295,9 @@ pub struct Types {
     /// Generic struct and enum definitions, un-instantiated.
     generic_structs: HashMap<String, ast::StructItem>,
     generic_enums: HashMap<String, ast::EnumItem>,
+    /// Trait declarations, so that `dyn Trait` can be checked for object
+    /// safety where it is written rather than where it is coerced to.
+    traits: HashMap<String, ast::TraitItem>,
     /// What each mangled name was an instantiation of. A mangled name is not
     /// parseable back into its arguments, and a generic impl needs them.
     instantiations: RefCell<HashMap<String, (String, Vec<Ty>)>>,
@@ -662,7 +673,10 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
     module.funcs.extend(derived);
 
     let pending: RefCell<Vec<Job>> = RefCell::new(Vec::new());
+    let vtables: RefCell<Vec<(String, String, ir::Global)>> = RefCell::new(Vec::new());
     let world = World {
+        traits: &types.traits.clone(),
+        vtables: &vtables,
         sigs: &sigs,
         generic_fns: &generic_fns,
         impls: &impls,
@@ -707,10 +721,86 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
         let _ = job.depth;
     }
 
+    // Vtables are globals like any other, and are emitted once every
+    // coercion that needs one has been seen (Ch. 4 §3.3).
+    module
+        .globals
+        .extend(vtables.into_inner().into_iter().map(|(_, _, g)| g));
+
     if errs.is_empty() {
         Ok(module)
     } else {
         Err(errs)
+    }
+}
+
+/// One error, for the places that build one rather than return it.
+fn one_err(line: Line, message: String) -> Error {
+    SyntaxError { line, message }
+}
+
+/// Every method reachable through `dyn Trait`, in vtable order: the
+/// supertraits' first, then the trait's own (Ch. 4 §3.3).
+///
+/// One list serves both the table and the dispatch, which is the only way
+/// the two can be guaranteed to agree on an index.
+fn object_methods(
+    traits: &HashMap<String, ast::TraitItem>,
+    name: &str,
+    seen: &mut Vec<String>,
+) -> Vec<ast::FnItem> {
+    if seen.iter().any(|s| s == name) {
+        return Vec::new();
+    }
+    seen.push(name.to_string());
+    let Some(decl) = traits.get(name) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for s in &decl.supertraits {
+        out.extend(object_methods(traits, s, seen));
+    }
+    out.extend(decl.methods.iter().cloned());
+    out
+}
+
+/// Ch. 4 §3.4: a method is object-safe when a trait object can call it.
+fn object_safe(m: &ast::FnItem, trait_name: &str) -> R<()> {
+    let complaint = |what: &str| {
+        err(
+            m.line,
+            format!(
+                "`{trait_name}::{}` is not object-safe: {what} (Ch. 4 §3.4). \
+                 A trait object has erased its type, so any signature that needs \
+                 it back cannot be called through one.",
+                m.name
+            ),
+        )
+    };
+    if !m.generics.is_empty() {
+        return complaint("it has type parameters of its own");
+    }
+    match m.params.first() {
+        Some((n, _)) if n == "self" => {}
+        _ => return complaint("it takes no `self`"),
+    }
+    for (i, (_, t)) in m.params.iter().enumerate() {
+        if i > 0 && mentions_self(t) {
+            return complaint("a parameter mentions `Self`");
+        }
+    }
+    if m.ret.as_ref().is_some_and(mentions_self) {
+        return complaint("it returns `Self`");
+    }
+    Ok(())
+}
+
+fn mentions_self(t: &ast::Ty) -> bool {
+    match t {
+        ast::Ty::SelfTy(_) => true,
+        ast::Ty::Ref(t, _, _) | ast::Ty::Slice(t, _) | ast::Ty::Array(t, _, _) => mentions_self(t),
+        ast::Ty::Tuple(ts, _) | ast::Ty::App(_, ts, _) => ts.iter().any(mentions_self),
+        _ => false,
     }
 }
 
@@ -860,7 +950,7 @@ fn subst_ty(t: &mut ast::Ty, self_ty: &SelfTy) {
         ast::Ty::Tuple(ts, _) | ast::Ty::App(_, ts, _) => {
             ts.iter_mut().for_each(|t| subst_ty(t, self_ty))
         }
-        ast::Ty::Name(..) | ast::Ty::Unit(_) => {}
+        ast::Ty::Name(..) | ast::Ty::Unit(_) | ast::Ty::Dyn(..) => {}
     }
 }
 
@@ -1642,6 +1732,14 @@ fn build_types(file: &ast::File) -> R<Types> {
         enums: RefCell::new(HashMap::new()),
         generic_structs: HashMap::new(),
         generic_enums: HashMap::new(),
+        traits: file
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                ast::Item::Trait(t) => Some((t.name.clone(), t.clone())),
+                _ => None,
+            })
+            .collect(),
         instantiations: RefCell::new(HashMap::new()),
     };
 
@@ -1838,6 +1936,17 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
                 .collect::<R<_>>()?;
             types.instantiate(name, &args, *line)
         }
+        // §3.4: a trait may be used as an object only if every method is
+        // object-safe, and this is where "used as" happens.
+        ast::Ty::Dyn(name, line) => {
+            if !types.traits.contains_key(name) {
+                return err(*line, format!("`{name}` is not a trait in scope"));
+            }
+            for m in &object_methods(&types.traits, name, &mut Vec::new()) {
+                object_safe(m, name)?;
+            }
+            Ok(Ty::Dyn(name.clone()))
+        }
         ast::Ty::Unit(_) => Ok(Ty::Unit),
         ast::Ty::Tuple(ts, _) => Ok(Ty::Tuple(
             ts.iter()
@@ -1958,6 +2067,10 @@ struct Fn<'a> {
     /// one, and the call site that caused it must be able to check its
     /// arguments against it immediately (Ch. 4 §2.7).
     sigs: &'a RefCell<HashMap<String, (Vec<Ty>, Ty)>>,
+    /// Trait declarations, for `dyn Trait` (Ch. 4 §3).
+    traits: &'a HashMap<String, ast::TraitItem>,
+    /// Vtables built so far (Ch. 4 §3.3).
+    vtables: &'a RefCell<Vec<(String, String, ir::Global)>>,
     /// Generic function definitions, un-instantiated.
     generic_fns: &'a HashMap<String, ast::FnItem>,
     /// Every (type, trait) pair the file implements, for bounds (§2.2).
@@ -2021,6 +2134,11 @@ struct LoopCtx {
 /// Everything a function body is lowered against, which is the same for
 /// every function in the module and is therefore passed as one thing.
 struct World<'a> {
+    /// Trait declarations, for `dyn Trait` (Ch. 4 §3).
+    traits: &'a HashMap<String, ast::TraitItem>,
+    /// Vtables built so far, keyed by (concrete type, trait), and the
+    /// globals they became.
+    vtables: &'a RefCell<Vec<(String, String, ir::Global)>>,
     sigs: &'a RefCell<HashMap<String, (Vec<Ty>, Ty)>>,
     generic_fns: &'a HashMap<String, ast::FnItem>,
     impls: &'a std::collections::HashSet<(String, String)>,
@@ -2038,6 +2156,8 @@ fn function(
     w: &World,
 ) -> R<Function> {
     let World {
+        traits,
+        vtables,
         sigs,
         generic_fns,
         impls,
@@ -2048,6 +2168,8 @@ fn function(
     let (param_tys, ret) = sigs.borrow().get(key).cloned().unwrap();
     let destructor_of = key.strip_prefix("drop.").map(|t| t.to_string());
     let mut fx = Fn {
+        traits,
+        vtables,
         sigs,
         generic_fns,
         impls,
@@ -2586,7 +2708,13 @@ impl Fn<'_> {
                 line,
             } => {
                 let declared = match ty {
-                    Some(t) => Some(self.resolve(t)?),
+                    Some(t) => {
+                        let d = self.resolve(t)?;
+                        // A dynamically sized type is legal only behind a
+                        // reference (Ch. 3 §5.1, Ch. 4 §3.1).
+                        check_sized(&d, *line, &format!("the local `{name}`"))?;
+                        Some(d)
+                    }
                     None => None,
                 };
                 let loans_before = self.loans.len();
@@ -2632,6 +2760,20 @@ impl Fn<'_> {
     // --------------------------------------------------------- expressions
 
     fn expr(&mut self, e: &ast::Expr, expected: Option<&Ty>) -> R<(Operand, Ty)> {
+        let (v, ty) = self.expr_inner(e, expected)?;
+        // `&Concrete` becomes `&dyn Trait` wherever one is expected — the
+        // only implicit conversion the language has, and it converts a
+        // representation rather than a value (Ch. 4 §3.2).
+        if let Some(want) = expected
+            && ty != *want
+            && let Some(fat) = self.coerce_dyn(v.clone(), &ty, want, e.line())?
+        {
+            return Ok(fat);
+        }
+        Ok((v, ty))
+    }
+
+    fn expr_inner(&mut self, e: &ast::Expr, expected: Option<&Ty>) -> R<(Operand, Ty)> {
         use ast::Expr as E;
         match e {
             // An unconstrained integer literal is `t27` (Ch. 1 §3), and one
@@ -3862,6 +4004,33 @@ impl Fn<'_> {
                 Ok((Operand::Value(slot), result))
             }
 
+            // Ch. 3 §5.4: a slice's length is the second word of its fat
+            // reference; an array's is in its type.
+            "len" => {
+                if !args.is_empty() {
+                    return err(line, "`len` takes no arguments");
+                }
+                match &ty {
+                    Ty::Array(_, n) => {
+                        Ok((Operand::Const(Type::Int(27), Bt::from_i128(*n)), Ty::TAddr))
+                    }
+                    Ty::Ref(inner, _) if matches!(**inner, Ty::Slice(_)) => {
+                        let at = self.offset(v, 3);
+                        Ok((self.load_from(at, &Ty::TAddr), Ty::TAddr))
+                    }
+                    Ty::Ref(inner, _) if matches!(**inner, Ty::Array(..)) => {
+                        let Ty::Array(_, n) = &**inner else {
+                            unreachable!()
+                        };
+                        Ok((Operand::Const(Type::Int(27), Bt::from_i128(*n)), Ty::TAddr))
+                    }
+                    other => err(
+                        line,
+                        format!("`len` applies to a slice or an array, not {other}"),
+                    ),
+                }
+            }
+
             "checked_add" | "checked_sub" | "checked_mul" => err(
                 line,
                 format!(
@@ -4068,6 +4237,194 @@ impl Fn<'_> {
         }
     }
 
+    /// Call a method through a trait object's vtable (Ch. 4 §§3.1, 3.3).
+    fn dyn_call(
+        &mut self,
+        fat: Operand,
+        trait_name: &str,
+        name: &str,
+        args: &[ast::Expr],
+        line: Line,
+    ) -> R<(Operand, Ty)> {
+        if !self.traits.contains_key(trait_name) {
+            return err(line, format!("`{trait_name}` is not a trait in scope"));
+        }
+        let methods = object_methods(self.traits, trait_name, &mut Vec::new());
+        let Some(index) = methods.iter().position(|m| m.name == name) else {
+            return err(
+                line,
+                format!(
+                    "`dyn {trait_name}` has no method `{name}`; only the trait's are \
+                         reachable through an object (Ch. 4 §3.1)"
+                ),
+            );
+        };
+        let m = &methods[index];
+        object_safe(m, trait_name)?;
+
+        // The signature, with `Self` erased to the data pointer.
+        let params: Vec<Ty> = m.params[1..]
+            .iter()
+            .map(|(_, t)| self.resolve(t))
+            .collect::<R<_>>()?;
+        let ret = match &m.ret {
+            None => Ty::Unit,
+            Some(t) => self.resolve(t)?,
+        };
+        if params.len() != args.len() {
+            return err(
+                line,
+                format!(
+                    "`{trait_name}::{name}` takes {} argument(s), {} given",
+                    params.len(),
+                    args.len()
+                ),
+            );
+        }
+
+        // Data pointer, then vtable pointer (§3.2); the method slots start
+        // after size, align and drop (§3.3).
+        let data = self.load_ptr(fat.clone());
+        let vt_at = self.offset(fat, 3);
+        let vt = self.load_ptr(vt_at);
+        let slot = self.offset(vt, 9 + 3 * index as i128);
+        let f = self.load_ptr(slot);
+
+        let mut values = vec![data];
+        let out = ret.is_aggregate().then(|| self.temp_slot(&ret));
+        if let Some(slot) = &out {
+            values.insert(0, Operand::Value(slot.clone()));
+        }
+        for (arg, want) in args.iter().zip(&params) {
+            let (v, got) = self.expr(arg, Some(want))?;
+            self.check(&got, want, arg.line(), "argument")?;
+            values.push(v);
+        }
+        let kind = InstKind::Call {
+            callee: Callee::Indirect(f),
+            args: values,
+            ret: if ret == Ty::Unit || ret.is_aggregate() {
+                None
+            } else {
+                Some(ret.tir())
+            },
+        };
+        match out {
+            Some(slot) => {
+                self.push(Inst {
+                    results: Vec::new(),
+                    kind,
+                });
+                Ok((Operand::Value(slot), ret))
+            }
+            None if ret == Ty::Unit => {
+                self.push(Inst {
+                    results: Vec::new(),
+                    kind,
+                });
+                Ok((unit(), Ty::Unit))
+            }
+            None => {
+                let v = self.emit("r", ret.tir(), kind);
+                Ok((v, ret))
+            }
+        }
+    }
+
+    /// The global holding the vtable for this (type, trait) pair, building
+    /// it if this is the first coercion to it (Ch. 4 §3.3).
+    ///
+    /// Layout: size, align, drop, then one address per object-safe method in
+    /// declaration order. `size` and `align` are here because a future
+    /// `Box<dyn Trait>` needs them to free what it points at, and adding a
+    /// slot later would change the layout of something programs will have
+    /// been written against.
+    fn vtable_for(&mut self, concrete: &Ty, trait_name: &str, line: Line) -> R<String> {
+        let name = nominal_name(concrete)
+            .ok_or_else(|| one_err(line, format!("{concrete} cannot be a trait object")))?;
+        let symbol = format!("vt.{name}.{trait_name}");
+        if self
+            .vtables
+            .borrow()
+            .iter()
+            .any(|(_, _, g)| g.name == symbol)
+        {
+            return Ok(symbol);
+        }
+        let Some(decl) = self.traits.get(trait_name).cloned() else {
+            return err(line, format!("`{trait_name}` is not a trait in scope"));
+        };
+        let _ = &decl;
+        if !self.impls.contains(&(name.clone(), trait_name.to_string())) {
+            return err(
+                line,
+                format!(
+                    "`{name}` does not implement `{trait_name}`, so it is not a `dyn {trait_name}`"
+                ),
+            );
+        }
+
+        let word = |v: i128| {
+            let b = Bt::from_i128(v);
+            (0..3)
+                .map(|i| InitItem::Tryte(b.shr(i * 9).wrap_to(9)))
+                .collect::<Vec<_>>()
+        };
+        let mut items = word(self.types.size(concrete));
+        items.extend(word(self.types.layout(concrete).align as i128));
+        // A drop slot of 0 is unambiguous: 0 is not the address of anything
+        // (Ch. 3 §2.4).
+        if self.types.needs_drop(concrete) {
+            items.push(InitItem::Addr(format!("drop.{name}")));
+        } else {
+            items.extend(word(0));
+        }
+        for m in &object_methods(self.traits, trait_name, &mut Vec::new()) {
+            object_safe(m, trait_name)?;
+            items.push(InitItem::Addr(format!("{name}.{}", m.name)));
+        }
+
+        let trytes = items.iter().map(|i| i.trytes()).sum();
+        self.vtables.borrow_mut().push((
+            name,
+            trait_name.to_string(),
+            ir::Global {
+                name: symbol.clone(),
+                trytes,
+                init: Some(items),
+            },
+        ));
+        Ok(symbol)
+    }
+
+    /// Coerce `&Concrete` to `&dyn Trait`: a fat pointer of the data address
+    /// and the vtable's (Ch. 4 §3.2).
+    fn coerce_dyn(
+        &mut self,
+        v: Operand,
+        from: &Ty,
+        to: &Ty,
+        line: Line,
+    ) -> R<Option<(Operand, Ty)>> {
+        let (Ty::Ref(target, m), Ty::Ref(want, _)) = (from, to) else {
+            return Ok(None);
+        };
+        let Ty::Dyn(trait_name) = &**want else {
+            return Ok(None);
+        };
+        if target.is_unsized() {
+            return Ok(None);
+        }
+        let symbol = self.vtable_for(target, trait_name, line)?;
+        let fat = Ty::Ref(Box::new(Ty::Dyn(trait_name.clone())), *m);
+        let slot = self.temp_slot(&fat);
+        let at = Operand::Value(slot.clone());
+        self.store_ptr(at, v);
+        let second = self.offset(Operand::Value(slot.clone()), 3);
+        self.store_ptr(second, Operand::Global(symbol));
+        Ok(Some((Operand::Value(slot), fat)))
+    }
+
     /// The function a method call resolves to.
     ///
     /// A concrete impl gives the name directly. A generic impl gives a
@@ -4121,6 +4478,16 @@ impl Fn<'_> {
             Some(t) => (t, true),
             None => (self.expr(recv, None)?.1, false),
         };
+
+        // A call on a trait object is one indirect call through its vtable
+        // (Ch. 4 §3.1). Nothing else about the receiver is known.
+        if let Ty::Ref(inner, _) = &recv_ty
+            && let Ty::Dyn(trait_name) = &**inner
+        {
+            let trait_name = trait_name.clone();
+            let (fat, _) = self.expr(recv, None)?;
+            return self.dyn_call(fat, &trait_name, name, args, line);
+        }
 
         let mut base = recv_ty.clone();
         let mut derefs = 0;

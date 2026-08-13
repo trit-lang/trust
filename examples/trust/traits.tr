@@ -106,6 +106,20 @@ fn print_signed(value: t27) {
     }
 }
 
+// Static dispatch has one copy of the code per type; dynamic dispatch has
+// one copy and an indirect call through a vtable (Ch. 4 §3). Only the second
+// can hold shapes of different types in one array.
+fn total_area(shapes: &[&dyn Named]) -> t27 {
+    let mut sum: t27 = 0;
+    let mut i: taddr = 0;
+    while i < shapes.len() {
+        shapes[i].report();
+        sum += shapes[i].area();
+        i += 1;
+    }
+    sum
+}
+
 fn main() -> t27 {
     let mut p = Point::origin();
     p.translate(3, 4);
@@ -114,10 +128,10 @@ fn main() -> t27 {
     let r = Rect { w: 3, h: 4 };
     let flat = Rect { w: 3, h: 0 };
 
-    c.report();
-    r.report();
+    let shapes: [&dyn Named; 2] = [&c, &r];
+    let area = total_area(&shapes);              // 12 + 12, and two reports
 
-    let mut n: t27 = p.magnitude_squared();      // 25
+    let mut n: t27 = p.magnitude_squared() + area - area;   // 25
     if flat.is_degenerate() {
         n += (1).thrice();                       // 3, via the default body
     }

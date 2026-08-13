@@ -198,6 +198,9 @@ pub enum Ty {
     /// `Name<T, U>` — a generic type applied to arguments (Ch. 4 §2.1).
     /// Substituted and mangled to a plain `Name` before layout ever sees it.
     App(String, Vec<Ty>, Line),
+    /// `dyn Trait` — dynamically sized, and legal only behind a reference
+    /// (Ch. 4 §3.1).
+    Dyn(String, Line),
 }
 
 impl Ty {
@@ -211,7 +214,8 @@ impl Ty {
             | Ty::Ref(_, _, l)
             | Ty::Slice(_, l)
             | Ty::SelfTy(l)
-            | Ty::App(_, _, l) => *l,
+            | Ty::App(_, _, l)
+            | Ty::Dyn(_, l) => *l,
         }
     }
 }

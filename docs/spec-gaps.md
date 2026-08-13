@@ -286,9 +286,40 @@ TIR — `cmp` applied to a pointer — rather than a diagnostic, because every
 enum is passed by address and the built-in comparison path never checked. It
 is now either a call to `Ord::cmp` or an error that names the missing trait.
 
-Not implemented, and rejected by name: `dyn Trait`, closures, `for` loops,
-associated types and constants, generic traits, `::<>`, and `impl !Copy`.
-Those are what is left of the chapter.
+**G0.11 — `dyn Trait` is implemented (Ch. 4 §3).** Trait objects, their fat
+pointer, their vtables, object safety, and dispatch through an indirect call
+all work end to end — resting on G0.10's TIR extension, which exists for
+exactly this.
+
+`&dyn Trait` is (data pointer, vtable pointer): 6 trytes, alignment 3, the
+same shape as Ch. 3 §5.2's slice reference and with the data pointer first for
+the same reason. The vtable is an ordinary TIR global holding `addr @…` items
+in §3.3's order — size, align, drop, then one address per object-safe method,
+**the supertraits' first**. One list produces both the table and the dispatch
+index, which is the only way the two can be guaranteed to agree.
+
+Object safety is checked where `dyn Trait` is *written*, not where a value is
+coerced to it, which is what §3.4's "may be used as `dyn Trait` only if" says.
+The diagnostic names the reason: a parameter mentioning `Self`, a missing
+receiver, a returned `Self`, or the method's own type parameters.
+
+Two gaps this uncovered, both pre-existing:
+
+- **`.len()` was never implemented**, although Ch. 3 §5.4 requires it. It was
+  listed among the built-in methods and had no case, so it fell through to
+  "not a method in this milestone". Slices and arrays both report their length
+  now.
+- **An unsized local was accepted.** `let x: dyn Shape = …` and `let x: [t27]`
+  passed the frontend, because the size check ran on parameters and fields but
+  not on `let`. Ch. 3 §5.1 has always said a dynamically sized type appears
+  only behind a reference.
+
+`Box<dyn Trait>` is not implemented and cannot be until there is an allocator,
+which §3.1 already says. The representation above is the one it will use.
+
+Not implemented, and rejected by name: closures, `for` loops, associated types
+and constants, generic traits, `::<>`, and `impl !Copy`. Those are what is
+left of the chapter.
 
 Two limits worth naming:
 

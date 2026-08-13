@@ -671,6 +671,10 @@ impl Parser {
             self.bump();
             return Ok(Ty::SelfTy(line));
         }
+        // `dyn Trait` (Ch. 4 §3.1).
+        if self.eat_kw("dyn") {
+            return Ok(Ty::Dyn(self.expect_ident()?, line));
+        }
         let name = self.expect_ident()?;
         let args = self.generic_args()?;
         if args.is_empty() {
