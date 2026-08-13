@@ -290,8 +290,8 @@ fn the_deferred_features_say_what_they_are_waiting_for() {
     tir_of("fn f(x: &t27) -> t27 { *x }");
     tir_of("trait Shape { fn area(&self) -> t27; }");
     tir_of("fn id<T>(x: T) -> T { x } fn main() -> t27 { id(1) }");
-    let e = error("struct P { x: t27 } impl<T> P { fn f(&self) -> t27 { 0 } }");
-    assert!(e.contains("generic impl"), "{e}");
+    let e = error("struct P { x: t27 } impl<T> P<T> { fn f(&self) -> t27 { 0 } }");
+    assert!(e.contains("is not a generic type"), "{e}");
     let e = error("trait Into<T> { fn into(self) -> T; }");
     assert!(e.contains("§1.7"), "{e}");
 }
@@ -1134,4 +1134,72 @@ fn a_where_clause_is_the_same_bound_written_later() {
     );
     let e = error("fn f<T>(x: T) -> T where U: Copy { x } fn main() -> t27 { 0 }");
     assert!(e.contains("not a type parameter"), "{e}");
+}
+
+#[test]
+fn a_generic_impl_gives_a_generic_type_its_methods() {
+    // Ch. 4 §2.1: the impl's type parameters become the method's, so a
+    // method of a generic type is a generic function keyed by the base.
+    assert_eq!(
+        run("enum Opt<T> { None, Some(T) } \
+             impl<T> Opt<T> { \
+                 fn is_some(&self) -> bool { \
+                     match self { Opt::Some(v) => true, Opt::None => false, } \
+                 } \
+                 fn unwrap_or(self, d: T) -> T { \
+                     match self { Opt::Some(v) => v, Opt::None => d, } \
+                 } \
+             } \
+             fn main() -> t27 { \
+                 let a: Opt<t27> = Opt::Some(7); \
+                 let b: Opt<t27> = Opt::None; \
+                 let n = if a.is_some() { a.unwrap_or(0) } else { 100 }; \
+                 n + b.unwrap_or(5) \
+             }")
+        .0,
+        12
+    );
+    // One method, two instantiations.
+    assert_eq!(
+        run("struct W<T> { v: T } \
+             impl<T> W<T> { fn get(&self) -> &T { &self.v } } \
+             fn main() -> t27 { \
+                 let a: W<t27> = W { v: 40 }; \
+                 let b: W<t9> = W { v: 2 }; \
+                 *a.get() + *b.get() as t27 \
+             }")
+        .0,
+        42
+    );
+    // A trait implemented for a generic type satisfies a bound on any of its
+    // instantiations (§2.2).
+    assert_eq!(
+        run("trait Size { fn size(&self) -> t27; } \
+             struct Boxed<T> { v: T } \
+             impl<T> Size for Boxed<T> { fn size(&self) -> t27 { 1 } } \
+             fn total<T: Size>(x: &T) -> t27 { x.size() * 5 } \
+             fn main() -> t27 { let b: Boxed<t9> = Boxed { v: 3 }; total(&b) }")
+        .0,
+        5
+    );
+}
+
+#[test]
+fn a_match_scrutinee_auto_dereferences() {
+    // Ch. 3 §2.3 governs `.`; a scrutinee behind a reference reads the same
+    // way, which is what lets a `&self` method match on `self`.
+    assert_eq!(
+        run("enum E { A, B } \
+             fn f(e: &E) -> t27 { match e { E::A => 1, E::B => 2, } } \
+             fn main() -> t27 { let x = E::B; f(&x) }")
+        .0,
+        2
+    );
+    assert_eq!(
+        run("enum Opt<T> { None, Some(T) } \
+             fn get(o: &Opt<t27>) -> t27 { match o { Opt::Some(v) => v, Opt::None => 0, } } \
+             fn main() -> t27 { let o: Opt<t27> = Opt::Some(7); get(&o) }")
+        .0,
+        7
+    );
 }

@@ -80,6 +80,8 @@ pub struct ImplItem {
     pub trait_name: Option<String>,
     /// The type being implemented.
     pub self_ty: String,
+    /// Its type arguments: `impl<T> Pair<T, T>` (Ch. 4 §2.1).
+    pub self_args: Vec<Ty>,
     /// Its methods and associated functions.
     pub methods: Vec<FnItem>,
     /// Where it was written.

@@ -457,16 +457,17 @@ impl Parser {
         // The type arguments of the self type: `impl<T> Pair<T, T>`.
         let self_args = self.generic_args()?;
         self.where_clause(&mut generics)?;
-        if !generics.is_empty() || !self_args.is_empty() {
+        if generics.is_empty() != self_args.is_empty() {
             return self.err(
-                "a generic impl is Ch. 4 §2.1, specified but not implemented; \
-                 an impl block on a concrete type works",
+                "an impl's type parameters and its self type's arguments must agree: \
+                 `impl<T> Name<T>` (Ch. 4 §2.1)",
             );
         }
         let methods = self.method_block("impl")?;
         Ok(ImplItem {
             generics,
             trait_name,
+            self_args,
             self_ty,
             methods,
             line,

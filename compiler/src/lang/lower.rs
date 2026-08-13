@@ -287,6 +287,9 @@ pub struct Types {
     /// Generic struct and enum definitions, un-instantiated.
     generic_structs: HashMap<String, ast::StructItem>,
     generic_enums: HashMap<String, ast::EnumItem>,
+    /// What each mangled name was an instantiation of. A mangled name is not
+    /// parseable back into its arguments, and a generic impl needs them.
+    instantiations: RefCell<HashMap<String, (String, Vec<Ty>)>>,
 }
 
 /// One enum variant, resolved.
@@ -370,6 +373,10 @@ impl Types {
     /// that generics exist.
     fn instantiate(&self, name: &str, args: &[Ty], line: Line) -> R<Ty> {
         let mangled = mangle(name, args);
+        self.instantiations
+            .borrow_mut()
+            .entry(mangled.clone())
+            .or_insert_with(|| (name.to_string(), args.to_vec()));
         if self.structs.borrow().contains_key(&mangled) {
             return Ok(Ty::Struct(mangled));
         }
@@ -660,7 +667,13 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
     // Then the instantiations, and the instantiations they in turn need
     // (§2.7). The queue drains because every job is unique by key and the
     // depth limit stops a body that instantiates itself at a larger type.
-    while let Some(job) = pending.borrow_mut().pop() {
+    loop {
+        // Not `while let Some(job) = pending.borrow_mut().pop()`: that keeps
+        // the mutable borrow alive for the whole body, and the body queues
+        // more jobs.
+        let Some(job) = pending.borrow_mut().pop() else {
+            break;
+        };
         let def = generic_fns[&job.from].clone();
         let body = def.body.clone().expect("a generic function has a body");
         let signature = signature_of(&def, &job.key, &sigs);
@@ -794,7 +807,7 @@ fn nominal_name(ty: &Ty) -> Option<String> {
 
 /// Substitute `Self` for the implementing type throughout a method, in type
 /// and in path position, so that nothing downstream ever sees `Self`.
-fn subst_self(f: &ast::FnItem, self_ty: &str) -> ast::FnItem {
+fn subst_self(f: &ast::FnItem, self_ty: &SelfTy) -> ast::FnItem {
     let mut f = f.clone();
     for (_, t) in &mut f.params {
         subst_ty(t, self_ty);
@@ -808,9 +821,16 @@ fn subst_self(f: &ast::FnItem, self_ty: &str) -> ast::FnItem {
     f
 }
 
-fn subst_ty(t: &mut ast::Ty, self_ty: &str) {
+/// What `Self` stands for in an impl block: the written type, and the bare
+/// name a path like `Self::new` or `Self { … }` turns into.
+struct SelfTy {
+    ty: ast::Ty,
+    name: String,
+}
+
+fn subst_ty(t: &mut ast::Ty, self_ty: &SelfTy) {
     match t {
-        ast::Ty::SelfTy(l) => *t = ast::Ty::Name(self_ty.to_string(), *l),
+        ast::Ty::SelfTy(_) => *t = self_ty.ty.clone(),
         ast::Ty::Array(e, _, _) | ast::Ty::Ref(e, _, _) | ast::Ty::Slice(e, _) => {
             subst_ty(e, self_ty)
         }
@@ -821,7 +841,7 @@ fn subst_ty(t: &mut ast::Ty, self_ty: &str) {
     }
 }
 
-fn subst_block(b: &mut ast::Block, self_ty: &str) {
+fn subst_block(b: &mut ast::Block, self_ty: &SelfTy) {
     for st in &mut b.stmts {
         match st {
             ast::Stmt::Let { ty, value, .. } => {
@@ -838,21 +858,21 @@ fn subst_block(b: &mut ast::Block, self_ty: &str) {
     }
 }
 
-fn subst_expr(e: &mut ast::Expr, self_ty: &str) {
+fn subst_expr(e: &mut ast::Expr, self_ty: &SelfTy) {
     use ast::Expr::*;
     let mut kids: Vec<&mut ast::Expr> = Vec::new();
     match e {
         Aggregate(path, fields, _) => {
             for seg in &mut path.segments {
                 if seg == "Self" {
-                    *seg = self_ty.to_string();
+                    seg.clone_from(&self_ty.name);
                 }
             }
             kids.extend(fields.iter_mut().map(|(_, e)| e));
         }
         Path(name, _) => {
             if name == "Self" {
-                *name = self_ty.to_string();
+                name.clone_from(&self_ty.name);
             }
         }
         Cast(a, t, _) => {
@@ -948,6 +968,8 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
         let self_ty = &imp.self_ty;
         if !types.structs.borrow().contains_key(self_ty)
             && !types.enums.borrow().contains_key(self_ty)
+            && !types.generic_structs.contains_key(self_ty)
+            && !types.generic_enums.contains_key(self_ty)
             && !matches!(self_ty.as_str(), "trit" | "bool" | "t9" | "t27" | "taddr")
         {
             errs.push(SyntaxError {
@@ -956,6 +978,39 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
             });
             continue;
         }
+
+        if !imp.generics.is_empty()
+            && !types.generic_structs.contains_key(self_ty)
+            && !types.generic_enums.contains_key(self_ty)
+        {
+            errs.push(SyntaxError {
+                line: imp.line,
+                message: format!(
+                    "`{self_ty}` is not a generic type, so this impl has \
+                                  type parameters nothing can determine (Ch. 4 §2.1)"
+                ),
+            });
+            continue;
+        }
+        if !imp.generics.is_empty() && imp.trait_name.as_deref() == Some("Drop") {
+            errs.push(SyntaxError {
+                line: imp.line,
+                message: "a destructor on a generic type is not implemented; whether a \
+                          type needs dropping is decided before its instantiations exist"
+                    .into(),
+            });
+            continue;
+        }
+
+        // What `Self` means here: the concrete type, or the applied generic.
+        let self_repr = SelfTy {
+            ty: if imp.self_args.is_empty() {
+                ast::Ty::Name(self_ty.clone(), imp.line)
+            } else {
+                ast::Ty::App(self_ty.clone(), imp.self_args.clone(), imp.line)
+            },
+            name: self_ty.clone(),
+        };
 
         let mut methods: Vec<ast::FnItem> = imp.methods.clone();
 
@@ -986,7 +1041,21 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
         }
 
         for m in &methods {
-            let f = subst_self(m, self_ty);
+            let mut f = subst_self(m, &self_repr);
+            // An impl's type parameters become the method's, so a generic
+            // method is an ordinary generic function keyed by the base type.
+            if !imp.generics.is_empty() {
+                if !f.generics.is_empty() {
+                    errs.push(SyntaxError {
+                        line: f.line,
+                        message: "a method with type parameters of its own, inside a \
+                                  generic impl, is not implemented"
+                            .into(),
+                    });
+                    continue;
+                }
+                f.generics.clone_from(&imp.generics);
+            }
             // A destructor keeps its own name so that `fn_key` gives it the
             // `drop.Type` key the drop machinery already uses (Ch. 3 §1.4).
             let is_destructor = imp.trait_name.as_deref() == Some("Drop") && f.name == "drop";
@@ -1264,6 +1333,7 @@ fn build_types(file: &ast::File) -> R<Types> {
         enums: RefCell::new(HashMap::new()),
         generic_structs: HashMap::new(),
         generic_enums: HashMap::new(),
+        instantiations: RefCell::new(HashMap::new()),
     };
 
     // A generic definition is not a type until it is applied (Ch. 4 §2.7), so
@@ -3128,6 +3198,15 @@ impl Fn<'_> {
             targs.push(ty.clone());
         }
 
+        let _ = targs;
+        self.instantiate_with(name, env, line)
+    }
+
+    /// Instantiate a generic function with an environment already worked out,
+    /// queueing its body if this is the first time (Ch. 4 §2.7).
+    fn instantiate_with(&mut self, name: &str, env: HashMap<String, Ty>, line: Line) -> R<String> {
+        let def = self.generic_fns[name].clone();
+        let targs: Vec<Ty> = def.generics.iter().map(|p| env[p.name()].clone()).collect();
         let key = mangle(name, &targs);
         if self.sigs.borrow().contains_key(&key) {
             return Ok(key);
@@ -3179,7 +3258,16 @@ impl Fn<'_> {
             "Copy" => self.types.is_copyable(ty),
             "Sized" => !ty.is_unsized(),
             _ => match nominal_name(ty) {
-                Some(n) => self.impls.contains(&(n, bound.to_string())),
+                Some(n) => {
+                    let base = self
+                        .types
+                        .instantiations
+                        .borrow()
+                        .get(&n)
+                        .map(|(b, _)| b.clone());
+                    self.impls.contains(&(n, bound.to_string()))
+                        || base.is_some_and(|b| self.impls.contains(&(b, bound.to_string())))
+                }
                 None => false,
             },
         };
@@ -3574,6 +3662,39 @@ impl Fn<'_> {
         resolve_ty_env(t, self.types, &self.env)
     }
 
+    /// The function a method call resolves to.
+    ///
+    /// A concrete impl gives the name directly. A generic impl gives a
+    /// generic function keyed by the base type, which is instantiated here
+    /// with the arguments the receiver's own instantiation was made with —
+    /// recovered from the table, since a mangled name cannot be read back.
+    fn method_key(&mut self, type_name: &str, name: &str, line: Line) -> R<String> {
+        let concrete = format!("{type_name}.{name}");
+        if self.sigs.borrow().contains_key(&concrete) {
+            return Ok(concrete);
+        }
+        let Some((base, args)) = self.types.instantiations.borrow().get(type_name).cloned() else {
+            return Ok(concrete);
+        };
+        let generic = format!("{base}.{name}");
+        let Some(def) = self.generic_fns.get(&generic).cloned() else {
+            return Ok(concrete);
+        };
+        if def.generics.len() != args.len() {
+            return err(
+                line,
+                format!("`{base}::{name}` does not apply to `{type_name}`"),
+            );
+        }
+        let env: HashMap<String, Ty> = def
+            .generics
+            .iter()
+            .map(|p| p.name().to_string())
+            .zip(args.iter().cloned())
+            .collect();
+        self.instantiate_with(&generic, env, line)
+    }
+
     /// A method call that resolves to an impl block (Ch. 4 §1.3).
     ///
     /// Resolution is a desugaring: `p.area()` becomes `Point.area(&p)`, with
@@ -3607,7 +3728,7 @@ impl Fn<'_> {
         let Some(type_name) = nominal_name(&base) else {
             return err(line, format!("{base} has no methods"));
         };
-        let key = format!("{type_name}.{name}");
+        let key = self.method_key(&type_name, name, line)?;
         let Some((params, _)) = self.sigs.borrow().get(&key).cloned() else {
             return err(
                 line,
@@ -4356,7 +4477,22 @@ impl Fn<'_> {
         expected: Option<&Ty>,
         line: Line,
     ) -> R<(Operand, Ty)> {
-        let (v, ty) = self.expr(scrutinee, None)?;
+        let (mut v, mut ty) = self.expr(scrutinee, None)?;
+        // A scrutinee behind a reference is dereferenced, exactly as `.` is
+        // (Ch. 3 §2.3). Bindings then copy out of the referent, which the
+        // copy rule of §1.2 already governs.
+        while let Ty::Ref(target, _) = ty.clone() {
+            if target.is_unsized() {
+                break;
+            }
+            // `v` is the reference itself, which is an address. An
+            // aggregate's value *is* its address, so dereferencing one is a
+            // retype; a scalar has to be loaded.
+            if !target.is_aggregate() {
+                v = self.load_from(v, &target);
+            }
+            ty = *target;
+        }
         if let Ty::Enum(name) = ty.clone() {
             return self.match_enum(&name, v, arms, expected, line);
         }

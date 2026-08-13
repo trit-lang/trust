@@ -232,9 +232,13 @@ Three limits, all named in the diagnostics:
   parameter that appears in neither an argument nor the expected type cannot
   be determined and the diagnostic says which parameter it was. Const generic
   arguments (§2.4) are parsed and rejected for the same reason.
-- **No generic impls.** `impl<T> Pair<T, T>` is rejected. Methods therefore
-  exist only on concrete types, which is why `Opt<T>` above has free functions
-  rather than methods.
+- **Generic impls work; associated functions on them do not.** `impl<T> Opt<T>`
+  and `impl<T> Trait for Boxed<T>` both work: the impl's type parameters become
+  the method's, so a method of a generic type is an ordinary generic function
+  keyed by the base type, instantiated with the arguments the receiver's own
+  instantiation was made with — recovered from a table, since a mangled name
+  cannot be read back. What does not work is `Opt::<t27>::new()`, an associated
+  function with no receiver to infer from, which needs `::<>`.
 - **A generic body is checked at instantiation, not once.** Ch. 4 §2.2 makes
   the *bound* half normative — "an instantiation that fails a bound is
   rejected at the call site, not inside the body" — and that half holds: bounds
@@ -247,9 +251,18 @@ Three limits, all named in the diagnostics:
   mode Appendix B claims is removed by construction, and it is removed at the
   call site only. Recorded, not glossed.
 
+Two fixes fell out of building it, both pre-existing:
+
+- **`while let Some(x) = cell.borrow_mut().pop()` held the borrow for the whole
+  loop body**, and the body queued more work into the same cell. A panic, not a
+  wrong answer, and the classic `RefCell` shape.
+- **A `match` scrutinee did not auto-dereference.** Ch. 3 §2.3 gives the rule
+  for `.`, and a scrutinee reads the same way; without it a `&self` method
+  could not match on `self`, which is most of what a method on an enum does.
+
 Not implemented, and rejected by name: `dyn Trait`, closures, `for` loops,
-`derive`, associated types and constants, generic traits, and `impl !Copy`.
-Those are the third block.
+`derive`, associated types and constants, generic traits, `::<>`, and
+`impl !Copy`. Those are what is left of the chapter.
 
 Two limits worth naming:
 
