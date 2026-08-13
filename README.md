@@ -17,15 +17,15 @@ the source.
 | `compiler/` — crate `trustc` | **implemented**: TIR data structures, textual format (parser + canonical printer), verifier, reference interpreter, target descriptions, CLI |
 | TIR legalization (TIR §6) | **both directions implemented** and differentially tested — promotion, and expansion into multi-part arithmetic with carry chaining. `mul` expansion is blocked on a missing TIR primitive (G6.6); `div` and the shifts are unwritten |
 | `compiler/` — layout engine (Lang Ch. 2) | **implemented**: sizes, alignments, offsets, both `repr`s, discriminants, niche optimization |
-| `compiler/` — the rest of the frontend | **not started**: the surface syntax is explicitly provisional in the spec (`docs/spec-gaps.md` G0.3) |
 | `vm/` — crate `tritium` | **implemented**: the reference TRISC-27 machine — encoder/decoder, ALU, memory, the negative-address device region, CLI |
-| assembler (`.t27`) | **not started, unblocked**: the assembly language is specified (`spec/isa/assembly-0.1.md`) and `tritium::inst` already holds the encoding it needs |
-| backend (TIR → TRISC-27) | **not started, unblocked** |
+| assembler (`.t27`) | **implemented**: two-pass, exact balanced-ternary expressions, all directives and pseudo-instructions (`tritium asm`) |
+| backend (TIR → TRISC-27) | **implemented**: `trustc compile` emits assembly. No register allocator yet — every value lives in a stack slot |
+| `compiler/` — Trust frontend | **not started**: the surface syntax is explicitly provisional in the spec (`docs/spec-gaps.md` G0.3) |
 
 ## Building
 
 ```
-cargo test          # 166 tests
+cargo test          # 199 tests
 cargo build
 ```
 
@@ -43,9 +43,28 @@ trustc run <file.tir> [@fn] [args…]        interpret a TIR function
 trustc legalize <file.tir> [file.target]   legalize for a target (TIR §6)
 trustc target <file.target>                parse and check a target description
 
+trustc compile <file.tir> [@fn]            legalize and emit TRISC-27 assembly
+
+tritium asm <file.t27> [-o <image>]        assemble source into an image
 tritium run <image> [--mem N]              run a TRISC-27 image
 tritium dump <image>                       disassemble an image
 ```
+
+The pipeline runs end to end:
+
+```
+$ trustc compile examples/tir/sum_global.tir @sum_data > sum.t27
+$ tritium asm sum.t27 -o sum.timg
+$ trustc run examples/tir/sum_global.tir @sum_data     # the TIR interpreter
+45  (0t00001TT00, 0hDF4)
+$ tritium run sum.timg                                  # the machine
+tritium: halted with status 45
+```
+
+Both answers come from the same source by different routes, and
+`compiler/tests/pipeline.rs` holds them to it: every end-to-end test runs a
+function on the TIR interpreter *and* through legalization, code generation,
+assembly and the machine, and demands the same result — faults included.
 
 The machine runs. `examples/trisc/echo.timg` is the worked program from the
 ISA's own appendix, and both of its branches are three-way:

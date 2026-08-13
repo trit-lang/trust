@@ -9,6 +9,11 @@ repository.workspace = true
 [dependencies]
 trit-core.workspace = true
 
+[dev-dependencies]
+# The end-to-end tests run generated code on the reference machine. Only the
+# tests need it: the compiler itself emits assembly text and stops there.
+tritium = { path = "../vm" }
+
 [lib]
 name = "trustc"
 path = "src/lib.rs"

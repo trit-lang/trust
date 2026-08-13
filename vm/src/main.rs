@@ -8,16 +8,18 @@ const USAGE: &str = "\
 tritium — the reference TRISC-27 virtual machine (draft 0.1)
 
 usage:
+    tritium asm <file.t27> [-o <image>]         assemble source into an image
     tritium run <image> [--mem N] [--steps N]   run an image, stdin to stdout
     tritium dump <image>                        show an image as instructions
 
 An image is a textual list of tryte values (see `tritium::image`), loaded at
-address 0. Execution begins there.
+address 0. Execution begins there. `asm` writes to stdout without `-o`.
 ";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
+        Some("asm") => cmd_asm(&args[1..]),
         Some("run") => cmd_run(&args[1..]),
         Some("dump") => cmd_dump(&args[1..]),
         Some("-h") | Some("--help") | Some("help") => {
@@ -53,6 +55,29 @@ fn flag(args: &[String], name: &str, default: i128) -> Result<i128, String> {
             .parse::<i128>()
             .map_err(|_| format!("{name} needs a number")),
     }
+}
+
+fn cmd_asm(args: &[String]) -> Result<ExitCode, String> {
+    let path = args.first().ok_or("asm: expected a source file")?;
+    let src = std::fs::read_to_string(path).map_err(|e| format!("cannot read `{path}`: {e}"))?;
+
+    let trytes = tritium::assemble(&src).map_err(|errs| {
+        let mut msg = format!("{} assembly error(s) in `{path}`:", errs.len());
+        for e in &errs {
+            msg.push_str(&format!("\n  {path}:{e}"));
+        }
+        msg
+    })?;
+
+    let text = image::render(&trytes);
+    match args.iter().position(|a| a == "-o") {
+        Some(i) => {
+            let out = args.get(i + 1).ok_or("-o needs a path")?;
+            std::fs::write(out, text).map_err(|e| format!("cannot write `{out}`: {e}"))?;
+        }
+        None => print!("{text}"),
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn cmd_run(args: &[String]) -> Result<ExitCode, String> {

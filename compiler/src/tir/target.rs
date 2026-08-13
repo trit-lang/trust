@@ -24,13 +24,21 @@ pub struct TargetDesc {
 }
 
 impl TargetDesc {
-    /// The reference target: the Tritium VM implementing TRISC-27 (TIR §7).
+    /// The reference target: the Tritium VM implementing TRISC-27.
+    ///
+    /// TIR §7's illustrative example writes `legal = [1, 9, 27]`, but the ISA
+    /// it illustrates has exactly one arithmetic width. `ld.tryte` moves nine
+    /// trits and `wrap` narrows to any width, yet there is no 9-trit adder, so
+    /// a `t9` `add.wrap` is not a native operation and the legal set — which
+    /// describes the ALU — contains the word alone. Legalization promotes
+    /// everything narrower and renormalizes with `wrap`, which is exactly the
+    /// instruction TRISC-27 §4.3 provides for it.
     pub fn tritium() -> TargetDesc {
         TargetDesc {
             name: "tritium".into(),
             addr_unit: 9,
             ptr_width: 27,
-            legal: vec![1, 9, 27],
+            legal: vec![27],
             word: 27,
             call_conv: "tritium0".into(),
         }
@@ -174,6 +182,9 @@ mod tests {
 
     #[test]
     fn parses_the_spec_example() {
+        // TIR §7's example verbatim. It parses and satisfies every §7
+        // constraint — it is simply not the machine TRISC-27 turned out to
+        // describe, which is why `TargetDesc::tritium()` differs from it.
         let src = r#"
 target "tritium" {
     addr_unit   = 9          ; trits per addressable unit (tryte)
@@ -183,7 +194,10 @@ target "tritium" {
     call_conv   = "tritium0" ; symbolic; defined in the target's own doc
 }
 "#;
-        assert_eq!(parse_target(src).unwrap(), TargetDesc::tritium());
+        let parsed = parse_target(src).unwrap();
+        assert_eq!(parsed.legal, vec![1, 9, 27]);
+        assert!(parsed.check().is_empty());
+        assert_eq!(TargetDesc::tritium().legal, vec![27]);
     }
 
     #[test]

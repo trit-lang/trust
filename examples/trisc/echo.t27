@@ -1,0 +1,28 @@
+; echo — the worked program of TRISC-27 Appendix A, in assembly source.
+;
+; Reads the input port until it closes, writing every code unit back out.
+; Both of its branches are three-way: "code unit / waiting / closed", and then
+; "still waiting / closed". Neither is a two-way branch dressed up.
+
+.equ IO_IN,    -1
+.equ IO_OUT,   -2
+.equ MEM_SIZE, -6
+
+start:
+    ld.word  sp, MEM_SIZE(zero)     ; portable across any address-space size
+
+loop:
+    ld.tryte a0, IO_IN(zero)        ; >= 0 code unit, -1 waiting, -2 closed
+    cmp      t0, a0, zero
+    br3      t0, check_eof, echo, echo
+
+check_eof:
+    addi     t1, a0, 1               ; -1 -> 0 (waiting), -2 -> -1 (closed)
+    br3      t1, done, loop, done
+
+echo:
+    st.tryte a0, IO_OUT(zero)
+    j        loop
+
+done:
+    halt     zero                    ; exit status 0

@@ -22,12 +22,14 @@
 //! assert_eq!(vm.run(100), Stop::Halted(42));
 //! ```
 
+pub mod asm;
 pub mod image;
 pub mod inst;
 pub mod mem;
 pub mod vm;
 pub mod word;
 
+pub use asm::{AsmError, assemble};
 pub use inst::{AluOp, Inst, Malformed, Reg, Width};
 pub use mem::Memory;
 pub use vm::{DEFAULT_MEM_SIZE, Io, Stop, Vm, device};

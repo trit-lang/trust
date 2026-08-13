@@ -1,10 +1,21 @@
 ; The reference target: the Tritium VM, implementing TRISC-27.
 ; TIR §7.
+;
+; Note the legal set. TIR §7's illustrative example writes [1, 9, 27], but
+; TRISC-27 as specified has exactly one arithmetic width: the word. `ld.tryte`
+; moves nine trits and `wrap` narrows to any width, but there is no 9-trit
+; adder, so a t9 `add.wrap` is not a native operation. The legal set describes
+; what the ALU does, and this ALU does one width.
+;
+; Legalization therefore promotes everything narrower to t27 and renormalizes
+; with `wrap` — which is exactly the instruction TRISC-27 §4.3 provides for it.
+; `t1` survives as the condition type, and `cmp`, `br3` and `sel3` all read a
+; register's sign, so a promoted trit needs no conversion at all.
 
 target "tritium" {
     addr_unit   = 9          ; trits per addressable unit (tryte)
     ptr_width   = 27         ; trits in an address
-    legal       = [1, 9, 27] ; widths with native operation support
+    legal       = [27]       ; the word is the only arithmetic width
     word        = 27         ; preferred/register width
-    call_conv   = "tritium0" ; symbolic; defined in the target's own doc
+    call_conv   = "tritium0" ; defined in spec/isa/trisc-27-0.1.md §6
 }

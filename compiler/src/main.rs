@@ -12,6 +12,7 @@ usage:
     trustc fmt <file.tir>                      print a module in canonical form
     trustc run <file.tir> [@fn] [args…]        interpret a TIR function
     trustc legalize <file.tir> [file.target]   legalize for a target (TIR §6)
+    trustc compile <file.tir> [@fn]            legalize and emit TRISC-27 assembly
     trustc target <file.target>                parse and check a target description
 
 `run` defaults to `@main`; arguments are decimal, `0t` or `0h` literals and
@@ -31,6 +32,7 @@ fn main() -> ExitCode {
         "fmt" => cmd_fmt(rest),
         "run" => cmd_run(rest),
         "legalize" => cmd_legalize(rest),
+        "compile" => cmd_compile(rest),
         "target" => cmd_target(rest),
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
@@ -166,6 +168,36 @@ fn cmd_legalize(args: &[String]) -> Result<(), String> {
         return Err(msg);
     }
     print!("{}", tir::print_module(&legalized));
+    Ok(())
+}
+
+fn cmd_compile(args: &[String]) -> Result<(), String> {
+    let path = args.first().ok_or("compile: expected a file")?;
+    let entry = match args.get(1) {
+        Some(a) => a.trim_start_matches('@').to_string(),
+        None => "main".to_string(),
+    };
+    let module = load(path)?;
+    let target = tir::TargetDesc::tritium();
+
+    // The backend consumes legalized TIR only, so the pipeline runs the
+    // mandatory pass itself rather than trusting its input (TIR §6).
+    let legalized = tir::legalize_module(&module, &target).map_err(|errs| {
+        let mut msg = format!("{} instruction(s) could not be legalized:", errs.len());
+        for e in &errs {
+            msg.push_str(&format!("\n  {e}"));
+        }
+        msg
+    })?;
+
+    let asm = trustc::codegen::compile(&legalized, &entry).map_err(|errs| {
+        let mut msg = format!("{} code generation error(s):", errs.len());
+        for e in &errs {
+            msg.push_str(&format!("\n  {e}"));
+        }
+        msg
+    })?;
+    print!("{asm}");
     Ok(())
 }
 

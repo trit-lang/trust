@@ -10,5 +10,6 @@
 //! so there is no `.tr` parser yet. The layout engine does not need one: Ch. 2
 //! is stated in terms of types, not syntax. See `docs/spec-gaps.md`.
 
+pub mod codegen;
 pub mod layout;
 pub mod tir;
