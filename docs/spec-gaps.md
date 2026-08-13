@@ -191,9 +191,50 @@ One consequence for a document already written:
   rule can be added later without invalidating any program that predates
   modules, which is why it is deferred rather than guessed at now. Ch. 3 §1.2's note wants half a line changed.
 
-Nothing in Ch. 4 is implemented yet. The frontend still rejects `trait`,
-`impl`, `for`, `dyn` and `<…>` type parameters with the diagnostics Ch. 0 §1.3
-requires, which now name a chapter that exists.
+**G0.7 — Ch. 4's first block is implemented: traits, impls and methods.**
+Trait declarations with required and provided methods, supertraits, inherent
+and trait impls, the four receiver forms, associated functions, method
+resolution with auto-deref and auto-ref, elision rule 3, and `impl Drop for T`
+all work end to end.
+
+The implementation is a desugaring, and that is the interesting part. An impl
+block's method becomes an ordinary function named `Type.method` with `Self`
+substituted away and the receiver an ordinary leading parameter; `p.area()`
+becomes `Point.area(&p)`, with as many dereferences inserted as Ch. 3 §2.3
+calls for. Argument checking, loans, moves, drop flags and the borrow checker
+then apply unchanged, because there is nothing new for them to see — which is
+the claim Ch. 4 §1.2 makes when it says an impl block is a naming construct.
+`impl Drop for T` lands on the same `drop.T` key Ch. 3 §1.4's `fn drop(self: T)`
+already used, so both spellings produce identical code, as §1.4 promised.
+
+Not implemented, and rejected by name: generic parameters (`<T>`), `dyn Trait`,
+closures, `for` loops, `derive`, associated types and constants, `where`
+clauses, and `impl !Copy`. Those are the next two blocks.
+
+Two limits worth naming:
+
+- **`Ord`, `Eq` and the operator traits are not wired to the operators.**
+  A trait named `Ord` may be declared and implemented, but `<` on a user type
+  still does not call it. Ch. 4 §5's lang items need generics first, since
+  their blanket impls do.
+- **No coherence check across impls of the same trait.** Overlap cannot arise
+  without generics — two impls for the same type collide on the method name
+  and are caught — so §1.8's overlap rule has nothing to check yet.
+
+**G6.9 — narrowing a runtime value did not legalize, and now does.** A `t9`
+is not a legal register width on `tritium`, so TIR §6.2 promotes it to a word;
+but a *memory access type* is not promoted, because a `t9` in memory occupies
+one tryte whatever the registers are. The legalizer's `coerce` could only
+widen, so storing a promoted value back into a `t9` failed outright with
+"cannot convert a value of type t27 to t9". Every runtime narrowing was
+affected — `n as t9`, `a[i] += 10` on a `[t9; N]` — and the existing cast test
+missed it because its operands were constants and were folded before
+legalization ever saw them.
+
+The fix is a third case in `coerce`: narrow with `trunc`. It is exact, because
+promotion renormalizes into the narrow type's own symmetric range after every
+operation, so the trits being dropped are already zero. The spec is unchanged;
+this was an implementation gap, not a specification one.
 
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but

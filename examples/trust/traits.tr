@@ -1,0 +1,124 @@
+// traits.tr — Language Ch. 4 §§1.1–1.6: traits, impls, methods.
+//
+// Everything here is static dispatch. `dyn Trait` is Ch. 4 §3 and closures
+// are §4; neither is built yet, and neither is needed for any of this.
+
+fn putchar(c: t9);
+
+// An inherent impl: methods that belong to the type itself (§1.2).
+struct Point { x: t27, y: t27 }
+
+impl Point {
+    // No `self`, so it is an associated function, called on the type (§1.4).
+    fn origin() -> Point {
+        Point { x: 0, y: 0 }
+    }
+
+    // `&self`: reads, and promises not to write.
+    fn magnitude_squared(&self) -> t27 {
+        self.x * self.x + self.y * self.y
+    }
+
+    // `&mut self`: the only reference to this point while it lives.
+    fn translate(&mut self, dx: t27, dy: t27) {
+        self.x += dx;
+        self.y += dy;
+    }
+}
+
+// A trait, with one required method and one provided body (§1.1, §1.5).
+trait Shape {
+    fn area(&self) -> t27;
+
+    fn is_degenerate(&self) -> bool {
+        self.area() == 0
+    }
+}
+
+struct Circle { r: t27 }
+struct Rect { w: t27, h: t27 }
+
+impl Shape for Circle {
+    fn area(&self) -> t27 { self.r * self.r * 3 }
+}
+
+impl Shape for Rect {
+    fn area(&self) -> t27 { self.w * self.h }
+    // `is_degenerate` is not written: the default body serves.
+}
+
+// A supertrait: every `Named` is a `Shape`, so a default body of `Named` may
+// call `area` (§1.6).
+trait Named: Shape {
+    fn initial(&self) -> t9;
+
+    fn report(&self) {
+        putchar(self.initial());
+        putchar(58);       // ':'
+        putchar(32);       // ' '
+        print_signed(self.area());
+        putchar(10);       // '\n'
+    }
+}
+
+impl Named for Circle { fn initial(&self) -> t9 { 67 } }   // 'C'
+impl Named for Rect { fn initial(&self) -> t9 { 82 } }     // 'R'
+
+// A method on a built-in type. The orphan rule permits it because the trait
+// is declared here (§1.8).
+trait Thrice {
+    fn thrice(&self) -> t27;
+}
+
+impl Thrice for t27 {
+    fn thrice(&self) -> t27 { *self * 3 }
+}
+
+// Parameters are `name: Type` (Ch. 0 §3.1) — there is no `mut` binding mode
+// on one — so the digit loop works on a local.
+fn print_signed(value: t27) {
+    let mut n = value;
+    if n < 0 {
+        putchar(45);       // '-'
+        n = -n;
+    }
+    if n == 0 {
+        putchar(48);
+        return;
+    }
+    let mut digits: [t9; 16] = [0; 16];
+    let mut i: taddr = 0;
+    while n > 0 {
+        digits[i] = (n % 10) as t9;
+        n = n / 10;
+        // Round-to-nearest division means `n % 10` may be negative and the
+        // quotient one too large; correct both (Ch. 1 §4).
+        if digits[i] < 0 {
+            digits[i] += 10;
+            n += 1;
+        }
+        i += 1;
+    }
+    while i > 0 {
+        i -= 1;
+        putchar(digits[i] + 48);
+    }
+}
+
+fn main() -> t27 {
+    let mut p = Point::origin();
+    p.translate(3, 4);
+
+    let c = Circle { r: 2 };
+    let r = Rect { w: 3, h: 4 };
+    let flat = Rect { w: 3, h: 0 };
+
+    c.report();
+    r.report();
+
+    let mut n: t27 = p.magnitude_squared();      // 25
+    if flat.is_degenerate() {
+        n += (1).thrice();                       // 3, via the default body
+    }
+    n
+}

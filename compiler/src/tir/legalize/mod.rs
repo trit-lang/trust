@@ -342,11 +342,19 @@ impl Emit<'_> {
 
     /// Convert an operand to the type a use site requires.
     ///
-    /// Only two conversions are ever needed, and each is exact: `widen` lifts
-    /// a `t1` condition into the arithmetic width, and `cmp x, 0` projects an
-    /// arithmetic value back down to a condition trit by *sign* — never by
-    /// residue, which `trunc` would give and which would be wrong for any
-    /// value outside −1…1.
+    /// Three conversions are needed, and each is exact.
+    ///
+    /// `widen` lifts a narrow value into the arithmetic width. `cmp x, 0`
+    /// projects an arithmetic value back down to a condition trit by *sign* —
+    /// never by residue, which `trunc` would give and which would be wrong
+    /// for any value outside −1…1.
+    ///
+    /// `trunc` narrows, and is needed because a **memory access type is not
+    /// promoted**: a `t9` in memory occupies one tryte whatever width the
+    /// registers have, so a promoted value must come back down to be stored.
+    /// It is exact because promotion renormalizes into the narrow type's own
+    /// symmetric range after every operation (TIR §6.2), so the trits being
+    /// dropped are already zero.
     fn coerce(&mut self, o: &Operand, want: Type) -> Operand {
         let o = self.resolve(o);
         let have = match self.type_of(&o) {
@@ -365,6 +373,17 @@ impl Emit<'_> {
                 "w",
                 want,
                 InstKind::Widen {
+                    from: have,
+                    a: o,
+                    to: want,
+                },
+            ),
+            // A store to narrower memory. Not to `t1`: that one is a sign
+            // projection and is handled below.
+            (Type::Int(from), Type::Int(to), _) if to > 1 && to < from => self.emit(
+                "t",
+                want,
+                InstKind::Trunc {
                     from: have,
                     a: o,
                     to: want,

@@ -168,6 +168,12 @@ impl Parser {
         if self.at_kw("enum") {
             return Ok(Item::Enum(self.enum_item(repr)?));
         }
+        if self.at_kw("trait") {
+            return Ok(Item::Trait(self.trait_item()?));
+        }
+        if self.at_kw("impl") {
+            return Ok(Item::Impl(self.impl_item()?));
+        }
         self.err(format!("expected an item, found {}", self.peek()))
     }
 
@@ -322,6 +328,111 @@ impl Parser {
         Ok(tys)
     }
 
+    /// `trait Name: Super + Other { … }` (Ch. 4 §1.1).
+    fn trait_item(&mut self) -> R<TraitItem> {
+        let line = self.line();
+        self.bump(); // trait
+        let name = self.expect_ident()?;
+        self.lifetime_params()?;
+        let mut supertraits = Vec::new();
+        if self.eat_op(":") {
+            loop {
+                supertraits.push(self.expect_ident()?);
+                if !self.eat_op("+") {
+                    break;
+                }
+            }
+        }
+        let methods = self.method_block("trait")?;
+        Ok(TraitItem {
+            name,
+            supertraits,
+            methods,
+            line,
+        })
+    }
+
+    /// `impl Type { … }` or `impl Trait for Type { … }` (Ch. 4 §1.2).
+    fn impl_item(&mut self) -> R<ImplItem> {
+        let line = self.line();
+        self.bump(); // impl
+        self.lifetime_params()?;
+        // `impl !Copy for T` — the one negative impl (Ch. 4 §5.1).
+        if self.at_op("!") {
+            return self.err(
+                "a negative impl is Ch. 4 §5.1, which is specified but not implemented; \
+                 a type opts out of copying by having a destructor",
+            );
+        }
+        let first = self.expect_ident()?;
+        let (trait_name, self_ty) = if self.eat_kw("for") {
+            (Some(first), self.expect_ident()?)
+        } else {
+            (None, first)
+        };
+        self.lifetime_params()?;
+        let methods = self.method_block("impl")?;
+        Ok(ImplItem {
+            trait_name,
+            self_ty,
+            methods,
+            line,
+        })
+    }
+
+    /// The `{ fn … fn … }` body shared by `trait` and `impl`.
+    fn method_block(&mut self, what: &str) -> R<Vec<FnItem>> {
+        self.expect_op("{")?;
+        let mut methods = Vec::new();
+        while !self.eat_op("}") {
+            if self.at(&Tok::Eof) {
+                return self.err(format!("unterminated `{what}` body"));
+            }
+            if !self.at_kw("fn") {
+                return self.err(format!(
+                    "expected `fn`, found {}; a {what} body contains functions, and \
+                     associated types and constants are Ch. 4 §1.7, not implemented yet",
+                    self.peek()
+                ));
+            }
+            methods.push(self.fn_item()?);
+        }
+        Ok(methods)
+    }
+
+    /// One of §1.4's four shortened receiver forms, if that is what comes
+    /// next. Restores the position when it is not, since `&mut x: T` and
+    /// `&mut self` share a prefix.
+    fn self_param(&mut self) -> Option<(String, Ty)> {
+        let start = self.pos;
+        let line = self.line();
+        if self.at_kw("self") {
+            self.bump();
+            // `self: Buffer` is the long form Ch. 3 §1.4 writes; leave it to
+            // the ordinary parameter path.
+            if self.at_op(":") {
+                self.pos = start;
+                return None;
+            }
+            return Some(("self".to_string(), Ty::SelfTy(line)));
+        }
+        if self.eat_op("&") {
+            if let Tok::Lifetime(_) = self.peek() {
+                self.bump();
+            }
+            let mutable = self.eat_kw("mut");
+            if self.at_kw("self") {
+                self.bump();
+                return Some((
+                    "self".to_string(),
+                    Ty::Ref(Box::new(Ty::SelfTy(line)), mutable, line),
+                ));
+            }
+        }
+        self.pos = start;
+        None
+    }
+
     fn fn_item(&mut self) -> R<FnItem> {
         let line = self.line();
         self.bump(); // fn
@@ -331,6 +442,17 @@ impl Parser {
         let mut params = Vec::new();
         if !self.eat_op(")") {
             loop {
+                if let Some(p) = self.self_param() {
+                    params.push(p);
+                    if self.eat_op(",") {
+                        if self.eat_op(")") {
+                            break;
+                        }
+                        continue;
+                    }
+                    self.expect_op(")")?;
+                    break;
+                }
                 let pname = if self.eat_kw("self") {
                     "self".to_string()
                 } else {
@@ -417,6 +539,10 @@ impl Parser {
             }
             let mutable = self.eat_kw("mut");
             return Ok(Ty::Ref(Box::new(self.ty()?), mutable, line));
+        }
+        if self.at_kw("Self") {
+            self.bump();
+            return Ok(Ty::SelfTy(line));
         }
         Ok(Ty::Name(self.expect_ident()?, line))
     }
@@ -617,6 +743,41 @@ impl Parser {
         }
     }
 
+    /// The tail of a path expression, after its first segment.
+    fn path_expr(&mut self, first: String, line: Line) -> R<Expr> {
+        let mut segments = vec![first];
+        while self.eat_op("::") {
+            segments.push(self.expect_ident()?);
+        }
+        let path = Path { segments, line };
+
+        // `Name(args)` is a call when the name is a function and a
+        // tuple-struct or variant literal when it is a type; the two are told
+        // apart during lowering, where the names are known.
+        if self.at_op("(") {
+            let args = self.args()?;
+            if path.segments.len() == 1 {
+                return Ok(Expr::Call(path.segments[0].clone(), args, line));
+            }
+            let fields = args
+                .into_iter()
+                .enumerate()
+                .map(|(i, e)| (i.to_string(), e))
+                .collect();
+            return Ok(Expr::Aggregate(path, fields, line));
+        }
+        // A struct literal is ambiguous with a block in a condition position,
+        // and is not permitted there without parentheses (§2.8).
+        if self.at_op("{") && !self.no_struct {
+            let fields = self.field_values()?;
+            return Ok(Expr::Aggregate(path, fields, line));
+        }
+        if path.segments.len() > 1 {
+            return Ok(Expr::Aggregate(path, Vec::new(), line));
+        }
+        Ok(Expr::Path(path.segments[0].clone(), line))
+    }
+
     fn args(&mut self) -> R<Vec<Expr>> {
         self.expect_op("(")?;
         let mut args = Vec::new();
@@ -652,6 +813,16 @@ impl Parser {
                 self.bump();
                 Ok(Expr::Path("self".to_string(), line))
             }
+            // `Self::new()` and `Self { … }` are paths like any other; the
+            // name is substituted away before lowering (Ch. 4 §1.2).
+            Tok::Kw("Self") => {
+                self.bump();
+                self.path_expr("Self".to_string(), line)
+            }
+            Tok::Kw("for") => self.err(
+                "`for` loops are Ch. 4 §5.7, specified but not implemented; \
+                 write a `while` and an index",
+            ),
             Tok::Kw("true") => {
                 self.bump();
                 Ok(Expr::Bool(true, line))
@@ -662,38 +833,7 @@ impl Parser {
             }
             Tok::Ident(name) => {
                 self.bump();
-                let mut segments = vec![name];
-                while self.eat_op("::") {
-                    segments.push(self.expect_ident()?);
-                }
-                let path = Path { segments, line };
-
-                // `Name(args)` is a call when the name is a function and a
-                // tuple-struct or variant literal when it is a type; the two
-                // are told apart during lowering, where the names are known.
-                if self.at_op("(") {
-                    let args = self.args()?;
-                    if path.segments.len() == 1 {
-                        return Ok(Expr::Call(path.segments[0].clone(), args, line));
-                    }
-                    let fields = args
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, e)| (i.to_string(), e))
-                        .collect();
-                    return Ok(Expr::Aggregate(path, fields, line));
-                }
-                // A struct literal is ambiguous with a block in a condition
-                // position, and is not permitted there without parentheses
-                // (§2.8).
-                if self.at_op("{") && !self.no_struct {
-                    let fields = self.field_values()?;
-                    return Ok(Expr::Aggregate(path, fields, line));
-                }
-                if path.segments.len() > 1 {
-                    return Ok(Expr::Aggregate(path, Vec::new(), line));
-                }
-                Ok(Expr::Path(path.segments[0].clone(), line))
+                self.path_expr(name, line)
             }
             Tok::Op("(") => {
                 self.bump();

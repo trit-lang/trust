@@ -56,6 +56,13 @@ fn hello_world_runs_the_whole_way() {
     assert_eq!(out, "Hello, world!\n");
 }
 
+#[test]
+fn the_traits_example_runs_the_whole_way() {
+    let (status, out) = run(include_str!("../../examples/trust/traits.tr"));
+    assert_eq!(status, 28);
+    assert_eq!(out, "C: 12\nR: 12\n");
+}
+
 // ------------------------------------------------------------- expressions
 
 #[test]
@@ -138,6 +145,19 @@ fn casts_are_explicit_and_follow_chapter_one() {
     // Narrowing wraps into the narrow symmetric range.
     assert_eq!(value("9842 as t9 as t27"), -9841);
     assert_eq!(value("1t as t27"), 1);
+    // A *runtime* narrowing, which constant folding cannot hide: `t9` is not
+    // a legal register width on this target, so the value is promoted to a
+    // word and must come back down to be stored (TIR §6.2).
+    assert_eq!(
+        run("fn main() -> t27 { let n: t27 = 9842; let d: t9 = n as t9; d as t27 }").0,
+        -9841
+    );
+    assert_eq!(
+        run("fn main() -> t27 { let mut a: [t9; 4] = [0; 4]; let i: taddr = 1; \
+             a[i] += 10; a[i] as t27 }")
+            .0,
+        10
+    );
 }
 
 // ------------------------------------------------------- control and state
@@ -253,11 +273,13 @@ fn the_deferred_features_say_what_they_are_waiting_for() {
     assert!(error("fn main() -> t27 { 1 ^ 2 }").contains("tmul"));
     // Reserved for a chapter nobody has written…
     assert!(error("fn main() -> t27 { mod m; 0 }").contains("not written yet"));
-    // …as against one that is written and not built.
-    assert!(error("fn main() -> t27 { for x in y { } 0 }").contains("Ch. 4"));
-    assert!(error("trait Shape { }").contains("Ch. 4"));
-    // References are Chapter 3 and now work; generics are still Chapter 4.
+    // …as against one that is written and only partly built.
+    assert!(error("fn main() -> t27 { let x: dyn Shape = 0; 0 }").contains("Ch. 4"));
+    assert!(error("fn main() -> t27 { for x in y { } 0 }").contains("§5.7"));
+    // References are Chapter 3 and traits are Chapter 4, and both now work;
+    // generic parameters are the next piece of Chapter 4.
     tir_of("fn f(x: &t27) -> t27 { *x }");
+    tir_of("trait Shape { fn area(&self) -> t27; }");
     assert!(error("fn f<T>(x: T) -> T { x }").contains("Chapter 4"));
 }
 
@@ -611,7 +633,7 @@ fn a_reference_may_be_returned_under_elision() {
     assert_eq!(
         run("fn first(xs: &[t27]) -> &t27 { &xs[0] } \
              fn main() -> t27 { let a: [t27; 3] = [7, 8, 9]; *first(&a) }")
-            .0,
+        .0,
         7
     );
     // A reference into a local would dangle.
@@ -668,7 +690,7 @@ fn a_borrow_lives_to_its_last_use_and_no_further() {
                  p.x = 9; \
                  a + p.x \
              }")
-            .0,
+        .0,
         10
     );
     // A borrow taken and used inside a loop body is fine.
@@ -773,4 +795,179 @@ fn drops_nest_through_fields() {
          struct Outer { a: Inner, b: Inner } \
          fn main() -> t27 { let o = Outer { a: Inner { t: 49 }, b: Inner { t: 50 } }; 0 }");
     assert_eq!(out, "12"); // declaration order within the struct
+}
+
+// ------------------------------------------------- Chapter 4: traits, impls
+
+#[test]
+fn inherent_methods_and_associated_functions() {
+    // Ch. 4 §1.2: an impl block attaches methods to a type; §1.4: a function
+    // without a `self` receiver is called on the type.
+    assert_eq!(
+        run("struct Point { x: t27, y: t27 } \
+             impl Point { \
+                 fn origin() -> Point { Point { x: 0, y: 0 } } \
+                 fn magnitude_squared(&self) -> t27 { self.x * self.x + self.y * self.y } \
+                 fn translate(&mut self, dx: t27, dy: t27) { self.x += dx; self.y += dy; } \
+             } \
+             fn main() -> t27 { \
+                 let mut p = Point::origin(); \
+                 p.translate(3, 4); \
+                 p.magnitude_squared() \
+             }")
+        .0,
+        25
+    );
+}
+
+#[test]
+fn a_trait_is_implemented_and_dispatched_statically() {
+    // §1.1, §1.2, §1.5: required methods, two impls, and a default body the
+    // second impl does not override.
+    let src = "trait Shape { \
+                   fn area(&self) -> t27; \
+                   fn is_degenerate(&self) -> bool { self.area() == 0 } \
+               } \
+               struct Circle { r: t27 } \
+               struct Rect { w: t27, h: t27 } \
+               impl Shape for Circle { fn area(&self) -> t27 { self.r * self.r * 3 } } \
+               impl Shape for Rect { fn area(&self) -> t27 { self.w * self.h } } \
+               fn main() -> t27 { \
+                   let c = Circle { r: 2 }; \
+                   let r = Rect { w: 3, h: 0 }; \
+                   let mut n: t27 = c.area(); \
+                   if r.is_degenerate() { n += 100; } \
+                   n \
+               }";
+    assert_eq!(run(src).0, 112);
+}
+
+#[test]
+fn a_supertrait_supplies_its_methods() {
+    // §1.6, and the default body of `B` calling a required method of `A`.
+    assert_eq!(
+        run("trait A { fn a(&self) -> t27; } \
+             trait B: A { fn b(&self) -> t27 { self.a() * 2 } } \
+             struct S { n: t27 } \
+             impl A for S { fn a(&self) -> t27 { self.n } } \
+             impl B for S { } \
+             fn main() -> t27 { let s = S { n: 21 }; s.b() }")
+        .0,
+        42
+    );
+    assert!(error("trait B: Nope { } fn main() -> t27 { 0 }").contains("not a trait in scope"));
+}
+
+#[test]
+fn a_receiver_auto_dereferences_and_writes_through() {
+    // Ch. 3 §2.3 applies to method receivers: `r.get()` through a reference.
+    assert_eq!(
+        run("struct P { x: t27 } \
+             impl P { fn get(&self) -> t27 { self.x } fn set(&mut self, v: t27) { self.x = v; } } \
+             fn read(p: &P) -> t27 { p.get() } \
+             fn write(p: &mut P) { p.set(9); } \
+             fn main() -> t27 { let mut p = P { x: 1 }; write(&mut p); read(&p) }")
+        .0,
+        9
+    );
+    // A method on a built-in type: the orphan rule permits it because the
+    // trait is local (§1.8).
+    assert_eq!(
+        run("trait Double { fn double(&self) -> t27; } \
+             impl Double for t27 { fn double(&self) -> t27 { *self * 2 } } \
+             fn main() -> t27 { (21).double() }")
+        .0,
+        42
+    );
+}
+
+#[test]
+fn elision_rule_three_lends_from_self() {
+    // Ch. 4 §1.4: a `&self` method lends to its result, and rule 2 does not
+    // get to complain about the other reference parameters.
+    assert_eq!(
+        run("struct W { d: [t27; 3] } \
+             impl W { fn first(&self, _other: &t27) -> &t27 { &self.d[0] } } \
+             fn main() -> t27 { let w = W { d: [9, 8, 7] }; let k: t27 = 1; *w.first(&k) }")
+        .0,
+        9
+    );
+    // And the caller's borrow lives as long as the result does.
+    let e = error(
+        "struct P { x: t27 } \
+         impl P { fn get(&self) -> &t27 { &self.x } } \
+         fn main() -> t27 { let mut p = P { x: 1 }; let r = p.get(); p.x = 9; *r }",
+    );
+    assert!(e.contains("cannot be written to"), "{e}");
+}
+
+#[test]
+fn drop_is_a_trait_and_means_what_chapter_three_said() {
+    // Ch. 4 §5.2: `impl Drop for B` is Ch. 3 §1.4's `fn drop(self: B)`, and
+    // both make the type non-copyable and get called at end of scope.
+    let both = [
+        "struct B { x: t27 } impl Drop for B { fn drop(self) { } }",
+        "struct B { x: t27 } fn drop(self: B) { }",
+    ];
+    for decl in both {
+        let m = tir_of(&format!(
+            "{decl} fn main() -> t27 {{ let b = B {{ x: 7 }}; b.x }}"
+        ));
+        let printed = tir::print_module(&m);
+        assert!(printed.contains("drop.B"), "{printed}");
+        // Moving it out means it is not dropped, and not usable either.
+        let e = error(&format!(
+            "{decl} fn take(b: B) -> t27 {{ b.x }} \
+             fn main() -> t27 {{ let a = B {{ x: 1 }}; let n = take(a); let m = a.x; n }}"
+        ));
+        assert!(e.contains("moved out of"), "{e}");
+    }
+    // §5.2's restrictions.
+    assert!(
+        error("struct S { } impl S { fn drop(self) { } } fn main() -> t27 { 0 }")
+            .contains("impl Drop for T")
+    );
+    let e = error("struct S { } impl Drop for S { fn drop(&self) { } } fn main() -> t27 { 0 }");
+    assert!(e.contains("by value"), "{e}");
+}
+
+#[test]
+fn a_trait_impl_must_match_its_trait() {
+    let s = "trait T { fn f(&self) -> t27; } struct S { } ";
+    // Missing a required method.
+    assert!(error(&format!("{s} impl T for S {{ }} fn main() -> t27 {{ 0 }}")).contains("missing"));
+    // Supplying one the trait does not declare (§1.2).
+    let e = error(&format!(
+        "{s} impl T for S {{ fn f(&self) -> t27 {{ 1 }} fn g(&self) -> t27 {{ 2 }} }} \
+         fn main() -> t27 {{ 0 }}"
+    ));
+    assert!(e.contains("no method `g`"), "{e}");
+    // A signature that disagrees.
+    let e = error(&format!(
+        "{s} impl T for S {{ fn f(&self) -> t9 {{ 1 }} }} fn main() -> t27 {{ 0 }}"
+    ));
+    assert!(e.contains("does not match"), "{e}");
+    // Two methods of the same name on one type (§1.3).
+    let e = error(
+        "struct S { } impl S { fn f(&self) -> t27 { 1 } } \
+         impl S { fn f(&self) -> t27 { 2 } } fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("already has a method"), "{e}");
+    // A method that does not exist.
+    let e = error("struct S { } fn main() -> t27 { let s = S { }; s.nope() }");
+    assert!(e.contains("no method `nope`"), "{e}");
+}
+
+#[test]
+fn chapter_ones_methods_are_the_languages_and_are_not_overridden() {
+    // §5.4's principle applied to Ch. 1: the built-in methods resolve first,
+    // so an impl cannot change what `tmin` means.
+    assert_eq!(value("0t111.tmin(0t1T0)"), 6);
+    assert_eq!(
+        run("trait Bad { fn tmin(&self, o: t27) -> t27; } \
+             impl Bad for t27 { fn tmin(&self, o: t27) -> t27 { 999 } } \
+             fn main() -> t27 { 0t111.tmin(0t1T0) }")
+        .0,
+        6
+    );
 }

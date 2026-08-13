@@ -22,12 +22,12 @@ the source.
 | backend (TIR → TRISC-27) | **implemented**: `trustc compile` emits assembly. No register allocator yet — every value lives in a stack slot |
 | `compiler/` — Trust frontend | **implemented through Ch. 2**: lexer, parser, type checker and lowering to TIR — scalars, arrays, tuples, structs, enums with payloads and niches, both `repr`s, all control flow |
 | Ch. 3 — ownership and references | **built**: `&T`/`&mut T`, deref and auto-deref, slices, bounds-checked indexing, erased lifetimes, moves through branches and loops, destructors with drop flags, and a non-lexical borrow checker. A reference may be returned under elision rule 2; regions are not inferred, so rooting is checked syntactically and written lifetimes wait for Ch. 4 (G0.5) |
-| Ch. 4 — generics and traits | **specified, not implemented**: `spec/language/04-generics.md` defines traits, impls, methods, generics, `dyn Trait`, closures, `for`, `derive`, and the language's own traits — `Ord::cmp` returning `trit` with no `PartialOrd` above it, `Copy` automatic, `Drop` taking `self` by value. The frontend still rejects all of it by name (G0.6) |
+| Ch. 4 — generics and traits | **specified in full, built in part**: traits, impls, methods, the four receivers, associated functions, supertraits, default bodies, elision rule 3 and `impl Drop for T` all run end to end. Generic parameters, `dyn Trait`, closures, `for` and `derive` are specified and rejected by name (G0.7) |
 
 ## Building
 
 ```
-cargo test          # 255 tests
+cargo test          # 264 tests
 cargo build
 ```
 

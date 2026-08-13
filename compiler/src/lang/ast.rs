@@ -23,6 +23,36 @@ pub enum Item {
     Struct(StructItem),
     /// `enum Name { … }` (§3.3).
     Enum(EnumItem),
+    /// `trait Name: Super { … }` (Ch. 4 §1.1).
+    Trait(TraitItem),
+    /// `impl Type { … }` or `impl Trait for Type { … }` (Ch. 4 §1.2).
+    Impl(ImplItem),
+}
+
+/// A trait declaration (Ch. 4 §1.1).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TraitItem {
+    /// Its name.
+    pub name: String,
+    /// Its supertraits (§1.6).
+    pub supertraits: Vec<String>,
+    /// Its methods, required (no body) or provided (with one, §1.5).
+    pub methods: Vec<FnItem>,
+    /// Where it was written.
+    pub line: Line,
+}
+
+/// An impl block (Ch. 4 §1.2).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ImplItem {
+    /// The trait being implemented, or `None` for an inherent impl.
+    pub trait_name: Option<String>,
+    /// The type being implemented.
+    pub self_ty: String,
+    /// Its methods and associated functions.
+    pub methods: Vec<FnItem>,
+    /// Where it was written.
+    pub line: Line,
 }
 
 /// How a nominal type is laid out (§3.4, Ch. 2 §1).
@@ -119,6 +149,9 @@ pub enum Ty {
     Ref(Box<Ty>, bool, Line),
     /// `[T]` — dynamically sized, and legal only behind a reference.
     Slice(Box<Ty>, Line),
+    /// `Self` — the implementing type, substituted away before lowering
+    /// (Ch. 4 §1.2).
+    SelfTy(Line),
 }
 
 impl Ty {
@@ -130,7 +163,8 @@ impl Ty {
             | Ty::Array(_, _, l)
             | Ty::Tuple(_, l)
             | Ty::Ref(_, _, l)
-            | Ty::Slice(_, l) => *l,
+            | Ty::Slice(_, l)
+            | Ty::SelfTy(l) => *l,
         }
     }
 }

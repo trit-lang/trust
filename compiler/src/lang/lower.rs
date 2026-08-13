@@ -395,9 +395,23 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
         }
     };
 
+    // Impl blocks become ordinary functions before anything else looks at
+    // the file, so the rest of lowering never learns they existed.
+    let (expanded, impl_errs) = expand_impls(file, &types);
+    errs.extend(impl_errs);
+    let fns: Vec<ast::FnItem> = file
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            ast::Item::Fn(f) => Some(f.clone()),
+            _ => None,
+        })
+        .chain(expanded)
+        .collect();
+
     let mut sigs: HashMap<String, (Vec<Ty>, Ty)> = HashMap::new();
-    for item in &file.items {
-        if let ast::Item::Fn(f) = item {
+    for f in &fns {
+        {
             let params: Result<Vec<Ty>, Error> = f
                 .params
                 .iter()
@@ -411,8 +425,12 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
                 None => Ok(Ty::Unit),
                 Some(t) => resolve_ty(t, &types),
             };
+            let self_ref = matches!(
+                f.params.first(),
+                Some((n, ast::Ty::Ref(..))) if n == "self"
+            );
             if let (Ok(p), Ok(r)) = (&params, &ret)
-                && let Err(e) = check_returned_reference(p, r, f.line)
+                && let Err(e) = check_returned_reference(p, r, self_ref, f.line)
             {
                 errs.push(e);
                 continue;
@@ -449,8 +467,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
         }
     }
 
-    for item in &file.items {
-        let ast::Item::Fn(f) = item else { continue };
+    for f in &fns {
         if !sigs.contains_key(&fn_key(f)) {
             continue; // its signature was already reported
         }
@@ -473,6 +490,33 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
     }
 }
 
+/// The methods Ch. 1 defines on the built-in types. A user method of the
+/// same name on the same type would shadow a language rule, so these are
+/// matched first and impl blocks never see them.
+const BUILTIN_METHODS: &[&str] = &[
+    "tmin",
+    "tmax",
+    "tmul",
+    "tneg",
+    "is_pos",
+    "is_zero",
+    "is_neg",
+    "to_trit",
+    "len",
+    "wrapping_add",
+    "wrapping_sub",
+    "wrapping_mul",
+    "saturating_add",
+    "saturating_sub",
+    "saturating_mul",
+    "overflowing_add",
+    "overflowing_sub",
+    "overflowing_mul",
+    "checked_add",
+    "checked_sub",
+    "checked_mul",
+];
+
 /// The name of the hidden out-pointer for an aggregate return.
 const SRET: &str = "sret";
 
@@ -494,8 +538,13 @@ fn fn_key(f: &ast::FnItem) -> String {
 /// exactly one reference among the parameters, the returned reference borrows
 /// from it, and the caller's loan is extended to cover the result. With none
 /// or several, the signature is the one §3.3 calls ill-formed.
-fn check_returned_reference(params: &[Ty], ret: &Ty, line: Line) -> R<()> {
+fn check_returned_reference(params: &[Ty], ret: &Ty, self_ref: bool, line: Line) -> R<()> {
     if !contains_reference(ret) {
+        return Ok(());
+    }
+    // Rule 3 first: a method borrowing `self` lends to its result, whatever
+    // else it takes (Ch. 4 §1.4).
+    if self_ref {
         return Ok(());
     }
     let sources = params.iter().filter(|t| contains_reference(t)).count();
@@ -536,6 +585,359 @@ fn contains_reference(ty: &Ty) -> bool {
         Ty::Ref(..) | Ty::Slice(_) => true,
         Ty::Array(t, _) => contains_reference(t),
         Ty::Tuple(ts) => ts.iter().any(contains_reference),
+        _ => false,
+    }
+}
+
+/// The name a method on this type is keyed by (Ch. 4 §1.2). Scalars have one
+/// too, so `impl Trait for t27` is expressible — the orphan rule permits it
+/// because the trait is local (§1.8).
+fn nominal_name(ty: &Ty) -> Option<String> {
+    Some(match ty {
+        Ty::Struct(n) | Ty::Enum(n) => n.clone(),
+        Ty::Trit => "trit".into(),
+        Ty::Bool => "bool".into(),
+        Ty::T9 => "t9".into(),
+        Ty::T27 => "t27".into(),
+        Ty::TAddr => "taddr".into(),
+        _ => return None,
+    })
+}
+
+/// Substitute `Self` for the implementing type throughout a method, in type
+/// and in path position, so that nothing downstream ever sees `Self`.
+fn subst_self(f: &ast::FnItem, self_ty: &str) -> ast::FnItem {
+    let mut f = f.clone();
+    for (_, t) in &mut f.params {
+        subst_ty(t, self_ty);
+    }
+    if let Some(t) = &mut f.ret {
+        subst_ty(t, self_ty);
+    }
+    if let Some(b) = &mut f.body {
+        subst_block(b, self_ty);
+    }
+    f
+}
+
+fn subst_ty(t: &mut ast::Ty, self_ty: &str) {
+    match t {
+        ast::Ty::SelfTy(l) => *t = ast::Ty::Name(self_ty.to_string(), *l),
+        ast::Ty::Array(e, _, _) | ast::Ty::Ref(e, _, _) | ast::Ty::Slice(e, _) => {
+            subst_ty(e, self_ty)
+        }
+        ast::Ty::Tuple(ts, _) => ts.iter_mut().for_each(|t| subst_ty(t, self_ty)),
+        ast::Ty::Name(..) | ast::Ty::Unit(_) => {}
+    }
+}
+
+fn subst_block(b: &mut ast::Block, self_ty: &str) {
+    for st in &mut b.stmts {
+        match st {
+            ast::Stmt::Let { ty, value, .. } => {
+                if let Some(t) = ty {
+                    subst_ty(t, self_ty);
+                }
+                subst_expr(value, self_ty);
+            }
+            ast::Stmt::Expr(e) => subst_expr(e, self_ty),
+        }
+    }
+    if let Some(t) = &mut b.tail {
+        subst_expr(t, self_ty);
+    }
+}
+
+fn subst_expr(e: &mut ast::Expr, self_ty: &str) {
+    use ast::Expr::*;
+    let mut kids: Vec<&mut ast::Expr> = Vec::new();
+    match e {
+        Aggregate(path, fields, _) => {
+            for seg in &mut path.segments {
+                if seg == "Self" {
+                    *seg = self_ty.to_string();
+                }
+            }
+            kids.extend(fields.iter_mut().map(|(_, e)| e));
+        }
+        Path(name, _) => {
+            if name == "Self" {
+                *name = self_ty.to_string();
+            }
+        }
+        Cast(a, t, _) => {
+            subst_ty(t, self_ty);
+            kids.push(a);
+        }
+        Unary(_, a, _) | Deref(a, _) | Borrow(a, _, _) | Field(a, _, _) => kids.push(a),
+        Binary(_, a, b, _) | Assign(_, a, b, _) | Index(a, b, _) | Repeat(a, b, _) => {
+            kids.push(a);
+            kids.push(b);
+        }
+        Call(_, args, _) | Array(args, _) | Tuple(args, _) => kids.extend(args.iter_mut()),
+        Method(r, _, args, _) => {
+            kids.push(r);
+            kids.extend(args.iter_mut());
+        }
+        Block(b) | Loop(b, _) => return subst_block(b, self_ty),
+        If(c, t, e2, _) => {
+            subst_expr(c, self_ty);
+            subst_block(t, self_ty);
+            if let Some(e2) = e2 {
+                subst_expr(e2, self_ty);
+            }
+            return;
+        }
+        While(c, b, _) => {
+            subst_expr(c, self_ty);
+            subst_block(b, self_ty);
+            return;
+        }
+        Match(sc, arms, _) => {
+            subst_expr(sc, self_ty);
+            for a in arms {
+                if let Some(g) = &mut a.guard {
+                    subst_expr(g, self_ty);
+                }
+                subst_expr(&mut a.body, self_ty);
+            }
+            return;
+        }
+        Break(v, _) | Return(v, _) => {
+            if let Some(v) = v {
+                subst_expr(v, self_ty);
+            }
+            return;
+        }
+        Int(..) | Trit(..) | Bool(..) | Unit(_) | Continue(_) => {}
+    }
+    for k in kids {
+        subst_expr(k, self_ty);
+    }
+}
+
+/// Expand every `trait` and `impl` in the file into ordinary functions.
+///
+/// A method becomes a function named `Type.method`, `Self` substituted away
+/// and the receiver an ordinary leading parameter. Everything downstream —
+/// signatures, calls, drops, the borrow checker — then works unchanged, which
+/// is the point: Ch. 4 §1.2's impl block is a naming construct, not a new
+/// kind of code.
+fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error>) {
+    let mut out = Vec::new();
+    let mut errs = Vec::new();
+    let mut traits: HashMap<String, &ast::TraitItem> = HashMap::new();
+
+    for item in &file.items {
+        if let ast::Item::Trait(t) = item
+            && traits.insert(t.name.clone(), t).is_some()
+        {
+            errs.push(SyntaxError {
+                line: t.line,
+                message: format!("`{}` is defined more than once", t.name),
+            });
+        }
+    }
+    for t in traits.values() {
+        for s in &t.supertraits {
+            if !traits.contains_key(s) && s != "Eq" && s != "Ord" {
+                errs.push(SyntaxError {
+                    line: t.line,
+                    message: format!("`{s}` is not a trait in scope"),
+                });
+            }
+        }
+    }
+
+    // Which methods each type already has, so a collision is reported rather
+    // than silently resolved (§1.3).
+    let mut defined: HashMap<String, Line> = HashMap::new();
+
+    for item in &file.items {
+        let ast::Item::Impl(imp) = item else { continue };
+        let self_ty = &imp.self_ty;
+        if !types.structs.contains_key(self_ty)
+            && !types.enums.contains_key(self_ty)
+            && !matches!(self_ty.as_str(), "trit" | "bool" | "t9" | "t27" | "taddr")
+        {
+            errs.push(SyntaxError {
+                line: imp.line,
+                message: format!("`{self_ty}` is not a type in scope"),
+            });
+            continue;
+        }
+
+        let mut methods: Vec<ast::FnItem> = imp.methods.clone();
+
+        if let Some(trait_name) = &imp.trait_name {
+            // `Drop` is the language's own (Ch. 4 §5.2) and is not declared
+            // in the file.
+            if trait_name == "Drop" {
+                if let Err(e) = check_drop_impl(imp) {
+                    errs.push(e);
+                    continue;
+                }
+            } else {
+                let Some(decl) = traits.get(trait_name) else {
+                    errs.push(SyntaxError {
+                        line: imp.line,
+                        message: format!("`{trait_name}` is not a trait in scope"),
+                    });
+                    continue;
+                };
+                match check_trait_impl(decl, imp) {
+                    Ok(defaults) => methods.extend(defaults),
+                    Err(e) => {
+                        errs.push(e);
+                        continue;
+                    }
+                }
+            }
+        }
+
+        for m in &methods {
+            let f = subst_self(m, self_ty);
+            // A destructor keeps its own name so that `fn_key` gives it the
+            // `drop.Type` key the drop machinery already uses (Ch. 3 §1.4).
+            let is_destructor = imp.trait_name.as_deref() == Some("Drop") && f.name == "drop";
+            if !is_destructor && f.name == "drop" {
+                errs.push(SyntaxError {
+                    line: f.line,
+                    message: "a destructor is written `impl Drop for T` (Ch. 4 §5.2); \
+                              an inherent `drop` would never be called"
+                        .into(),
+                });
+                continue;
+            }
+            let key = if is_destructor {
+                format!("drop.{self_ty}")
+            } else {
+                format!("{self_ty}.{}", f.name)
+            };
+            if let Some(first) = defined.insert(key.clone(), f.line) {
+                errs.push(SyntaxError {
+                    line: f.line,
+                    message: format!(
+                        "`{self_ty}` already has a method `{}` (line {first}); \
+                         §1.3 requires the ambiguity be written out",
+                        f.name
+                    ),
+                });
+                continue;
+            }
+            out.push(ast::FnItem {
+                name: if is_destructor { f.name.clone() } else { key },
+                ..f
+            });
+        }
+    }
+
+    // A trait declaration's provided bodies are only reachable through an
+    // impl, so a trait with no impl contributes nothing but is still checked
+    // for a supertrait that does not exist, above.
+    (out, errs)
+}
+
+/// `impl Drop for T` must supply exactly `fn drop(self)` (Ch. 4 §5.2).
+fn check_drop_impl(imp: &ast::ImplItem) -> R<()> {
+    let bad = |line| {
+        err(
+            line,
+            "`impl Drop` supplies exactly one method, `fn drop(self)` (Ch. 4 §5.2)",
+        )
+    };
+    if imp.methods.len() != 1 {
+        return bad(imp.line);
+    }
+    let m = &imp.methods[0];
+    if m.name != "drop" || m.ret.is_some() {
+        return bad(m.line);
+    }
+    match m.params.as_slice() {
+        [(n, ast::Ty::SelfTy(_))] if n == "self" => Ok(()),
+        _ => err(
+            m.line,
+            "a destructor takes `self` by value, so that dropping its fields is not \
+             a drop of `self` (Ch. 3 §1.4)",
+        ),
+    }
+}
+
+/// Check an impl against its trait, and return the provided methods it did
+/// not override (Ch. 4 §§1.2, 1.5).
+fn check_trait_impl(decl: &ast::TraitItem, imp: &ast::ImplItem) -> R<Vec<ast::FnItem>> {
+    for m in &imp.methods {
+        let Some(want) = decl.methods.iter().find(|d| d.name == m.name) else {
+            return err(
+                m.line,
+                format!(
+                    "`{}` has no method `{}`, and a trait impl may supply nothing else",
+                    decl.name, m.name
+                ),
+            );
+        };
+        let same_ret = match (&want.ret, &m.ret) {
+            (None, None) => true,
+            (Some(a), Some(b)) => same_ast_ty(a, b),
+            _ => false,
+        };
+        if want.params.len() != m.params.len() || !same_ret {
+            return err(
+                m.line,
+                format!(
+                    "`{}` does not match the signature `{}` declares",
+                    m.name, decl.name
+                ),
+            );
+        }
+        for ((_, a), (_, b)) in want.params.iter().zip(&m.params) {
+            if !same_ast_ty(a, b) {
+                return err(
+                    m.line,
+                    format!(
+                        "`{}` does not match the signature `{}` declares",
+                        m.name, decl.name
+                    ),
+                );
+            }
+        }
+        if m.body.is_none() {
+            return err(m.line, format!("`{}` needs a body here", m.name));
+        }
+    }
+    let mut defaults = Vec::new();
+    for d in &decl.methods {
+        if imp.methods.iter().any(|m| m.name == d.name) {
+            continue;
+        }
+        match d.body {
+            Some(_) => defaults.push(d.clone()),
+            None => {
+                return err(
+                    imp.line,
+                    format!(
+                        "`impl {} for {}` is missing `{}`, which the trait requires",
+                        decl.name, imp.self_ty, d.name
+                    ),
+                );
+            }
+        }
+    }
+    Ok(defaults)
+}
+
+/// Structural equality of written types, ignoring where they were written.
+fn same_ast_ty(a: &ast::Ty, b: &ast::Ty) -> bool {
+    use ast::Ty::*;
+    match (a, b) {
+        (Name(x, _), Name(y, _)) => x == y,
+        (Unit(_), Unit(_)) | (SelfTy(_), SelfTy(_)) => true,
+        (Ref(x, m, _), Ref(y, n, _)) => m == n && same_ast_ty(x, y),
+        (Slice(x, _), Slice(y, _)) => same_ast_ty(x, y),
+        (Array(x, _, _), Array(y, _, _)) => same_ast_ty(x, y),
+        (Tuple(x, _), Tuple(y, _)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(x, y)| same_ast_ty(x, y))
+        }
         _ => false,
     }
 }
@@ -642,8 +1044,34 @@ fn build_types(file: &ast::File) -> R<Types> {
         }
     }
 
+    // `impl Drop for T` (Ch. 4 §5.2) — registered here rather than after
+    // expansion, because whether a type has a destructor decides whether it
+    // is copyable, and that decides how every use of it lowers.
+    for item in &file.items {
+        let ast::Item::Impl(imp) = item else { continue };
+        if imp.trait_name.as_deref() != Some("Drop") {
+            continue;
+        }
+        if !types.structs.contains_key(&imp.self_ty) && !types.enums.contains_key(&imp.self_ty) {
+            return err(
+                imp.line,
+                format!(
+                    "`{}` cannot have a destructor: it is not declared in this file",
+                    imp.self_ty
+                ),
+            );
+        }
+        if !types.destructors.insert(imp.self_ty.clone()) {
+            return err(
+                imp.line,
+                format!("`{}` has more than one destructor", imp.self_ty),
+            );
+        }
+    }
+
     // A function named `drop` whose one parameter is named `self` is that
-    // parameter's type's destructor (Ch. 3 §1.4).
+    // parameter's type's destructor (Ch. 3 §1.4). This is the spelling that
+    // predates impl blocks, and Ch. 3 §1.4 promises it keeps its meaning.
     for item in &file.items {
         let ast::Item::Fn(f) = item else { continue };
         if f.name != "drop" {
@@ -698,6 +1126,12 @@ fn repr_of(r: ast::Repr) -> layout::Repr {
 
 fn resolve_ty(t: &ast::Ty, types: &Types) -> R<Ty> {
     match t {
+        // Substitution replaces every `Self` before lowering (Ch. 4 §1.2),
+        // so one surviving here was written where there is no impl.
+        ast::Ty::SelfTy(l) => err(
+            *l,
+            "`Self` names the implementing type, and there is none here",
+        ),
         ast::Ty::Unit(_) => Ok(Ty::Unit),
         ast::Ty::Tuple(ts, _) => Ok(Ty::Tuple(
             ts.iter().map(|t| resolve_ty(t, types)).collect::<R<_>>()?,
@@ -824,6 +1258,9 @@ struct Fn<'a> {
     /// The names of this function's parameters, for §4.1's check that a
     /// returned reference does not point into a local.
     params: Vec<String>,
+    /// Whether elision rule 3 applies here — a `&self` receiver, which lends
+    /// to the result and leaves the other parameters out of it (Ch. 4 §1.4).
+    self_lends: bool,
     /// Set while lowering a destructor: the type whose `self` this is.
     ///
     /// Inside it, `self` is not dropped as a whole — that would call this
@@ -872,6 +1309,10 @@ fn function(
         stmt_index: 0,
         last_use: last_use_of(body),
         params: f.params.iter().map(|(n, _)| n.clone()).collect(),
+        self_lends: matches!(
+            f.params.first(),
+            Some((n, ast::Ty::Ref(..))) if n == "self"
+        ),
         destructor_of,
         counter: 0,
         done: false,
@@ -1188,13 +1629,34 @@ impl Fn<'_> {
 
     /// Check an access against the live loans (Ch. 3 §2.2).
     fn check_access(&mut self, path: &PlacePath, access: Access, line: Line) -> R<()> {
+        // §4.1's first check, before the aliasing one: a place is used only
+        // where it is certainly initialized. A move out of a local leaves
+        // every projection of it uninitialized too, so `a.x` after `a` moved
+        // is as dead as `a` is.
+        let root = &path.root;
+        let moved = match self.ownership(root) {
+            Some(Owns::No) => Some("was moved out of and cannot be used again"),
+            Some(Owns::Maybe) => Some("may have been moved out of on some path here"),
+            _ => None,
+        };
+        if let Some(what) = moved
+            && !path.projections.is_empty()
+        {
+            return err(line, format!("`{root}` {what} (Ch. 3 §4.1)"));
+        }
+
         self.retire_loans();
         for loan in &self.loans {
             if !loan.place.conflicts(path) {
                 continue;
             }
             let borrowed = describe(&loan.place);
-            let kind = if loan.mutable { "exclusively" } else { "shared" };
+            let since = loan.line;
+            let kind = if loan.mutable {
+                "exclusively"
+            } else {
+                "shared"
+            };
             let complaint = match access {
                 // While an exclusive reference is live, the place may not be
                 // read or written except through it.
@@ -1211,8 +1673,8 @@ impl Fn<'_> {
                 return err(
                     line,
                     format!(
-                        "`{borrowed}` cannot be {what} here: it is {kind} borrowed, \
-                         and that borrow is still live (Ch. 3 §2.2)"
+                        "`{borrowed}` cannot be {what} here: it is {kind} borrowed \
+                         on line {since}, and that borrow is still live (Ch. 3 §2.2)"
                     ),
                 );
             }
@@ -1241,8 +1703,13 @@ impl Fn<'_> {
         let Some(path) = self.borrow_root(e) else {
             return Ok(()); // not a place the checker can see through
         };
-        let is_param = self.params.contains(&path);
-        if !is_param {
+        // Under rule 3 the only lender is `self`, whatever else is in scope
+        // (Ch. 4 §1.4).
+        let ok = match self.params.first() {
+            Some(first) if first == "self" && self.self_lends => path == "self",
+            _ => self.params.contains(&path),
+        };
+        if !ok {
             return err(
                 line,
                 format!(
@@ -1963,10 +2430,53 @@ impl Fn<'_> {
         }
     }
 
-    /// The type of a place, without emitting anything.
+    /// The type of a place, without emitting anything. `None` means the
+    /// expression is not a place, not that it has no type.
     fn type_of_place(&mut self, e: &ast::Expr) -> R<Option<Ty>> {
+        let through_refs = |mut t: Ty| {
+            while let Ty::Ref(inner, _) = t.clone() {
+                if inner.is_unsized() {
+                    break;
+                }
+                t = *inner;
+            }
+            t
+        };
         Ok(match e {
-            ast::Expr::Path(name, _) => self.lookup(name).map(|l| l.ty),
+            ast::Expr::Path(name, _) => match self.lookup(name) {
+                Some(l) => Some(l.ty),
+                None => match self.globals.get(name) {
+                    Some(Global::Array(_, ty)) => Some(ty.clone()),
+                    _ => None,
+                },
+            },
+            ast::Expr::Field(base, field, _) => {
+                let Some(bt) = self.type_of_place(base)? else {
+                    return Ok(None);
+                };
+                self.types
+                    .fields(&through_refs(bt))
+                    .into_iter()
+                    .find(|(n, _, _)| n == field)
+                    .map(|(_, t, _)| t)
+            }
+            ast::Expr::Index(base, _, _) => {
+                let Some(bt) = self.type_of_place(base)? else {
+                    return Ok(None);
+                };
+                match through_refs(bt) {
+                    Ty::Array(elem, _) => Some(*elem),
+                    Ty::Ref(inner, _) => match *inner {
+                        Ty::Slice(elem) => Some(*elem),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
+            ast::Expr::Deref(inner, _) => match self.type_of_place(inner)? {
+                Some(Ty::Ref(target, _)) => Some(*target),
+                _ => None,
+            },
             _ => None,
         })
     }
@@ -2155,16 +2665,29 @@ impl Fn<'_> {
             return self.aggregate(&path, &fields, line);
         }
 
+        self.call_key(name, Vec::new(), args, line)
+    }
+
+    /// A call to a known key, with any number of already-evaluated leading
+    /// arguments. Methods use the prefix for a receiver that is not a place
+    /// (Ch. 4 §1.3); ordinary calls pass none.
+    fn call_key(
+        &mut self,
+        name: &str,
+        pre: Vec<(Operand, Ty)>,
+        args: &[ast::Expr],
+        line: Line,
+    ) -> R<(Operand, Ty)> {
         let Some((params, ret)) = self.sigs.get(name).cloned() else {
             return err(line, format!("`{name}` is not a function in scope"));
         };
-        if params.len() != args.len() {
+        if params.len() != args.len() + pre.len() {
             return err(
                 line,
                 format!(
                     "`{name}` takes {} argument(s), {} given",
                     params.len(),
-                    args.len()
+                    args.len() + pre.len()
                 ),
             );
         }
@@ -2175,7 +2698,14 @@ impl Fn<'_> {
         if let Some(slot) = &out {
             values.push(Operand::Value(slot.clone()));
         }
-        for (arg, want) in args.iter().zip(&params) {
+        for ((v, got), want) in pre.into_iter().zip(&params) {
+            self.check(&got, want, line, "receiver")?;
+            values.push(v);
+        }
+        for (arg, want) in args
+            .iter()
+            .zip(params.iter().skip(values.len() - out.is_some() as usize))
+        {
             let (v, got) = self.expr(arg, Some(want))?;
             self.check(&got, want, arg.line(), "argument")?;
             values.push(v);
@@ -2220,6 +2750,11 @@ impl Fn<'_> {
         args: &[ast::Expr],
         line: Line,
     ) -> R<(Operand, Ty)> {
+        // Ch. 1's own methods are the language's, and are not overridable;
+        // everything else resolves through impl blocks (Ch. 4 §1.3).
+        if !BUILTIN_METHODS.contains(&name) {
+            return self.user_method(recv, name, args, line);
+        }
         let (v, ty) = self.expr(recv, None)?;
         let one_arg = |this: &mut Self, want: &Ty| -> R<Operand> {
             if args.len() != 1 {
@@ -2408,6 +2943,91 @@ impl Fn<'_> {
 
     /// The address of a place, and its type (Ch. 3 §1.3). A place is a local,
     /// a field of a place, an element of a place, or a dereference.
+    /// A method call that resolves to an impl block (Ch. 4 §1.3).
+    ///
+    /// Resolution is a desugaring: `p.area()` becomes `Point.area(&p)`, with
+    /// as many dereferences inserted as the receiver's type needs (Ch. 3
+    /// §2.3) and the borrow the receiver form asks for. Argument checking,
+    /// loans, moves and drops then all come from the ordinary call path,
+    /// which is the whole reason for doing it this way.
+    fn user_method(
+        &mut self,
+        recv: &ast::Expr,
+        name: &str,
+        args: &[ast::Expr],
+        line: Line,
+    ) -> R<(Operand, Ty)> {
+        // A place receiver keeps its identity, so `&mut self` writes through
+        // to the caller's value rather than to a copy.
+        let (recv_ty, place) = match self.type_of_place(recv)? {
+            Some(t) => (t, true),
+            None => (self.expr(recv, None)?.1, false),
+        };
+
+        let mut base = recv_ty.clone();
+        let mut derefs = 0;
+        while let Ty::Ref(inner, _) = base.clone() {
+            if inner.is_unsized() {
+                break;
+            }
+            base = *inner;
+            derefs += 1;
+        }
+        let Some(type_name) = nominal_name(&base) else {
+            return err(line, format!("{base} has no methods"));
+        };
+        let key = format!("{type_name}.{name}");
+        let Some((params, _)) = self.sigs.get(&key).cloned() else {
+            return err(
+                line,
+                format!("{base} has no method `{name}`, and neither does Ch. 1"),
+            );
+        };
+        let Some(self_ty) = params.first().cloned() else {
+            return err(
+                line,
+                format!(
+                    "`{type_name}::{name}` takes no `self`, so it is called \
+                     `{type_name}::{name}(…)` and not on a receiver (Ch. 4 §1.4)"
+                ),
+            );
+        };
+
+        if !place {
+            // The receiver is a value, so it lives in a temporary and there
+            // is nothing to borrow-check.
+            let (v, ty) = self.expr(recv, None)?;
+            let mut v = v;
+            for _ in 0..derefs {
+                v = self.load_ptr(v);
+            }
+            let arg = match &self_ty {
+                Ty::Ref(..) if !base.is_aggregate() => {
+                    let slot = self.temp_slot(&base);
+                    self.store_at(&slot, 0, &base, v, line)?;
+                    (Operand::Value(slot), self_ty.clone())
+                }
+                // An aggregate is already an address, which is what a
+                // reference to it is.
+                Ty::Ref(..) => (v, self_ty.clone()),
+                _ => (v, ty),
+            };
+            return self.call_key(&key, vec![arg], args, line);
+        }
+
+        let mut receiver = recv.clone();
+        for _ in 0..derefs {
+            receiver = ast::Expr::Deref(Box::new(receiver), line);
+        }
+        let receiver = match &self_ty {
+            Ty::Ref(_, mutable) => ast::Expr::Borrow(Box::new(receiver), *mutable, line),
+            _ => receiver,
+        };
+        let mut full = vec![receiver];
+        full.extend(args.iter().cloned());
+        self.call_key(&key, Vec::new(), &full, line)
+    }
+
     fn place(&mut self, e: &ast::Expr, line: Line) -> R<(Operand, Ty)> {
         match e {
             ast::Expr::Path(name, l) => {
@@ -2716,6 +3336,16 @@ impl Fn<'_> {
         line: Line,
     ) -> R<(Operand, Ty)> {
         let head = path.segments[0].clone();
+
+        // `Type::function(args)` — an associated function, which is written
+        // like a variant and told apart by what the names are (Ch. 4 §1.4).
+        if path.segments.len() == 2 {
+            let key = format!("{head}.{}", path.segments[1]);
+            if self.sigs.contains_key(&key) {
+                let args: Vec<ast::Expr> = fields.iter().map(|(_, e)| e.clone()).collect();
+                return self.call_key(&key, Vec::new(), &args, line);
+            }
+        }
 
         // `Enum::Variant`, with or without a payload.
         if path.segments.len() == 2 {
@@ -3500,7 +4130,7 @@ fn walk_block(b: &ast::Block, index: &mut u32, out: &mut HashMap<String, u32>) {
 
 fn walk_expr(e: &ast::Expr, index: &mut u32, out: &mut HashMap<String, u32>) {
     use ast::Expr as E;
-    let mut go = |x: &ast::Expr, i: &mut u32, o: &mut HashMap<String, u32>| walk_expr(x, i, o);
+    let go = |x: &ast::Expr, i: &mut u32, o: &mut HashMap<String, u32>| walk_expr(x, i, o);
     match e {
         E::Path(name, _) => {
             let at = *index;
