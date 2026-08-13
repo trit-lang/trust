@@ -22,6 +22,7 @@ use super::ast;
 use super::lex::{Line, SyntaxError};
 use crate::layout;
 use crate::tir::ir::{self, *};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use trit_core::{Bt, FaultCode, Flavor};
 
@@ -273,13 +274,19 @@ struct Local {
 /// Everything the frontend knows about the nominal types in a file, plus the
 /// layout engine's answers about them.
 pub struct Types {
-    db: layout::TypeDb,
+    /// The layout engine's view. Behind a cell because a generic type is
+    /// registered the moment it is first applied (Ch. 4 §2.7), which can
+    /// happen anywhere a type is resolved.
+    db: RefCell<layout::TypeDb>,
     /// Types with a destructor of their own.
     destructors: std::collections::BTreeSet<String>,
     /// Field names and semantic types of each struct, in declaration order.
-    structs: HashMap<String, Vec<(String, Ty)>>,
+    structs: RefCell<HashMap<String, Vec<(String, Ty)>>>,
     /// Variants of each enum, in declaration order.
-    enums: HashMap<String, Vec<VariantInfo>>,
+    enums: RefCell<HashMap<String, Vec<VariantInfo>>>,
+    /// Generic struct and enum definitions, un-instantiated.
+    generic_structs: HashMap<String, ast::StructItem>,
+    generic_enums: HashMap<String, ast::EnumItem>,
 }
 
 /// One enum variant, resolved.
@@ -293,7 +300,7 @@ impl Types {
     /// The layout of a type, which is where every size, offset, discriminant
     /// and niche comes from (Ch. 2).
     fn layout(&self, ty: &Ty) -> layout::Layout {
-        layout::layout_of(&self.db, &ty.layout_ty())
+        layout::layout_of(&self.db.borrow(), &ty.layout_ty())
             .unwrap_or_else(|e| panic!("layout of {ty} failed after checking: {e}"))
     }
 
@@ -305,7 +312,7 @@ impl Types {
     fn fields(&self, ty: &Ty) -> Vec<(String, Ty, i128)> {
         let l = self.layout(ty);
         match ty {
-            Ty::Struct(name) => self.structs[name]
+            Ty::Struct(name) => self.structs.borrow()[name]
                 .iter()
                 .enumerate()
                 .map(|(i, (n, t))| (n.clone(), t.clone(), l.offsets[i] as i128))
@@ -324,12 +331,13 @@ impl Types {
     fn needs_drop(&self, ty: &Ty) -> bool {
         match ty {
             Ty::Struct(n) => {
-                self.destructors.contains(n)
-                    || self.structs[n].iter().any(|(_, t)| self.needs_drop(t))
+                let fields = self.structs.borrow()[n].clone();
+                self.destructors.contains(n) || fields.iter().any(|(_, t)| self.needs_drop(t))
             }
             Ty::Enum(n) => {
+                let variants = self.enums.borrow()[n].clone();
                 self.destructors.contains(n)
-                    || self.enums[n]
+                    || variants
                         .iter()
                         .any(|v| v.fields.iter().any(|(_, t)| self.needs_drop(t)))
             }
@@ -348,9 +356,123 @@ impl Types {
     /// The index of a variant by name.
     fn variant(&self, enum_name: &str, variant: &str) -> Option<usize> {
         self.enums
+            .borrow()
             .get(enum_name)?
             .iter()
             .position(|v| v.name == variant)
+    }
+
+    /// Instantiate a generic struct or enum, or return the one already made
+    /// (Ch. 4 §2.7).
+    ///
+    /// The instantiation is an ordinary nominal type under a mangled name, so
+    /// the layout engine, the drop machinery and code generation never learn
+    /// that generics exist.
+    fn instantiate(&self, name: &str, args: &[Ty], line: Line) -> R<Ty> {
+        let mangled = mangle(name, args);
+        if self.structs.borrow().contains_key(&mangled) {
+            return Ok(Ty::Struct(mangled));
+        }
+        if self.enums.borrow().contains_key(&mangled) {
+            return Ok(Ty::Enum(mangled));
+        }
+
+        let (params, is_struct) =
+            match (self.generic_structs.get(name), self.generic_enums.get(name)) {
+                (Some(s), _) => (&s.generics, true),
+                (_, Some(e)) => (&e.generics, false),
+                _ => {
+                    let known = self.structs.borrow().contains_key(name)
+                        || self.enums.borrow().contains_key(name);
+                    return err(
+                        line,
+                        if known {
+                            format!("`{name}` takes no type arguments")
+                        } else {
+                            format!("`{name}` is not a type in scope")
+                        },
+                    );
+                }
+            };
+        if params.len() != args.len() {
+            return err(
+                line,
+                format!(
+                    "`{name}` takes {} type argument(s), {} given",
+                    params.len(),
+                    args.len()
+                ),
+            );
+        }
+        let env: HashMap<String, Ty> = params
+            .iter()
+            .map(|p| p.name().to_string())
+            .zip(args.iter().cloned())
+            .collect();
+
+        // Registered before its fields are resolved, so that a type which
+        // mentions itself behind a reference terminates rather than recurses.
+        if is_struct {
+            self.structs
+                .borrow_mut()
+                .insert(mangled.clone(), Vec::new());
+            let def = self.generic_structs[name].clone();
+            let fields: Vec<(String, Ty)> = def
+                .fields
+                .iter()
+                .map(|(n, t)| {
+                    let ty = resolve_ty_env(t, self, &env)?;
+                    check_sized(&ty, t.line(), &format!("the field `{n}`"))?;
+                    Ok((n.clone(), ty))
+                })
+                .collect::<R<_>>()?;
+            self.db.borrow_mut().struct_(
+                &mangled,
+                repr_of(def.repr),
+                fields
+                    .iter()
+                    .map(|(n, t)| (n.as_str(), t.layout_ty()))
+                    .collect(),
+            );
+            self.structs.borrow_mut().insert(mangled.clone(), fields);
+        } else {
+            self.enums.borrow_mut().insert(mangled.clone(), Vec::new());
+            let def = self.generic_enums[name].clone();
+            let mut infos = Vec::new();
+            let mut variants = Vec::new();
+            for v in &def.variants {
+                let fields: Vec<(String, Ty)> = v
+                    .fields
+                    .iter()
+                    .map(|(n, t)| Ok((n.clone(), resolve_ty_env(t, self, &env)?)))
+                    .collect::<R<_>>()?;
+                variants.push(layout::Variant {
+                    name: v.name.clone(),
+                    fields: fields
+                        .iter()
+                        .map(|(n, t)| (n.clone(), t.layout_ty()))
+                        .collect(),
+                    discriminant: v.discriminant,
+                });
+                infos.push(VariantInfo {
+                    name: v.name.clone(),
+                    fields,
+                });
+            }
+            self.db
+                .borrow_mut()
+                .enum_(&mangled, repr_of(def.repr), variants);
+            self.enums.borrow_mut().insert(mangled.clone(), infos);
+        }
+
+        if let Err(e) = layout::layout_of(&self.db.borrow(), &layout::Ty::named(&mangled)) {
+            return err(line, format!("`{name}` cannot be laid out here: {e}"));
+        }
+        Ok(if is_struct {
+            Ty::Struct(mangled)
+        } else {
+            Ty::Enum(mangled)
+        })
     }
 
     /// A variant's payload fields, with their offsets.
@@ -358,8 +480,9 @@ impl Types {
         let ty = Ty::Enum(enum_name.to_string());
         let l = self.layout(&ty);
         let e = l.enum_layout.expect("an enum");
-        self.enums[enum_name][index]
+        self.enums.borrow()[enum_name][index]
             .fields
+            .clone()
             .iter()
             .enumerate()
             .map(|(i, (n, t))| (n.clone(), t.clone(), e.variant_offsets[index][i] as i128))
@@ -395,6 +518,21 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
         }
     };
 
+    // Which traits each type implements, which is all a bound needs to know
+    // (Ch. 4 §2.2). Supertraits are included, since implementing `B: A`
+    // requires implementing `A` and the impl for it is in the file too.
+    let impls: std::collections::HashSet<(String, String)> = file
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            ast::Item::Impl(imp) => imp
+                .trait_name
+                .as_ref()
+                .map(|t| (imp.self_ty.clone(), t.clone())),
+            _ => None,
+        })
+        .collect();
+
     // Impl blocks become ordinary functions before anything else looks at
     // the file, so the rest of lowering never learns they existed.
     let (expanded, impl_errs) = expand_impls(file, &types);
@@ -409,7 +547,33 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
         .chain(expanded)
         .collect();
 
-    let mut sigs: HashMap<String, (Vec<Ty>, Ty)> = HashMap::new();
+    // A generic function is not code until it is instantiated (§2.7), so it
+    // is set aside here and its body lowered once per instantiation.
+    let mut generic_fns: HashMap<String, ast::FnItem> = HashMap::new();
+    for f in &fns {
+        if !f.generics.is_empty() {
+            if f.body.is_none() {
+                errs.push(SyntaxError {
+                    line: f.line,
+                    message: format!(
+                        "`{}` is a declaration, so there is no body to instantiate; \
+                         an external function cannot be generic",
+                        f.name
+                    ),
+                });
+                continue;
+            }
+            if generic_fns.insert(f.name.clone(), f.clone()).is_some() {
+                errs.push(SyntaxError {
+                    line: f.line,
+                    message: format!("`{}` is defined more than once", f.name),
+                });
+            }
+        }
+    }
+    let fns: Vec<ast::FnItem> = fns.into_iter().filter(|f| f.generics.is_empty()).collect();
+
+    let sigs: RefCell<HashMap<String, (Vec<Ty>, Ty)>> = RefCell::new(HashMap::new());
     for f in &fns {
         {
             let params: Result<Vec<Ty>, Error> = f
@@ -437,7 +601,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
             }
             match (params, ret) {
                 (Ok(p), Ok(r)) => {
-                    if sigs.insert(fn_key(f), (p, r)).is_some() {
+                    if sigs.borrow_mut().insert(fn_key(f), (p, r)).is_some() {
                         errs.push(SyntaxError {
                             line: f.line,
                             message: format!("`{}` is defined more than once", f.name),
@@ -467,20 +631,44 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
         }
     }
 
+    let pending: RefCell<Vec<Job>> = RefCell::new(Vec::new());
+    let world = World {
+        sigs: &sigs,
+        generic_fns: &generic_fns,
+        impls: &impls,
+        pending: &pending,
+        globals: &globals,
+        types: &types,
+    };
     for f in &fns {
-        if !sigs.contains_key(&fn_key(f)) {
+        if !sigs.borrow().contains_key(&fn_key(f)) {
             continue; // its signature was already reported
         }
-        let signature = signature_of(f, &sigs);
+        let key = fn_key(f);
+        let signature = signature_of(f, &key, &sigs);
         match &f.body {
             // A function without a body is a declaration, and lowers to TIR's
             // own declaration form — one mechanism, spelled twice.
             None => module.decls.push(signature),
-            Some(body) => match function(f, signature, body, &sigs, &globals, &types) {
+            Some(body) => match function(f, signature, body, &key, HashMap::new(), &world) {
                 Ok(func) => module.funcs.push(func),
                 Err(e) => errs.push(e),
             },
         }
+    }
+
+    // Then the instantiations, and the instantiations they in turn need
+    // (§2.7). The queue drains because every job is unique by key and the
+    // depth limit stops a body that instantiates itself at a larger type.
+    while let Some(job) = pending.borrow_mut().pop() {
+        let def = generic_fns[&job.from].clone();
+        let body = def.body.clone().expect("a generic function has a body");
+        let signature = signature_of(&def, &job.key, &sigs);
+        match function(&def, signature, &body, &job.key, job.env, &world) {
+            Ok(func) => module.funcs.push(func),
+            Err(e) => errs.push(e),
+        }
+        let _ = job.depth;
     }
 
     if errs.is_empty() {
@@ -626,7 +814,9 @@ fn subst_ty(t: &mut ast::Ty, self_ty: &str) {
         ast::Ty::Array(e, _, _) | ast::Ty::Ref(e, _, _) | ast::Ty::Slice(e, _) => {
             subst_ty(e, self_ty)
         }
-        ast::Ty::Tuple(ts, _) => ts.iter_mut().for_each(|t| subst_ty(t, self_ty)),
+        ast::Ty::Tuple(ts, _) | ast::Ty::App(_, ts, _) => {
+            ts.iter_mut().for_each(|t| subst_ty(t, self_ty))
+        }
         ast::Ty::Name(..) | ast::Ty::Unit(_) => {}
     }
 }
@@ -756,8 +946,8 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
     for item in &file.items {
         let ast::Item::Impl(imp) = item else { continue };
         let self_ty = &imp.self_ty;
-        if !types.structs.contains_key(self_ty)
-            && !types.enums.contains_key(self_ty)
+        if !types.structs.borrow().contains_key(self_ty)
+            && !types.enums.borrow().contains_key(self_ty)
             && !matches!(self_ty.as_str(), "trit" | "bool" | "t9" | "t27" | "taddr")
         {
             errs.push(SyntaxError {
@@ -931,6 +1121,9 @@ fn same_ast_ty(a: &ast::Ty, b: &ast::Ty) -> bool {
     use ast::Ty::*;
     match (a, b) {
         (Name(x, _), Name(y, _)) => x == y,
+        (App(x, xs, _), App(y, ys, _)) => {
+            x == y && xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| same_ast_ty(x, y))
+        }
         (Unit(_), Unit(_)) | (SelfTy(_), SelfTy(_)) => true,
         (Ref(x, m, _), Ref(y, n, _)) => m == n && same_ast_ty(x, y),
         (Slice(x, _), Slice(y, _)) => same_ast_ty(x, y),
@@ -942,10 +1135,14 @@ fn same_ast_ty(a: &ast::Ty, b: &ast::Ty) -> bool {
     }
 }
 
-fn signature_of(f: &ast::FnItem, sigs: &HashMap<String, (Vec<Ty>, Ty)>) -> Signature {
-    let key = fn_key(f);
+fn signature_of(
+    f: &ast::FnItem,
+    key: &str,
+    sigs: &RefCell<HashMap<String, (Vec<Ty>, Ty)>>,
+) -> Signature {
     let (params, ret) = sigs
-        .get(&key)
+        .borrow()
+        .get(key)
         .cloned()
         .unwrap_or_else(|| (Vec::new(), Ty::Unit));
 
@@ -961,7 +1158,7 @@ fn signature_of(f: &ast::FnItem, sigs: &HashMap<String, (Vec<Ty>, Ty)>) -> Signa
     );
 
     Signature {
-        name: key,
+        name: key.to_string(),
         params: tir_params,
         ret: if ret == Ty::Unit || ret.is_aggregate() {
             None
@@ -971,23 +1168,129 @@ fn signature_of(f: &ast::FnItem, sigs: &HashMap<String, (Vec<Ty>, Ty)>) -> Signa
     }
 }
 
+/// Match a written type against a concrete one, binding any parameter it
+/// mentions (Ch. 4 §2.3's inference, in the only form this draft needs).
+///
+/// Deliberately partial: what it cannot match it leaves unbound, and the
+/// caller reports the parameter it could not determine rather than guessing.
+fn unify(written: &ast::Ty, got: &Ty, params: &[ast::GenericParam], env: &mut HashMap<String, Ty>) {
+    match written {
+        ast::Ty::Name(n, _) if params.iter().any(|p| p.name() == n) => {
+            env.entry(n.clone()).or_insert_with(|| got.clone());
+        }
+        ast::Ty::Ref(inner, _, _) => {
+            if let Ty::Ref(t, _) = got {
+                unify(inner, t, params, env);
+            }
+        }
+        ast::Ty::Slice(inner, _) => match got {
+            Ty::Slice(t) | Ty::Array(t, _) => unify(inner, t, params, env),
+            _ => {}
+        },
+        ast::Ty::Array(inner, _, _) => {
+            if let Ty::Array(t, _) = got {
+                unify(inner, t, params, env);
+            }
+        }
+        ast::Ty::Tuple(ws, _) => {
+            if let Ty::Tuple(ts) = got
+                && ws.len() == ts.len()
+            {
+                for (w, t) in ws.iter().zip(ts) {
+                    unify(w, t, params, env);
+                }
+            }
+        }
+        ast::Ty::App(name, wargs, _) => {
+            // `Pair<T, U>` against `Pair.t27.t9`: the instantiation's own
+            // arguments are not recoverable from the mangled name, so this
+            // matches only when the concrete type is the same application.
+            let _ = (name, wargs);
+        }
+        _ => {}
+    }
+}
+
+/// Whether a written path head names this type.
+///
+/// A generic type is written without its arguments in a path — `Opt::Some`,
+/// not `Opt<t27>::Some` — while the type it resolved to carries them in its
+/// mangled name, so the head matches either exactly or as a prefix.
+fn heads_match(head: &str, name: &str) -> bool {
+    head == name || name.starts_with(&format!("{head}."))
+}
+
+/// One instantiation waiting to be lowered (Ch. 4 §2.7).
+struct Job {
+    /// The name it is known by: the generic function's name, mangled with
+    /// its type arguments.
+    key: String,
+    /// The generic definition it comes from.
+    from: String,
+    /// The environment its body is lowered under.
+    env: HashMap<String, Ty>,
+    /// How many instantiations deep this one is, so that a generic function
+    /// that instantiates itself at a larger type is rejected rather than
+    /// diverging (§2.7).
+    depth: u32,
+}
+
+/// How deep §2.7's termination check lets instantiation go.
+const INSTANTIATION_LIMIT: u32 = 64;
+
+/// The name an instantiation is known by.
+///
+/// A dot, which is what `drop.Buffer` already uses and what both the TIR text
+/// format and the assembler accept in an identifier. Diagnostics therefore
+/// say `Pair.t27.t9` where the source said `Pair<t27, t9>`.
+fn mangle(name: &str, args: &[Ty]) -> String {
+    let mut out = name.to_string();
+    for a in args {
+        out.push('.');
+        out.push_str(
+            &a.to_string()
+                .replace([' ', ',', '&', '[', ']', '(', ')'], "_"),
+        );
+    }
+    out
+}
+
 /// Resolve every nominal type in the file and hand them to the layout engine.
 fn build_types(file: &ast::File) -> R<Types> {
     let mut types = Types {
-        db: layout::TypeDb::new(),
+        db: RefCell::new(layout::TypeDb::new()),
         destructors: std::collections::BTreeSet::new(),
-        structs: HashMap::new(),
-        enums: HashMap::new(),
+        structs: RefCell::new(HashMap::new()),
+        enums: RefCell::new(HashMap::new()),
+        generic_structs: HashMap::new(),
+        generic_enums: HashMap::new(),
     };
+
+    // A generic definition is not a type until it is applied (Ch. 4 §2.7), so
+    // it is set aside here and instantiated on demand.
+    for item in &file.items {
+        match item {
+            ast::Item::Struct(s) if !s.generics.is_empty() => {
+                types.generic_structs.insert(s.name.clone(), s.clone());
+            }
+            ast::Item::Enum(e) if !e.generics.is_empty() => {
+                types.generic_enums.insert(e.name.clone(), e.clone());
+            }
+            _ => {}
+        }
+    }
 
     // Names first, so that a type may mention another declared later.
     for item in &file.items {
         match item {
-            ast::Item::Struct(s) => {
-                types.structs.insert(s.name.clone(), Vec::new());
+            ast::Item::Struct(s) if s.generics.is_empty() => {
+                types
+                    .structs
+                    .borrow_mut()
+                    .insert(s.name.clone(), Vec::new());
             }
-            ast::Item::Enum(e) => {
-                types.enums.insert(e.name.clone(), Vec::new());
+            ast::Item::Enum(e) if e.generics.is_empty() => {
+                types.enums.borrow_mut().insert(e.name.clone(), Vec::new());
             }
             _ => {}
         }
@@ -995,7 +1298,7 @@ fn build_types(file: &ast::File) -> R<Types> {
 
     for item in &file.items {
         match item {
-            ast::Item::Struct(st) => {
+            ast::Item::Struct(st) if st.generics.is_empty() => {
                 let fields: Vec<(String, Ty)> = st
                     .fields
                     .iter()
@@ -1005,7 +1308,7 @@ fn build_types(file: &ast::File) -> R<Types> {
                         Ok((n.clone(), ty))
                     })
                     .collect::<R<_>>()?;
-                types.db.struct_(
+                types.db.borrow_mut().struct_(
                     &st.name,
                     repr_of(st.repr),
                     fields
@@ -1013,9 +1316,9 @@ fn build_types(file: &ast::File) -> R<Types> {
                         .map(|(n, t)| (n.as_str(), t.layout_ty()))
                         .collect(),
                 );
-                types.structs.insert(st.name.clone(), fields);
+                types.structs.borrow_mut().insert(st.name.clone(), fields);
             }
-            ast::Item::Enum(en) => {
+            ast::Item::Enum(en) if en.generics.is_empty() => {
                 let mut infos = Vec::new();
                 let mut variants = Vec::new();
                 for v in &en.variants {
@@ -1037,8 +1340,11 @@ fn build_types(file: &ast::File) -> R<Types> {
                         fields,
                     });
                 }
-                types.db.enum_(&en.name, repr_of(en.repr), variants);
-                types.enums.insert(en.name.clone(), infos);
+                types
+                    .db
+                    .borrow_mut()
+                    .enum_(&en.name, repr_of(en.repr), variants);
+                types.enums.borrow_mut().insert(en.name.clone(), infos);
             }
             _ => {}
         }
@@ -1052,7 +1358,9 @@ fn build_types(file: &ast::File) -> R<Types> {
         if imp.trait_name.as_deref() != Some("Drop") {
             continue;
         }
-        if !types.structs.contains_key(&imp.self_ty) && !types.enums.contains_key(&imp.self_ty) {
+        if !types.structs.borrow().contains_key(&imp.self_ty)
+            && !types.enums.borrow().contains_key(&imp.self_ty)
+        {
             return err(
                 imp.line,
                 format!(
@@ -1106,11 +1414,11 @@ fn build_types(file: &ast::File) -> R<Types> {
     // reported here rather than at its first use.
     for item in &file.items {
         let (name, line) = match item {
-            ast::Item::Struct(s) => (&s.name, s.line),
-            ast::Item::Enum(e) => (&e.name, e.line),
+            ast::Item::Struct(s) if s.generics.is_empty() => (&s.name, s.line),
+            ast::Item::Enum(e) if e.generics.is_empty() => (&e.name, e.line),
             _ => continue,
         };
-        if let Err(e) = layout::layout_of(&types.db, &layout::Ty::named(name)) {
+        if let Err(e) = layout::layout_of(&types.db.borrow(), &layout::Ty::named(name)) {
             return err(line, e.to_string());
         }
     }
@@ -1125,6 +1433,16 @@ fn repr_of(r: ast::Repr) -> layout::Repr {
 }
 
 fn resolve_ty(t: &ast::Ty, types: &Types) -> R<Ty> {
+    resolve_ty_env(t, types, &HashMap::new())
+}
+
+/// Resolve a written type, with a generic environment in scope.
+///
+/// A type parameter is not a kind of `Ty`: it is a name the environment maps
+/// to a concrete one. That is what makes monomorphization (Ch. 4 §2.7) a
+/// matter of lowering the same body under a different environment, rather
+/// than of rewriting it.
+fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty> {
     match t {
         // Substitution replaces every `Self` before lowering (Ch. 4 §1.2),
         // so one surviving here was written where there is no impl.
@@ -1132,13 +1450,26 @@ fn resolve_ty(t: &ast::Ty, types: &Types) -> R<Ty> {
             *l,
             "`Self` names the implementing type, and there is none here",
         ),
+        // `Name<T, U>` — instantiate now, so that everything downstream sees
+        // an ordinary nominal type (Ch. 4 §2.7).
+        ast::Ty::App(name, args, line) => {
+            let args: Vec<Ty> = args
+                .iter()
+                .map(|a| resolve_ty_env(a, types, env))
+                .collect::<R<_>>()?;
+            types.instantiate(name, &args, *line)
+        }
         ast::Ty::Unit(_) => Ok(Ty::Unit),
         ast::Ty::Tuple(ts, _) => Ok(Ty::Tuple(
-            ts.iter().map(|t| resolve_ty(t, types)).collect::<R<_>>()?,
+            ts.iter()
+                .map(|t| resolve_ty_env(t, types, env))
+                .collect::<R<_>>()?,
         )),
-        ast::Ty::Ref(t, mutable, _) => Ok(Ty::Ref(Box::new(resolve_ty(t, types)?), *mutable)),
+        ast::Ty::Ref(t, mutable, _) => {
+            Ok(Ty::Ref(Box::new(resolve_ty_env(t, types, env)?), *mutable))
+        }
         ast::Ty::Slice(t, line) => {
-            let elem = resolve_ty(t, types)?;
+            let elem = resolve_ty_env(t, types, env)?;
             if elem.is_unsized() {
                 return err(*line, "a slice element must have a size");
             }
@@ -1155,12 +1486,25 @@ fn resolve_ty(t: &ast::Ty, types: &Types) -> R<Ty> {
                 *line,
                 format!("`{name}` is a reserved type name (Ch. 1 §8)"),
             ),
-            other if types.structs.contains_key(other) => Ok(Ty::Struct(other.to_string())),
-            other if types.enums.contains_key(other) => Ok(Ty::Enum(other.to_string())),
+            // A type parameter in scope.
+            other if env.contains_key(other) => Ok(env[other].clone()),
+            other
+                if types.generic_structs.contains_key(other)
+                    || types.generic_enums.contains_key(other) =>
+            {
+                err(
+                    *line,
+                    format!("`{other}` is generic and needs its arguments written: `{other}<…>`"),
+                )
+            }
+            other if types.structs.borrow().contains_key(other) => {
+                Ok(Ty::Struct(other.to_string()))
+            }
+            other if types.enums.borrow().contains_key(other) => Ok(Ty::Enum(other.to_string())),
             other => err(*line, format!("`{other}` is not a type in scope")),
         },
         ast::Ty::Array(elem, count, line) => {
-            let elem = resolve_ty(elem, types)?;
+            let elem = resolve_ty_env(elem, types, env)?;
             let n = const_int(count)?;
             if n < 0 {
                 // Ch. 2 §3: the type-level face of the signed-taddr decision.
@@ -1231,7 +1575,20 @@ fn const_item(c: &ast::ConstItem, module: &mut Module, types: &Types) -> R<Globa
 // --------------------------------------------------------------- lowering
 
 struct Fn<'a> {
-    sigs: &'a HashMap<String, (Vec<Ty>, Ty)>,
+    /// Signatures, shared and mutable: instantiating a generic function adds
+    /// one, and the call site that caused it must be able to check its
+    /// arguments against it immediately (Ch. 4 §2.7).
+    sigs: &'a RefCell<HashMap<String, (Vec<Ty>, Ty)>>,
+    /// Generic function definitions, un-instantiated.
+    generic_fns: &'a HashMap<String, ast::FnItem>,
+    /// Every (type, trait) pair the file implements, for bounds (§2.2).
+    impls: &'a std::collections::HashSet<(String, String)>,
+    /// Instantiations discovered here and not yet lowered.
+    pending: &'a RefCell<Vec<Job>>,
+    /// The type arguments this instantiation was made with, which is what
+    /// makes a type parameter a name for a concrete type rather than a kind
+    /// of type.
+    env: HashMap<String, Ty>,
     globals: &'a HashMap<String, Global>,
     types: &'a Types,
     ret: Ty,
@@ -1282,18 +1639,41 @@ struct LoopCtx {
     result: Option<(String, Ty)>,
 }
 
+/// Everything a function body is lowered against, which is the same for
+/// every function in the module and is therefore passed as one thing.
+struct World<'a> {
+    sigs: &'a RefCell<HashMap<String, (Vec<Ty>, Ty)>>,
+    generic_fns: &'a HashMap<String, ast::FnItem>,
+    impls: &'a std::collections::HashSet<(String, String)>,
+    pending: &'a RefCell<Vec<Job>>,
+    globals: &'a HashMap<String, Global>,
+    types: &'a Types,
+}
+
 fn function(
     f: &ast::FnItem,
     sig: Signature,
     body: &ast::Block,
-    sigs: &HashMap<String, (Vec<Ty>, Ty)>,
-    globals: &HashMap<String, Global>,
-    types: &Types,
+    key: &str,
+    env: HashMap<String, Ty>,
+    w: &World,
 ) -> R<Function> {
-    let (param_tys, ret) = sigs.get(&fn_key(f)).cloned().unwrap();
-    let destructor_of = fn_key(f).strip_prefix("drop.").map(|t| t.to_string());
+    let World {
+        sigs,
+        generic_fns,
+        impls,
+        pending,
+        globals,
+        types,
+    } = *w;
+    let (param_tys, ret) = sigs.borrow().get(key).cloned().unwrap();
+    let destructor_of = key.strip_prefix("drop.").map(|t| t.to_string());
     let mut fx = Fn {
         sigs,
+        generic_fns,
+        impls,
+        pending,
+        env,
         globals,
         types,
         ret: ret.clone(),
@@ -1827,7 +2207,7 @@ impl Fn<'_> {
                 line,
             } => {
                 let declared = match ty {
-                    Some(t) => Some(resolve_ty(t, self.types)?),
+                    Some(t) => Some(self.resolve(t)?),
                     None => None,
                 };
                 let loans_before = self.loans.len();
@@ -1961,7 +2341,7 @@ impl Fn<'_> {
             E::Binary(op, a, b, line) => self.binary(op, a, b, expected, *line),
             E::Assign(op, target, value, line) => self.assign(op, target, value, *line),
             E::Cast(inner, ty, line) => self.cast(inner, ty, *line),
-            E::Call(name, args, line) => self.call(name, args, *line),
+            E::Call(name, args, line) => self.call(name, args, expected, *line),
             E::Method(recv, name, args, line) => self.method(recv, name, args, *line),
 
             E::Block(b) => self.block(b, expected),
@@ -2104,7 +2484,7 @@ impl Fn<'_> {
                 Ok((Operand::Value(slot), ty))
             }
 
-            E::Aggregate(path, fields, line) => self.aggregate(path, fields, *line),
+            E::Aggregate(path, fields, line) => self.aggregate(path, fields, expected, *line),
 
             // A borrow is the address of a place — which every local already
             // has, since every local lives in a slot.
@@ -2537,7 +2917,7 @@ impl Fn<'_> {
 
     /// `x as T` (Ch. 1 §6).
     fn cast(&mut self, inner: &ast::Expr, to: &ast::Ty, line: Line) -> R<(Operand, Ty)> {
-        let to = resolve_ty(to, self.types)?;
+        let to = self.resolve(to)?;
         let (v, from) = self.expr(inner, None)?;
 
         // A fieldless enum may be cast to an integer, yielding its
@@ -2547,7 +2927,10 @@ impl Fn<'_> {
             if !to.is_arithmetic() && to != Ty::Trit {
                 return err(line, format!("an enum casts only to an integer, not {to}"));
             }
-            if self.types.enums[name].iter().any(|v| !v.fields.is_empty()) {
+            if self.types.enums.borrow()[name]
+                .iter()
+                .any(|v| !v.fields.is_empty())
+            {
                 return err(
                     line,
                     format!("`{name}` has variants with payloads, so it has no integer value"),
@@ -2627,7 +3010,13 @@ impl Fn<'_> {
         Ok((value, to))
     }
 
-    fn call(&mut self, name: &str, args: &[ast::Expr], line: Line) -> R<(Operand, Ty)> {
+    fn call(
+        &mut self,
+        name: &str,
+        args: &[ast::Expr],
+        expected: Option<&Ty>,
+        line: Line,
+    ) -> R<(Operand, Ty)> {
         // `sign(x)` is a function, not a method (Ch. 1 §6).
         if name == "sign" {
             if args.len() != 1 {
@@ -2652,7 +3041,7 @@ impl Fn<'_> {
 
         // `Name(args)` is a tuple-struct literal when the name is a type.
         // The parser cannot tell the two apart; here the names are known.
-        if self.types.structs.contains_key(name) {
+        if self.types.structs.borrow().contains_key(name) {
             let fields: Vec<(String, ast::Expr)> = args
                 .iter()
                 .enumerate()
@@ -2662,10 +3051,148 @@ impl Fn<'_> {
                 segments: vec![name.to_string()],
                 line,
             };
-            return self.aggregate(&path, &fields, line);
+            return self.aggregate(&path, &fields, None, line);
+        }
+
+        // A generic callee is instantiated here, at the call site, which is
+        // also where its bounds are checked (Ch. 4 §2.2).
+        if self.generic_fns.contains_key(name) {
+            let key = self.instantiate_fn(name, args, expected, line)?;
+            return self.call_key(&key, Vec::new(), args, line);
         }
 
         self.call_key(name, Vec::new(), args, line)
+    }
+
+    /// Instantiate a generic function for this call, and return the name the
+    /// instantiation is known by (Ch. 4 §2.7).
+    fn instantiate_fn(
+        &mut self,
+        name: &str,
+        args: &[ast::Expr],
+        expected: Option<&Ty>,
+        line: Line,
+    ) -> R<String> {
+        let def = self.generic_fns[name].clone();
+        if def.params.len() != args.len() {
+            return err(
+                line,
+                format!(
+                    "`{name}` takes {} argument(s), {} given",
+                    def.params.len(),
+                    args.len()
+                ),
+            );
+        }
+
+        // Infer each parameter from the arguments it appears in, and from
+        // the type the result is expected to have — which is the only way to
+        // tell `id(2)` bound to a `t9` from the same call bound to a `t27`.
+        let mut env: HashMap<String, Ty> = HashMap::new();
+        if let (Some(want), Some(ret)) = (expected, &def.ret) {
+            unify(ret, want, &def.generics, &mut env);
+        }
+        for ((_, want), arg) in def.params.iter().zip(args) {
+            if let Some(got) = self.peek_ty(arg)? {
+                unify(want, &got, &def.generics, &mut env);
+            }
+        }
+
+        let mut targs = Vec::new();
+        for p in &def.generics {
+            let ast::GenericParam::Type {
+                name: pname,
+                bounds,
+            } = p
+            else {
+                return err(
+                    line,
+                    "a const generic argument cannot be inferred, and `::<>` is \
+                     Ch. 4 §2.3, not implemented yet",
+                );
+            };
+            let Some(ty) = env.get(pname) else {
+                return err(
+                    line,
+                    format!(
+                        "cannot tell what `{pname}` is in this call to `{name}`; \
+                         give an argument a written type (Ch. 4 §2.3)"
+                    ),
+                );
+            };
+            // §2.2: an instantiation that fails a bound is rejected here, at
+            // the call site, and not inside the body.
+            for b in bounds {
+                self.check_bound(ty, b, name, pname, line)?;
+            }
+            targs.push(ty.clone());
+        }
+
+        let key = mangle(name, &targs);
+        if self.sigs.borrow().contains_key(&key) {
+            return Ok(key);
+        }
+        if self.pending.borrow().len() as u32 > INSTANTIATION_LIMIT {
+            return err(
+                line,
+                format!(
+                    "instantiating `{name}` does not terminate: more than \
+                     {INSTANTIATION_LIMIT} instantiations are outstanding (Ch. 4 §2.7)"
+                ),
+            );
+        }
+
+        // The signature is built now, so this call can be checked against it
+        // before the body it belongs to has been lowered.
+        let params: Vec<Ty> = def
+            .params
+            .iter()
+            .map(|(n, t)| {
+                let ty = resolve_ty_env(t, self.types, &env)?;
+                check_sized(&ty, t.line(), &format!("the parameter `{n}`"))?;
+                Ok(ty)
+            })
+            .collect::<R<_>>()?;
+        let ret = match &def.ret {
+            None => Ty::Unit,
+            Some(t) => resolve_ty_env(t, self.types, &env)?,
+        };
+        let self_ref = matches!(def.params.first(), Some((n, ast::Ty::Ref(..))) if n == "self");
+        check_returned_reference(&params, &ret, self_ref, line)?;
+        self.sigs
+            .borrow_mut()
+            .insert(key.clone(), (params, ret.clone()));
+        self.pending.borrow_mut().push(Job {
+            key: key.clone(),
+            from: name.to_string(),
+            env,
+            depth: 0,
+        });
+        Ok(key)
+    }
+
+    /// Check that a type argument satisfies a bound (Ch. 4 §2.2).
+    fn check_bound(&self, ty: &Ty, bound: &str, callee: &str, param: &str, line: Line) -> R<()> {
+        // `Copy` is structural and automatic (Ch. 4 §5.1); `Sized` is a fact
+        // about the type, not a claim about it (§2.5).
+        let ok = match bound {
+            "Copy" => self.types.is_copyable(ty),
+            "Sized" => !ty.is_unsized(),
+            _ => match nominal_name(ty) {
+                Some(n) => self.impls.contains(&(n, bound.to_string())),
+                None => false,
+            },
+        };
+        if ok {
+            return Ok(());
+        }
+        err(
+            line,
+            format!(
+                "`{ty}` does not implement `{bound}`, which `{callee}` requires of \
+                 `{param}` (Ch. 4 §2.2)"
+            ),
+        )
     }
 
     /// A call to a known key, with any number of already-evaluated leading
@@ -2678,7 +3205,7 @@ impl Fn<'_> {
         args: &[ast::Expr],
         line: Line,
     ) -> R<(Operand, Ty)> {
-        let Some((params, ret)) = self.sigs.get(name).cloned() else {
+        let Some((params, ret)) = self.sigs.borrow().get(name).cloned() else {
             return err(line, format!("`{name}` is not a function in scope"));
         };
         if params.len() != args.len() + pre.len() {
@@ -2943,6 +3470,110 @@ impl Fn<'_> {
 
     /// The address of a place, and its type (Ch. 3 §1.3). A place is a local,
     /// a field of a place, an element of a place, or a dereference.
+    /// The concrete name a literal's path head refers to.
+    ///
+    /// For a generic type the arguments are not written — `Pair { … }`, not
+    /// `Pair<t27, t9> { … }` — so they come from the type this literal is
+    /// expected to have, or, failing that, from the types of the fields it is
+    /// given. Anything else is an inference failure, and says so.
+    fn instantiate_head(
+        &mut self,
+        path: &ast::Path,
+        fields: &[(String, ast::Expr)],
+        expected: Option<&Ty>,
+        line: Line,
+    ) -> R<String> {
+        let head = path.segments[0].clone();
+        let generic = self.types.generic_structs.get(&head).map(|s| {
+            (
+                s.generics.clone(),
+                s.fields.clone(),
+                s.fields.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+            )
+        });
+        let (params, decl) = match generic {
+            Some((g, f, _)) => (g, f),
+            None => match self.types.generic_enums.get(&head) {
+                Some(e) => {
+                    let variant = path.segments.get(1).cloned().unwrap_or_default();
+                    let Some(v) = e.variants.iter().find(|v| v.name == variant) else {
+                        return err(line, format!("`{head}` has no variant `{variant}`"));
+                    };
+                    (e.generics.clone(), v.fields.clone())
+                }
+                None => return Ok(head),
+            },
+        };
+
+        // The expected type already names an instantiation of this generic.
+        if let Some(want) = expected
+            && let Some(name) = nominal_name(want)
+            && name.starts_with(&format!("{head}."))
+        {
+            return Ok(name);
+        }
+
+        // Otherwise, match the written field types against what was given.
+        let mut env: HashMap<String, Ty> = HashMap::new();
+        for (fname, fty) in &decl {
+            let Some((_, e)) = fields.iter().find(|(n, _)| n == fname) else {
+                continue;
+            };
+            if let Some(got) = self.peek_ty(e)? {
+                unify(fty, &got, &params, &mut env);
+            }
+        }
+        let mut args = Vec::new();
+        for p in &params {
+            match env.get(p.name()) {
+                Some(t) => args.push(t.clone()),
+                None => {
+                    return err(
+                        line,
+                        format!(
+                            "cannot tell what `{}` is here; write the type of this value \
+                             (Ch. 4 §2.3)",
+                            p.name()
+                        ),
+                    );
+                }
+            }
+        }
+        let ty = self.types.instantiate(&head, &args, line)?;
+        Ok(nominal_name(&ty).expect("an instantiation is nominal"))
+    }
+
+    /// The type of an expression, where that can be told without lowering it.
+    ///
+    /// Inference for a generic call needs the argument types before it knows
+    /// what the parameters are, and lowering an argument twice is not an
+    /// option, so this answers for the forms that carry their type plainly
+    /// and gives up on the rest.
+    fn peek_ty(&mut self, e: &ast::Expr) -> R<Option<Ty>> {
+        use ast::Expr as E;
+        if let Some(t) = self.type_of_place(e)? {
+            return Ok(Some(t));
+        }
+        Ok(match e {
+            E::Int(..) => Some(Ty::T27),
+            E::Trit(..) => Some(Ty::Trit),
+            E::Bool(..) => Some(Ty::Bool),
+            E::Unit(_) => Some(Ty::Unit),
+            E::Borrow(inner, mutable, _) => {
+                self.peek_ty(inner)?.map(|t| Ty::Ref(Box::new(t), *mutable))
+            }
+            E::Cast(_, t, _) => Some(self.resolve(t)?),
+            E::Call(name, _, _) => self.sigs.borrow().get(name).map(|(_, r)| r.clone()),
+            E::Method(..) | E::Aggregate(..) => None,
+            _ => None,
+        })
+    }
+
+    /// Resolve a written type in this function's generic environment.
+    fn resolve(&self, t: &ast::Ty) -> R<Ty> {
+        resolve_ty_env(t, self.types, &self.env)
+    }
+
     /// A method call that resolves to an impl block (Ch. 4 §1.3).
     ///
     /// Resolution is a desugaring: `p.area()` becomes `Point.area(&p)`, with
@@ -2977,7 +3608,7 @@ impl Fn<'_> {
             return err(line, format!("{base} has no methods"));
         };
         let key = format!("{type_name}.{name}");
-        let Some((params, _)) = self.sigs.get(&key).cloned() else {
+        let Some((params, _)) = self.sigs.borrow().get(&key).cloned() else {
             return err(
                 line,
                 format!("{base} has no method `{name}`, and neither does Ch. 1"),
@@ -3333,15 +3964,16 @@ impl Fn<'_> {
         &mut self,
         path: &ast::Path,
         fields: &[(String, ast::Expr)],
+        expected: Option<&Ty>,
         line: Line,
     ) -> R<(Operand, Ty)> {
-        let head = path.segments[0].clone();
+        let head = self.instantiate_head(path, fields, expected, line)?;
 
         // `Type::function(args)` — an associated function, which is written
         // like a variant and told apart by what the names are (Ch. 4 §1.4).
         if path.segments.len() == 2 {
             let key = format!("{head}.{}", path.segments[1]);
-            if self.sigs.contains_key(&key) {
+            if self.sigs.borrow().contains_key(&key) {
                 let args: Vec<ast::Expr> = fields.iter().map(|(_, e)| e.clone()).collect();
                 return self.call_key(&key, Vec::new(), &args, line);
             }
@@ -3350,7 +3982,7 @@ impl Fn<'_> {
         // `Enum::Variant`, with or without a payload.
         if path.segments.len() == 2 {
             let (enum_name, variant) = (head, path.segments[1].clone());
-            if !self.types.enums.contains_key(&enum_name) {
+            if !self.types.enums.borrow().contains_key(&enum_name) {
                 return err(line, format!("`{enum_name}` is not an enum in scope"));
             }
             let Some(index) = self.types.variant(&enum_name, &variant) else {
@@ -3360,7 +3992,7 @@ impl Fn<'_> {
         }
 
         // A struct literal.
-        if !self.types.structs.contains_key(&head) {
+        if !self.types.structs.borrow().contains_key(&head) {
             return err(line, format!("`{head}` is not a struct in scope"));
         }
         let ty = Ty::Struct(head.clone());
@@ -3798,7 +4430,7 @@ impl Fn<'_> {
         let ty = Ty::Enum(name.to_string());
         let l = self.types.layout(&ty);
         let e = l.enum_layout.clone().expect("an enum");
-        let variants = self.types.enums[name].clone();
+        let variants = self.types.enums.borrow()[name].clone();
 
         // Which variant each arm selects, and whether an arm catches all.
         let mut selects: Vec<Option<usize>> = Vec::new();
@@ -3813,7 +4445,7 @@ impl Fn<'_> {
                 ast::Pattern::Wild(_) | ast::Pattern::Bind(..) => None,
                 ast::Pattern::Aggregate(path, _, l2) => {
                     let variant = match path.segments.len() {
-                        2 if path.segments[0] == name => path.segments[1].clone(),
+                        2 if heads_match(&path.segments[0], name) => path.segments[1].clone(),
                         1 => path.segments[0].clone(),
                         _ => {
                             return err(

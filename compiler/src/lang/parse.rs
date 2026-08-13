@@ -182,7 +182,7 @@ impl Parser {
         let line = self.line();
         self.bump(); // struct
         let name = self.expect_ident()?;
-        self.lifetime_params()?;
+        let generics = self.generic_params()?;
         let fields = if self.at_op("{") {
             self.named_fields()?
         } else if self.at_op("(") {
@@ -198,6 +198,7 @@ impl Parser {
         };
         Ok(StructItem {
             name,
+            generics,
             repr,
             fields,
             line,
@@ -208,7 +209,7 @@ impl Parser {
         let line = self.line();
         self.bump(); // enum
         let name = self.expect_ident()?;
-        self.lifetime_params()?;
+        let generics = self.generic_params()?;
         self.expect_op("{")?;
         let mut variants = Vec::new();
         while !self.eat_op("}") {
@@ -256,6 +257,7 @@ impl Parser {
         }
         Ok(EnumItem {
             name,
+            generics,
             repr,
             variants,
             line,
@@ -264,35 +266,112 @@ impl Parser {
 
     /// `<'a, 'b>` — parsed and discarded, since lifetimes are erased before
     /// TIR (Ch. 3 §3.1). Ch. 4 will put type parameters in the same list.
-    fn lifetime_params(&mut self) -> R<()> {
+    /// `<'a, T: Bound, const N: taddr>` (Ch. 3 §3.2, Ch. 4 §2.1).
+    ///
+    /// Lifetimes are parsed and dropped: they exist for the borrow checker
+    /// and are erased before TIR (Ch. 3 §3.1).
+    fn generic_params(&mut self) -> R<Vec<GenericParam>> {
+        let mut out = Vec::new();
         if !self.at_op("<") {
-            return Ok(());
+            return Ok(out);
         }
         self.bump();
+        if self.eat_op(">") {
+            return Ok(out);
+        }
         loop {
-            match self.bump() {
-                Tok::Lifetime(_) => {}
-                Tok::Op(">") => return Ok(()),
-                other => {
-                    return self.err(format!(
-                        "expected a lifetime, found {other}; type parameters are Chapter 4"
-                    ));
+            if let Tok::Lifetime(_) = self.peek() {
+                self.bump();
+                // `'a: 'b` outlives, also erased.
+                if self.eat_op(":") {
+                    while matches!(self.peek(), Tok::Lifetime(_)) {
+                        self.bump();
+                        if !self.eat_op("+") {
+                            break;
+                        }
+                    }
                 }
+            } else if self.eat_kw("const") {
+                let name = self.expect_ident()?;
+                self.expect_op(":")?;
+                let ty = self.ty()?;
+                out.push(GenericParam::Const { name, ty });
+            } else {
+                let name = self.expect_ident()?;
+                let mut bounds = Vec::new();
+                if self.eat_op(":") {
+                    loop {
+                        // A lifetime bound — `T: 'a` — is erased with the
+                        // rest of them (Ch. 4 §2.6).
+                        if let Tok::Lifetime(_) = self.peek() {
+                            self.bump();
+                        } else {
+                            bounds.push(self.expect_ident()?);
+                        }
+                        if !self.eat_op("+") {
+                            break;
+                        }
+                    }
+                }
+                out.push(GenericParam::Type { name, bounds });
             }
-            // `'a: 'b` outlives, also erased.
-            if self.eat_op(":") {
+            if self.eat_op(",") {
+                if self.eat_op(">") {
+                    return Ok(out);
+                }
+                continue;
+            }
+            self.expect_op(">")?;
+            return Ok(out);
+        }
+    }
+
+    /// `where T: Bound, U: Other` — the same bounds, written after the
+    /// signature instead of inside the angle brackets (Ch. 4 §2.2).
+    fn where_clause(&mut self, generics: &mut [GenericParam]) -> R<()> {
+        if !self.eat_kw("where") {
+            return Ok(());
+        }
+        loop {
+            if let Tok::Lifetime(_) = self.peek() {
+                self.bump();
+                self.expect_op(":")?;
                 while matches!(self.peek(), Tok::Lifetime(_)) {
                     self.bump();
                     if !self.eat_op("+") {
                         break;
                     }
                 }
+            } else {
+                let name = self.expect_ident()?;
+                self.expect_op(":")?;
+                let mut bounds = Vec::new();
+                loop {
+                    if let Tok::Lifetime(_) = self.peek() {
+                        self.bump();
+                    } else {
+                        bounds.push(self.expect_ident()?);
+                    }
+                    if !self.eat_op("+") {
+                        break;
+                    }
+                }
+                match generics.iter_mut().find(|g| g.name() == name) {
+                    Some(GenericParam::Type { bounds: b, .. }) => b.extend(bounds),
+                    _ => {
+                        return self.err(format!(
+                            "`{name}` is not a type parameter of this item, so a \
+                             `where` clause cannot bound it"
+                        ));
+                    }
+                }
             }
-            if self.eat_op(",") {
-                continue;
+            if !self.eat_op(",") {
+                return Ok(());
             }
-            self.expect_op(">")?;
-            return Ok(());
+            if self.at_op("{") {
+                return Ok(());
+            }
         }
     }
 
@@ -333,7 +412,12 @@ impl Parser {
         let line = self.line();
         self.bump(); // trait
         let name = self.expect_ident()?;
-        self.lifetime_params()?;
+        if !self.generic_params()?.is_empty() {
+            return self.err(
+                "a trait with type parameters is Ch. 4 §1.7, specified but not implemented; \
+                 an associated type is the other half of that section",
+            );
+        }
         let mut supertraits = Vec::new();
         if self.eat_op(":") {
             loop {
@@ -356,7 +440,7 @@ impl Parser {
     fn impl_item(&mut self) -> R<ImplItem> {
         let line = self.line();
         self.bump(); // impl
-        self.lifetime_params()?;
+        let mut generics = self.generic_params()?;
         // `impl !Copy for T` — the one negative impl (Ch. 4 §5.1).
         if self.at_op("!") {
             return self.err(
@@ -370,9 +454,18 @@ impl Parser {
         } else {
             (None, first)
         };
-        self.lifetime_params()?;
+        // The type arguments of the self type: `impl<T> Pair<T, T>`.
+        let self_args = self.generic_args()?;
+        self.where_clause(&mut generics)?;
+        if !generics.is_empty() || !self_args.is_empty() {
+            return self.err(
+                "a generic impl is Ch. 4 §2.1, specified but not implemented; \
+                 an impl block on a concrete type works",
+            );
+        }
         let methods = self.method_block("impl")?;
         Ok(ImplItem {
+            generics,
             trait_name,
             self_ty,
             methods,
@@ -437,7 +530,7 @@ impl Parser {
         let line = self.line();
         self.bump(); // fn
         let name = self.expect_ident()?;
-        self.lifetime_params()?;
+        let mut generics = self.generic_params()?;
         self.expect_op("(")?;
         let mut params = Vec::new();
         if !self.eat_op(")") {
@@ -475,6 +568,7 @@ impl Parser {
         } else {
             None
         };
+        self.where_clause(&mut generics)?;
 
         // A function without a body is a declaration (§3.1) — the same rule
         // TIR §1 states for its own.
@@ -485,6 +579,7 @@ impl Parser {
         };
         Ok(FnItem {
             name,
+            generics,
             params,
             ret,
             body,
@@ -544,7 +639,40 @@ impl Parser {
             self.bump();
             return Ok(Ty::SelfTy(line));
         }
-        Ok(Ty::Name(self.expect_ident()?, line))
+        let name = self.expect_ident()?;
+        let args = self.generic_args()?;
+        if args.is_empty() {
+            return Ok(Ty::Name(name, line));
+        }
+        Ok(Ty::App(name, args, line))
+    }
+
+    /// `<T, U>` after a type name (Ch. 4 §2.1), empty when there is none.
+    fn generic_args(&mut self) -> R<Vec<Ty>> {
+        let mut args = Vec::new();
+        if !self.at_op("<") {
+            return Ok(args);
+        }
+        self.bump();
+        if self.eat_op(">") {
+            return Ok(args);
+        }
+        loop {
+            // A lifetime argument is erased, like the parameter it fills.
+            if let Tok::Lifetime(_) = self.peek() {
+                self.bump();
+            } else {
+                args.push(self.ty()?);
+            }
+            if self.eat_op(",") {
+                if self.eat_op(">") {
+                    return Ok(args);
+                }
+                continue;
+            }
+            self.expect_op(">")?;
+            return Ok(args);
+        }
     }
 
     // -------------------------------------------------------- statements

@@ -29,6 +29,35 @@ pub enum Item {
     Impl(ImplItem),
 }
 
+/// One generic parameter (Ch. 4 §2.1). Lifetimes are parsed and dropped,
+/// since Ch. 3 §3.1 erases them; the other two reach code generation.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum GenericParam {
+    /// `T: Bound + Other`.
+    Type {
+        /// Its name.
+        name: String,
+        /// The traits it is required to implement (§2.2).
+        bounds: Vec<String>,
+    },
+    /// `const N: taddr`.
+    Const {
+        /// Its name.
+        name: String,
+        /// Its type, one of Ch. 1's integers or `bool` (§2.4).
+        ty: Ty,
+    },
+}
+
+impl GenericParam {
+    /// Its name.
+    pub fn name(&self) -> &str {
+        match self {
+            GenericParam::Type { name, .. } | GenericParam::Const { name, .. } => name,
+        }
+    }
+}
+
 /// A trait declaration (Ch. 4 §1.1).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TraitItem {
@@ -45,6 +74,8 @@ pub struct TraitItem {
 /// An impl block (Ch. 4 §1.2).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ImplItem {
+    /// Its generic parameters (Ch. 4 §2.1).
+    pub generics: Vec<GenericParam>,
     /// The trait being implemented, or `None` for an inherent impl.
     pub trait_name: Option<String>,
     /// The type being implemented.
@@ -70,6 +101,8 @@ pub enum Repr {
 pub struct StructItem {
     /// Its name.
     pub name: String,
+    /// Its generic parameters (Ch. 4 §2.1).
+    pub generics: Vec<GenericParam>,
     /// Its layout regime.
     pub repr: Repr,
     /// Fields in declaration order. A tuple struct's fields are named `0`,
@@ -84,6 +117,8 @@ pub struct StructItem {
 pub struct EnumItem {
     /// Its name.
     pub name: String,
+    /// Its generic parameters (Ch. 4 §2.1).
+    pub generics: Vec<GenericParam>,
     /// Its layout regime.
     pub repr: Repr,
     /// Its variants, in declaration order.
@@ -110,6 +145,8 @@ pub struct Variant {
 pub struct FnItem {
     /// Its name.
     pub name: String,
+    /// Its generic parameters (Ch. 4 §2.1).
+    pub generics: Vec<GenericParam>,
     /// Its parameters.
     pub params: Vec<(String, Ty)>,
     /// Its return type; `None` means `()`.
@@ -152,6 +189,9 @@ pub enum Ty {
     /// `Self` — the implementing type, substituted away before lowering
     /// (Ch. 4 §1.2).
     SelfTy(Line),
+    /// `Name<T, U>` — a generic type applied to arguments (Ch. 4 §2.1).
+    /// Substituted and mangled to a plain `Name` before layout ever sees it.
+    App(String, Vec<Ty>, Line),
 }
 
 impl Ty {
@@ -164,7 +204,8 @@ impl Ty {
             | Ty::Tuple(_, l)
             | Ty::Ref(_, _, l)
             | Ty::Slice(_, l)
-            | Ty::SelfTy(l) => *l,
+            | Ty::SelfTy(l)
+            | Ty::App(_, _, l) => *l,
         }
     }
 }

@@ -207,9 +207,49 @@ the claim Ch. 4 §1.2 makes when it says an impl block is a naming construct.
 `impl Drop for T` lands on the same `drop.T` key Ch. 3 §1.4's `fn drop(self: T)`
 already used, so both spellings produce identical code, as §1.4 promised.
 
-Not implemented, and rejected by name: generic parameters (`<T>`), `dyn Trait`,
-closures, `for` loops, `derive`, associated types and constants, `where`
-clauses, and `impl !Copy`. Those are the next two blocks.
+**G0.8 — Ch. 4's second block is implemented: generics and monomorphization.**
+Type parameters on functions, structs and enums; bounds, inline and in a
+`where` clause; inference from arguments and from the expected type; and
+monomorphization with a termination limit — all work end to end.
+
+The implementation turns on one decision: **a type parameter is not a kind of
+type.** There is no `Ty::Param`. A parameter is a name that an *environment*
+maps to a concrete type, so lowering a generic body is lowering the same AST
+under a different environment, and no AST is ever rewritten. A generic struct
+or enum becomes an ordinary nominal type under a mangled name the first time
+it is applied, so the layout engine, the drop machinery, the borrow checker
+and code generation never learn that generics exist. That is also why no
+generic construct reaches TIR, which the test suite asserts directly.
+
+The payoff worth naming: `enum Opt<T> { None, Some(T) }` written in the
+language gets every layout promise Ch. 2 §6 and Ch. 3 §2.5 make about
+`Option`, because nothing told the compiler it was special — one tryte for
+`Opt<trit>`, one word for `Opt<&t27>`, a word and a tag for `Opt<t27>`.
+
+Three limits, all named in the diagnostics:
+
+- **No `::<>`.** Ch. 4 §2.3's explicit instantiation is not implemented, so a
+  parameter that appears in neither an argument nor the expected type cannot
+  be determined and the diagnostic says which parameter it was. Const generic
+  arguments (§2.4) are parsed and rejected for the same reason.
+- **No generic impls.** `impl<T> Pair<T, T>` is rejected. Methods therefore
+  exist only on concrete types, which is why `Opt<T>` above has free functions
+  rather than methods.
+- **A generic body is checked at instantiation, not once.** Ch. 4 §2.2 makes
+  the *bound* half normative — "an instantiation that fails a bound is
+  rejected at the call site, not inside the body" — and that half holds: bounds
+  are checked where the call is written, with a diagnostic naming the call, the
+  parameter and the trait. The other half, that a generic body compiles once
+  against its bounds, would need a checker that runs on abstract types. Today a
+  body is checked once per instantiation, so a generic function that is never
+  called is never checked, and one that uses a method its bounds do not grant
+  is caught at the call rather than at the definition. This is the C++ failure
+  mode Appendix B claims is removed by construction, and it is removed at the
+  call site only. Recorded, not glossed.
+
+Not implemented, and rejected by name: `dyn Trait`, closures, `for` loops,
+`derive`, associated types and constants, generic traits, and `impl !Copy`.
+Those are the third block.
 
 Two limits worth naming:
 

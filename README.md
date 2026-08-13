@@ -22,12 +22,12 @@ the source.
 | backend (TIR → TRISC-27) | **implemented**: `trustc compile` emits assembly. No register allocator yet — every value lives in a stack slot |
 | `compiler/` — Trust frontend | **implemented through Ch. 2**: lexer, parser, type checker and lowering to TIR — scalars, arrays, tuples, structs, enums with payloads and niches, both `repr`s, all control flow |
 | Ch. 3 — ownership and references | **built**: `&T`/`&mut T`, deref and auto-deref, slices, bounds-checked indexing, erased lifetimes, moves through branches and loops, destructors with drop flags, and a non-lexical borrow checker. A reference may be returned under elision rule 2; regions are not inferred, so rooting is checked syntactically and written lifetimes wait for Ch. 4 (G0.5) |
-| Ch. 4 — generics and traits | **specified in full, built in part**: traits, impls, methods, the four receivers, associated functions, supertraits, default bodies, elision rule 3 and `impl Drop for T` all run end to end. Generic parameters, `dyn Trait`, closures, `for` and `derive` are specified and rejected by name (G0.7) |
+| Ch. 4 — generics and traits | **specified in full, built through §2**: traits, impls, methods, supertraits, default bodies, elision rule 3, `impl Drop`; generic functions, structs and enums, bounds, `where` clauses, inference and monomorphization. `Opt<T>` written in the language keeps every niche promise Ch. 2 and Ch. 3 make about `Option`. `dyn Trait`, closures, `for`, `derive` and generic impls are specified and rejected by name (G0.7, G0.8) |
 
 ## Building
 
 ```
-cargo test          # 264 tests
+cargo test          # 271 tests
 cargo build
 ```
 

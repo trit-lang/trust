@@ -57,6 +57,13 @@ fn hello_world_runs_the_whole_way() {
 }
 
 #[test]
+fn the_generics_example_runs_the_whole_way() {
+    let (status, out) = run(include_str!("../../examples/trust/generics.tr"));
+    assert_eq!(status, 19);
+    assert_eq!(out, "18\n20\n");
+}
+
+#[test]
 fn the_traits_example_runs_the_whole_way() {
     let (status, out) = run(include_str!("../../examples/trust/traits.tr"));
     assert_eq!(status, 28);
@@ -153,9 +160,11 @@ fn casts_are_explicit_and_follow_chapter_one() {
         -9841
     );
     assert_eq!(
-        run("fn main() -> t27 { let mut a: [t9; 4] = [0; 4]; let i: taddr = 1; \
-             a[i] += 10; a[i] as t27 }")
-            .0,
+        run(
+            "fn main() -> t27 { let mut a: [t9; 4] = [0; 4]; let i: taddr = 1; \
+             a[i] += 10; a[i] as t27 }"
+        )
+        .0,
         10
     );
 }
@@ -276,11 +285,15 @@ fn the_deferred_features_say_what_they_are_waiting_for() {
     // …as against one that is written and only partly built.
     assert!(error("fn main() -> t27 { let x: dyn Shape = 0; 0 }").contains("Ch. 4"));
     assert!(error("fn main() -> t27 { for x in y { } 0 }").contains("§5.7"));
-    // References are Chapter 3 and traits are Chapter 4, and both now work;
-    // generic parameters are the next piece of Chapter 4.
+    // References are Chapter 3; traits and generics are Chapter 4; all now
+    // work. What is left of Ch. 4 says which section it is waiting for.
     tir_of("fn f(x: &t27) -> t27 { *x }");
     tir_of("trait Shape { fn area(&self) -> t27; }");
-    assert!(error("fn f<T>(x: T) -> T { x }").contains("Chapter 4"));
+    tir_of("fn id<T>(x: T) -> T { x } fn main() -> t27 { id(1) }");
+    let e = error("struct P { x: t27 } impl<T> P { fn f(&self) -> t27 { 0 } }");
+    assert!(e.contains("generic impl"), "{e}");
+    let e = error("trait Into<T> { fn into(self) -> T; }");
+    assert!(e.contains("§1.7"), "{e}");
 }
 
 #[test]
@@ -970,4 +983,155 @@ fn chapter_ones_methods_are_the_languages_and_are_not_overridden() {
         .0,
         6
     );
+}
+
+// ------------------------------------------------ Chapter 4: generics
+
+#[test]
+fn a_generic_function_is_monomorphized_per_instantiation() {
+    // Ch. 4 §2.7: one copy of the code per distinct set of type arguments.
+    assert_eq!(
+        run("fn id<T>(x: T) -> T { x } \
+             fn main() -> t27 { let a = id(40); let b: t9 = id(2); a + b as t27 }")
+        .0,
+        42
+    );
+    let m = tir_of(
+        "fn id<T>(x: T) -> T { x } \
+                    fn main() -> t27 { let a = id(40); let b: t9 = id(2); a + b as t27 }",
+    );
+    let printed = tir::print_module(&m);
+    assert!(printed.contains("@id.t27"), "{printed}");
+    assert!(printed.contains("@id.t9"), "{printed}");
+    // And no generic construct reaches TIR at all.
+    assert!(!printed.contains('<'), "{printed}");
+}
+
+#[test]
+fn generic_parameters_are_inferred_from_arguments_and_from_the_expected_type() {
+    // From an argument.
+    assert_eq!(
+        run("fn first<T>(xs: &[T]) -> &T { &xs[0] } \
+             fn main() -> t27 { let a: [t27; 3] = [9, 8, 7]; *first(&a) }")
+        .0,
+        9
+    );
+    // From the expected type, which is the only thing that separates these.
+    assert_eq!(
+        run("fn zero<T>(x: T) -> T { x } \
+             fn main() -> t27 { let n: t9 = zero(1); n as t27 }")
+        .0,
+        1
+    );
+    // And when neither says, the diagnostic names the parameter.
+    let e = error("fn make<T>() -> t27 { 0 } fn main() -> t27 { make() }");
+    assert!(e.contains("cannot tell what `T` is"), "{e}");
+}
+
+#[test]
+fn a_generic_struct_is_a_type_once_it_is_applied() {
+    assert_eq!(
+        run("struct Pair<A, B> { first: A, second: B } \
+             fn main() -> t27 { \
+                 let p: Pair<t27, t9> = Pair { first: 7, second: 2 }; \
+                 p.first + p.second as t27 \
+             }")
+        .0,
+        9
+    );
+    // Written without its arguments it is not a type.
+    let e = error("struct Pair<A, B> { first: A, second: B } fn f(p: Pair) -> t27 { 0 }");
+    assert!(e.contains("needs its arguments written"), "{e}");
+    // Nor with the wrong number of them.
+    let e = error("struct Pair<A, B> { first: A, second: B } fn f(p: Pair<t27>) -> t27 { 0 }");
+    assert!(e.contains("takes 2 type argument"), "{e}");
+}
+
+#[test]
+fn a_generic_enum_keeps_chapter_twos_niche_promise() {
+    // The payoff: `Opt<T>` is written in the language now, and the niche
+    // optimization applies to it because nothing told the compiler it was
+    // special (Ch. 4 §5.8).
+    assert_eq!(
+        run("enum Opt<T> { None, Some(T) } \
+             fn unwrap_or<T>(o: Opt<T>, d: T) -> T { \
+                 match o { Opt::Some(v) => v, Opt::None => d, } \
+             } \
+             fn main() -> t27 { unwrap_or(Opt::Some(7), 0) + unwrap_or(Opt::None, 5) }")
+        .0,
+        12
+    );
+    // The layout promises hold for a type the compiler was never told was
+    // special: one tryte for `Opt<trit>`, one word for `Opt<&t27>` because
+    // every non-positive value is a reference niche, and a word plus a tag
+    // for `Opt<t27>` because a word has no spare patterns to hide `None` in.
+    let m = tir_of(
+        "enum Opt<T> { None, Some(T) } \
+         fn main() -> t27 { \
+             let a: Opt<&t27> = Opt::None; \
+             let b: Opt<t27> = Opt::None; \
+             let c: Opt<trit> = Opt::None; \
+             0 \
+         }",
+    );
+    let printed = tir::print_module(&m);
+    for want in ["%a.slot.4 = slot tryte[3]", "tryte[6]", "tryte[1]"] {
+        assert!(printed.contains(want), "{want} missing from\n{printed}");
+    }
+    // `Opt<&t27>` is one word, because every non-positive value is a
+    // reference niche (Ch. 3 §2.5).
+    assert_eq!(
+        run("enum Opt<T> { None, Some(T) } \
+             fn main() -> t27 { \
+                 let n: Opt<&t27> = Opt::None; \
+                 match n { Opt::Some(v) => *v, Opt::None => 5, } \
+             }")
+        .0,
+        5
+    );
+}
+
+#[test]
+fn a_bound_is_checked_at_the_call_site() {
+    // Ch. 4 §2.2: the diagnostic names the call, not something inside the
+    // generic body.
+    assert_eq!(
+        run("trait Area { fn area(&self) -> t27; } \
+             struct Sq { s: t27 } \
+             impl Area for Sq { fn area(&self) -> t27 { self.s * self.s } } \
+             fn measure<T: Area>(x: &T) -> t27 { x.area() } \
+             fn main() -> t27 { let s = Sq { s: 5 }; measure(&s) }")
+        .0,
+        25
+    );
+    let e = error(
+        "trait Area { fn area(&self) -> t27; } struct Sq { s: t27 } \
+         fn measure<T: Area>(x: &T) -> t27 { 0 } \
+         fn main() -> t27 { let s = Sq { s: 5 }; measure(&s) }",
+    );
+    assert!(e.contains("does not implement `Area`"), "{e}");
+    // `Copy` is structural and automatic (§5.1), so it is a bound the
+    // compiler answers itself.
+    tir_of("fn dup<T: Copy>(x: T) -> T { x } fn main() -> t27 { dup(1) }");
+    let e = error(
+        "struct B { x: t27 } impl Drop for B { fn drop(self) { } } \
+         fn dup<T: Copy>(x: T) -> T { x } \
+         fn main() -> t27 { let b = B { x: 1 }; dup(b); 0 }",
+    );
+    assert!(e.contains("does not implement `Copy`"), "{e}");
+}
+
+#[test]
+fn a_where_clause_is_the_same_bound_written_later() {
+    assert_eq!(
+        run("trait Area { fn area(&self) -> t27; } \
+             struct Sq { s: t27 } \
+             impl Area for Sq { fn area(&self) -> t27 { self.s * self.s } } \
+             fn measure<T>(x: &T) -> t27 where T: Area { x.area() } \
+             fn main() -> t27 { let s = Sq { s: 4 }; measure(&s) }")
+        .0,
+        16
+    );
+    let e = error("fn f<T>(x: T) -> T where U: Copy { x } fn main() -> t27 { 0 }");
+    assert!(e.contains("not a type parameter"), "{e}");
 }

@@ -1,0 +1,114 @@
+// generics.tr — Language Ch. 4 §2: type parameters, bounds, monomorphization.
+//
+// The point of this file is that `Opt<T>` below is an ordinary enum written
+// in the language, and every layout promise Ch. 2 and Ch. 3 make about
+// `Option` holds for it because nothing told the compiler it was special:
+//
+//     Opt<trit>   1 tryte    — trit uses 3 of 19 683 patterns (Ch. 2 §6)
+//     Opt<&t27>   3 trytes   — every non-positive value is a reference
+//                              niche, so `None` costs nothing (Ch. 3 §2.5)
+//     Opt<t27>    6 trytes   — a word has no spare patterns, so this one
+//                              pays for a tag, as it must
+
+fn putchar(c: t9);
+
+enum Opt<T> {
+    None,
+    Some(T),
+}
+
+fn unwrap_or<T>(o: Opt<T>, d: T) -> T {
+    match o {
+        Opt::Some(v) => v,
+        Opt::None => d,
+    }
+}
+
+struct Pair<A, B> {
+    first: A,
+    second: B,
+}
+
+// One type parameter, inferred from the argument.
+fn first_of<T>(xs: &[T]) -> &T {
+    &xs[0]
+}
+
+// A bound. `T: Area` is checked where `total` is *called*, not here — so a
+// mistake is reported at the call and never inside this body (Ch. 4 §2.2).
+trait Area {
+    fn area(&self) -> t27;
+}
+
+struct Sq { s: t27 }
+struct Rect { w: t27, h: t27 }
+
+impl Area for Sq {
+    fn area(&self) -> t27 { self.s * self.s }
+}
+
+impl Area for Rect {
+    fn area(&self) -> t27 { self.w * self.h }
+}
+
+// Static dispatch: one copy of this function per shape it is used with
+// (§2.7). `dyn Trait` would give one copy and an indirect call, and is §3.
+fn twice_the_area<T>(x: &T) -> t27
+where
+    T: Area,
+{
+    x.area() * 2
+}
+
+fn print_signed(value: t27) {
+    let mut n = value;
+    if n < 0 {
+        putchar(45);
+        n = -n;
+    }
+    if n == 0 {
+        putchar(48);
+    }
+    let mut digits: [t9; 16] = [0; 16];
+    let mut i: taddr = 0;
+    while n > 0 {
+        digits[i] = (n % 10) as t9;
+        n = n / 10;
+        // Round-to-nearest division (Ch. 1 §4): 18 / 10 is 2, so 18 % 10 is
+        // −2 and the quotient is one too *large*. Carrying the 10 back into
+        // the digit therefore costs one from the quotient.
+        if digits[i] < 0 {
+            digits[i] += 10;
+            n -= 1;
+        }
+        i += 1;
+    }
+    while i > 0 {
+        i -= 1;
+        putchar(digits[i] + 48);
+    }
+    putchar(10);
+}
+
+fn main() -> t27 {
+    // Inferred from the argument.
+    let a = unwrap_or(Opt::Some(7), 0);
+
+    // Inferred from the expected type: nothing else distinguishes these.
+    let b: t9 = unwrap_or(Opt::None, 2);
+
+    // A pair of two different types, which is two type arguments and one
+    // instantiation.
+    let p: Pair<t27, t9> = Pair { first: a, second: b };
+
+    let xs: [t27; 3] = [10, 20, 30];
+    let head = first_of(&xs);
+
+    let sq = Sq { s: 3 };
+    let rect = Rect { w: 2, h: 5 };
+
+    print_signed(twice_the_area(&sq));      // 18
+    print_signed(twice_the_area(&rect));    // 20
+
+    p.first + p.second as t27 + *head       // 7 + 2 + 10
+}
