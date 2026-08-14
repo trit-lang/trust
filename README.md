@@ -9,6 +9,10 @@ authority; the code implements it. Where the spec is silent, the decision made
 is recorded in [`docs/spec-gaps.md`](docs/spec-gaps.md) rather than buried in
 the source.
 
+[`docs/status.md`](docs/status.md) is the handoff: what exists, what it can
+and cannot do, the architecture decisions you need before changing anything,
+and where to go next.
+
 ## What exists today
 
 | Component | State |
