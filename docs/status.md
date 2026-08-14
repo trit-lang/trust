@@ -265,8 +265,8 @@ The front half has two other checks and needs both:
   enforces TIR §6's post-condition — every arithmetic width is one the target
   has a native operation for. §6 says a backend "may assume legalized input
   and is not required to handle any other", which without a check is a licence
-  to emit anything, and legalization is *incomplete* (G6.6 blocks `mul`;
-  `div`, `rem` and the shifts are unwritten), so that path is reachable.
+  to emit anything, and legalization is *incomplete* (`shl`, `div`, `rem` and
+  `shr` are unwritten at wide widths), so that path is reachable.
 - **Output assertions and negative tests.** `run()` checks a program's exact
   output, and `error()` checks that a program that must be rejected *is*, with
   the reason. Discipline 3 below has teeth only through the second: of the 94
