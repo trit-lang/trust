@@ -1138,6 +1138,59 @@ This is not yet cross-block register allocation, which remains the largest
 single item: stack traffic is still the biggest pool in the profile. It is
 the part of that pool that needed no liveness analysis across edges.
 
+**G8.9 — cross-block register allocation, and the interval that began one
+instruction too late.** G8.1's allocator was block-local: a value could live
+in a register only where one block both defined and used it, and everything
+crossing an edge went to memory. G8.6's profile put a number on that —
+**frame traffic 44% of every instruction executed, against 15% for the
+program's own data**, and it stayed the largest single pool through four
+changes.
+
+`allocate` is now a linear scan over live intervals, decided once for the
+whole function.
+
+**What the frontend makes easy.** `lang/lower.rs` gives every local a slot,
+so *no value crosses a block edge in a register* and the frontend emits **no
+block parameters at all** — 412 blocks in `examples/trust/HPL.tr`, zero
+parameters, before and after legalization. Agreeing on a register for a value
+with a different definition on each incoming edge is the parallel-copy
+problem, and this pass does not have to solve it: block parameters keep the
+transfer area `move_args` already uses. Hand-written TIR has them and keeps
+working.
+
+**What needed care.** Three things, and one of them was got wrong:
+
+1. *The interval is a hull.* A value defined inside a loop and read at the
+   top of the next iteration is live at a point earlier in the linear order
+   than its definition. The interval reaches back over the whole loop, or
+   another value takes the register there.
+2. *`a0`…`a7` are written while a call sets up its arguments*, not only when
+   it executes. They are allocated only in a function that makes no call.
+3. *What "crossing a call" means.* A value whose last use is an **argument**
+   to the call is read before the call executes, and a caller-saved register
+   holds it perfectly well; so does the call's own result. Only a value still
+   live after the call returns needs `s0`…`s6`.
+
+**The bug.** A block's first instruction had the same position as the block's
+entry, so a value live *into* a block whose first instruction is a call had
+an interval beginning *at* that call — and "strictly inside" was then false.
+A function parameter is the common case: `@print_field(%v, %width)` calls
+`@decimal_width` first and reads `%width` after, so `%width` went into `t6`
+and the call destroyed it. HPL printed its table with no padding.
+
+A block's entry now has a position of its own, before its first instruction.
+
+**What found it was not the test suite.** 342 tests passed. HPL's output
+changed, and only because it is a program that prints something formatted
+enough for a wrong answer to be visible. The regression test written
+afterwards fails on the old code — checked by reverting the fix, because a
+test that cannot fail is not one.
+
+Measured on `examples/trust/HPL.tr`: 8 033 644 → 5 538 068 dynamic
+instructions (**−31.1%**), frame traffic 43.97% → 16.67%, output unchanged.
+
+**Against the profile that started G8.6: −49.0%.**
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

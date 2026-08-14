@@ -572,9 +572,8 @@ fn @thrice(%a: t27) -> t27 {
 fn @once(%a: t27) -> t27 {
 ^entry:
     %b = call @twice(%a) -> t27
-    %c = call @twice(%a) -> t27
-    %d = mul.wrap t27 %b, %c
-    ret %d
+    %c = call @twice(%b) -> t27
+    ret %c
 }
 "#;
     let asm = compile_asm(src, "thrice");
@@ -593,8 +592,9 @@ fn @once(%a: t27) -> t27 {
         "every save has its restore:\n{thrice}"
     );
 
-    // `%b` and `%c` are read once each; neither is worth a save and a
-    // restore, which cost more than the one spill they would replace.
+    // Nothing here is read twice: `%a` reaches one call and `%b` the next.
+    // Neither is worth a save and a restore, which cost more than the one
+    // spill they would replace.
     let once = body_of(&asm, "once");
     assert_eq!(
         once.matches("st.word s").count(),
@@ -709,4 +709,95 @@ fn @calls(%a: t27) -> t27 {
     for entry in ["leaf", "calls"] {
         differential(src, entry, &[&[0, 0], &[3, 5], &[-7, 11], &[9841, -3]]);
     }
+}
+
+#[test]
+fn a_parameter_live_across_the_first_call_is_not_left_where_a_call_clobbers_it() {
+    // A parameter is live from before the entry block's first instruction.
+    // When that instruction is a call, the parameter is live *across* it, and
+    // an interval that began at the call rather than before it did not say
+    // so — the allocator handed `%b` a caller-saved register, and
+    // `examples/trust/HPL.tr` printed a table with no padding in it.
+    //
+    // This is what `Positions` gives a block's entry a number of its own for.
+    let src = r#"tir 0.1 target "tritium"
+
+fn @clobber(%x: t27) -> t27 {
+^entry:
+    %a = mul.wrap t27 %x, const t27 3
+    %b = add.wrap t27 %a, const t27 7
+    %c = mul.wrap t27 %b, const t27 5
+    %d = add.wrap t27 %c, %a
+    %e = sub.wrap t27 %d, %b
+    %f = add.wrap t27 %e, %c
+    ret %f
+}
+
+fn @f(%a: t27, %b: t27) -> t27 {
+^entry:
+    %r = call @clobber(%a) -> t27
+    %s = add.wrap t27 %b, %r
+    ret %s
+}
+"#;
+    let asm = compile_asm(src, "f");
+    let f = body_of(&asm, "f");
+    // `%b` arrives in a1. Whatever happens to it, it may not be moved into a
+    // register the call is entitled to destroy (TRISC-27 §6.1).
+    for r in [
+        "t4", "t5", "t6", "t7", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7",
+    ] {
+        assert!(
+            !f.contains(&format!("add.wrap {r}, a1, zero")),
+            "`%b` is live across the call and {r} does not survive one:\n{f}"
+        );
+    }
+    differential(src, "f", &[&[0, 0], &[1, 100], &[-3, 9], &[7, -7]]);
+}
+
+#[test]
+fn a_loop_counter_stays_in_a_register_across_the_back_edge() {
+    // What cross-block allocation is for. The counter is defined in one
+    // block, tested in another and incremented in a third; nothing here is
+    // block-local, so the old allocator left every one of them in memory —
+    // two accesses per iteration for the counter alone.
+    let src = r#"tir 0.1 target "tritium"
+
+fn @sum(%n: t27) -> t27 {
+^entry:
+    br ^head(const t27 0, const t27 0)
+^head(%i: t27, %acc: t27):
+    %c = cmp t27 %i, %n
+    br3 %c, ^body, ^done(%acc), ^done(%acc)
+^body:
+    %i2 = add.wrap t27 %i, const t27 1
+    %a2 = add.wrap t27 %acc, %i
+    br ^head(%i2, %a2)
+^done(%r: t27):
+    ret %r
+}
+
+fn @count(%n: t27) -> t27 {
+^entry:
+    %z = cmp t27 %n, const t27 0
+    br3 %z, ^done, ^done, ^loop
+^loop:
+    %v = load t27 @cell
+    %w = add.wrap t27 %v, const t27 1
+    store t27 %w, @cell
+    %d = sub.wrap t27 %n, const t27 1
+    store t27 %d, @cell
+    br ^done
+^done:
+    %o = load t27 @cell
+    ret %o
+}
+
+global @cell : tryte[3] = [0, 0, 0]
+"#;
+    // Block parameters keep their transfer slots — agreeing on a register for
+    // a value with a different definition on each incoming edge is the
+    // parallel-copy problem, and the frontend emits none of them.
+    differential(src, "sum", &[&[0], &[1], &[5], &[100]]);
+    differential(src, "count", &[&[0], &[3]]);
 }

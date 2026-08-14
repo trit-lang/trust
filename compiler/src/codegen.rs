@@ -7,19 +7,17 @@
 //!
 //! # Where a value lives
 //!
-//! Every SSA value gets a stack slot, and that slot is still where a value
-//! lives by default: an instruction loads its operands into scratch
-//! registers, computes, and stores the result back. On top of that floor sits
-//! a **block-local** allocator (`allocate`), which keeps a value in a
-//! register when it is defined and used in one block and nothing outside that
-//! block mentions it. A value crossing a block boundary stays in memory,
-//! because this pass has no agreement between blocks about where it would be.
+//! Every SSA value gets a stack slot, and that slot is the floor: an
+//! instruction whose operands are not in registers loads them into scratch,
+//! computes, and stores the result back. Above that floor sits `allocate`, a
+//! linear scan over live intervals that decides once, for the whole function,
+//! which values never touch memory at all.
 //!
-//! Two things follow from that floor being narrow. A **parameter** arrives in
-//! `a0`…`a7` and, in the entry block of a function that makes no call, has no
-//! reason to leave: nothing can clobber it there. And a function whose values
-//! all fit in registers touches no frame, so it opens none — which is why
-//! `function` needs the measuring pass to tell it whether this one did.
+//! Two things follow. A **parameter** arrives in `a0`…`a7` and, in a function
+//! that makes no call, has no reason to leave: nothing can clobber it there.
+//! And a function whose values all fit in registers touches no frame, so it
+//! opens none — which is why `function` needs the measuring pass to tell it
+//! whether this one did.
 //!
 //! # Constants
 //!
@@ -497,114 +495,162 @@ struct Gen<'a> {
     frame_used: bool,
     /// What the measuring pass concluded.
     frame_needed: bool,
-    /// Values held in a register for the block being emitted. A value not
-    /// here lives in its frame slot, as every value did before there was an
+    /// Where every value lives, for the whole function. A value not here
+    /// lives in its frame slot, as every value did before there was an
     /// allocator.
     regs: BTreeMap<String, &'static str>,
 }
 
-/// Choose which of a block's values can live in a register.
+/// Where every value lives, decided once for the whole function.
 ///
-/// The rule is deliberately narrow, and each clause pays for itself:
+/// This is a linear scan over live intervals — the classical shape, with the
+/// parts this machine and this frontend make simpler or harder called out
+/// below. It replaced a block-local allocator that could keep a value in a
+/// register only when one block both defined and used it; everything crossing
+/// an edge went to memory, and on `examples/trust/HPL.tr` that traffic was
+/// 44% of every instruction executed, against 15% for the program's own data.
 ///
-/// - **Defined and used only in this block.** A value crossing a block
-///   boundary would need agreement between blocks about where it lives, and
-///   this pass has none.
-/// - **A range crossing a call goes in a callee-saved register**, or nowhere.
-///   `t4`…`t7` and `a0`…`a7` are caller-saved (TRISC-27 §6.1), so a call ends
-///   a range in one of them whether the allocator likes it or not; `s0`…`s6`
-///   survive, at the cost of a save in the prologue and a restore in the
-///   epilogue.
+/// **Liveness.** The interval of a value is the hull of every point it is
+/// live at: its definition, its uses, and the start of every block it is
+/// live into and the end of every block it is live out of (`liveness`). The
+/// hull matters for loops — a value defined inside one and read at the top of
+/// the next iteration is live at a point *earlier* in the linear order than
+/// its definition, and an interval that did not reach back would let another
+/// value take the register there.
 ///
-/// Caller-saved registers are preferred where they work, since they cost
-/// nothing to use. What is left in memory is a value another block reads.
-fn allocate(f: &Function, block: &Block) -> BTreeMap<String, &'static str> {
-    let folds = block_folds(f, block);
-    // A value another block mentions has to be somewhere both agree on.
-    let mut elsewhere: BTreeSet<String> = BTreeSet::new();
+/// **Block parameters are left in memory.** A parameter has a different
+/// definition on each incoming edge, so agreeing on a register for it is the
+/// parallel-copy problem, and `move_args` already solves it with a transfer
+/// area in the frame. The frontend emits no block parameters at all
+/// (`lang/lower.rs`: every local is a slot, so nothing crosses an edge in a
+/// register), so this costs real programs nothing; hand-written TIR uses
+/// them, and keeps working.
+///
+/// **Which registers.** `t0`…`t3` are the scratch the emitters use and are
+/// never allocated. `t4`…`t7` are caller-saved and free to take. `a0`…`a7`
+/// are caller-saved too, but a call writes them while setting up its own
+/// arguments, so they are allocated only in a function that makes no call —
+/// where that cannot happen, and where a parameter can simply stay in the
+/// register it arrived in. `s0`…`s6` survive a call (TRISC-27 §6.1) at the
+/// cost of a save and a restore.
+///
+/// **What a callee-saved register is worth.** It is paid once per
+/// *invocation*; a spill is paid once per *use*. So an interval that crosses
+/// a call takes one only when the value is used more than once — measured,
+/// not assumed: handing one to every call-crossing value made a recursive
+/// benchmark 6% slower (G8.3).
+fn allocate(f: &Function, folds: &[BTreeMap<String, Folded>]) -> BTreeMap<String, &'static str> {
+    let pos = positions(f);
+    let (live_in, live_out) = liveness(f, folds);
+
+    // A block parameter is defined by its predecessors, not here.
+    let mut excluded: BTreeSet<String> = BTreeSet::new();
     for b in &f.blocks {
-        if b.label == block.label {
-            continue;
+        for (n, _) in &b.params {
+            excluded.insert(n.clone());
         }
+    }
+
+    // Every point each value is live at, collapsed to a first and a last.
+    let mut span: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let mut uses: BTreeMap<String, usize> = BTreeMap::new();
+    let mark = |span: &mut BTreeMap<String, (usize, usize)>, v: &str, at: usize| {
+        span.entry(v.to_string())
+            .and_modify(|(lo, hi)| {
+                *lo = (*lo).min(at);
+                *hi = (*hi).max(at);
+            })
+            .or_insert((at, at));
+    };
+
+    // A parameter is live from the entry block's entry, which is before its
+    // first instruction — a call there is one the parameter is live across.
+    for (n, _) in &f.sig.params {
+        mark(&mut span, n, 0);
+    }
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for n in &live_in[bi] {
+            mark(&mut span, n, pos.block_start[bi]);
+        }
+        for n in &live_out[bi] {
+            mark(&mut span, n, pos.block_term[bi]);
+        }
+        let mut at = pos.block_start[bi] + 1;
         for inst in &b.insts {
-            operands_of(&inst.kind, &mut |o| {
-                if let Operand::Value(n) = o {
-                    elsewhere.insert(n.clone());
-                }
-            });
+            if !inst.results.iter().any(|r| folds[bi].contains_key(r)) {
+                effective_operands(&inst.kind, &folds[bi], &mut |o| {
+                    if let Operand::Value(v) = o {
+                        mark(&mut span, v, at);
+                        *uses.entry(v.clone()).or_default() += 1;
+                    }
+                });
+            }
+            for r in &inst.results {
+                mark(&mut span, r, at);
+            }
+            at += 1;
         }
         terminator_operands(&b.term, &mut |o| {
-            if let Operand::Value(n) = o {
-                elsewhere.insert(n.clone());
-            }
-        });
-        for (n, _) in &b.params {
-            elsewhere.insert(n.clone());
-        }
-    }
-    for (n, _) in &block.params {
-        elsewhere.insert(n.clone());
-    }
-
-    let n = block.insts.len();
-    let is_call = |i: usize| matches!(block.insts[i].kind, InstKind::Call { .. });
-    let has_call = (0..n).any(is_call);
-
-    // The last instruction index that uses each value, and how often it is
-    // used at all; `n` for a use in the terminator, which runs after them.
-    let mut last: BTreeMap<String, usize> = BTreeMap::new();
-    let mut uses: BTreeMap<String, usize> = BTreeMap::new();
-    for (i, inst) in block.insts.iter().enumerate() {
-        // A computation the accesses absorbed emits nothing, so it reads
-        // nothing: counting its operands here would keep a register alive
-        // past the last instruction that actually looks at it.
-        if inst.results.first().is_some_and(|r| folds.contains_key(r)) {
-            continue;
-        }
-        effective_operands(&inst.kind, &folds, &mut |o| {
             if let Operand::Value(v) = o {
-                last.insert(v.clone(), i);
+                mark(&mut span, v, at);
                 *uses.entry(v.clone()).or_default() += 1;
             }
         });
     }
-    terminator_operands(&block.term, &mut |o| {
-        if let Operand::Value(v) = o {
-            last.insert(v.clone(), n);
-            *uses.entry(v.clone()).or_default() += 1;
-        }
+
+    // A value the accesses absorbed, or one nothing ever reads, needs
+    // nowhere to be.
+    span.retain(|n, _| {
+        !excluded.contains(n) && !folds.iter().any(|m| m.contains_key(n)) && uses.contains_key(n)
     });
 
+    let calls = &pos.calls;
+    // A call is crossed only by a value that is still live after it
+    // returns. A value whose last use is an *argument* to the call is read
+    // while the arguments are set up, before the call executes, so a
+    // caller-saved register holds it perfectly well; so does the call's own
+    // result, which arrives after everything is clobbered.
+    let crosses_call = |lo: usize, hi: usize| calls.iter().any(|c| lo < *c && *c < hi);
+    let function_calls = !calls.is_empty();
+
     let mut fast: Vec<&'static str> = POOL_ALWAYS.to_vec();
-    if !has_call {
+    if !function_calls {
         fast.extend_from_slice(POOL_CALL_FREE);
     }
     let mut saved: Vec<&'static str> = POOL_SAVED.to_vec();
     let mut regs: BTreeMap<String, &'static str> = BTreeMap::new();
-    let mut expiry: Vec<(usize, &'static str, bool)> = Vec::new();
+    // Registers in use, with the point their value dies.
+    let mut active: Vec<(usize, &'static str, bool)> = Vec::new();
 
-    // A parameter arrives in `a0`…`a7` (TRISC-27 §6.1) and was being stored
-    // to its frame slot by the prologue and loaded back by every use. In the
-    // entry block of a function that makes no call, a parameter used nowhere
-    // else can simply stay where it arrived: no store, no load, and no
-    // register taken that was not already the caller's to clobber. A block
-    // that calls cannot, because the arguments of that call overwrite them.
-    let is_entry = f.blocks.first().map(|b| b.label.as_str()) == Some(block.label.as_str());
-    if is_entry && !has_call {
+    // A parameter arrives in `a0`…`a7`, and in a function that makes no call
+    // nothing can take it from there. Claiming its own register first is what
+    // makes the prologue emit nothing at all for it.
+    if !function_calls {
         for (i, (pname, _)) in f.sig.params.iter().enumerate().take(POOL_CALL_FREE.len()) {
-            if elsewhere.contains(pname) {
+            let Some((_, hi)) = span.get(pname).copied() else {
+                continue;
+            };
+            let r = POOL_CALL_FREE[i];
+            if !fast.contains(&r) {
                 continue;
             }
-            let r = POOL_CALL_FREE[i];
-            regs.insert(pname.clone(), r);
             fast.retain(|x| *x != r);
+            regs.insert(pname.clone(), r);
+            active.push((hi, r, false));
         }
     }
 
-    for (i, inst) in block.insts.iter().enumerate() {
-        // Registers whose value died before this instruction are free again.
-        expiry.retain(|(end, r, is_saved)| {
-            if *end < i {
+    // Linear scan: intervals in order of where they begin.
+    let mut order: Vec<(usize, usize, String)> = span
+        .iter()
+        .filter(|(n, _)| !regs.contains_key(*n))
+        .map(|(n, (lo, hi))| (*lo, *hi, n.clone()))
+        .collect();
+    order.sort();
+
+    for (lo, hi, name) in order {
+        active.retain(|(end, r, is_saved)| {
+            if *end < lo {
                 if *is_saved {
                     saved.push(r)
                 } else {
@@ -615,53 +661,160 @@ fn allocate(f: &Function, block: &Block) -> BTreeMap<String, &'static str> {
                 true
             }
         });
-        for name in &inst.results {
-            if folds.contains_key(name) {
-                continue; // absorbed into the accesses that used it
-            }
-            let Some(end) = last.get(name).copied() else {
-                continue; // never used; nothing to keep
-            };
-            if elsewhere.contains(name) {
+        let picked = if crosses_call(lo, hi) {
+            if uses.get(&name).copied().unwrap_or(0) < 2 {
                 continue;
             }
-            let crosses = (i + 1..=end.min(n.saturating_sub(1))).any(is_call);
-            // A callee-saved register is paid for once per *invocation* — a
-            // save and a restore — while a spill is paid once per *use*. So
-            // it is only worth taking when the value is used more than once:
-            // measured on a recursive benchmark, handing one to every
-            // call-crossing value made the program 6% slower, because the
-            // hot function paid two instructions per call to keep a value it
-            // read once.
-            let picked = if crosses {
-                if uses.get(name).copied().unwrap_or(0) < 2 {
-                    continue;
-                }
-                saved.pop().map(|r| (r, true))
-            } else {
-                fast.pop()
-                    .map(|r| (r, false))
-                    .or_else(|| saved.pop().map(|r| (r, true)))
-            };
-            let Some((r, is_saved)) = picked else {
-                continue;
-            };
-            regs.insert(name.clone(), r);
-            expiry.push((end, r, is_saved));
-        }
+            saved.pop().map(|r| (r, true))
+        } else {
+            fast.pop()
+                .map(|r| (r, false))
+                .or_else(|| saved.pop().map(|r| (r, true)))
+        };
+        let Some((r, is_saved)) = picked else {
+            continue;
+        };
+        regs.insert(name, r);
+        active.push((hi, r, is_saved));
     }
     regs
 }
 
+/// Where each block begins and ends in one linear numbering of the function,
+/// and where the calls are.
+///
+/// A block's *entry* gets a position of its own, strictly before its first
+/// instruction, and so does its terminator. Both matter. A value live into a
+/// block whose first instruction is a call is live across that call, and an
+/// interval that began *at* the call would not say so — which is exactly how
+/// a function parameter read after the first call came to be given a
+/// caller-saved register.
+struct Positions {
+    /// A point before the block's first instruction, where its parameters
+    /// are bound and where anything live into it is already live.
+    block_start: Vec<usize>,
+    /// The index of a block's terminator, which runs after its instructions.
+    block_term: Vec<usize>,
+    calls: Vec<usize>,
+}
+
+fn positions(f: &Function) -> Positions {
+    let mut p = Positions {
+        block_start: Vec::with_capacity(f.blocks.len()),
+        block_term: Vec::with_capacity(f.blocks.len()),
+        calls: Vec::new(),
+    };
+    let mut at = 0usize;
+    for b in &f.blocks {
+        p.block_start.push(at);
+        at += 1;
+        for inst in &b.insts {
+            if matches!(inst.kind, InstKind::Call { .. }) {
+                p.calls.push(at);
+            }
+            at += 1;
+        }
+        p.block_term.push(at);
+        at += 1;
+    }
+    p
+}
+
+/// Live-in and live-out sets, by the usual backward fixpoint.
+///
+/// `use[b]` is what the block reads before defining, `def[b]` what it
+/// defines — its parameters included, since they are bound on entry.
+fn liveness(
+    f: &Function,
+    folds: &[BTreeMap<String, Folded>],
+) -> (Vec<BTreeSet<String>>, Vec<BTreeSet<String>>) {
+    let n = f.blocks.len();
+    let mut used: Vec<BTreeSet<String>> = vec![BTreeSet::new(); n];
+    let mut defined: Vec<BTreeSet<String>> = vec![BTreeSet::new(); n];
+    let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let index: BTreeMap<&str, usize> = f
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.label.as_str(), i))
+        .collect();
+
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for (p, _) in &b.params {
+            defined[bi].insert(p.clone());
+        }
+        for inst in &b.insts {
+            if !inst.results.iter().any(|r| folds[bi].contains_key(r)) {
+                effective_operands(&inst.kind, &folds[bi], &mut |o| {
+                    if let Operand::Value(v) = o
+                        && !defined[bi].contains(v)
+                    {
+                        used[bi].insert(v.clone());
+                    }
+                });
+            }
+            for r in &inst.results {
+                defined[bi].insert(r.clone());
+            }
+        }
+        let mut reads = BTreeSet::new();
+        terminator_operands(&b.term, &mut |o| {
+            if let Operand::Value(v) = o {
+                reads.insert(v.clone());
+            }
+        });
+        for v in reads {
+            if !defined[bi].contains(&v) {
+                used[bi].insert(v);
+            }
+        }
+        for label in successors(&b.term) {
+            if let Some(j) = index.get(label.as_str()) {
+                succ[bi].push(*j);
+            }
+        }
+    }
+
+    let mut live_in: Vec<BTreeSet<String>> = vec![BTreeSet::new(); n];
+    let mut live_out: Vec<BTreeSet<String>> = vec![BTreeSet::new(); n];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for bi in (0..n).rev() {
+            let mut out = BTreeSet::new();
+            for &j in &succ[bi] {
+                out.extend(live_in[j].iter().cloned());
+            }
+            let mut into = used[bi].clone();
+            into.extend(out.iter().filter(|v| !defined[bi].contains(*v)).cloned());
+            if out != live_out[bi] || into != live_in[bi] {
+                live_out[bi] = out;
+                live_in[bi] = into;
+                changed = true;
+            }
+        }
+    }
+    (live_in, live_out)
+}
+
+/// The blocks a terminator may transfer to.
+fn successors(t: &Terminator) -> Vec<String> {
+    match t {
+        Terminator::Br3 { neg, zero, pos, .. } => {
+            vec![neg.label.clone(), zero.label.clone(), pos.label.clone()]
+        }
+        Terminator::Br(d) => vec![d.label.clone()],
+        Terminator::Ret(_) | Terminator::Trap(_) | Terminator::Unreachable => Vec::new(),
+    }
+}
+
 /// The callee-saved registers a function's allocation uses, in order — what
 /// the prologue must save and the epilogue restore.
-fn saved_registers(f: &Function) -> Vec<&'static str> {
+fn saved_registers(regs: &BTreeMap<String, &'static str>) -> Vec<&'static str> {
     let mut used: BTreeSet<&'static str> = BTreeSet::new();
-    for b in &f.blocks {
-        for r in allocate(f, b).values() {
-            if POOL_SAVED.contains(r) {
-                used.insert(r);
-            }
+    for r in regs.values() {
+        if POOL_SAVED.contains(r) {
+            used.insert(r);
         }
     }
     used.into_iter().collect()
@@ -848,9 +1001,21 @@ impl Gen<'_> {
 /// instructions, so no distance it sees is longer than the one the first
 /// measured, and a branch judged to reach still reaches.
 fn function(f: &Function) -> Result<String, Vec<String>> {
-    let saved = saved_registers(f);
-    let measured = emit_function(f, &saved, &BTreeMap::new(), true);
-    let final_pass = emit_function(f, &saved, &measured.offsets, measured.frame_used);
+    // Everything the two emission passes need to agree on is decided once,
+    // here: which addresses the accesses absorb, where every value lives, and
+    // therefore what the prologue has to save.
+    let folds: Vec<BTreeMap<String, Folded>> = f.blocks.iter().map(|b| block_folds(f, b)).collect();
+    let regs = allocate(f, &folds);
+    let saved = saved_registers(&regs);
+    let measured = emit_function(f, &saved, &folds, &regs, &BTreeMap::new(), true);
+    let final_pass = emit_function(
+        f,
+        &saved,
+        &folds,
+        &regs,
+        &measured.offsets,
+        measured.frame_used,
+    );
     if final_pass.errs.is_empty() {
         Ok(final_pass.out)
     } else {
@@ -861,6 +1026,8 @@ fn function(f: &Function) -> Result<String, Vec<String>> {
 fn emit_function<'a>(
     f: &'a Function,
     saved: &[&'static str],
+    folds: &[BTreeMap<String, Folded>],
+    regs: &BTreeMap<String, &'static str>,
     offsets: &BTreeMap<String, i128>,
     needs_frame: bool,
 ) -> Gen<'a> {
@@ -874,7 +1041,7 @@ fn emit_function<'a>(
     });
 
     let mut g = Gen {
-        regs: BTreeMap::new(),
+        regs: regs.clone(),
         func: f,
         frame,
         out: String::new(),
@@ -911,28 +1078,28 @@ fn emit_function<'a>(
         g.line(format!("st.word {r}, {at}(sp)"));
     }
 
-    // Arguments arrive in a0…a7 and are spilled to their slots, unless the
-    // entry block's allocation left one where it arrived.
-    let entry_regs = allocate(f, &f.blocks[0]);
+    // Arguments arrive in a0…a7. One the allocator left where it arrived
+    // needs nothing; one it put elsewhere is moved there once; the rest are
+    // spilled to their slots.
     for (i, (pname, _)) in f.sig.params.iter().enumerate() {
         if i >= 8 {
             g.errs
                 .push("more than eight arguments is not implemented".into());
             break;
         }
-        if entry_regs.contains_key(pname) {
-            continue;
+        match regs.get(pname) {
+            Some(r) if *r == POOL_CALL_FREE[i] => {}
+            Some(r) => g.line(format!("add.wrap {r}, a{i}, zero")),
+            None => {
+                let at = g.slot(pname);
+                g.line(format!("st.word a{i}, {at}(sp)"));
+            }
         }
-        let at = g.slot(pname);
-        g.line(format!("st.word a{i}, {at}(sp)"));
     }
     // The entry block is emitted next, so the prologue falls into it.
 
     for (i, b) in f.blocks.iter().enumerate() {
-        // One allocation per block: a value that escapes it stays in its
-        // frame slot, which is where every value used to live.
-        g.regs = allocate(f, b);
-        g.folds = block_folds(f, b);
+        g.folds = folds[i].clone();
         let label = g.block_label(&b.label);
         g.offsets.insert(b.label.clone(), g.here);
         g.label(label);
