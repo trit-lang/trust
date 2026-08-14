@@ -339,3 +339,101 @@ fn @dispatch(%which: t27, %x: t27) -> t27 {
         &[&[0, 7], &[3, 7], &[0, -5], &[3, -5]],
     );
 }
+
+/// The assembly a module compiles to, for tests about the shape of the code
+/// rather than the answer it gives.
+fn compile_asm(src: &str, entry: &str) -> String {
+    let m = parse(src);
+    let legalized = tir::legalize_module(&m, &TargetDesc::tritium())
+        .unwrap_or_else(|e| panic!("legalization failed: {e:?}"));
+    codegen::compile(&legalized, entry).unwrap_or_else(|e| panic!("code generation failed: {e:?}"))
+}
+
+/// The body of a function, without the surrounding module.
+fn body_of<'a>(asm: &'a str, name: &str) -> &'a str {
+    let start = asm
+        .find(&format!("\nf.{name}:"))
+        .unwrap_or_else(|| panic!("`f.{name}` is not in\n{asm}"));
+    let rest = &asm[start + 1..];
+    match rest[1..].find("\n\n") {
+        Some(end) => &rest[..end + 1],
+        None => rest,
+    }
+}
+
+#[test]
+fn a_constant_operand_goes_in_the_immediate_field() {
+    // Every operation but `wrap` has an immediate form (TRISC-27 §4.1), and
+    // the field reaches ±2 391 484. A constant that fits belongs there: the
+    // alternative is `li` into a scratch register, an instruction spent on a
+    // number the encoding had room for. Measured on `examples/trust/HPL.tr`,
+    // this fold was 10% of everything the program executed.
+    let src = r#"tir 0.1 target "tritium"
+
+fn @plain(%x: t27) -> t27 {
+^entry:
+    %r = add.trap t27 %x, const t27 5
+    ret %r
+}
+
+fn @onleft(%x: t27) -> t27 {
+^entry:
+    %r = mul.trap t27 const t27 3, %x
+    ret %r
+}
+
+fn @notcommutative(%x: t27) -> t27 {
+^entry:
+    %r = sub.trap t27 const t27 3, %x
+    ret %r
+}
+
+fn @toobig(%x: t27) -> t27 {
+^entry:
+    %r = add.trap t27 %x, const t27 43046721
+    ret %r
+}
+
+fn @flagged(%x: t27) -> t27 {
+^entry:
+    %r, %o = add.flag t27 %x, const t27 5
+    ret %r
+}
+"#;
+    let asm = compile_asm(src, "plain");
+
+    let plain = body_of(&asm, "plain");
+    assert!(plain.contains("addi.trap"), "{plain}");
+    assert!(
+        !plain.contains("li "),
+        "a constant was materialized:\n{plain}"
+    );
+
+    // Addition and multiplication commute, so a constant on the left reaches
+    // the immediate field just as readily.
+    let onleft = body_of(&asm, "onleft");
+    assert!(onleft.contains("muli.trap"), "{onleft}");
+    assert!(!onleft.contains("li "), "{onleft}");
+
+    // Subtraction does not, and the constant stays in a register.
+    let sub = body_of(&asm, "notcommutative");
+    assert!(sub.contains("li "), "{sub}");
+    assert!(sub.contains("sub.trap"), "{sub}");
+
+    // 3¹⁶ does not fit fourteen trits, so it goes back through `li`.
+    // (`addi.trap sp, sp, …` is the prologue and says nothing either way.)
+    let big = body_of(&asm, "toobig");
+    assert!(big.contains("li "), "{big}");
+    assert!(big.contains("add.trap"), "{big}");
+
+    // `alui` has no field for the flag flavor's second destination, so the
+    // flag form keeps the register form whatever its operands are.
+    let flagged = body_of(&asm, "flagged");
+    assert!(flagged.contains("add.flag"), "{flagged}");
+    assert!(flagged.contains("li "), "{flagged}");
+
+    // And every one of them still computes what the interpreter computes.
+    for entry in ["plain", "onleft", "notcommutative", "toobig", "flagged"] {
+        differential(src, entry, &[&[0], &[1], &[-1], &[7], &[-3_812_798]]);
+    }
+}

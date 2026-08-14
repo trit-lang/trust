@@ -5,15 +5,23 @@
 //! each, in `tritium`, shared with the disassembler. It also means the
 //! backend's output is readable, which matters a great deal while it is new.
 //!
-//! # The register allocator, and its absence
+//! # Where a value lives
 //!
-//! Every SSA value gets a stack slot, and every instruction loads its
-//! operands into scratch registers, computes, and stores the result back.
-//! This is the simplest allocator that is correct, and the code it produces
-//! is correspondingly slow — three memory accesses for an add. It is written
-//! this way on purpose: an allocator is a large, subtle thing, and a backend
-//! that is *obviously* right is the better first one to have. Values live in
-//! `t0`–`t3`; nothing is kept in a register across an instruction boundary.
+//! Every SSA value gets a stack slot, and that slot is still where a value
+//! lives by default: an instruction loads its operands into scratch
+//! registers, computes, and stores the result back. On top of that floor sits
+//! a **block-local** allocator (`allocate`), which keeps a value in a
+//! register when it is defined and used in one block and nothing outside that
+//! block mentions it. A value crossing a block boundary stays in memory,
+//! because this pass has no agreement between blocks about where it would be.
+//!
+//! # Constants
+//!
+//! Every operation but `wrap` has an immediate form (TRISC-27 §4.1), so a
+//! constant operand is folded into the encoding rather than materialized with
+//! `li` into a scratch register — see `immediate` and `Gen::binary`. Measured
+//! on `examples/trust/HPL.tr`, that fold alone was 10% of the instructions the
+//! program executed.
 //!
 //! # Why every branch is four instructions
 //!
@@ -51,6 +59,28 @@ impl std::error::Error for CodegenError {}
 
 /// Trytes in a word.
 const WORD: i128 = 3;
+
+/// The reach of an I-format immediate: 14 trits, so (3¹⁴ − 1)/2 either way
+/// (TRISC-27 §3.2).
+const IMM_MAX: i128 = 2_391_484;
+
+/// The immediate an operand carries, if it is a constant the I formats can
+/// hold.
+///
+/// Every operation but `wrap` has both forms, spelled with an `i` suffix and
+/// taking the immediate where the register form takes `rs2` (TRISC-27 §4.1).
+/// Folding a constant into that field is worth doing everywhere it is legal:
+/// the alternative is `li` into a scratch register, which is a whole
+/// instruction spent on a number the encoding had room for.
+fn immediate(o: &Operand) -> Option<i128> {
+    match o {
+        Operand::Const(_, v) => match v.to_i128() {
+            Some(n) if n.abs() <= IMM_MAX => Some(n),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 
 /// Round up to a whole number of words.
 fn round_up(v: i128) -> i128 {
@@ -485,6 +515,49 @@ impl Gen<'_> {
         }
     }
 
+    /// Emit a binary operation, taking the immediate form when an operand is
+    /// a constant the field can hold.
+    ///
+    /// `commutative` says whether the operands may be exchanged, which is
+    /// what lets `3 * x` reach the immediate form as readily as `x * 3`. The
+    /// operations where it is false are the ones an exchange would change:
+    /// `sub`, the shifts, `div`, `rem`, and `cmp`, whose result an exchange
+    /// negates.
+    fn binary(
+        &mut self,
+        stem: &str,
+        suffix: &str,
+        commutative: bool,
+        a: &Operand,
+        b: &Operand,
+        result: Option<&String>,
+    ) {
+        let folded = match (immediate(b), immediate(a)) {
+            (Some(n), _) => Some((a, n)),
+            (None, Some(n)) if commutative => Some((b, n)),
+            _ => None,
+        };
+        let (rd, text) = match folded {
+            Some((other, n)) => {
+                let ro = self.read(other, "t0");
+                let rd = self.dest(result, "t2");
+                let m = format!("{stem}i{suffix}");
+                (rd.clone(), format!("{m:<7} {rd}, {ro}, {n}"))
+            }
+            None => {
+                let ra = self.read(a, "t0");
+                let rb = self.read(b, "t1");
+                let rd = self.dest(result, "t2");
+                let m = format!("{stem}{suffix}");
+                (rd.clone(), format!("{m:<7} {rd}, {ra}, {rb}"))
+            }
+        };
+        self.line(text);
+        if let Some(r) = result {
+            self.write(r, &rd);
+        }
+    }
+
     /// Store a result to its slot, unless it lives in a register.
     fn write(&mut self, name: &str, reg: &str) {
         if self.regs.contains_key(name) {
@@ -601,8 +674,6 @@ fn emit_inst(g: &mut Gen, inst: &Inst, _calls: bool) {
             ty,
         } => {
             check_width(g, *ty);
-            let ra = g.read(a, "t0");
-            let rb = g.read(b, "t1");
             let mnemonic = match op {
                 FlavoredOp::Add => "add",
                 FlavoredOp::Sub => "sub",
@@ -610,8 +681,12 @@ fn emit_inst(g: &mut Gen, inst: &Inst, _calls: bool) {
                 FlavoredOp::Shl => "shl",
             };
             let suffix = flavor.suffix();
-            let rd = g.dest(inst.results.first(), "t2");
+            // The flag flavor names a second destination, and `alui` has no
+            // field for it (TRISC-27 §4.1), so it keeps the register form.
             if *flavor == Flavor::Flag {
+                let ra = g.read(a, "t0");
+                let rb = g.read(b, "t1");
+                let rd = g.dest(inst.results.first(), "t2");
                 let rf = g.dest(inst.results.get(1), "t3");
                 g.line(format!("{mnemonic}{suffix} {rd}, {ra}, {rb}, {rf}"));
                 if let Some(r) = inst.results.first() {
@@ -621,17 +696,13 @@ fn emit_inst(g: &mut Gen, inst: &Inst, _calls: bool) {
                     g.write(r, &rf);
                 }
             } else {
-                g.line(format!("{mnemonic}{suffix} {rd}, {ra}, {rb}"));
-                if let Some(r) = inst.results.first() {
-                    g.write(r, &rd);
-                }
+                let commutative = matches!(op, FlavoredOp::Add | FlavoredOp::Mul);
+                g.binary(mnemonic, suffix, commutative, a, b, inst.results.first());
             }
         }
 
         InstKind::Plain { op, a, b, ty } => {
             check_width(g, *ty);
-            let ra = g.read(a, "t0");
-            let rb = g.read(b, "t1");
             let mnemonic = match op {
                 PlainOp::MulH => "mulh",
                 PlainOp::Div => "div",
@@ -641,11 +712,11 @@ fn emit_inst(g: &mut Gen, inst: &Inst, _calls: bool) {
                 PlainOp::TMax => "tmax",
                 PlainOp::TMul => "tmul",
             };
-            let rd = g.dest(inst.results.first(), "t2");
-            g.line(format!("{mnemonic}    {rd}, {ra}, {rb}"));
-            if let Some(r) = inst.results.first() {
-                g.write(r, &rd);
-            }
+            let commutative = matches!(
+                op,
+                PlainOp::MulH | PlainOp::TMin | PlainOp::TMax | PlainOp::TMul
+            );
+            g.binary(mnemonic, "", commutative, a, b, inst.results.first());
         }
 
         // Negation is `0 − x`; the machine needs no separate instruction
@@ -662,13 +733,7 @@ fn emit_inst(g: &mut Gen, inst: &Inst, _calls: bool) {
 
         InstKind::Cmp { a, b, ty } => {
             check_width(g, *ty);
-            let ra = g.read(a, "t0");
-            let rb = g.read(b, "t1");
-            let rd = g.dest(inst.results.first(), "t2");
-            g.line(format!("cmp     {rd}, {ra}, {rb}"));
-            if let Some(r) = inst.results.first() {
-                g.write(r, &rd);
-            }
+            g.binary("cmp", "", false, a, b, inst.results.first());
         }
 
         // One instruction, three arms, no branch.
@@ -723,13 +788,7 @@ fn emit_inst(g: &mut Gen, inst: &Inst, _calls: bool) {
 
         // Address arithmetic is ordinary addition; there is no GEP to lower.
         InstKind::Offset { p, d } => {
-            let rp = g.read(p, "t0");
-            let rd2 = g.read(d, "t1");
-            let rd = g.dest(inst.results.first(), "t2");
-            g.line(format!("add.trap {rd}, {rp}, {rd2}"));
-            if let Some(r) = inst.results.first() {
-                g.write(r, &rd);
-            }
+            g.binary("add", ".trap", false, p, d, inst.results.first());
         }
 
         // Widening is a copy: a balanced value's high trits are already zero,
