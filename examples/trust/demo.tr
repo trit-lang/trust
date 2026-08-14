@@ -1,0 +1,277 @@
+// demo.tr — everything the compiler can do today, in one program.
+//
+// The theme is the radix, because that is what the language is for. The
+// centrepiece is `print_ternary`: writing a number in balanced ternary is
+// `n % 3` and `n / 3` and nothing else, because round-to-nearest division
+// makes the remainder land in −1…1 every time. The decimal printer below it
+// needs a correction step that this one has no use for — the same code, one
+// radix apart, and only one of them needs an apology.
+
+fn putchar(c: t9);
+
+// ------------------------------------------------------------ printing
+
+// Balanced ternary, digit by digit. `n % 3` is exactly −1, 0 or +1 (Ch. 1
+// §4): round-to-nearest leaves no other possibility, so there is no fixup.
+fn print_ternary(value: t27) {
+    if value == 0 {
+        putchar(48);            // '0'
+        return;
+    }
+    let mut n = value;
+    let mut digits: [t9; 28] = [0; 28];
+    let mut i: taddr = 0;
+    while n != 0 {
+        let t = n % 3;
+        n = n / 3;
+        digits[i] = if t < 0 {
+            84
+        } else {
+            if t == 0 { 48 } else { 49 }
+        };
+        i += 1;                 // 'T' / '0' / '1'
+    }
+    putchar(48);
+    putchar(116);               // the `0t` prefix of Ch. 1 §3
+    while i > 0 {
+        i -= 1;
+        putchar(digits[i]);
+    }
+}
+
+// Decimal, for comparison. The `if` inside the loop is the price of a radix
+// whose remainder does not land where you want it.
+fn print_decimal(value: t27) {
+    let mut n = value;
+    if n < 0 {
+        putchar(45);
+        n = -n;
+    }
+    if n == 0 {
+        putchar(48);
+        return;
+    }
+    let mut digits: [t9; 16] = [0; 16];
+    let mut i: taddr = 0;
+    while n > 0 {
+        digits[i] = (n % 10) as t9;
+        n = n / 10;
+        if digits[i] < 0 {      // ← the fixup print_ternary does not need
+            digits[i] += 10;
+            n -= 1;
+        }
+        i += 1;
+    }
+    while i > 0 {
+        i -= 1;
+        putchar(digits[i] + 48);
+    }
+}
+
+fn newline() {
+    putchar(10);
+}
+
+fn space() {
+    putchar(32);
+}
+
+// ------------------------------------------------- traits and dispatch
+
+trait Shape {
+    fn area(&self) -> t27;
+    fn initial(&self) -> t9;
+
+    // A provided body: it may call the required methods and nothing else.
+    fn is_degenerate(&self) -> bool {
+        self.area() == 0
+    }
+}
+
+struct Circle { r: t27 }
+struct Rect { w: t27, h: t27 }
+
+impl Shape for Circle {
+    fn area(&self) -> t27 { self.r * self.r * 3 }
+    fn initial(&self) -> t9 { 67 }          // 'C'
+}
+
+impl Shape for Rect {
+    fn area(&self) -> t27 { self.w * self.h }
+    fn initial(&self) -> t9 { 82 }          // 'R'
+}
+
+// Static dispatch: one copy of this per shape it is used with.
+fn describe<S: Shape>(s: &S) {
+    putchar(s.initial());
+    putchar(61);                            // '='
+    print_decimal(s.area());
+}
+
+// Dynamic dispatch: one copy, and an indirect call through a vtable. Only
+// this one can hold shapes of different types in a single array.
+fn total_area(shapes: &[&dyn Shape]) -> t27 {
+    let mut sum: t27 = 0;
+    let mut i: taddr = 0;
+    while i < shapes.len() {
+        describe(shapes[i]);
+        space();
+        sum += shapes[i].area();
+        i += 1;
+    }
+    sum
+}
+
+// ------------------------------------------------------- an iterator
+
+trait Iterator {
+    type Item;
+    fn next(&mut self) -> Option<Self::Item>;
+}
+
+// The powers of three, which is the only sequence this machine really has.
+struct Powers { at: t27, limit: t27 }
+
+impl Iterator for Powers {
+    type Item = t27;
+    fn next(&mut self) -> Option<t27> {
+        if self.at > self.limit {
+            Option::None
+        } else {
+            let v = self.at;
+            self.at = self.at * 3;
+            Option::Some(v)
+        }
+    }
+}
+
+// -------------------------------------------------- ordering and sorting
+
+// A derived comparison over scalar fields is one `cmp` per field and one
+// `sel3` per field after the first — no branch at all (Ch. 4 §5.3.3).
+#[derive(Ord)]
+struct Version { major: t27, minor: t27 }
+
+fn sort(xs: &mut [Version]) {
+    let mut i: taddr = 1;
+    while i < xs.len() {
+        let mut j: taddr = i;
+        while j > 0 {
+            // One three-way comparison decides; `match` on it is one `br3`.
+            match xs[j - 1] <=> xs[j] {
+                1t => {
+                    let a = xs[j - 1];
+                    let b = xs[j];
+                    xs[j - 1] = b;
+                    xs[j] = a;
+                    j -= 1;
+                },
+                0t => { j = 0; },
+                -1t => { j = 0; },
+            }
+        }
+        i += 1;
+    }
+}
+
+// ------------------------------------------------------------- ownership
+
+// A type with a destructor is not copyable, moves rather than copies, and is
+// dropped exactly once (Ch. 3 §§1.2, 1.4).
+struct Port { id: t27 }
+
+impl Drop for Port {
+    fn drop(self) {
+        putchar(91);                        // '['
+        print_decimal(self.id);
+        putchar(93);                        // ']'
+    }
+}
+
+// ----------------------------------------------------------------- main
+
+fn main() -> t27 {
+    // 1. The radix, in its own notation and in decimal.
+    for v in (Powers { at: 1, limit: 300 }) {
+        print_ternary(v);
+        space();
+    }
+    newline();
+
+    print_ternary(-11);
+    space();
+    print_decimal(-11);
+    space();
+    print_ternary(1000);
+    space();
+    print_decimal(1000);
+    newline();
+
+    // 2. Traits, static and dynamic.
+    let c = Circle { r: 4 };
+    let r = Rect { w: 7, h: 6 };
+    let shapes: [&dyn Shape; 2] = [&c, &r];
+    let total = total_area(&shapes);
+    print_decimal(total);
+    newline();
+
+    // 3. A closure, passed but not returned, capturing nothing but the
+    //    factor — and unable to outlive the frame that made it, which is why
+    //    `move` is neither provided nor missed (Ch. 4 §4.5).
+    let mut scaled: [t27; 4] = [1, 2, 3, 4];
+    map_in_place(&mut scaled, |x| x * 3);
+    let mut i: taddr = 0;
+    while i < 4 {
+        print_decimal(scaled[i]);
+        space();
+        i += 1;
+    }
+    newline();
+
+    // 4. Ordering, and a sort driven by one three-way comparison.
+    let mut vs: [Version; 4] = [
+        Version { major: 1, minor: 9 },
+        Version { major: 0, minor: 4 },
+        Version { major: 1, minor: 2 },
+        Version { major: 0, minor: 11 },
+    ];
+    sort(&mut vs);
+    let mut k: taddr = 0;
+    while k < 4 {
+        print_decimal(vs[k].major);
+        putchar(46);                        // '.'
+        print_decimal(vs[k].minor);
+        space();
+        k += 1;
+    }
+    newline();
+
+    // 5. Option, which is an ordinary enum and pays nothing for `None`.
+    print_decimal(unwrap_or(Option::Some(41), 0) + unwrap_or(Option::None, 1));
+    newline();
+
+    // 6. Destructors, in reverse order of declaration, at end of scope.
+    let a = Port { id: 1 };
+    {
+        let b = Port { id: 2 };
+    }
+    let d = Port { id: 3 };
+    newline();
+
+    total - total
+}
+
+fn map_in_place(xs: &mut [t27], f: impl Fn(t27) -> t27) {
+    let mut i: taddr = 0;
+    while i < xs.len() {
+        xs[i] = f(xs[i]);
+        i += 1;
+    }
+}
+
+fn unwrap_or<T>(o: Option<T>, d: T) -> T {
+    match o {
+        Option::Some(v) => v,
+        Option::None => d,
+    }
+}

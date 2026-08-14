@@ -57,6 +57,40 @@ fn hello_world_runs_the_whole_way() {
 }
 
 #[test]
+fn the_demo_runs_the_whole_way() {
+    // Every feature the compiler has, in one program, checked against its
+    // exact output — which is the only claim about a compiler worth making.
+    let (status, out) = run(include_str!("../../examples/trust/demo.tr"));
+    assert_eq!(status, 0);
+    assert_eq!(
+        out,
+        "0t1 0t10 0t100 0t1000 0t10000 0t100000 \n\
+         0tTT1 -11 0t1101001 1000\n\
+         C=48 R=42 90\n\
+         3 6 9 12 \n\
+         0.4 0.11 1.2 1.9 \n\
+         42\n\
+         [2]\n\
+         [3][1]"
+    );
+}
+
+#[test]
+fn a_trait_object_satisfies_its_own_traits_bound() {
+    // Ch. 4 §3.1: dispatch through an object is what its vtable is for, so
+    // `dyn Shape` is a `Shape` and a generic function may take one.
+    assert_eq!(
+        run("trait Shape { fn area(&self) -> t27; } \
+             struct C { r: t27 } \
+             impl Shape for C { fn area(&self) -> t27 { self.r * 2 } } \
+             fn twice<S: Shape>(s: &S) -> t27 { s.area() * 2 } \
+             fn main() -> t27 { let c = C { r: 5 }; let d: &dyn Shape = &c; twice(d) }")
+        .0,
+        20
+    );
+}
+
+#[test]
 fn the_generics_example_runs_the_whole_way() {
     let (status, out) = run(include_str!("../../examples/trust/generics.tr"));
     assert_eq!(status, 19);

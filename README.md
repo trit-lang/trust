@@ -24,10 +24,39 @@ the source.
 | Ch. 3 — ownership and references | **built**: `&T`/`&mut T`, deref and auto-deref, slices, bounds-checked indexing, erased lifetimes, moves through branches and loops, destructors with drop flags, and a non-lexical borrow checker. A reference may be returned under elision rule 2; regions are not inferred, so rooting is checked syntactically and written lifetimes wait for Ch. 4 (G0.5) |
 | Ch. 4 — generics and traits | **specified in full, built through §2**: traits, impls, methods, supertraits, default bodies, elision rule 3, `impl Drop`; generic functions, structs and enums, bounds, `where` clauses, inference and monomorphization. `Opt<T>` written in the language keeps every niche promise Ch. 2 and Ch. 3 make about `Option`. generic impls, so `Opt<T>` has methods; `derive(Eq, Ord, Clone)` with the comparison operators wired to them — and §5.3.3's promise that a derived comparison over scalars has no branch is asserted against the emitted assembly. `dyn Trait` with real vtables, object safety and indirect dispatch. closures with capture inference and `impl Fn(…)` arguments. associated types, `for` loops, and `Option`/`Result` as language types. `::<>`, `impl !Copy` and associated constants. Generic traits and their blanket impls are specified and rejected by name (G0.7–G0.9, G0.11–G0.14) |
 
+## A program that runs today
+
+[`examples/trust/demo.tr`](examples/trust/demo.tr) exercises every feature the
+compiler has, and its exact output is a test. Build and run it:
+
+```
+trustc compile examples/trust/demo.tr @main > demo.t27
+cat examples/trisc/runtime.t27 >> demo.t27
+tritium asm demo.t27 -o demo.timg
+tritium run demo.timg
+```
+
+```
+0t1 0t10 0t100 0t1000 0t10000 0t100000
+0tTT1 -11 0t1101001 1000
+C=48 R=42 90
+3 6 9 12
+0.4 0.11 1.2 1.9
+42
+[2]
+[3][1]
+```
+
+The first two lines are the point of the language. Writing a number in
+balanced ternary is `n % 3` and `n / 3` and nothing else, because
+round-to-nearest division leaves the remainder in −1…1 every time; the
+decimal printer in the same file needs a correction step inside its loop that
+the ternary one has no use for.
+
 ## Building
 
 ```
-cargo test          # 294 tests
+cargo test          # 296 tests
 cargo build
 ```
 

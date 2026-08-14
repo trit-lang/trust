@@ -4402,6 +4402,25 @@ impl Fn<'_> {
         if let Some(key) = bound.strip_prefix("Fn@") {
             return self.check_fn_bound(ty, key, callee, param, line);
         }
+        // A trait object implements its own trait, and its supertraits
+        // (Ch. 4 §3.1): dispatch through it is what the vtable is for.
+        if let Ty::Dyn(name) = ty {
+            let mut chain = vec![name.clone()];
+            let mut i = 0;
+            while i < chain.len() {
+                if let Some(decl) = self.traits.get(&chain[i]) {
+                    for s in &decl.supertraits {
+                        if !chain.contains(s) {
+                            chain.push(s.clone());
+                        }
+                    }
+                }
+                i += 1;
+            }
+            if chain.iter().any(|t| t == bound) {
+                return Ok(());
+            }
+        }
         let ok = match bound {
             "Copy" => self.types.is_copyable(ty),
             "Sized" => !ty.is_unsized(),
