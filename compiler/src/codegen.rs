@@ -147,9 +147,15 @@ struct Frame {
 /// argument reads a slot another argument is about to write — the loop back
 /// edge that swaps two values is the case that matters. Arguments go to the
 /// transfer slots first, and only then to the parameters.
-fn layout(f: &Function) -> Frame {
+fn layout(f: &Function, saved: &[&'static str]) -> Frame {
     let mut slots = BTreeMap::new();
     let mut cursor = WORD; // word 0 holds the saved return address
+
+    // Then one word per callee-saved register the allocator used.
+    for r in saved {
+        slots.insert(format!("\u{1}saved.{r}"), cursor);
+        cursor += WORD;
+    }
 
     let mut give = |name: &str, cursor: &mut i128| {
         slots.entry(name.to_string()).or_insert_with(|| {
@@ -264,6 +270,11 @@ fn terminator_operands(t: &Terminator, f: &mut impl FnMut(&Operand)) {
 /// clobbers them and overwrites them while its arguments are set up.
 const POOL_ALWAYS: &[&str] = &["t4", "t5", "t6", "t7"];
 const POOL_CALL_FREE: &[&str] = &["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"];
+/// Callee-saved (TRISC-27 §6.1), so a value in one survives a call. Using one
+/// costs a save in the prologue and a restore in the epilogue, so they are
+/// handed out only to a range that actually crosses a call — the range no
+/// caller-saved register can hold.
+const POOL_SAVED: &[&str] = &["s0", "s1", "s2", "s3", "s4", "s5", "s6"];
 
 struct Gen<'a> {
     func: &'a Function,
@@ -284,13 +295,14 @@ struct Gen<'a> {
 /// - **Defined and used only in this block.** A value crossing a block
 ///   boundary would need agreement between blocks about where it lives, and
 ///   this pass has none.
-/// - **No call between the definition and the last use.** Every register in
-///   the pool is caller-saved (TRISC-27 §6.1), so a call ends every live
-///   range whether the allocator likes it or not.
+/// - **A range crossing a call goes in a callee-saved register**, or nowhere.
+///   `t4`…`t7` and `a0`…`a7` are caller-saved (TRISC-27 §6.1), so a call ends
+///   a range in one of them whether the allocator likes it or not; `s0`…`s6`
+///   survive, at the cost of a save in the prologue and a restore in the
+///   epilogue.
 ///
-/// What is left is the common case and the one that hurts most: a value
-/// produced by one instruction and consumed by the next, which the frame-slot
-/// scheme wrote to memory and read straight back.
+/// Caller-saved registers are preferred where they work, since they cost
+/// nothing to use. What is left in memory is a value another block reads.
 fn allocate(f: &Function, block: &Block) -> BTreeMap<String, &'static str> {
     // A value another block mentions has to be somewhere both agree on.
     let mut elsewhere: BTreeSet<String> = BTreeSet::new();
@@ -322,35 +334,42 @@ fn allocate(f: &Function, block: &Block) -> BTreeMap<String, &'static str> {
     let is_call = |i: usize| matches!(block.insts[i].kind, InstKind::Call { .. });
     let has_call = (0..n).any(is_call);
 
-    // The last instruction index that uses each value; `n` for a use in the
-    // terminator, which runs after them all.
+    // The last instruction index that uses each value, and how often it is
+    // used at all; `n` for a use in the terminator, which runs after them.
     let mut last: BTreeMap<String, usize> = BTreeMap::new();
+    let mut uses: BTreeMap<String, usize> = BTreeMap::new();
     for (i, inst) in block.insts.iter().enumerate() {
         operands_of(&inst.kind, &mut |o| {
             if let Operand::Value(v) = o {
                 last.insert(v.clone(), i);
+                *uses.entry(v.clone()).or_default() += 1;
             }
         });
     }
     terminator_operands(&block.term, &mut |o| {
         if let Operand::Value(v) = o {
             last.insert(v.clone(), n);
+            *uses.entry(v.clone()).or_default() += 1;
         }
     });
 
-    let mut pool: Vec<&'static str> = POOL_ALWAYS.to_vec();
+    let mut fast: Vec<&'static str> = POOL_ALWAYS.to_vec();
     if !has_call {
-        pool.extend_from_slice(POOL_CALL_FREE);
+        fast.extend_from_slice(POOL_CALL_FREE);
     }
-    let mut free = pool;
+    let mut saved: Vec<&'static str> = POOL_SAVED.to_vec();
     let mut regs: BTreeMap<String, &'static str> = BTreeMap::new();
-    let mut expiry: Vec<(usize, &'static str)> = Vec::new();
+    let mut expiry: Vec<(usize, &'static str, bool)> = Vec::new();
 
     for (i, inst) in block.insts.iter().enumerate() {
         // Registers whose value died before this instruction are free again.
-        expiry.retain(|(end, r)| {
+        expiry.retain(|(end, r, is_saved)| {
             if *end < i {
-                free.push(r);
+                if *is_saved {
+                    saved.push(r)
+                } else {
+                    fast.push(r)
+                }
                 false
             } else {
                 true
@@ -363,16 +382,46 @@ fn allocate(f: &Function, block: &Block) -> BTreeMap<String, &'static str> {
             if elsewhere.contains(name) {
                 continue;
             }
-            // A call between here and the last use clobbers the register.
-            if (i + 1..=end.min(n.saturating_sub(1))).any(is_call) {
+            let crosses = (i + 1..=end.min(n.saturating_sub(1))).any(is_call);
+            // A callee-saved register is paid for once per *invocation* — a
+            // save and a restore — while a spill is paid once per *use*. So
+            // it is only worth taking when the value is used more than once:
+            // measured on a recursive benchmark, handing one to every
+            // call-crossing value made the program 6% slower, because the
+            // hot function paid two instructions per call to keep a value it
+            // read once.
+            let picked = if crosses {
+                if uses.get(name).copied().unwrap_or(0) < 2 {
+                    continue;
+                }
+                saved.pop().map(|r| (r, true))
+            } else {
+                fast.pop()
+                    .map(|r| (r, false))
+                    .or_else(|| saved.pop().map(|r| (r, true)))
+            };
+            let Some((r, is_saved)) = picked else {
                 continue;
-            }
-            let Some(r) = free.pop() else { continue };
+            };
             regs.insert(name.clone(), r);
-            expiry.push((end, r));
+            expiry.push((end, r, is_saved));
         }
     }
     regs
+}
+
+/// The callee-saved registers a function's allocation uses, in order — what
+/// the prologue must save and the epilogue restore.
+fn saved_registers(f: &Function) -> Vec<&'static str> {
+    let mut used: BTreeSet<&'static str> = BTreeSet::new();
+    for b in &f.blocks {
+        for r in allocate(f, b).values() {
+            if POOL_SAVED.contains(r) {
+                used.insert(r);
+            }
+        }
+    }
+    used.into_iter().collect()
 }
 
 impl Gen<'_> {
@@ -451,7 +500,10 @@ impl Gen<'_> {
 }
 
 fn function(f: &Function) -> Result<String, Vec<String>> {
-    let frame = layout(f);
+    // The frame has to hold whatever the allocator decided to save, so the
+    // allocation is settled before the layout that depends on it.
+    let saved = saved_registers(f);
+    let frame = layout(f, &saved);
     let calls = f.blocks.iter().any(|b| {
         b.insts
             .iter()
@@ -479,6 +531,11 @@ fn function(f: &Function) -> Result<String, Vec<String>> {
     g.line(format!("addi.trap sp, sp, -{size}"));
     if calls {
         g.line("st.word ra, 0(sp)");
+    }
+    // A callee-saved register belongs to whoever called us (TRISC-27 §6.1).
+    for r in &saved {
+        let at = g.slot(&format!("\u{1}saved.{r}"));
+        g.line(format!("st.word {r}, {at}(sp)"));
     }
 
     // Arguments arrive in a0…a7 and are spilled to their slots at once.
@@ -517,6 +574,17 @@ fn function(f: &Function) -> Result<String, Vec<String>> {
 fn epilogue(g: &mut Gen, calls: bool) {
     if calls {
         g.line("ld.word ra, 0(sp)");
+    }
+    let saved: Vec<String> = g
+        .frame
+        .slots
+        .keys()
+        .filter(|k| k.starts_with('\u{1}'))
+        .filter_map(|k| k.strip_prefix("\u{1}saved.").map(str::to_string))
+        .collect();
+    for r in saved {
+        let at = g.slot(&format!("\u{1}saved.{r}"));
+        g.line(format!("ld.word {r}, {at}(sp)"));
     }
     let size = g.frame.size;
     g.line(format!("addi.trap sp, sp, {size}"));

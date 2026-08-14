@@ -2159,8 +2159,7 @@ fn the_machine_can_be_asked_what_it_has_done() {
     // difference of two readings is the cost of what ran between them —
     // nothing to subtract for the measurement, because the load has not
     // retired when its value is produced.
-    let (status, _) = run(
-        "fn elapsed() -> t27; \
+    let (status, _) = run("fn elapsed() -> t27; \
          fn work(n: t27) -> t27 { \
              let mut s: t27 = 0; let mut i: t27 = 0; \
              while i < n { s += i * i; i += 1; } \
@@ -2171,8 +2170,7 @@ fn the_machine_can_be_asked_what_it_has_done() {
              let r = work(10); \
              let t1 = elapsed(); \
              if t1 > t0 { 1 } else { 0 } \
-         }",
-    );
+         }");
     assert_eq!(status, 1, "time moves forward");
 
     // Twice the work costs more than once, which is the only property a
@@ -2214,7 +2212,7 @@ fn mulh_is_reachable_from_the_language() {
                  let h = a.mulh(b); let l = a.wrapping_mul(b); \
                  h * 3 + l * 0 + h \
              }")
-            .0,
+        .0,
         // 10^12 / 3^27 rounds to 0 here; the point is that it compiles and
         // agrees with the interpreter, which `tir_of` already checked.
         0
@@ -2239,9 +2237,36 @@ fn a_constant_may_be_an_arrays_length() {
                  let g = Grid { cells: [1; M] }; \
                  sum(&a) + sum(&g.cells) \
              }")
-            .0,
+        .0,
         8 * 3 + 16
     );
     let e = error("fn main() -> t27 { let a: [t27; K] = [0; 1]; 0 }");
     assert!(e.contains("not a constant"), "{e}");
+}
+
+#[test]
+fn a_value_used_after_a_call_survives_in_a_callee_saved_register() {
+    // TRISC-27 §6.1: `s0`…`s6` survive a call, at the cost of a save in the
+    // prologue and a restore in the epilogue. A value read more than once
+    // after a call earns that; a value read once does not, which was
+    // measured rather than assumed (G8.3).
+    let m = tir_of(
+        "fn f(x: t27) -> t27 { x * 3 + 1 } \
+         fn work() -> t27 { \
+             let a: t27 = 7; let b: t27 = 9; \
+             let r = f(1); \
+             a * r + b * r + a * b \
+         } \
+         fn main() -> t27 { work() }",
+    );
+    let legalized = tir::legalize_module(&m, &tir::TargetDesc::tritium()).unwrap();
+    let asm = trustc::codegen::compile(&legalized, "main").unwrap();
+
+    let start = asm.find("f.work:").expect("the function");
+    let body = &asm[start..asm[start..].find("\n\n").map_or(asm.len(), |i| start + i)];
+    // If a saved register is used it is saved and restored exactly once each.
+    let saved = body.matches("st.word s").count();
+    let restored = body.matches("ld.word s").count();
+    assert_eq!(saved, restored, "every save has its restore:\n{body}");
+    assert!(saved > 0, "a value read three times across a call:\n{body}");
 }

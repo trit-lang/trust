@@ -921,6 +921,39 @@ sweep rule of Naming §6 failing in the direction it always fails: a change
 lands, and the document that described the old state is not the one being
 edited.
 
+**G8.3 — values live across a call, and a heuristic that had to be measured
+to be believed.** G8.1's allocator ended every live range at a call, because
+`t4`…`t7` and `a0`…`a7` are caller-saved (TRISC-27 §6.1). `s0`…`s6` survive a
+call, so the obvious next step was to hand one to every range that crosses
+one.
+
+**It made the benchmark 6% slower** — 91 668 instructions against 86 686 —
+and the reason is a cost model that reads the wrong way round if you do not
+write it down:
+
+| | paid |
+|---|---|
+| spilled to a frame slot | one store at the definition, one load **per use** |
+| held in a callee-saved register | one save and one restore **per invocation** |
+
+A recursive `fib` pays the save and restore on every call, to keep a value it
+reads once. The register is only worth taking when the value is used **more
+than once** after the call, which is the threshold the allocator now applies.
+
+With it, the same benchmark comes back to where it started — 86 685, a net
+gain of one instruction — because values crossing a call and read more than
+once are *rare in that shape of code*. On a loop that calls once and then uses
+several live values, it is **7.3% better**: 20 451 against 22 050.
+
+So the increment is conditional rather than uniform, and both numbers are
+recorded because only having the second would misrepresent it.
+
+**This is the first change in the project measured rather than argued.** It
+was possible because G8.2 added `CYCLES` a few commits earlier; before that
+the only instrument was counting lines of assembly, which would have shown
+the first attempt as an improvement — it emits *fewer* instructions
+statically, and executes more.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

@@ -163,7 +163,7 @@ inference and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
 | generic traits, `From`/`Into` | see below — the one substantial hole in Ch. 4 |
 | modules, `use`, `pub`, multiple files | reserved in Ch. 0 §1.3 |
 | `unsafe`, raw pointers, `?` | reserved |
-| values kept in registers across a block boundary or a call | the allocator is block-local (G8.1); the callee-saved `s0`…`s6` could hold them at the cost of saving them |
+| values kept in registers across a **block boundary** | the allocator is block-local (G8.1). Across a *call* they are held in `s0`…`s6` when used more than once, which is measured at −7.3% instructions where it applies and neutral where it does not (G8.3) |
 
 **Generic traits** are the one substantial hole. Two things stand in the way
 and both must arrive together: a type may implement `trait From<T>` many
