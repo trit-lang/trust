@@ -626,11 +626,17 @@ pub(super) fn trunc_from(e: &mut Emit, inst: &Inst, a: &Operand, from: Wide, to:
 /// A wide load is one load per part, at ascending addresses — the parts are
 /// stored little-trytean, like everything else (AM §2.2).
 pub(super) fn load(e: &mut Emit, inst: &Inst, wide: Wide, p: &Operand) {
+    let parts = load_parts(e, wide, p);
+    bind(e, inst, parts);
+}
+
+/// Read a wide value's parts from memory, least significant first.
+pub(super) fn load_parts(e: &mut Emit, wide: Wide, p: &Operand) -> Vec<Operand> {
     let Some(stride) = part_stride(e, wide) else {
-        return;
+        return vec![konst(wide.part, 0); wide.k as usize];
     };
     let base = e.coerce(p, Type::Ptr);
-    let parts = (0..wide.k)
+    (0..wide.k)
         .map(|i| {
             let addr = offset_by(e, &base, i * stride);
             e.emit(
@@ -642,8 +648,7 @@ pub(super) fn load(e: &mut Emit, inst: &Inst, wide: Wide, p: &Operand) {
                 },
             )
         })
-        .collect();
-    bind(e, inst, parts);
+        .collect()
 }
 
 /// A wide store is one store per part.

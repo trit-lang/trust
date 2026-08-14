@@ -207,13 +207,10 @@ fn the_expansion_frontier_is_exactly_this() {
         let msg = refusal(&wide(op), &target);
         assert!(msg.contains("not implemented"), "{msg}");
     }
-    // G6.5: a wide value cannot cross a function boundary, because TIR has
-    // neither multiple return values nor an `sret` convention.
-    let msg = refusal(
-        "tir 0.1 target \"tritium\"\n\nfn @f(%a: t27) -> t27 {\n^entry:\n    ret %a\n}\n",
-        &target,
-    );
-    assert!(msg.contains("crosses a function boundary"), "{msg}");
+    // G6.5 is closed: a wide value crosses a function boundary as its parts,
+    // with a wide result travelling through a hidden pointer, and both ends
+    // are reshaped together. Asserted in `boundary_crossing_preserves_meaning`
+    // below rather than as a refusal here.
 }
 
 #[test]
@@ -231,6 +228,15 @@ fn a_trust_program_legalizes_for_a_nine_trit_machine() {
              while i < 3 { s = s + (p as t27); i = i + 1; } \
              s as t9 \
          }",
+        // Wide values crossing a function boundary, which G6.5 blocked: the
+        // parameters and the result of `add` are all wider than a t9
+        // machine's word.
+        "fn add(a: t27, b: t27) -> t27 { a + b } \
+         fn f(p: t9, q: t9) -> t9 { add(add(p as t27, 1000000), q as t27) as t9 }",
+        // And through a recursive call, so a reshaped signature has to agree
+        // with itself.
+        "fn sum(n: t27) -> t27 { if n < 1 { 0 } else { n + sum(n - 1) } } \
+         fn f(p: t9, q: t9) -> t9 { sum(p as t27) as t9 }",
     ] {
         let m = trustc::lang::compile(src).expect("compiles");
         let legalized = tir::legalize_module(&m, &target).expect("legalizes for t9");
@@ -345,4 +351,72 @@ fn wide_shifts_by_a_constant_expand() {
         interpret(&legalized, "f", &[0]),
         Err(trit_core::FaultCode::Shift)
     );
+}
+
+#[test]
+fn boundary_crossing_preserves_meaning() {
+    // G6.5, closed: legalization reshapes the signature *and* every call
+    // site, which it can because it sees the whole module. Nothing in TIR
+    // changed — the rewritten signature is an ordinary one and `ret` still
+    // carries at most one value.
+    let target = t9_target();
+    let src = r#"tir 0.1 target "tritium"
+
+fn @add3(%a: t27, %b: t27) -> t27 {
+^entry:
+    %r = add.wrap t27 %a, %b
+    ret %r
+}
+
+fn @f(%p: t9, %q: t9) -> t9 {
+^entry:
+    %a = widen t9 %p -> t27
+    %b = widen t9 %q -> t27
+    %s = call @add3(%a, %b) -> t27
+    %t = call @add3(%s, %a) -> t27
+    %n = trunc t27 %t -> t9
+    ret %n
+}
+"#;
+    let m = tir::parse_module(src).expect("parses");
+    let legalized = tir::legalize_module(&m, &target).expect("reshapes the boundary");
+    assert!(
+        tir::verify(&legalized).is_empty(),
+        "{:?}",
+        tir::verify(&legalized)
+    );
+    assert!(tir::verify_legalized(&legalized, &target).is_empty());
+
+    // Least significant part first, behind the hidden out-pointer.
+    let callee = legalized
+        .funcs
+        .iter()
+        .find(|f| f.sig.name == "add3")
+        .expect("the callee");
+    assert_eq!(callee.sig.ret, None);
+    assert_eq!(
+        callee
+            .sig
+            .params
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "lz.sret", "a.part0", "a.part1", "a.part2", "b.part0", "b.part1", "b.part2"
+        ]
+    );
+
+    for args in [
+        &[7i128, 3][..],
+        &[-7, 3],
+        &[9841, -9841],
+        &[0, 0],
+        &[9841, 9841],
+    ] {
+        assert_eq!(
+            interpret(&m, "f", args),
+            interpret(&legalized, "f", args),
+            "at {args:?}"
+        );
+    }
 }

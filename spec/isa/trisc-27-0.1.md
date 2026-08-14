@@ -560,11 +560,20 @@ ascending addresses from `sp`.
 
 Results come back the same way: `a0`, then `a1` for a second word.
 
-> **Note on TIR (informative).** This resolves the ABI half of
-> `docs/spec-gaps.md` G6.5: a `t54` value *does* have a defined way to cross a
-> function boundary — two argument registers. The TIR half remains open, since
-> TIR's `ret` carries a single value and has no `sret` form, so the frontend
-> still cannot express a wide return even though the machine can perform one.
+> **Note on TIR (informative).** The ABI half of `docs/spec-gaps.md` G6.5 is
+> discharged here: a `t54` value has a defined way to cross a function
+> boundary, in two argument registers. The TIR half was closed differently,
+> and the difference is worth knowing about.
+>
+> TIR's `ret` carries a single value and has no `sret` form, so rather than
+> grow one, legalization reshapes a wide signature: a wide parameter becomes
+> one parameter per part — which is exactly the order this section
+> specifies — and a wide *result* travels through a hidden pointer instead.
+>
+> So **the provision above for a result in `a0` and `a1` is one the reference
+> compiler will never use.** It stands for hand-written assembly and for any
+> other frontend, and it is recorded here as unused rather than quietly left
+> to drift.
 
 ### 6.4 Entry and exit
 

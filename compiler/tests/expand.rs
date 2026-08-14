@@ -468,7 +468,17 @@ fn @accumulate(%n: t27, %step: t27) -> t27 {
 }
 
 #[test]
-fn wide_values_cannot_cross_a_function_boundary_yet() {
+fn a_wide_value_crosses_a_function_boundary_as_parts() {
+    // This test used to assert the refusal (G6.5): TIR has neither multiple
+    // return values nor an `sret` form, so a `t54` parameter had nowhere to
+    // go. It still has neither — what changed is that legalization reshapes
+    // the signature and every call site together, which it can because it
+    // sees the whole module.
+    //
+    // A wide parameter arrives as one parameter per part, least significant
+    // first, which is AM §2.2's order for memory and TRISC-27 §6.3's for
+    // argument registers. A wide result goes back through a hidden leading
+    // pointer, which is what the frontend already does for aggregates.
     let src = r#"
 tir 0.1 target "tritium"
 fn @f(%a: t54) -> t54 {
@@ -476,12 +486,17 @@ fn @f(%a: t54) -> t54 {
     ret %a
 }
 "#;
-    let errs = legalize_module(&parse(src), &tritium()).unwrap_err();
-    assert!(
-        errs.iter()
-            .any(|e| e.message.contains("calling convention")),
-        "{errs:?}"
+    let m = legalize_module(&parse(src), &tritium()).expect("reshapes");
+    let sig = &m.funcs[0].sig;
+    assert_eq!(
+        sig.params,
+        vec![
+            ("lz.sret".to_string(), tir::Type::Ptr),
+            ("a.part0".to_string(), tir::Type::Int(27)),
+            ("a.part1".to_string(), tir::Type::Int(27)),
+        ]
     );
+    assert_eq!(sig.ret, None, "the result travels through the pointer");
 }
 
 #[test]

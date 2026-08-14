@@ -95,9 +95,9 @@ pub fn legalize_module(m: &Module, target: &TargetDesc) -> Result<Module, Vec<Le
     }
 
     // Signatures first: a call has to agree with the callee's legalized shape.
-    let mut sigs: HashMap<String, Signature> = HashMap::new();
+    let mut sigs: HashMap<String, (Signature, SigShape)> = HashMap::new();
     for s in m.funcs.iter().map(|f| &f.sig).chain(m.decls.iter()) {
-        match widths.signature(s) {
+        match widths.reshape(s) {
             Ok(l) => {
                 sigs.insert(s.name.clone(), l);
             }
@@ -174,30 +174,92 @@ impl WidthMap<'_> {
     /// target's is `"tritium0"`, "defined in the target's own doc", which does
     /// not exist. So this is reported rather than invented.
     fn signature(&self, s: &Signature) -> Result<Signature, String> {
-        let across_the_boundary = |t: Type| -> Result<Type, String> {
-            if let Type::Int(w) = t
-                && matches!(self.classify(w), Class::Wide(_))
-            {
-                return Err(format!(
-                    "`t{w}` crosses a function boundary but is wider than the \
-                     widest legal width t{}; passing it needs a calling \
-                     convention this repository does not have \
-                     (see docs/spec-gaps.md G6.5)",
-                    self.target.widest_legal()
-                ));
-            }
-            self.ty(t)
-        };
-        Ok(Signature {
-            name: s.name.clone(),
-            params: s
-                .params
-                .iter()
-                .map(|(n, t)| Ok((n.clone(), across_the_boundary(*t)?)))
-                .collect::<Result<_, String>>()?,
-            ret: s.ret.map(across_the_boundary).transpose()?,
-        })
+        self.reshape(s).map(|(sig, _)| sig)
     }
+
+    /// Legalize a signature, splitting whatever is too wide to cross the
+    /// boundary as it stands (G6.5).
+    ///
+    /// A wide **parameter** becomes one parameter per part, least significant
+    /// first — the same order AM §2.2 fixes for memory and TRISC-27 §6.3 for
+    /// argument registers. A wide **result** becomes a hidden leading pointer
+    /// and the function returns nothing, which is the arrangement the
+    /// frontend already uses for aggregates, applied one layer down.
+    ///
+    /// Nothing here is a TIR change: the rewritten signature is an ordinary
+    /// one, and `ret` still carries at most one value. What makes it work is
+    /// that this pass sees the whole module, so it can rewrite the callee and
+    /// every call site together.
+    fn reshape(&self, s: &Signature) -> Result<(Signature, SigShape), String> {
+        let mut params = Vec::new();
+        let mut shape = SigShape {
+            params: Vec::new(),
+            sret: None,
+        };
+
+        // The hidden out-pointer comes first, so that the arguments keep
+        // their order behind it.
+        if let Some(Type::Int(w)) = s.ret
+            && let Class::Wide(wide) = self.classify(w)
+        {
+            params.push((SRET.to_string(), Type::Ptr));
+            shape.sret = Some(wide);
+        }
+
+        for (n, t) in &s.params {
+            match t {
+                Type::Int(w) => match self.classify(*w) {
+                    Class::Wide(wide) => {
+                        for i in 0..wide.k {
+                            params.push((part_name(n, i), wide.ty()));
+                        }
+                        shape.params.push((n.clone(), Some(wide)));
+                    }
+                    Class::Legal(l) => {
+                        params.push((n.clone(), Type::Int(l)));
+                        shape.params.push((n.clone(), None));
+                    }
+                },
+                Type::Ptr => {
+                    params.push((n.clone(), Type::Ptr));
+                    shape.params.push((n.clone(), None));
+                }
+            }
+        }
+
+        let ret = match (s.ret, &shape.sret) {
+            (_, Some(_)) => None,
+            (Some(t), None) => Some(self.ty(t)?),
+            (None, None) => None,
+        };
+        Ok((
+            Signature {
+                name: s.name.clone(),
+                params,
+                ret,
+            },
+            shape,
+        ))
+    }
+}
+
+/// The hidden out-pointer a wide result comes back through. Named with a dot,
+/// which a hand-written module is unlikely to use and a frontend never does.
+const SRET: &str = "lz.sret";
+
+/// The name of one part of a split parameter.
+fn part_name(n: &str, i: u32) -> String {
+    format!("{n}.part{i}")
+}
+
+/// What a signature became: how each parameter was split, and whether the
+/// result now travels through a pointer.
+#[derive(Clone)]
+struct SigShape {
+    /// One entry per original parameter, in order.
+    params: Vec<(String, Option<Wide>)>,
+    /// Set when the result is returned through the hidden pointer.
+    sret: Option<Wide>,
 }
 
 /// What one block parameter became after legalization: itself, or one slot
@@ -220,7 +282,7 @@ fn konst(at: u32, v: i128) -> Operand {
 /// operation needs a conditional fault.
 struct Emit<'a> {
     widths: &'a WidthMap<'a>,
-    sigs: &'a HashMap<String, Signature>,
+    sigs: &'a HashMap<String, (Signature, SigShape)>,
     /// Finished blocks, in order.
     blocks: Vec<Block>,
     /// The block being built.
@@ -492,9 +554,9 @@ impl Emit<'_> {
 fn legalize_function(
     f: &Function,
     widths: &WidthMap,
-    sigs: &HashMap<String, Signature>,
+    sigs: &HashMap<String, (Signature, SigShape)>,
 ) -> Result<Function, Vec<String>> {
-    let sig = match sigs.get(&f.sig.name) {
+    let (sig, shape) = match sigs.get(&f.sig.name) {
         Some(s) => s.clone(),
         None => return Err(vec!["signature could not be legalized".into()]),
     };
@@ -534,6 +596,17 @@ fn legalize_function(
 
     for (n, t) in &sig.params {
         e.actual.insert(n.clone(), *t);
+    }
+    // A parameter that was split arrives as its parts, and the body refers to
+    // it by its original name, so the two are tied together here — the same
+    // binding a wide block parameter gets below (G6.5).
+    for (n, wide) in &shape.params {
+        if let Some(w) = wide {
+            e.parts.insert(
+                n.clone(),
+                (0..w.k).map(|i| Operand::Value(part_name(n, i))).collect(),
+            );
+        }
     }
 
     // Block parameter shapes are fixed up front: a branch has to agree with
@@ -596,7 +669,7 @@ fn legalize_function(
         }
         let term = match e.halted.take() {
             Some(halt) => halt,
-            None => legalize_terminator(&mut e, &b.term, &sig),
+            None => legalize_terminator(&mut e, &b.term, &sig, &shape),
         };
         e.finish_block(term);
     }
@@ -611,7 +684,21 @@ fn legalize_function(
     }
 }
 
-fn legalize_terminator(e: &mut Emit, t: &Terminator, sig: &Signature) -> Terminator {
+fn legalize_terminator(
+    e: &mut Emit,
+    t: &Terminator,
+    sig: &Signature,
+    shape: &SigShape,
+) -> Terminator {
+    // A wide result travels through the hidden pointer: the parts are stored
+    // there and the function returns nothing (G6.5).
+    if let Terminator::Ret(Some(v)) = t
+        && let Some(wide) = shape.sret
+    {
+        let p = Operand::Value(SRET.to_string());
+        expand::store(e, wide, v, &p);
+        return Terminator::Ret(None);
+    }
     match t {
         Terminator::Br3 {
             t: cond,
@@ -906,9 +993,9 @@ fn legalize_inst(e: &mut Emit, inst: &Inst) {
             // legalized signature. An indirect one has no callee to ask, so
             // TIR §3.7's rule applies: the call site's own types are the
             // signature, and each argument is legalized on its own.
-            let (params, want_ret) = match callee {
+            let (params, want_ret, shape) = match callee {
                 Callee::Direct(name) => match e.sigs.get(name).cloned() {
-                    Some(sig) => (Some(sig.params), sig.ret),
+                    Some((sig, shape)) => (Some(sig.params), sig.ret, Some(shape)),
                     None => {
                         e.errs.push(format!("`@{name}` has no legalized signature"));
                         return;
@@ -925,16 +1012,52 @@ fn legalize_inst(e: &mut Emit, inst: &Inst) {
                             },
                         },
                     };
-                    (None, r)
+                    (None, r, None)
                 }
             };
-            let args: Vec<Operand> = match &params {
-                Some(ps) => args
+
+            // The call site is reshaped to match the callee (G6.5): a wide
+            // argument goes as its parts, and a wide result comes back
+            // through a slot this frame supplies.
+            let mut actual: Vec<Operand> = Vec::new();
+            let mut out: Option<(Operand, Wide)> = None;
+            if let Some(shape) = &shape {
+                let ps = params.clone().unwrap_or_default();
+                let mut at = 0usize;
+                if let Some(wide) = shape.sret {
+                    let trytes = wide.k * wide.part / e.widths.target.addr_unit;
+                    let slot = e.emit("rs", Type::Ptr, InstKind::Slot { trytes });
+                    actual.push(slot.clone());
+                    out = Some((slot, wide));
+                    at = 1;
+                }
+                for ((_, split), a) in shape.params.iter().zip(args) {
+                    match split {
+                        Some(wide) => {
+                            let parts = expand::parts_of(e, a, *wide);
+                            at += parts.len();
+                            actual.extend(parts);
+                        }
+                        None => {
+                            let want = ps.get(at).map(|(_, t)| *t).unwrap_or(Type::Ptr);
+                            at += 1;
+                            actual.push(e.coerce(a, want));
+                        }
+                    }
+                }
+            }
+
+            // Without a shape (an indirect call), or where the shape left the
+            // arguments alone, the old rule applies: coerce to the callee's
+            // parameter types.
+            let args: Vec<Operand> = match (&shape, &params) {
+                (Some(_), _) => actual,
+                (None, Some(ps)) => args
                     .iter()
                     .zip(ps)
                     .map(|(a, (_, want))| e.coerce(a, *want))
                     .collect(),
-                None => args.iter().map(|a| e.resolve(a)).collect(),
+                (None, None) => args.iter().map(|a| e.resolve(a)).collect(),
             };
             let callee = match callee {
                 Callee::Direct(n) => Callee::Direct(n.clone()),
@@ -945,8 +1068,15 @@ fn legalize_inst(e: &mut Emit, inst: &Inst) {
                 args,
                 ret: want_ret,
             };
-            match (ret, want_ret) {
-                (Some(_), Some(t)) => define(e, inst, 0, t, kind),
+            match (ret, want_ret, out) {
+                // The result arrived in the slot, so it is read back as parts
+                // and bound to the name the original call defined.
+                (Some(_), _, Some((slot, wide))) => {
+                    e.push(Vec::new(), kind);
+                    let parts = expand::load_parts(e, wide, &slot);
+                    expand::bind(e, inst, parts);
+                }
+                (Some(_), Some(t), None) => define(e, inst, 0, t, kind),
                 _ => e.push(Vec::new(), kind),
             }
         }

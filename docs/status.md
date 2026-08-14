@@ -118,7 +118,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | `trit-core` | complete: arbitrary-precision balanced ternary, width-typed `tN`, three overflow flavors, the AM's five fault codes, three-radix literals |
 | TIR data structures, text format, verifier | complete, round-trips |
 | TIR reference interpreter | complete, with provenance-tracking pointers and a function-address space |
-| TIR legalization | promotion complete; expansion complete for `add`, `sub`, `mul`, `shl`/`shr` by a constant, `neg`, `cmp`, `tmin`/`tmax`/`tmul`, `select3` and **wide loads and stores** — a real Trust program legalizes for a nine-trit machine and computes the same answers (G6.11). `mul` expands (G6.6 closed — TIR §3.1 gained `mulh`), and so do `shl` and `shr` by a **constant** amount (G6.12); `div`, `rem` and a computed shift amount are unwritten; a wide value cannot cross a function boundary (G6.5) |
+| TIR legalization | promotion complete; expansion complete for `add`, `sub`, `mul`, `shl`/`shr` by a constant, `neg`, `cmp`, `tmin`/`tmax`/`tmul`, `select3` and **wide loads and stores** — a real Trust program legalizes for a nine-trit machine and computes the same answers (G6.11). `mul` expands (G6.6 closed — TIR §3.1 gained `mulh`), and so do `shl` and `shr` by a **constant** amount (G6.12); `div`, `rem` and a computed shift amount are unwritten. A wide value crosses a function boundary as its parts, with a wide result through a hidden pointer (G6.5 closed) |
 | Layout engine (Ch. 2) | complete: sizes, alignments, offsets, both `repr`s, discriminants, niche optimization |
 | Trust frontend | Ch. 0–3 complete; Ch. 4 complete except generic traits |
 | Backend (TIR → TRISC-27) | works; **no register allocator** — every value lives in a stack slot |

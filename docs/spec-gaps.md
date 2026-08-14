@@ -989,21 +989,36 @@ exact product survive any wider wrapping.
 *Decision:* the pass reports the case it cannot synthesize rather than
 emitting an operation that silently fails to trap.
 
-**G6.5 — A wide value cannot cross a function boundary (blocking for
-expansion).** A `t54` parameter on a `t27` target has to arrive in two
-registers, or through a hidden pointer. TIR has neither multiple return
-values nor an `sret` convention, and the calling convention is a
-target-description property (TIR §7) whose reference value, `"tritium0"`, is
-"defined in the target's own doc" — which is G0.2, the missing ISA spec.
+**G6.5 — A wide value could not cross a function boundary — RESOLVED.**
+A `t54` parameter on a `t27` target has to arrive in two registers, or through
+a hidden pointer. TIR has neither multiple return values nor an `sret` form,
+so expansion had nowhere to put the parts and reported the signature instead
+of inventing an ABI.
 
-*Decision:* expansion handles wide values *inside* a function body and
-reports wide parameters and returns instead of inventing an ABI.
+*Resolution, and it needed no TIR change at all.* Legalization **reshapes the
+signature**, and reshapes every call site to match — which it can do because
+it sees the whole module:
 
-*Half resolved.* TRISC-27 §6.3 now defines the ABI: a value wider than a word
-occupies consecutive argument registers, least significant word first, and
-results come back in `a0` then `a1`. So the machine can pass a `t54`. TIR
-cannot yet *express* it — `ret` carries one value and there is no `sret` form
-— so the remaining work is a TIR change, not a missing convention.
+- A wide **parameter** becomes one parameter per part, least significant
+  first. That is AM §2.2's order for memory and TRISC-27 §6.3's for argument
+  registers, so the two agree without either being consulted.
+- A wide **result** becomes a hidden leading pointer, `lz.sret`, and the
+  function returns nothing. The caller allocates a slot, passes its address,
+  and reads the parts back.
+
+The rewritten signature is an ordinary TIR signature, and `ret` still carries
+at most one value. The alternative — giving TIR multiple results, to match
+§6.3's "results come back in `a0`, then `a1`" — was rejected as the larger
+change: every consumer of a call result assumes there is one.
+
+*The choice was the author's, and it has a cost worth stating.* TRISC-27
+§6.3's provision for a wide result in two registers is now something this
+compiler will never emit. It remains correct for hand-written assembly, but a
+specification with a clause nothing implements is a clause that will drift.
+§6.3 carries a note saying so.
+
+The frontend can now compile `fn add(a: t27, b: t27) -> t27` for a nine-trit
+machine, recursion included, and the differential test checks the answers.
 
 **G6.6 — Expansion of `mul` needed a primitive TIR did not have — RESOLVED.**
 Expanding a multiply means multiplying a part by a part, and that product is
