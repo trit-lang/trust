@@ -584,6 +584,16 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
     // Which traits each type implements, which is all a bound needs to know
     // (Ch. 4 §2.2). Supertraits are included, since implementing `B: A`
     // requires implementing `A` and the impl for it is in the file too.
+    // A trait that takes arguments is recorded by `expand_impls` instead,
+    // with them: `From` alone is not a requirement anything can satisfy.
+    let parameterized: std::collections::HashSet<&str> = file
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            ast::Item::Trait(t) if !t.params.is_empty() => Some(t.name.as_str()),
+            _ => None,
+        })
+        .collect();
     let impls: std::collections::HashSet<(String, String)> = file
         .items
         .iter()
@@ -591,6 +601,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
             ast::Item::Impl(imp) => imp
                 .trait_name
                 .as_ref()
+                .filter(|t| !parameterized.contains(t.as_str()))
                 .map(|t| (imp.self_ty.clone(), t.clone())),
             _ => None,
         })
@@ -598,8 +609,9 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
 
     // Impl blocks become ordinary functions before anything else looks at
     // the file, so the rest of lowering never learns they existed.
-    let (expanded, impl_errs) = expand_impls(file, &types);
+    let (expanded, impl_errs, mut table) = expand_impls(file, &types);
     errs.extend(impl_errs);
+    table.pairs.extend(impls.iter().cloned());
     let fns: Vec<ast::FnItem> = file
         .items
         .iter()
@@ -630,7 +642,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
                 *t = ast::Ty::Name(pname.clone(), line);
                 f.generics.push(ast::GenericParam::Type {
                     name: pname,
-                    bounds: vec![format!("Fn@{key}")],
+                    bounds: vec![ast::Bound::plain(format!("Fn@{key}"))],
                 });
             }
             f
@@ -780,7 +792,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
         fn_bounds: &fn_bounds,
         sigs: &sigs,
         generic_fns: &generic_fns,
-        impls: &impls,
+        impls: &table,
         pending: &pending,
         globals: &globals,
         types: &types,
@@ -1449,14 +1461,34 @@ fn subst_expr(e: &mut ast::Expr, self_ty: &SelfTy) {
 
 /// Expand every `trait` and `impl` in the file into ordinary functions.
 ///
+/// What the file's impl blocks say, in the two forms the rest of lowering
+/// asks for.
+///
+/// A trait with type parameters may be implemented by one type many times,
+/// so neither "does `T` implement `Trait`?" nor "which function is `T`'s
+/// `method`?" has a single answer any more. `From<t9>` and `From<t27>` are
+/// different requirements and different functions, and both are identified by
+/// the trait's name with its arguments appended — `From.t9`, `From.t27` —
+/// which is the same mangling instantiated generics use.
+#[derive(Default, Clone)]
+struct Impls {
+    /// Every (type, trait-with-its-arguments) pair the file implements.
+    pairs: std::collections::HashSet<(String, String)>,
+    /// The trait-qualified functions each (type, method name) has. Only
+    /// methods of a parameterized trait are here; every other method is found
+    /// under `Type.method` as it always was.
+    by_method: HashMap<(String, String), Vec<String>>,
+}
+
 /// A method becomes a function named `Type.method`, `Self` substituted away
 /// and the receiver an ordinary leading parameter. Everything downstream —
 /// signatures, calls, drops, the borrow checker — then works unchanged, which
 /// is the point: Ch. 4 §1.2's impl block is a naming construct, not a new
 /// kind of code.
-fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error>) {
+fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error>, Impls) {
     let mut out = Vec::new();
     let mut errs = Vec::new();
+    let mut table = Impls::default();
     let mut traits: HashMap<String, &ast::TraitItem> = HashMap::new();
 
     for item in &file.items {
@@ -1521,6 +1553,44 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
                     .into(),
             });
             continue;
+        }
+
+        // A trait with parameters may be implemented by one type many
+        // times, so the arguments are part of what identifies the impl —
+        // and of what identifies each of its methods.
+        let mut qualifier = String::new();
+        if let Some(trait_name) = &imp.trait_name {
+            let params = traits.get(trait_name).map_or(0, |t| t.params.len());
+            if params != imp.trait_args.len() {
+                errs.push(SyntaxError {
+                    line: imp.line,
+                    message: format!(
+                        "`{trait_name}` takes {params} type argument(s), {} given",
+                        imp.trait_args.len()
+                    ),
+                });
+                continue;
+            }
+            let mut args = Vec::new();
+            let mut bad = false;
+            for a in &imp.trait_args {
+                match resolve_ty(a, types) {
+                    Ok(t) => args.push(t),
+                    Err(e) => {
+                        errs.push(e);
+                        bad = true;
+                    }
+                }
+            }
+            if bad {
+                continue;
+            }
+            if !args.is_empty() {
+                qualifier = format!("{}.", mangle(trait_name, &args));
+            }
+            table
+                .pairs
+                .insert((self_ty.clone(), mangle(trait_name, &args)));
         }
 
         // What `Self` means here: the concrete type, or the applied generic.
@@ -1596,8 +1666,15 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
             let key = if is_destructor {
                 format!("drop.{self_ty}")
             } else {
-                format!("{self_ty}.{}", f.name)
+                format!("{self_ty}.{qualifier}{}", f.name)
             };
+            if !qualifier.is_empty() {
+                table
+                    .by_method
+                    .entry((self_ty.clone(), f.name.clone()))
+                    .or_default()
+                    .push(key.clone());
+            }
             if let Some(first) = defined.insert(key.clone(), f.line) {
                 errs.push(SyntaxError {
                     line: f.line,
@@ -1619,7 +1696,7 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
     // A trait declaration's provided bodies are only reachable through an
     // impl, so a trait with no impl contributes nothing but is still checked
     // for a supertrait that does not exist, above.
-    (out, errs)
+    (out, errs, table)
 }
 
 /// `impl Drop for T` must supply exactly `fn drop(self)` (Ch. 4 §5.2).
@@ -1668,7 +1745,8 @@ fn check_trait_impl(
         // Compared after resolution, not as written: the trait says
         // `Option<Self::Item>` and the impl says `Option<t27>`, and only the
         // resolved types can tell that those are the same (Ch. 4 §1.7).
-        let want = subst_self(want, self_repr);
+        let want = subst_trait_params_fn(want, &decl.params, &imp.trait_args);
+        let want = subst_self(&want, self_repr);
         let mismatch = || {
             err::<()>(
                 m.line,
@@ -1774,6 +1852,66 @@ fn subst_self_ty(t: &ast::Ty, self_ty: &SelfTy) -> ast::Ty {
     let mut t = t.clone();
     subst_ty(&mut t, self_ty);
     t
+}
+
+/// Replace a trait's own type parameters by the arguments an impl gave them.
+///
+/// A trait declares `fn from(x: T) -> Self`, and `T` is neither a type nor a
+/// parameter of the impl: it is the trait's, and the impl chose it. So an
+/// impl's methods are compared against the declaration with the choice
+/// already made.
+fn subst_trait_params(t: &ast::Ty, params: &[String], args: &[ast::Ty]) -> ast::Ty {
+    use ast::Ty::*;
+    match t {
+        Name(n, _) => match params.iter().position(|p| p == n) {
+            Some(i) if i < args.len() => args[i].clone(),
+            _ => t.clone(),
+        },
+        App(n, xs, l) => App(
+            n.clone(),
+            xs.iter()
+                .map(|x| subst_trait_params(x, params, args))
+                .collect(),
+            *l,
+        ),
+        Ref(x, m, l) => Ref(Box::new(subst_trait_params(x, params, args)), *m, *l),
+        Slice(x, l) => Slice(Box::new(subst_trait_params(x, params, args)), *l),
+        Array(x, n, l) => Array(Box::new(subst_trait_params(x, params, args)), n.clone(), *l),
+        Tuple(xs, l) => Tuple(
+            xs.iter()
+                .map(|x| subst_trait_params(x, params, args))
+                .collect(),
+            *l,
+        ),
+        Assoc(x, n, l) => Assoc(Box::new(subst_trait_params(x, params, args)), n.clone(), *l),
+        other => other.clone(),
+    }
+}
+
+/// The same, over a whole signature.
+fn subst_trait_params_fn(f: &ast::FnItem, params: &[String], args: &[ast::Ty]) -> ast::FnItem {
+    if params.is_empty() {
+        return f.clone();
+    }
+    let mut f = f.clone();
+    for (_, t) in &mut f.params {
+        *t = subst_trait_params(t, params, args);
+    }
+    if let Some(r) = &mut f.ret {
+        *r = subst_trait_params(r, params, args);
+    }
+    f
+}
+
+/// The candidate list, for a diagnostic that says what the choices were.
+fn describe_candidates(keys: &[String]) -> String {
+    let mut names: Vec<&str> = keys.iter().map(String::as_str).collect();
+    names.sort_unstable();
+    format!(
+        "{} {}",
+        if names.len() == 1 { "is" } else { "are" },
+        names.join(", ")
+    )
 }
 
 /// Structural equality of written types, ignoring where they were written.
@@ -2719,8 +2857,9 @@ struct Fn<'a> {
     name: String,
     /// Generic function definitions, un-instantiated.
     generic_fns: &'a HashMap<String, ast::FnItem>,
-    /// Every (type, trait) pair the file implements, for bounds (§2.2).
-    impls: &'a std::collections::HashSet<(String, String)>,
+    /// What the file's impls say: which (type, trait-with-arguments) pairs
+    /// exist, and which functions a parameterized trait's methods became.
+    impls: &'a Impls,
     /// Instantiations discovered here and not yet lowered.
     pending: &'a RefCell<Vec<Job>>,
     /// The type arguments this instantiation was made with, which is what
@@ -2817,7 +2956,7 @@ struct World<'a> {
     fn_bounds: &'a HashMap<String, (ast::FnKind, Vec<ast::Ty>, Option<ast::Ty>)>,
     sigs: &'a RefCell<HashMap<String, (Vec<Ty>, Ty)>>,
     generic_fns: &'a HashMap<String, ast::FnItem>,
-    impls: &'a std::collections::HashSet<(String, String)>,
+    impls: &'a Impls,
     pending: &'a RefCell<Vec<Job>>,
     globals: &'a HashMap<String, Global>,
     types: &'a Types,
@@ -4553,7 +4692,8 @@ impl Fn<'_> {
             // §2.2: an instantiation that fails a bound is rejected here, at
             // the call site, and not inside the body.
             for b in bounds {
-                self.check_bound(ty, b, name, pname, line)?;
+                let ty = ty.clone();
+                self.check_bound_in(&ty, b, &env, name, pname, line)?;
             }
             targs.push(ty.clone());
         }
@@ -4611,7 +4751,55 @@ impl Fn<'_> {
     }
 
     /// Check that a type argument satisfies a bound (Ch. 4 §2.2).
+    /// Whether `ty` satisfies one bound.
+    ///
+    /// A bound with arguments — `U: From<T>` — is a different requirement for
+    /// every argument, so the arguments are resolved in the caller's
+    /// environment and appended to the trait's name, which is exactly how the
+    /// impl recorded itself.
+    fn check_bound_in(
+        &mut self,
+        ty: &Ty,
+        bound: &ast::Bound,
+        env: &HashMap<String, Ty>,
+        callee: &str,
+        param: &str,
+        line: Line,
+    ) -> R<()> {
+        if bound.args.is_empty() {
+            return self.check_bound(ty, &bound.name, callee, param, line);
+        }
+        let args: Vec<Ty> = bound
+            .args
+            .iter()
+            .map(|a| resolve_ty_env(a, self.types, env))
+            .collect::<R<_>>()?;
+        let shown = format!(
+            "{}<{}>",
+            bound.name,
+            args.iter()
+                .map(Ty::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        self.check_bound_named(ty, &mangle(&bound.name, &args), &shown, callee, param, line)
+    }
+
     fn check_bound(&self, ty: &Ty, bound: &str, callee: &str, param: &str, line: Line) -> R<()> {
+        self.check_bound_named(ty, bound, bound, callee, param, line)
+    }
+
+    /// The same, with the requirement spelled for a reader rather than for
+    /// the lookup: `From<t27>` names what `From.t27` finds.
+    fn check_bound_named(
+        &self,
+        ty: &Ty,
+        bound: &str,
+        shown: &str,
+        callee: &str,
+        param: &str,
+        line: Line,
+    ) -> R<()> {
         // `Copy` is structural and automatic (Ch. 4 §5.1); `Sized` is a fact
         // about the type, not a claim about it (§2.5).
         // `Fn@…` is the bound an `impl Fn(…)` parameter was given: satisfied
@@ -4649,8 +4837,8 @@ impl Fn<'_> {
                         .borrow()
                         .get(&n)
                         .map(|(b, _)| b.clone());
-                    self.impls.contains(&(n, bound.to_string()))
-                        || base.is_some_and(|b| self.impls.contains(&(b, bound.to_string())))
+                    self.impls.pairs.contains(&(n, bound.to_string()))
+                        || base.is_some_and(|b| self.impls.pairs.contains(&(b, bound.to_string())))
                 }
                 None => false,
             },
@@ -4661,7 +4849,7 @@ impl Fn<'_> {
         err(
             line,
             format!(
-                "`{ty}` does not implement `{bound}`, which `{callee}` requires of \
+                "`{ty}` does not implement `{shown}`, which `{callee}` requires of \
                  `{param}` (Ch. 4 §2.2)"
             ),
         )
@@ -5056,6 +5244,14 @@ impl Fn<'_> {
         line: Line,
     ) -> R<String> {
         let head = path.segments[0].clone();
+        // A type parameter in scope stands for a concrete type here, exactly
+        // as it does in a written type: `U::from(x)` inside a generic body is
+        // the concrete `U`'s `from` (Ch. 4 §2.7).
+        if let Some(bound) = self.env.get(&head)
+            && let Some(name) = nominal_name(bound)
+        {
+            return Ok(name);
+        }
         // `Option::<t27>::None` — the arguments are written, so nothing has
         // to be inferred (Ch. 4 §2.3).
         if !path.targs.is_empty() {
@@ -5348,7 +5544,7 @@ impl Fn<'_> {
         else {
             return Ok(None);
         };
-        let Some(key) = bounds.iter().find_map(|b| b.strip_prefix("Fn@")) else {
+        let Some(key) = bounds.iter().find_map(|b| b.name.strip_prefix("Fn@")) else {
             return Ok(None);
         };
         let (_, ps, r) = self.fn_bounds[key].clone();
@@ -5631,7 +5827,11 @@ impl Fn<'_> {
             return err(line, format!("`{trait_name}` is not a trait in scope"));
         };
         let _ = &decl;
-        if !self.impls.contains(&(name.clone(), trait_name.to_string())) {
+        if !self
+            .impls
+            .pairs
+            .contains(&(name.clone(), trait_name.to_string()))
+        {
             return err(
                 line,
                 format!(
@@ -5707,6 +5907,76 @@ impl Fn<'_> {
     /// generic function keyed by the base type, which is instantiated here
     /// with the arguments the receiver's own instantiation was made with —
     /// recovered from the table, since a mangled name cannot be read back.
+    /// Which function a method of a *parameterized* trait means.
+    ///
+    /// One type may implement such a trait many times, so the name alone does
+    /// not say which — `t27::from` could be `From<t9>`'s or `From<bool>`'s.
+    /// The arguments say: each candidate's parameter types are compared
+    /// against what the call gives, and exactly one must fit.
+    ///
+    /// `None` means no parameterized trait provides this method, and the
+    /// ordinary `Type.method` lookup is the answer.
+    fn trait_method(
+        &mut self,
+        type_name: &str,
+        method: &str,
+        args: &[ast::Expr],
+        line: Line,
+    ) -> R<Option<String>> {
+        let Some(keys) = self
+            .impls
+            .by_method
+            .get(&(type_name.to_string(), method.to_string()))
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        if keys.len() == 1 {
+            return Ok(Some(keys[0].clone()));
+        }
+        // What the call actually passes, as far as it can be known without
+        // lowering it — which for a written value is its type.
+        let mut given = Vec::new();
+        for a in args {
+            given.push(self.peek_ty(a)?);
+        }
+        let mut fits: Vec<String> = Vec::new();
+        for key in &keys {
+            let Some((params, _)) = self.sigs.borrow().get(key).cloned() else {
+                continue;
+            };
+            if params.len() != given.len() {
+                continue;
+            }
+            if params
+                .iter()
+                .zip(&given)
+                .all(|(want, got)| got.as_ref().is_none_or(|g| g == want))
+            {
+                fits.push(key.clone());
+            }
+        }
+        match fits.len() {
+            1 => Ok(Some(fits[0].clone())),
+            0 => err(
+                line,
+                format!(
+                    "no implementation of `{method}` for `{type_name}` takes these \
+                     arguments; there {} (Ch. 4 §1.7)",
+                    describe_candidates(&keys)
+                ),
+            ),
+            _ => err(
+                line,
+                format!(
+                    "which `{type_name}::{method}` is meant is not decided by these \
+                     arguments; there {} (Ch. 4 §1.7)",
+                    describe_candidates(&fits)
+                ),
+            ),
+        }
+    }
+
     fn method_key(&mut self, type_name: &str, name: &str, line: Line) -> R<String> {
         let concrete = format!("{type_name}.{name}");
         if self.sigs.borrow().contains_key(&concrete) {
@@ -6156,6 +6426,13 @@ impl Fn<'_> {
             let key = format!("{head}.{}", path.segments[1]);
             if self.sigs.borrow().contains_key(&key) {
                 let args: Vec<ast::Expr> = fields.iter().map(|(_, e)| e.clone()).collect();
+                return self.call_key(&key, Vec::new(), &args, line);
+            }
+            // A method of a trait that takes arguments is not under
+            // `Type.method`: there may be several, and which one is meant is
+            // decided by the arguments given (Ch. 4 §1.7).
+            let args: Vec<ast::Expr> = fields.iter().map(|(_, e)| e.clone()).collect();
+            if let Some(key) = self.trait_method(&head, &path.segments[1], &args, line)? {
                 return self.call_key(&key, Vec::new(), &args, line);
             }
         }

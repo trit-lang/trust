@@ -114,6 +114,32 @@ impl Parser {
         })
     }
 
+    /// Close one level of angle brackets.
+    ///
+    /// `Option<Option<t27>>` ends in a token the lexer has every reason to
+    /// read as the shift operator, and only the parser knows it is two
+    /// brackets. Splitting it here — taking one `>` and leaving the other in
+    /// place — is what lets generic arguments nest at all.
+    fn close_angle(&mut self) -> bool {
+        if self.eat_op(">") {
+            return true;
+        }
+        if self.at_op(">>") {
+            self.toks[self.pos].0 = Tok::Op(">");
+            return true;
+        }
+        false
+    }
+
+    /// The same, as an expectation.
+    fn expect_angle(&mut self) -> R<()> {
+        if self.close_angle() {
+            Ok(())
+        } else {
+            self.err(format!("expected `>`, found {}", self.peek()))
+        }
+    }
+
     fn expect_op(&mut self, op: &str) -> R<()> {
         if self.eat_op(op) {
             Ok(())
@@ -318,7 +344,7 @@ impl Parser {
             return Ok(out);
         }
         self.bump();
-        if self.eat_op(">") {
+        if self.close_angle() {
             return Ok(out);
         }
         loop {
@@ -348,7 +374,7 @@ impl Parser {
                         if let Tok::Lifetime(_) = self.peek() {
                             self.bump();
                         } else {
-                            bounds.push(self.expect_ident()?);
+                            bounds.push(self.bound()?);
                         }
                         if !self.eat_op("+") {
                             break;
@@ -358,14 +384,23 @@ impl Parser {
                 out.push(GenericParam::Type { name, bounds });
             }
             if self.eat_op(",") {
-                if self.eat_op(">") {
+                if self.close_angle() {
                     return Ok(out);
                 }
                 continue;
             }
-            self.expect_op(">")?;
+            self.expect_angle()?;
             return Ok(out);
         }
+    }
+
+    /// One bound: a trait's name, and its type arguments when it takes any
+    /// (Ch. 4 §1.7). `From<t9>` is a different requirement from `From<t27>`,
+    /// which is the whole reason a trait may carry parameters.
+    fn bound(&mut self) -> R<Bound> {
+        let name = self.expect_ident()?;
+        let args = self.generic_args()?;
+        Ok(Bound { name, args })
     }
 
     /// `where T: Bound, U: Other` — the same bounds, written after the
@@ -392,7 +427,7 @@ impl Parser {
                     if let Tok::Lifetime(_) = self.peek() {
                         self.bump();
                     } else {
-                        bounds.push(self.expect_ident()?);
+                        bounds.push(self.bound()?);
                     }
                     if !self.eat_op("+") {
                         break;
@@ -449,16 +484,30 @@ impl Parser {
         Ok(tys)
     }
 
-    /// `trait Name: Super + Other { … }` (Ch. 4 §1.1).
+    /// `trait Name<T>: Super + Other { … }` (Ch. 4 §§1.1, 1.7).
     fn trait_item(&mut self) -> R<TraitItem> {
         let line = self.line();
         self.bump(); // trait
         let name = self.expect_ident()?;
-        if !self.generic_params()?.is_empty() {
-            return self.err(
-                "a trait with type parameters is Ch. 4 §1.7, specified but not implemented; \
-                 an associated type is the other half of that section",
-            );
+        // A trait's parameters are chosen by whoever implements it, once per
+        // implementation, which is what lets one type implement it many
+        // times (Ch. 4 §1.7).
+        let mut params = Vec::new();
+        for p in self.generic_params()? {
+            match p {
+                GenericParam::Type { name, bounds } if bounds.is_empty() => params.push(name),
+                GenericParam::Type { name, .. } => {
+                    return self.err(format!(
+                        "a bound on a trait's own parameter (`{name}`) is not implemented; \
+                         write it on the impl instead"
+                    ));
+                }
+                GenericParam::Const { name, .. } => {
+                    return self.err(format!(
+                        "`const {name}` as a trait parameter is not implemented (Ch. 4 §2.4)"
+                    ));
+                }
+            }
         }
         let mut supertraits = Vec::new();
         if self.eat_op(":") {
@@ -492,6 +541,7 @@ impl Parser {
         }
         Ok(TraitItem {
             name,
+            params,
             supertraits,
             methods,
             assoc: names,
@@ -507,14 +557,17 @@ impl Parser {
         let mut generics = self.generic_params()?;
         // `impl !Copy for T` — the one negative impl (Ch. 4 §5.1).
         let negative = self.eat_op("!");
+        // `impl Name<A> for Ty` and `impl Name<A>` both begin the same way,
+        // and only the `for` says which the name and arguments belonged to.
         let first = self.expect_ident()?;
-        let (trait_name, self_ty) = if self.eat_kw("for") {
-            (Some(first), self.expect_ident()?)
+        let first_args = self.generic_args()?;
+        let (trait_name, trait_args, self_ty, self_args) = if self.eat_kw("for") {
+            let self_ty = self.expect_ident()?;
+            let self_args = self.generic_args()?;
+            (Some(first), first_args, self_ty, self_args)
         } else {
-            (None, first)
+            (None, Vec::new(), first, first_args)
         };
-        // The type arguments of the self type: `impl<T> Pair<T, T>`.
-        let self_args = self.generic_args()?;
         self.where_clause(&mut generics)?;
         if generics.is_empty() != self_args.is_empty() {
             return self.err(
@@ -554,6 +607,7 @@ impl Parser {
         }
         Ok(ImplItem {
             generics,
+            trait_args,
             negative,
             trait_name,
             consts: given,
@@ -824,7 +878,7 @@ impl Parser {
             return Ok(args);
         }
         self.bump();
-        if self.eat_op(">") {
+        if self.close_angle() {
             return Ok(args);
         }
         loop {
@@ -835,12 +889,12 @@ impl Parser {
                 args.push(self.ty()?);
             }
             if self.eat_op(",") {
-                if self.eat_op(">") {
+                if self.close_angle() {
                     return Ok(args);
                 }
                 continue;
             }
-            self.expect_op(">")?;
+            self.expect_angle()?;
             return Ok(args);
         }
     }

@@ -1327,6 +1327,46 @@ now 36% of everything executed — `br3` 18.2%, `alui.cmp` 12.1%, `alu.cmp`
 6.1% — which is loop conditions and the two bounds checks every array index
 still pays. The index multiply is 7.9%. Both are analysis, not encoding.
 
+**G0.14a — a trait may take type parameters.** Half of Ch. 4's one
+substantial hole, and the half that stands alone.
+
+A trait's *associated* type is chosen by whoever implements it, once. A
+trait's *type parameters* are chosen by the user, and a type may implement
+such a trait many times over — that is the whole distinction §1.7 draws, and
+`trait From<T>` is why the language has both.
+
+**What stood in the way was the method's name.** An impl block becomes
+ordinary functions named `Type.method`, which is one name per method per
+type. Three `From` impls for `t27` all wanted to be `t27.from`. The arguments
+are now part of the name — `t27.From.t9.from`, `t27.From.bool.from`,
+`t27.From.Celsius.from` — using the same mangling instantiated generics use,
+and everything else follows:
+
+- a bound is a trait *with its arguments* (`ast::Bound`), so `U: From<T>` and
+  `U: From<t27>` are different requirements and `Impls::pairs` records the
+  mangled form;
+- an impl's signature is compared against the declaration with the trait's
+  parameters already substituted, since `fn from(x: T)` is `fn from(x: t9)`
+  once `T` is chosen;
+- which of several `from`s a call means is decided by the arguments given,
+  and a call that fits none or more than one says what the candidates were.
+
+A type parameter also resolves as a path head now, so `U::from(x)` inside a
+generic body means the concrete `U`'s.
+
+**A pre-existing bug this turned up.** `Option<Option<t27>>` had never
+parsed: the closing `>>` is a token the lexer has every reason to read as the
+shift operator, and only the parser knows it is two brackets. Splitting it —
+taking one `>` and leaving the other — is what lets any generic argument
+contain another, and it was needed here because `U: From<T>>` ends the same
+way.
+
+**What is still missing** is the blanket impl `impl<T, U: From<T>> Into<U> for
+T`, which is why `x.into()` does not exist yet and one writes `U::from(x)`.
+Since §5.6 closes `Into` to hand implementation, the only blanket impl will be
+the language's own — so no general overlap search is needed, and §1.8's
+coherence rule stays a comparison of names.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

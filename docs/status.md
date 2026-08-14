@@ -52,7 +52,7 @@ spec/                              4 866 lines of specification, 10 documents
     └── assembly-0.1.md      513   the assembly language
 
 core/      2 082 lines  crate trit-core — Bt, Tint, flavors, faults, literals
-compiler/ 25 154 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
+compiler/ 25 615 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
 vm/        4 566 lines  crate tritium  — machine, assembler, image format, profiler
 docs/
 ├── spec-gaps.md               50 entries: every place the spec was silent or wrong
@@ -126,7 +126,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6) |
 
-**350 tests, zero clippy warnings, 51 commits.** `scripts/stats.sh`.
+**354 tests, zero clippy warnings, 52 commits.** `scripts/stats.sh`.
 
 ---
 
@@ -160,20 +160,23 @@ inference and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
 | returning a closure | needs `impl Trait` in return position or `Box<dyn Fn>`; Ch. 4 §4.5 |
 | `FnOnce` | every capture is by reference; needs a move analysis of the closure body |
 | `IntoIterator`, so `for x in xs` over an array | the blanket impl and array iterators are the library's |
-| generic traits, `From`/`Into` | see below — the one substantial hole in Ch. 4 |
+| `From`/`Into`, so `x.into()` | a trait may take type parameters now (G0.14a), so `From` works and `t27::from(x)` resolves by argument; the blanket impl that gives `Into` for free is the other half |
 | modules, `use`, `pub`, multiple files | reserved in Ch. 0 §1.3 |
 | `unsafe`, raw pointers, `?` | reserved |
 | bounds checks a loop condition already implies | every array index still costs two comparisons and two branches; branches and comparisons are 36% of everything HPL executes (G8.13). Removing them needs range analysis, which nothing here does |
 
-**Generic traits** are the one substantial hole. Two things stand in the way
-and both must arrive together: a type may implement `trait From<T>` many
-times, so a method key must carry the trait's arguments and resolution must
-pick by argument type (today a method is keyed `Type.method` and there is
-one); and a blanket impl like `impl<T, U: From<T>> Into<U> for T` is
-quantified over types satisfying a bound, so deciding whether it applies is a
-search rather than a lookup (every other impl here is found by name). Half of
-it would leave the hole exactly where Ch. 4 §5.6 puts its example. Recorded in
-G0.14.
+**Generic traits** were the one substantial hole, and the first half is
+built (G0.14a): a trait may take type parameters, one type may implement it
+many times, and the arguments are part of the method's name — `t27.From.t9.from`
+against `t27.From.bool.from`. A bound carries the trait's arguments too, so
+`U: From<T>` is checked with them.
+
+What is left is the **blanket impl** `impl<T, U: From<T>> Into<U> for T`,
+which is quantified over the types satisfying a bound: deciding whether it
+applies is a search rather than a lookup, where every other impl here is found
+by name. It is what gives `x.into()`. Because Ch. 4 §5.6 closes `Into` to hand
+implementation, the only blanket impl will be the language's own, so §1.8's
+coherence rule can stay a comparison of names rather than an overlap search.
 
 ---
 

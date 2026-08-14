@@ -60,7 +60,7 @@ pub enum GenericParam {
         /// Its name.
         name: String,
         /// The traits it is required to implement (§2.2).
-        bounds: Vec<String>,
+        bounds: Vec<Bound>,
     },
     /// `const N: taddr`.
     Const {
@@ -85,6 +85,10 @@ impl GenericParam {
 pub struct TraitItem {
     /// Its name.
     pub name: String,
+    /// Its type parameters — `trait From<T>` (§1.7). A trait with these may
+    /// be implemented by one type many times, once per argument; a trait
+    /// without them, once.
+    pub params: Vec<String>,
     /// Its supertraits (§1.6).
     pub supertraits: Vec<String>,
     /// Its methods, required (no body) or provided (with one, §1.5).
@@ -97,6 +101,28 @@ pub struct TraitItem {
     pub line: Line,
 }
 
+/// One requirement on a type parameter: `T: From<U>` is `From` with `[U]`.
+///
+/// A bound with arguments is what makes a trait implementable many times by
+/// one type, so the arguments are part of the requirement and not decoration.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Bound {
+    /// The trait's name.
+    pub name: String,
+    /// Its type arguments, empty for a trait that takes none.
+    pub args: Vec<Ty>,
+}
+
+impl Bound {
+    /// A bound on a trait that takes no arguments.
+    pub fn plain(name: impl Into<String>) -> Bound {
+        Bound {
+            name: name.into(),
+            args: Vec::new(),
+        }
+    }
+}
+
 /// An impl block (Ch. 4 §1.2).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ImplItem {
@@ -107,6 +133,8 @@ pub struct ImplItem {
     pub negative: bool,
     /// The trait being implemented, or `None` for an inherent impl.
     pub trait_name: Option<String>,
+    /// The trait's type arguments — `impl From<t9> for t27` (§1.7).
+    pub trait_args: Vec<Ty>,
     /// The type being implemented.
     pub self_ty: String,
     /// Its type arguments: `impl<T> Pair<T, T>` (Ch. 4 §2.1).

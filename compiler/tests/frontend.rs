@@ -336,8 +336,16 @@ fn the_deferred_features_say_what_they_are_waiting_for() {
     tir_of("fn id<T>(x: T) -> T { x } fn main() -> t27 { id(1) }");
     let e = error("struct P { x: t27 } impl<T> P<T> { fn f(&self) -> t27 { 0 } }");
     assert!(e.contains("is not a generic type"), "{e}");
-    let e = error("trait Into<T> { fn into(self) -> T; }");
-    assert!(e.contains("§1.7"), "{e}");
+    // A trait may take type parameters now, and a type may implement it once
+    // per argument. What is still deferred is a bound on the trait's own
+    // parameter, and a blanket impl.
+    tir_of(
+        "trait From<T> { fn from(x: T) -> Self; } \
+         impl From<t9> for t27 { fn from(x: t9) -> t27 { x as t27 } } \
+         fn main() -> t27 { 0 }",
+    );
+    let e = error("trait Weird<T: Copy> { fn f(x: T) -> Self; }");
+    assert!(e.contains("bound on a trait's own parameter"), "{e}");
 }
 
 #[test]
@@ -2324,6 +2332,100 @@ fn the_checked_family_returns_an_option() {
              fn main() -> t27 { \
                  let m: t9 = 9841; \
                  get(m.checked_add(1), 7) as t27 \
+             }")
+        .0,
+        7
+    );
+}
+
+#[test]
+fn a_trait_with_type_parameters_is_implemented_once_per_argument() {
+    // A trait's own parameters are chosen by whoever implements it, so one
+    // type may implement it many times. That is the whole distinction from an
+    // associated type, which the implementor chooses once (Ch. 4 §1.7).
+    let src = "trait From<T> { fn from(x: T) -> Self; } \
+               struct Celsius { deg: t27 } \
+               impl From<t9> for t27 { fn from(x: t9) -> t27 { x as t27 } } \
+               impl From<bool> for t27 { fn from(b: bool) -> t27 { if b { 1 } else { 0 } } } \
+               impl From<Celsius> for t27 { \
+                   fn from(c: Celsius) -> t27 { c.deg * 9 / 5 + 32 } \
+               } \
+               fn main() -> t27 { \
+                   let n: t9 = 7; \
+                   t27::from(n) + t27::from(true) + t27::from(Celsius { deg: 100 }) \
+               }";
+    assert_eq!(run(src).0, 7 + 1 + 212);
+
+    // Which one is meant comes from the argument, and each is a separate
+    // function: three `from`s for one type would otherwise be one name.
+    let m = tir_of(src);
+    let text = tir::print_module(&m);
+    for want in [
+        "@t27.From.t9.from",
+        "@t27.From.bool.from",
+        "@t27.From.Celsius.from",
+    ] {
+        assert!(text.contains(want), "{want} is not in\n{text}");
+    }
+}
+
+#[test]
+fn a_bound_carries_the_traits_arguments() {
+    // `U: From<T>` is a different requirement for every `T`, so the arguments
+    // are part of it. A generic function may then call through the bound.
+    let src = "trait From<T> { fn from(x: T) -> Self; } \
+               struct Celsius { deg: t27 } \
+               impl From<Celsius> for t27 { fn from(c: Celsius) -> t27 { c.deg * 9 / 5 + 32 } } \
+               fn convert<T, U: From<T>>(x: T) -> U { U::from(x) } \
+               fn main() -> t27 { let f: t27 = convert(Celsius { deg: 100 }); f }";
+    assert_eq!(run(src).0, 212);
+
+    // And the requirement is checked with its arguments: `t27: From<t27>` is
+    // not `t27: From<Celsius>`.
+    let e = error(
+        "trait From<T> { fn from(x: T) -> Self; } \
+         struct Celsius { deg: t27 } \
+         impl From<Celsius> for t27 { fn from(c: Celsius) -> t27 { c.deg } } \
+         fn convert<T, U: From<T>>(x: T) -> U { U::from(x) } \
+         fn main() -> t27 { let f: t27 = convert(7); f }",
+    );
+    assert!(e.contains("does not implement `From<t27>`"), "{e}");
+}
+
+#[test]
+fn an_impl_must_give_the_trait_the_arguments_it_takes() {
+    let e = error(
+        "trait From<T> { fn from(x: T) -> Self; } \
+         impl From for t27 { fn from(x: t9) -> t27 { 0 } } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("takes 1 type argument(s), 0 given"), "{e}");
+
+    // And the impl's signature is checked against the declaration with the
+    // choice already made: `fn from(x: T)` with `T = t9` is `fn from(x: t9)`.
+    let e = error(
+        "trait From<T> { fn from(x: T) -> Self; } \
+         impl From<t9> for t27 { fn from(x: bool) -> t27 { 0 } } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("does not match the signature"), "{e}");
+}
+
+#[test]
+fn generic_arguments_nest() {
+    // `Option<Option<t27>>` ends in a token the lexer reads as the shift
+    // operator, and only the parser knows it is two brackets. Before the
+    // split, no generic argument could contain another.
+    assert_eq!(
+        run("fn main() -> t27 { \
+                 let x: Option<Option<t27>> = Option::Some(Option::Some(7)); \
+                 match x { \
+                     Option::Some(inner) => match inner { \
+                         Option::Some(v) => v, \
+                         Option::None => 1, \
+                     }, \
+                     Option::None => 2, \
+                 } \
              }")
         .0,
         7
