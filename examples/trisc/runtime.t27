@@ -11,6 +11,7 @@
 
 .equ IO_IN,  -1
 .equ IO_OUT, -2
+.equ CYCLES, -9
 
 ; Instructions are word-aligned (TRISC-27 §3.1), and this file is appended
 ; after whatever the compiler emitted — which may end in data.
@@ -25,4 +26,14 @@ f.putchar:
 ; getchar() -> t9 — read one code unit, or −1 waiting, or −2 end of input.
 f.getchar:
     ld.tryte a0, IO_IN(zero)
+    ret
+
+; elapsed() -> t27 — instructions retired since reset (TRISC-27 §2.3).
+;
+; The difference of two readings is the cost of the code between them, with
+; nothing to subtract for the measurement: the load has not retired when its
+; value is produced. Reading it through a call adds the call's own
+; instructions to both readings, so they cancel.
+f.elapsed:
+    ld.word a0, CYCLES(zero)
     ret

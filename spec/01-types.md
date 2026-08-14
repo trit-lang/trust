@@ -176,6 +176,26 @@ and likewise for `sub`, `mul`, `shl`. The families for `neg` and `abs` do
 **not** exist — those operations are total (P1) and providing a
 `checked_neg` would be an API lie.
 
+**`a.mulh(b)` is the high half of the product**, and it is a method rather
+than an operator because there is no operator anyone would recognize. Where
+`a * b` gives the low `N` trits of the product, `a.mulh(b)` gives the high
+`N`, so that
+
+> `a.mulh(b) · 3ᴺ + a.wrapping_mul(b)` reconstructs the exact product.
+
+It is total: the high half of a product of two `tN` values always fits in
+`tN`, which is a property of the symmetric range and not an accident. It has
+no flavors for the same reason.
+
+This is the operation fixed-point arithmetic is built on. Multiplying two
+values scaled by 3ᵏ gives a product scaled by 3²ᵏ, and recovering the
+original scale means keeping trits the low half has already dropped —
+`mulh` is where they are. Without it a `t27` fixed-point format is limited
+to roughly half the word, and with it the full word is usable.
+
+TRISC-27 §4.1 provides `mulh` as an instruction and TIR §3.1 as an operation;
+this is the same one, named the same way, at the surface.
+
 Trit-wise operations on integers are provided as methods, not operators, in
 draft 0.1: `a.tmin(b)`, `a.tmax(b)`, `a.tmul(b)`, `a.tneg()` (the last
 being identical to unary `-`; provided for symmetry when writing

@@ -153,6 +153,9 @@ inference and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
 | Missing | Why |
 |---|---|
 | strings and characters | AM §5 defers text encoding to the library chapter; write `[t9; N]` of code units |
+| `checked_*` | it returns `Option<T>`, whose layout this milestone needs before types are instantiated (G8.2) |
+| ranges, so `for i in 0..10` | Ch. 0 §4 reserves range expressions |
+| a type parameterized by a `const` | `const N` works as an array *length* (G8.2); `struct Grid<const N: taddr>` is Ch. 4 §2.4 and unimplemented |
 | `Box`, any heap allocation | no allocator; Ch. 3 §6 |
 | returning a closure | needs `impl Trait` in return position or `Box<dyn Fn>`; Ch. 4 §4.5 |
 | `FnOnce` | every capture is by reference; needs a move analysis of the closure body |
@@ -160,7 +163,7 @@ inference and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
 | generic traits, `From`/`Into` | see below — the one substantial hole in Ch. 4 |
 | modules, `use`, `pub`, multiple files | reserved in Ch. 0 §1.3 |
 | `unsafe`, raw pointers, `?` | reserved |
-| a register allocator | generated code is correct and slow |
+| values kept in registers across a block boundary or a call | the allocator is block-local (G8.1); the callee-saved `s0`…`s6` could hold them at the cost of saving them |
 
 **Generic traits** are the one substantial hole. Two things stand in the way
 and both must arrive together: a type may implement `trait From<T>` many

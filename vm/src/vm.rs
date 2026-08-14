@@ -18,6 +18,8 @@ pub mod device {
     pub const IO_OUT: i128 = -2;
     /// Reads the address-space size A.
     pub const MEM_SIZE: i128 = -6;
+    /// Instructions retired since reset, as a word (ISA §2.3).
+    pub const CYCLES: i128 = -9;
 }
 
 /// Why the machine stopped.
@@ -116,6 +118,8 @@ pub struct Vm {
     mem: Memory,
     /// The character ports.
     pub io: Io,
+    /// Instructions retired since reset, which `CYCLES` reports (ISA §2.3).
+    steps: u64,
 }
 
 impl Vm {
@@ -126,6 +130,7 @@ impl Vm {
             pc: 0,
             mem: Memory::new(mem_size),
             io: Io::default(),
+            steps: 0,
         }
     }
 
@@ -178,6 +183,12 @@ impl Vm {
         Stop::OutOfSteps
     }
 
+    /// Instructions retired since reset — what `CYCLES` reads, and what the
+    /// CLI reports when a program stops.
+    pub fn steps(&self) -> u64 {
+        self.steps
+    }
+
     /// Execute one instruction.
     pub fn step(&mut self) -> Result<(), Stop> {
         let pc = self.pc;
@@ -194,7 +205,13 @@ impl Vm {
         // The default is to fall through to the next word; control transfers
         // overwrite this.
         self.pc = pc + WORD_TRYTES;
-        self.exec(inst, pc)
+        let outcome = self.exec(inst, pc);
+        // Retired, not merely started: an instruction that faults did not
+        // complete and is not counted (ISA §2.3).
+        if outcome.is_ok() {
+            self.steps = self.steps.wrapping_add(1);
+        }
+        outcome
     }
 
     fn exec(&mut self, inst: Inst, pc: i128) -> Result<(), Stop> {
@@ -426,6 +443,9 @@ impl Vm {
                 None => -1,
             }),
             (device::MEM_SIZE, Width::Word) => Ok(self.mem.size()),
+            // ISA §2.3: the load has not retired yet, so two readings differ
+            // by exactly what ran between them.
+            (device::CYCLES, Width::Word) => Ok(word::wrap_to(self.steps as i128, 27)),
             _ => Err(fault(
                 FaultCode::Trap,
                 format!("no readable {} device at {addr}", width.name()),

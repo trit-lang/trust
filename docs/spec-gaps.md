@@ -863,6 +863,64 @@ saving them in the prologue; there is no peephole pass, so the moves a
 `widen` becomes are still emitted; and there is no TIR canonicalizer, so
 expansion's `add.wrap %x, const 0` reaches the machine as written.
 
+**G8.2 — what a benchmark needed, and what it found.** Four things reported
+missing by a program written against this compiler. Three are done; the
+fourth is smaller than its old excuse suggested.
+
+**A cycle counter, which was not merely unimplemented but unspecified.** A
+search of all ten documents for *clock*, *timer*, *counter* and *elapsed*
+found nothing, so there was no gap number to hang it on. TRISC-27 §2.3 now
+defines `CYCLES` at −9: a word, load-only, reading instructions retired since
+reset.
+
+It counts **instructions, not time**, and that is a decision rather than a
+shortcut. A cycle count would commit an implementation to a timing model, and
+the reference implementation is an interpreter whose timings mean nothing; an
+instruction count is what an implementation can report honestly and a program
+can compare against itself. The load has not retired when its value is
+produced, so the difference of two readings is exactly the code between them
+with nothing to subtract for the measurement.
+
+It is a device address rather than an instruction because a `rdcycle` would
+spend one of the seventeen reserved opcodes on something §2.2 already knows
+how to express, and would need its own rule for an implementation that cannot
+count — where a device address already has one.
+
+`examples/trisc/runtime.t27` gains `f.elapsed`, so a Trust program declares
+`fn elapsed() -> t27;` and subtracts two readings. `tritium run` now reports
+the count when a program halts, which is how you measure a change to the
+compiler rather than to the program.
+
+**`mulh` could not be reached from the language.** TRISC-27 §4.1 had the
+instruction, TIR §3.1 gained the operation with G6.6, and Ch. 1 §4's method
+list had never been told. It is now `a.mulh(b)`, specified where the rest of
+the arithmetic methods are, with the property that matters stated:
+`a.mulh(b)·3ᴺ + a.wrapping_mul(b)` is the exact product. This is what
+fixed-point arithmetic is built on — without it a `t27` format is confined to
+roughly half a word, because the trits it needs are exactly the ones the low
+half drops.
+
+**A `const` could not be an array's length.** Ch. 0 §3.2 says a length is a
+constant expression and a `const` is one; the implementation evaluated only
+literal arithmetic, so `const N: taddr = 8; let a: [t27; N]` was rejected.
+Constants are now evaluated to a fixpoint *before* types are built — a type
+may need a number and types come first — so one constant may also be written
+in terms of another. Note the limit this does **not** lift: `struct Grid<const
+N: taddr>` is Ch. 4 §2.4's const generic and is still unimplemented.
+
+**`checked_*` is now only unimplemented.** Its recorded reason — that it
+returns `Option<T>` and generics were Ch. 4 — expired when Ch. 4 was built,
+and a user-written `fn f() -> Option<t27>` compiles today. What blocks it is
+narrower: the built-in methods are lowered where the layout of an
+instantiated generic enum is not yet available. Worth fixing, and small.
+
+*The report that produced this list also caught two documentation lines that
+had stopped being true* — `docs/status.md` still listing the register
+allocator as missing, and the note above. Both are corrected. That is the
+sweep rule of Naming §6 failing in the direction it always fails: a change
+lands, and the document that described the old state is not the one being
+edited.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The
@@ -1229,8 +1287,9 @@ Specified well enough to build, simply not built yet:
 - **Nothing of Ch. 2 remains unimplemented.** Structs, tuples, enums with
   payloads and explicit discriminants, both `repr`s, field access, variant
   patterns and niche optimization all run end to end. `checked_*` is the one
-  method of Ch. 1 §4 still missing, because it returns `Option<T>` and
-  generics are Ch. 4.
+  method of Ch. 1 §4 still missing; the reason first written here — that it
+  returns `Option<T>` and generics are Ch. 4 — expired when Ch. 4 was
+  implemented, and G8.2 records what actually blocks it now.
 - **Indirect calls** (TIR §3.7) — rejected with a diagnostic that says they
   are reserved, which is as far as "parsed but reserved" can go before the
   function-pointer chapter exists.

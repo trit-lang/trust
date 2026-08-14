@@ -103,7 +103,10 @@ fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
             // the low tryte, clamped, and say so when it does not fit.
             let code = u8::try_from(status.rem_euclid(256)).unwrap_or(0);
             if status != 0 {
-                eprintln!("tritium: halted with status {status}");
+                eprintln!(
+                    "tritium: halted with status {status} after {} instruction(s)",
+                    vm.steps()
+                );
             }
             Ok(ExitCode::from(code))
         }

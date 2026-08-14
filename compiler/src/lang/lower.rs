@@ -303,6 +303,9 @@ pub struct Types {
     /// What each impl chose for each associated type (Ch. 4 §1.7). A cell
     /// because an impl on an instantiated generic chooses at instantiation.
     assoc: RefCell<HashMap<(String, String), Ty>>,
+    /// Integer constants, for the places a *type* needs a number: an array's
+    /// length is a constant expression (Ch. 0 §3.2), and a `const` is one.
+    consts: HashMap<String, i128>,
     /// Trait declarations, so that `dyn Trait` can be checked for object
     /// safety where it is written rather than where it is coerced to.
     traits: HashMap<String, ast::TraitItem>,
@@ -1196,6 +1199,7 @@ fn mentions_self(t: &ast::Ty) -> bool {
 /// same name on the same type would shadow a language rule, so these are
 /// matched first and impl blocks never see them.
 const BUILTIN_METHODS: &[&str] = &[
+    "mulh",
     "tmin",
     "tmax",
     "tmul",
@@ -2208,6 +2212,7 @@ fn build_types(file: &ast::File) -> R<Types> {
         generic_structs: HashMap::new(),
         generic_enums: HashMap::new(),
         assoc: RefCell::new(HashMap::new()),
+        consts: HashMap::new(),
         closures: RefCell::new(HashMap::new()),
         traits: file
             .items
@@ -2219,6 +2224,35 @@ fn build_types(file: &ast::File) -> R<Types> {
             .collect(),
         instantiations: RefCell::new(HashMap::new()),
     };
+
+    // Integer constants first of all: a type may need one for an array's
+    // length, and types are built before anything else. Evaluated to a
+    // fixpoint so that one constant may be written in terms of another.
+    {
+        let pending: Vec<(&String, &ast::Expr)> = file
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                ast::Item::Const(c) => Some((&c.name, &c.value)),
+                _ => None,
+            })
+            .collect();
+        for _ in 0..pending.len().max(1) {
+            let mut progress = false;
+            for (name, value) in &pending {
+                if types.consts.contains_key(*name) {
+                    continue;
+                }
+                if let Ok(v) = const_int_in(value, &types.consts) {
+                    types.consts.insert((*name).clone(), v);
+                    progress = true;
+                }
+            }
+            if !progress {
+                break;
+            }
+        }
+    }
 
     // A generic definition is not a type until it is applied (Ch. 4 §2.7), so
     // it is set aside here and instantiated on demand.
@@ -2536,7 +2570,7 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
         },
         ast::Ty::Array(elem, count, line) => {
             let elem = resolve_ty_env(elem, types, env)?;
-            let n = const_int(count)?;
+            let n = const_int_in(count, &types.consts)?;
             if n < 0 {
                 // Ch. 2 §3: the type-level face of the signed-taddr decision.
                 return err(*line, format!("array length {n} is negative"));
@@ -2551,7 +2585,24 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
 /// same evaluation the assembler performs, and for the reason Ch. 0 §3.2
 /// gives: a constant that means one thing to the compiler and another to the
 /// assembler is a bug with nowhere to live.
-fn const_int(e: &ast::Expr) -> R<i128> {
+/// Evaluate a constant expression with the named constants in scope, so that
+/// `const N: taddr = 8;` may be an array's length (Ch. 0 §3.2 says a length
+/// is a constant expression, and a `const` is one).
+fn const_int_in(e: &ast::Expr, named: &HashMap<String, i128>) -> R<i128> {
+    if let ast::Expr::Path(name, line) = e {
+        return match named.get(name) {
+            Some(v) => Ok(*v),
+            None => err(
+                *line,
+                format!("`{name}` is not a constant this expression can use"),
+            ),
+        };
+    }
+    const_int_raw(e, named)
+}
+
+fn const_int_raw(e: &ast::Expr, named: &HashMap<String, i128>) -> R<i128> {
+    let const_int = |e: &ast::Expr| const_int_in(e, named);
     let big = |v: &Bt, line: Line| {
         v.to_i128()
             .ok_or(())
@@ -2606,6 +2657,7 @@ fn const_int(e: &ast::Expr) -> R<i128> {
 }
 
 fn const_item(c: &ast::ConstItem, module: &mut Module, types: &Types) -> R<Global> {
+    let const_int = |e: &ast::Expr| const_int_in(e, &types.consts);
     let ty = resolve_ty(&c.ty, types)?;
     match (&ty, &c.value) {
         (Ty::Array(elem, n), ast::Expr::Array(items, line)) => {
@@ -3731,7 +3783,7 @@ impl Fn<'_> {
                     Some(Ty::Array(t, _)) => Some((**t).clone()),
                     _ => None,
                 };
-                let n = const_int(count)?;
+                let n = const_int_in(count, &self.types.consts)?;
                 if n < 0 {
                     return err(*line, format!("array length {n} is negative"));
                 }
@@ -4782,6 +4834,27 @@ impl Fn<'_> {
                 Ok((v, Ty::Trit))
             }
 
+            // Ch. 1 §4: the high half of the product, so that
+            // `a.mulh(b)·3^N + a.wrapping_mul(b)` is the exact product. Total,
+            // hence flavorless: the high half always fits.
+            "mulh" => {
+                if !ty.is_arithmetic() {
+                    return err(line, format!("`mulh` does not apply to {ty}"));
+                }
+                let b = one_arg(self, &ty)?;
+                let r = self.emit(
+                    "h",
+                    ty.tir(),
+                    InstKind::Plain {
+                        op: PlainOp::MulH,
+                        ty: ty.tir(),
+                        a: v,
+                        b,
+                    },
+                );
+                Ok((r, ty))
+            }
+
             "wrapping_add" | "wrapping_sub" | "wrapping_mul" => {
                 if !ty.is_arithmetic() {
                     return err(line, format!("`{name}` does not apply to {ty}"));
@@ -4904,8 +4977,9 @@ impl Fn<'_> {
             "checked_add" | "checked_sub" | "checked_mul" => err(
                 line,
                 format!(
-                    "`{name}` returns `Option<{ty}>`, and generics are Chapter 4, \
-                     which is not written yet"
+                    "`{name}` returns `Option<{ty}>`, which needs the layout of a \
+                     generic enum at a place this milestone builds before types \
+                     are instantiated"
                 ),
             ),
 

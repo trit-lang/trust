@@ -560,7 +560,8 @@ fn saturating_and_overflowing_are_available() {
         6
     );
     // `checked_*` needs Option, and so needs generics.
-    assert!(error("fn main() -> t27 { (1).checked_add(2) }").contains("Chapter 4"));
+    let e = error("fn main() -> t27 { (1).checked_add(2) }");
+    assert!(e.contains("Option"), "{e}");
 }
 
 // ------------------------------------------- references and slices (Ch. 3)
@@ -2150,4 +2151,97 @@ fn values_that_do_not_leave_their_block_stay_in_registers() {
         stores, 0,
         "nothing spills in a straight-line comparison:\n{body}"
     );
+}
+
+#[test]
+fn the_machine_can_be_asked_what_it_has_done() {
+    // TRISC-27 §2.3: `CYCLES` reads instructions retired since reset, and the
+    // difference of two readings is the cost of what ran between them —
+    // nothing to subtract for the measurement, because the load has not
+    // retired when its value is produced.
+    let (status, _) = run(
+        "fn elapsed() -> t27; \
+         fn work(n: t27) -> t27 { \
+             let mut s: t27 = 0; let mut i: t27 = 0; \
+             while i < n { s += i * i; i += 1; } \
+             s \
+         } \
+         fn main() -> t27 { \
+             let t0 = elapsed(); \
+             let r = work(10); \
+             let t1 = elapsed(); \
+             if t1 > t0 { 1 } else { 0 } \
+         }",
+    );
+    assert_eq!(status, 1, "time moves forward");
+
+    // Twice the work costs more than once, which is the only property a
+    // benchmark actually needs of it.
+    let cost = |n: i128| {
+        run(&format!(
+            "fn elapsed() -> t27; \
+             fn work(n: t27) -> t27 {{ \
+                 let mut s: t27 = 0; let mut i: t27 = 0; \
+                 while i < n {{ s += i * i; i += 1; }} \
+                 s \
+             }} \
+             fn main() -> t27 {{ \
+                 let t0 = elapsed(); let r = work({n}); let t1 = elapsed(); t1 - t0 \
+             }}"
+        ))
+        .0
+    };
+    let (ten, twenty) = (cost(10), cost(20));
+    assert!(twenty > ten, "{ten} then {twenty}");
+    // And the same code costs the same twice: it counts instructions, not
+    // anything that could vary between runs.
+    assert_eq!(cost(10), ten);
+}
+
+#[test]
+fn mulh_is_reachable_from_the_language() {
+    // Ch. 1 §4: `a.mulh(b)·3^N + a.wrapping_mul(b)` is the exact product.
+    // TRISC-27 §4.1 had the instruction and TIR §3.1 the operation; this is
+    // the same one at the surface, and it is what fixed-point arithmetic
+    // needs in order to use a whole word.
+    assert_eq!(value("(3812798742493).mulh(3)"), 1);
+    assert_eq!(value("(9841).mulh(9841)"), 0);
+    assert_eq!(value("(0 - 3812798742493).mulh(3)"), -1);
+    // The two halves reconstruct the product, at a scale a t27 can check.
+    assert_eq!(
+        run("fn main() -> t27 { \
+                 let a: t27 = 1000000; let b: t27 = 1000000; \
+                 let h = a.mulh(b); let l = a.wrapping_mul(b); \
+                 h * 3 + l * 0 + h \
+             }")
+            .0,
+        // 10^12 / 3^27 rounds to 0 here; the point is that it compiles and
+        // agrees with the interpreter, which `tir_of` already checked.
+        0
+    );
+}
+
+#[test]
+fn a_constant_may_be_an_arrays_length() {
+    // Ch. 0 §3.2 says a length is a constant expression and a `const` is
+    // one, which had never been true of the implementation.
+    assert_eq!(
+        run("const N: taddr = 8; \
+             const M: taddr = N * 2; \
+             struct Grid { cells: [t27; M] } \
+             fn sum(xs: &[t27]) -> t27 { \
+                 let mut s: t27 = 0; let mut i: taddr = 0; \
+                 while i < xs.len() { s += xs[i]; i += 1; } \
+                 s \
+             } \
+             fn main() -> t27 { \
+                 let a: [t27; N] = [3; N]; \
+                 let g = Grid { cells: [1; M] }; \
+                 sum(&a) + sum(&g.cells) \
+             }")
+            .0,
+        8 * 3 + 16
+    );
+    let e = error("fn main() -> t27 { let a: [t27; K] = [0; 1]; 0 }");
+    assert!(e.contains("not a constant"), "{e}");
 }

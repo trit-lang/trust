@@ -123,6 +123,7 @@ own machine:
 | `IO_OUT` | −2 | tryte | store | writes one UTF-8 code unit; the value must be 0 … 255 |
 | — | −3 | — | — | reserved |
 | `MEM_SIZE` | −6 | word | load | the address-space size A |
+| `CYCLES` | −9 | word | load | instructions retired since reset (§2.3) |
 
 Every other negative address is reserved and faults. An access of the wrong
 width for a device address faults, as does a load from `IO_OUT` or a store to
@@ -138,6 +139,33 @@ The addresses are small negative numbers on purpose: they fit in a 14-trit
 immediate many times over, so every device access is one instruction with
 `r0` as the base register — `ld.tryte a0, IO_IN(zero)`. A high fixed address
 would have needed `lui` first.
+
+### 2.3 `CYCLES`
+
+`CYCLES` reads the number of instructions the machine has retired since reset,
+as a word. The load itself has not retired when its value is produced, so two
+consecutive reads differ by exactly the number of instructions between them —
+which is what makes a difference of two readings the cost of the code between
+them, with nothing to subtract for the measurement.
+
+It is a **count of instructions, not of time.** This machine has no clock and
+this document does not give it one: a cycle count would commit an
+implementation to a timing model, and the reference implementation is an
+interpreter whose timings mean nothing. An instruction count is the thing an
+implementation can report honestly and a program can compare against itself.
+
+It wraps at MAX like any other word, and a program that runs longer than
+(3²⁷−1)/2 instructions gets a wrapped answer rather than a fault: there is no
+sensible value to trap with, and the alternative — a wider counter — would
+need a second device address for its top half.
+
+> **Why a device and not an instruction (informative).** A `rdcycle`
+> instruction would spend one of the seventeen reserved opcodes on something
+> the device region already knows how to express, and would need a rule for
+> what it does when an implementation cannot count. As a device address it
+> follows §2.2's existing rules: an implementation that cannot count faults
+> the load, which is the same answer it gives for every other address it does
+> not implement.
 
 `IO_IN` yields:
 
