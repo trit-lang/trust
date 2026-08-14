@@ -524,7 +524,11 @@ fn @f(%a: t27) -> t27 {
 }
 
 #[test]
-fn wide_division_reports_that_it_is_unwritten() {
+fn wide_division_becomes_a_call_to_a_helper() {
+    // This test used to assert the refusal. Division is the one operation
+    // expansion cannot rewrite — it is an algorithm rather than a pattern
+    // over the parts — so it becomes a function, the way `__divdi3` does, and
+    // the helper is emitted into the module and legalized like anything else.
     let src = r#"
 tir 0.1 target "tritium"
 fn @f(%a: t27) -> t27 {
@@ -535,9 +539,16 @@ fn @f(%a: t27) -> t27 {
     ret %r
 }
 "#;
-    let errs = legalize_module(&parse(src), &tritium()).unwrap_err();
+    let m = legalize_module(&parse(src), &tritium()).expect("emits a helper");
     assert!(
-        errs.iter().any(|e| e.message.contains("not implemented")),
-        "{errs:?}"
+        m.funcs.iter().any(|f| f.sig.name == "lz.div.t54"),
+        "the helper is in the module"
     );
+    let printed = tir::print_module(&m);
+    assert!(printed.contains("call @lz.div.t54"), "{printed}");
+    // And it is legalized: no t54 *type* survives. The helper's name still
+    // says t54, because that is what it divides.
+    for shape in [" t54 ", " t54,", "-> t54", ": t54"] {
+        assert!(!printed.contains(shape), "`{shape}` in\n{printed}");
+    }
 }

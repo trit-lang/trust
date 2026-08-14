@@ -118,7 +118,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | `trit-core` | complete: arbitrary-precision balanced ternary, width-typed `tN`, three overflow flavors, the AM's five fault codes, three-radix literals |
 | TIR data structures, text format, verifier | complete, round-trips |
 | TIR reference interpreter | complete, with provenance-tracking pointers and a function-address space |
-| TIR legalization | promotion complete; expansion complete for `add`, `sub`, `mul`, `shl`/`shr` by a constant, `neg`, `cmp`, `tmin`/`tmax`/`tmul`, `select3` and **wide loads and stores** — a real Trust program legalizes for a nine-trit machine and computes the same answers (G6.11). `mul` expands (G6.6 closed — TIR §3.1 gained `mulh`), and so do `shl` and `shr` by a **constant** amount (G6.12); `div`, `rem` and a computed shift amount are unwritten. A wide value crosses a function boundary as its parts, with a wide result through a hidden pointer (G6.5 closed) |
+| TIR legalization | promotion complete; **expansion complete**: `add`, `sub`, `mul`, `div`, `rem`, `shl`/`shr` by a constant, `neg`, `cmp`, `tmin`/`tmax`/`tmul`, `select3`, wide loads and stores, and wide values across a function boundary — a real Trust program legalizes for a nine-trit machine and computes the same answers (G6.11). `mul` expands (G6.6 closed — TIR §3.1 gained `mulh`), and so do `shl` and `shr` by a **constant** amount (G6.12); `div` and `rem` become a call to a helper written in TIR (G6.13). A wide value crosses a function boundary as its parts, with a wide result through a hidden pointer (G6.5). What is left: a shift by a *computed* amount |
 | Layout engine (Ch. 2) | complete: sizes, alignments, offsets, both `repr`s, discriminants, niche optimization |
 | Trust frontend | Ch. 0–3 complete; Ch. 4 complete except generic traits |
 | Backend (TIR → TRISC-27) | works; **no register allocator** — every value lives in a stack slot |
@@ -369,9 +369,9 @@ blind.
 **B. Backend quality.** A register allocator is the biggest single win —
 every value currently lives in a stack slot, so the generated code is
 correct and embarrassing. Then a peephole pass, a TIR canonicalizer, and
-expansion for `div`/`rem`/shifts. `mul`, `shl` and `shr` now expand; `div` and `rem` are what is left, and they
-are algorithms rather than rewrites — likely a helper in legal-width TIR,
-which must first get past G6.5.
+expansion for `div`/`rem`/shifts. Expansion is complete except for a shift by a computed amount. What is left
+of the backend is a register allocator, a peephole pass and a TIR
+canonicalizer.
 
 **C. Generic traits.** §6 above says what it needs. It closes Ch. 4 and
 unblocks `From`/`Into`.

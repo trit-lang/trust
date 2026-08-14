@@ -184,9 +184,11 @@ fn expansion_preserves_meaning() {
 
 #[test]
 fn the_expansion_frontier_is_exactly_this() {
-    // What expansion still refuses, with the reason each gives. When one of
+    // What expansion still refuses, with the reason it gives. When one of
     // these starts working this test fails, which is the point: the frontier
-    // moves in the document at the same time as in the code.
+    // moves in the document at the same time as in the code. It has moved
+    // four times — `mul` (G6.6), the shifts (G6.12), the function boundary
+    // (G6.5) and division (G6.13) — and this is what is left.
     let target = t9_target();
     let wide = |op: &str| {
         format!(
@@ -196,21 +198,17 @@ fn the_expansion_frontier_is_exactly_this() {
         )
     };
 
-    // Shifts expand when the amount is a constant. By a computed amount they
-    // do not: that would need 3ᵏ from k, which is itself a shift.
+    // A shift by a computed amount: it would need 3ᵏ from k, which is itself
+    // a shift.
     for op in ["%r = shl.wrap t27 %a, %b", "%r = shr t27 %a, %b"] {
         let msg = refusal(&wide(op), &target);
         assert!(msg.contains("not a constant"), "{msg}");
     }
-    // Unwritten: multi-part division.
-    for op in ["%r = div t27 %a, %b", "%r = rem t27 %a, %b"] {
-        let msg = refusal(&wide(op), &target);
-        assert!(msg.contains("not implemented"), "{msg}");
-    }
-    // G6.5 is closed: a wide value crosses a function boundary as its parts,
-    // with a wide result travelling through a hidden pointer, and both ends
-    // are reshaped together. Asserted in `boundary_crossing_preserves_meaning`
-    // below rather than as a refusal here.
+
+    // `mulh` at a wide width, which is only ever a step inside the multiply
+    // expansion and has nowhere to put a result twice as wide again.
+    let msg = refusal(&wide("%r = mulh t27 %a, %b"), &target);
+    assert!(msg.contains("wider than any value TIR can name"), "{msg}");
 }
 
 #[test]
@@ -418,5 +416,72 @@ fn @f(%p: t9, %q: t9) -> t9 {
             interpret(&legalized, "f", args),
             "at {args:?}"
         );
+    }
+}
+
+#[test]
+fn wide_division_and_remainder_agree_with_the_reference() {
+    // Division is the one operation expansion cannot rewrite, so it becomes a
+    // call to a helper (G6.13). The helper is written in TIR source and
+    // legalized like anything else, and its digit set runs −2…2 because one
+    // trit is provably not enough — which is why every even divisor is in
+    // this table.
+    let target = t9_target();
+    const A: [i128; 14] = [
+        0, 1, -1, 7, -7, 8, -8, 100, -100, 9841, -9841, 1_000_000,
+        3_812_798_742_493, -3_812_798_742_493,
+    ];
+    const B: [i128; 12] = [1, -1, 2, -2, 3, -3, 4, -4, 7, 10, -10, 9841];
+    for op in ["div", "rem"] {
+        for a in A {
+            for b in B {
+                let src = format!(
+                    "tir 0.1 target \"tritium\"\n\nfn @f(%z: t9) -> t9 {{\n^entry:\n\
+                     \x20   %r = {op} t27 const t27 {a}, const t27 {b}\n\
+                     \x20   %n = trunc t27 %r -> t9\n    ret %n\n}}\n"
+                );
+                let m = tir::parse_module(&src).expect("parses");
+                let legalized = tir::legalize_module(&m, &target)
+                    .unwrap_or_else(|e| panic!("{op} {a}/{b}: {e:?}"));
+                assert!(tir::verify(&legalized).is_empty());
+                assert_eq!(
+                    interpret(&m, "f", &[0]),
+                    interpret(&legalized, "f", &[0]),
+                    "{op} of {a} and {b}"
+                );
+            }
+        }
+    }
+    // And division by zero is still the fault it was.
+    let src = "tir 0.1 target \"tritium\"\n\nfn @f(%z: t9) -> t9 {\n^entry:\n\
+               \x20   %r = div t27 const t27 7, const t27 0\n\
+               \x20   %n = trunc t27 %r -> t9\n    ret %n\n}\n";
+    let m = tir::parse_module(src).expect("parses");
+    let legalized = tir::legalize_module(&m, &target).expect("legalizes");
+    assert_eq!(
+        interpret(&legalized, "f", &[0]),
+        Err(trit_core::FaultCode::DivZero)
+    );
+}
+
+#[test]
+fn the_division_helper_is_correct_at_a_legal_width_too() {
+    // The algorithm, tested where a failure can only be the division and not
+    // the expansion: `trit_core::Bt::divrem` is the oracle, and it is the
+    // routine this one was transcribed from.
+    for rem in [false, true] {
+        let src = trustc::tir::legalize::divide::helper_source(27, "tritium", rem);
+        let m = tir::parse_module(&src).expect("the helper parses");
+        assert!(tir::verify(&m).is_empty(), "{:?}", tir::verify(&m));
+        let name = trustc::tir::legalize::divide::helper_name(27, rem);
+        for a in [0i128, 1, -1, 8, -8, 100, 9841, -9841, 3_812_798_742_493] {
+            for b in [1i128, -1, 2, -2, 4, -4, 7, 10, -10, 9841] {
+                let (q, r) = trit_core::Bt::from_i128(a)
+                    .divrem(&trit_core::Bt::from_i128(b))
+                    .expect("b is nonzero");
+                let want = if rem { r } else { q }.to_i128().expect("fits");
+                assert_eq!(interpret(&m, &name, &[a, b]), Ok(want), "{a} / {b}");
+            }
+        }
     }
 }

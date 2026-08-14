@@ -336,6 +336,39 @@ pub(super) fn mul(e: &mut Emit, inst: &Inst, flavor: Flavor, wide: Wide, a: &Ope
     }
 }
 
+/// A wide `div` or `rem`: a call to the helper of `divide.rs`.
+///
+/// Division is the one operation expansion cannot rewrite — it is an
+/// algorithm, not a pattern over the parts — so it becomes a function, the
+/// way `__divdi3` does. The call is built already reshaped (G6.5): the result
+/// comes back through a slot this frame supplies, and each wide argument goes
+/// as its parts.
+pub(super) fn divide(e: &mut Emit, inst: &Inst, wide: Wide, a: &Operand, b: &Operand, rem: bool) {
+    let Some(stride) = part_stride(e, wide) else {
+        return;
+    };
+    let slot = e.emit(
+        "dq",
+        Type::Ptr,
+        InstKind::Slot {
+            trytes: wide.k * stride,
+        },
+    );
+    let mut args = vec![slot.clone()];
+    args.extend(parts_of(e, a, wide));
+    args.extend(parts_of(e, b, wide));
+    e.push(
+        Vec::new(),
+        InstKind::Call {
+            callee: Callee::Direct(super::divide::helper_name(wide.logical(), rem)),
+            args,
+            ret: None,
+        },
+    );
+    let parts = load_parts(e, wide, &slot);
+    bind(e, inst, parts);
+}
+
 /// Right shift by a constant, part by part — and **without any carry**.
 ///
 /// Write the amount as `k = q·L + r` over parts of width `L`. Dropping `q`

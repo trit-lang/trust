@@ -779,6 +779,55 @@ multi-part division is an algorithm rather than a rewrite. The likely shape is
 a helper function in legal-width TIR, which will first have to get past G6.5,
 since a wide value cannot cross a function boundary.
 
+**G6.13 — `div` and `rem` expand, as a call to a helper written in TIR.**
+Expansion is over: every operation now crosses the wide boundary.
+
+Division is the one operation expansion cannot *rewrite*. Every other one is a
+fixed pattern over the parts; division is an **algorithm**. So legalization
+emits it as an ordinary function and turns a wide `div` into a call — which is
+what a C compiler does with `__divdi3`, and for the same reason.
+
+**The helper is written as TIR source text**, not assembled from `Inst`
+values. It is a page of long division either way, and one of the two can be
+read. It is parsed, its signature joins the module's before anything is
+legalized, and its body is legalized like any other — including its own wide
+arithmetic, which now expands.
+
+**Why the digits run −2…2.** Schoolbook long division takes, at each step, the
+digit leaving the smallest remainder, and in balanced ternary the obvious
+digit set is one trit. **It is not enough.** Carrying `|r| ≤ |b|/2` through a
+step gives `|3r + t| ≤ 3|b|/2 + 1`, and when `|b|` is even that bound is
+reachable and no single trit pulls it back under `|b|/2` — after which the
+error compounds down the rest of the quotient. Widening the digit set fixes it
+and costs nothing structural, because the quotient is accumulated as a *value*
+(`q ← 3q + d`) rather than as a string of trits: a digit outside −1…1 simply
+carries into what is already there.
+
+This is not a new discovery. `trit_core::Bt::divrem` was written the naive way
+first, and the same bug was found and fixed there; the helper is that routine
+transcribed. It is worth recording that the trap was fallen into twice, four
+months apart, in two languages.
+
+**The tie.** `|r| = |b|/2` exactly — again only for even `|b|` — is what AM
+§3.2 sends *away from zero*. The loop leaves the remainder there rather than
+stepping past it, so a final block steps one further out when the leftover
+points the way the quotient already does. The quotient's sign is
+`tmul(sign(a), sign(b))`: one trit-wise multiply of two comparison results,
+where a binary machine needs a branch or an xor of sign bits.
+
+One helper serves `div` and `rem` — the same loop, differing only in the last
+block, since the remainder's fixup subtracts the step the quotient's adds.
+
+**Checked three ways.** The algorithm alone, at a legal width, against
+`Bt::divrem` as the oracle (180 cases). The expansion, at t27 for a nine-trit
+target, against the unlegalized module (336 cases). And division by zero,
+which is still `F_DIVZERO` after the rewrite.
+
+**What is left of expansion:** a shift by a *computed* amount, which needs
+`3ᵏ` from `k` and is therefore a shift; and `mulh` at a wide width, which is
+only ever a step inside the multiply expansion and whose result would be twice
+as wide again. Both are refused by name.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

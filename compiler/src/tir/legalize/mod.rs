@@ -43,7 +43,8 @@
 //! way down, which reads the sign rather than a residue and so is exact for
 //! any value.
 
-pub(crate) mod expand;
+pub mod divide;
+mod expand;
 
 use super::ir::*;
 use super::target::TargetDesc;
@@ -94,9 +95,49 @@ pub fn legalize_module(m: &Module, target: &TargetDesc) -> Result<Module, Vec<Le
         }
     }
 
+    // Division helpers first of all: their signatures have to be in the map
+    // before any call to them is legalized, and their bodies are legalized
+    // like anything else.
+    let mut helper_widths: Vec<u32> = Vec::new();
+    for f in &m.funcs {
+        for b in &f.blocks {
+            for inst in &b.insts {
+                if let InstKind::Plain {
+                    op: PlainOp::Div | PlainOp::Rem,
+                    ty: Type::Int(w),
+                    ..
+                } = &inst.kind
+                    && matches!(widths.classify(*w), Class::Wide(_))
+                    && !helper_widths.contains(w)
+                {
+                    helper_widths.push(*w);
+                }
+            }
+        }
+    }
+    let mut helpers: Vec<Function> = Vec::new();
+    for w in &helper_widths {
+        for rem in [false, true] {
+            let src = divide::helper_source(*w, &target.name, rem);
+            match crate::tir::parse_module(&src) {
+                Ok(hm) => helpers.extend(hm.funcs),
+                Err(e) => errs.push(LegalizeError {
+                    function: Some(divide::helper_name(*w, rem)),
+                    message: format!("the division helper does not parse: {e}"),
+                }),
+            }
+        }
+    }
+
     // Signatures first: a call has to agree with the callee's legalized shape.
     let mut sigs: HashMap<String, (Signature, SigShape)> = HashMap::new();
-    for s in m.funcs.iter().map(|f| &f.sig).chain(m.decls.iter()) {
+    for s in m
+        .funcs
+        .iter()
+        .map(|f| &f.sig)
+        .chain(helpers.iter().map(|f| &f.sig))
+        .chain(m.decls.iter())
+    {
         match widths.reshape(s) {
             Ok(l) => {
                 sigs.insert(s.name.clone(), l);
@@ -108,7 +149,7 @@ pub fn legalize_module(m: &Module, target: &TargetDesc) -> Result<Module, Vec<Le
         }
     }
 
-    for f in &m.funcs {
+    for f in m.funcs.iter().chain(helpers.iter()) {
         match legalize_function(f, &widths, &sigs) {
             Ok(func) => out.funcs.push(func),
             Err(msgs) => errs.extend(msgs.into_iter().map(|message| LegalizeError {
@@ -1345,6 +1386,15 @@ fn expand_inst(e: &mut Emit, inst: &Inst, wide: Wide) -> bool {
             true
         }
         InstKind::Plain {
+            op: op @ (PlainOp::Div | PlainOp::Rem),
+            a,
+            b,
+            ..
+        } => {
+            expand::divide(e, inst, wide, a, b, *op == PlainOp::Rem);
+            true
+        }
+        InstKind::Plain {
             op: PlainOp::Shr,
             a,
             b,
@@ -1363,17 +1413,6 @@ fn expand_inst(e: &mut Emit, inst: &Inst, wide: Wide) -> bool {
                 return true;
             };
             expand::shr(e, inst, wide, a, k as u32);
-            true
-        }
-        // Everything else at a wide width needs a technique this pass does
-        // not have; say which, rather than emit something plausible.
-        InstKind::Plain { op, .. } => {
-            e.errs.push(format!(
-                "`{}` at t{} needs expansion, which is not implemented \
-                 (multi-part division and the right shift are still to be written)",
-                op.name(),
-                wide.logical()
-            ));
             true
         }
         _ => false,
