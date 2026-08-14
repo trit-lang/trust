@@ -298,6 +298,9 @@ pub struct Types {
     /// The anonymous types closures were given, and what each one calls
     /// (Ch. 4 §4.2).
     closures: RefCell<HashMap<String, ClosureInfo>>,
+    /// What each impl chose for each associated type (Ch. 4 §1.7). A cell
+    /// because an impl on an instantiated generic chooses at instantiation.
+    assoc: RefCell<HashMap<(String, String), Ty>>,
     /// Trait declarations, so that `dyn Trait` can be checked for object
     /// safety where it is written rather than where it is coerced to.
     traits: HashMap<String, ast::TraitItem>,
@@ -1301,6 +1304,7 @@ fn subst_ty(t: &mut ast::Ty, self_ty: &SelfTy) {
         ast::Ty::Tuple(ts, _) | ast::Ty::App(_, ts, _) => {
             ts.iter_mut().for_each(|t| subst_ty(t, self_ty))
         }
+        ast::Ty::Assoc(base, _, _) => subst_ty(base, self_ty),
         ast::Ty::ImplFn(_, ps, r, _) => {
             ps.iter_mut().for_each(|t| subst_ty(t, self_ty));
             if let Some(r) = r {
@@ -1509,7 +1513,7 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
                     });
                     continue;
                 };
-                match check_trait_impl(decl, imp) {
+                match check_trait_impl(decl, imp, &self_repr, types) {
                     Ok(defaults) => methods.extend(defaults),
                     Err(e) => {
                         errs.push(e);
@@ -1603,7 +1607,12 @@ fn check_drop_impl(imp: &ast::ImplItem) -> R<()> {
 
 /// Check an impl against its trait, and return the provided methods it did
 /// not override (Ch. 4 §§1.2, 1.5).
-fn check_trait_impl(decl: &ast::TraitItem, imp: &ast::ImplItem) -> R<Vec<ast::FnItem>> {
+fn check_trait_impl(
+    decl: &ast::TraitItem,
+    imp: &ast::ImplItem,
+    self_repr: &SelfTy,
+    types: &Types,
+) -> R<Vec<ast::FnItem>> {
     for m in &imp.methods {
         let Some(want) = decl.methods.iter().find(|d| d.name == m.name) else {
             return err(
@@ -1614,33 +1623,75 @@ fn check_trait_impl(decl: &ast::TraitItem, imp: &ast::ImplItem) -> R<Vec<ast::Fn
                 ),
             );
         };
-        let same_ret = match (&want.ret, &m.ret) {
-            (None, None) => true,
-            (Some(a), Some(b)) => same_ast_ty(a, b),
-            _ => false,
-        };
-        if want.params.len() != m.params.len() || !same_ret {
-            return err(
+        // Compared after resolution, not as written: the trait says
+        // `Option<Self::Item>` and the impl says `Option<t27>`, and only the
+        // resolved types can tell that those are the same (Ch. 4 §1.7).
+        let want = subst_self(want, self_repr);
+        let mismatch = || {
+            err::<()>(
                 m.line,
                 format!(
                     "`{}` does not match the signature `{}` declares",
                     m.name, decl.name
                 ),
-            );
+            )
+        };
+        // A generic impl's parameters stand for nothing yet, so its
+        // signature is compared as written; a concrete one is compared after
+        // resolution, which is the only way `Option<Self::Item>` and
+        // `Option<t27>` can be seen to agree.
+        let concrete = imp.generics.is_empty();
+        let resolve = |t: &ast::Ty| resolve_ty(t, types);
+        let same_ret = match (&want.ret, &m.ret) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                let (a, b) = (subst_self_ty(a, self_repr), subst_self_ty(b, self_repr));
+                if concrete {
+                    resolve(&a)? == resolve(&b)?
+                } else {
+                    same_ast_ty(&a, &b)
+                }
+            }
+            _ => false,
+        };
+        if want.params.len() != m.params.len() || !same_ret {
+            mismatch()?;
         }
         for ((_, a), (_, b)) in want.params.iter().zip(&m.params) {
-            if !same_ast_ty(a, b) {
-                return err(
-                    m.line,
-                    format!(
-                        "`{}` does not match the signature `{}` declares",
-                        m.name, decl.name
-                    ),
-                );
+            // `self` is the one parameter whose written form differs by
+            // design: the trait writes `Self` and the impl its own type.
+            let (a, b) = (subst_self_ty(a, self_repr), subst_self_ty(b, self_repr));
+            let same = if concrete {
+                resolve(&a)? == resolve(&b)?
+            } else {
+                same_ast_ty(&a, &b)
+            };
+            if !same {
+                mismatch()?;
             }
         }
         if m.body.is_none() {
             return err(m.line, format!("`{}` needs a body here", m.name));
+        }
+    }
+    for a in &decl.assoc {
+        if !imp.assoc.iter().any(|(n, _)| n == a) {
+            return err(
+                imp.line,
+                format!(
+                    "`impl {} for {}` is missing `type {a}`, which the trait requires \
+                     (Ch. 4 §1.7)",
+                    decl.name, imp.self_ty
+                ),
+            );
+        }
+    }
+    for (n, _) in &imp.assoc {
+        if !decl.assoc.contains(n) {
+            return err(
+                imp.line,
+                format!("`{}` declares no associated type `{n}`", decl.name),
+            );
         }
     }
     let mut defaults = Vec::new();
@@ -1662,6 +1713,13 @@ fn check_trait_impl(decl: &ast::TraitItem, imp: &ast::ImplItem) -> R<Vec<ast::Fn
         }
     }
     Ok(defaults)
+}
+
+/// `subst_self` for a single type.
+fn subst_self_ty(t: &ast::Ty, self_ty: &SelfTy) -> ast::Ty {
+    let mut t = t.clone();
+    subst_ty(&mut t, self_ty);
+    t
 }
 
 /// Structural equality of written types, ignoring where they were written.
@@ -2098,6 +2156,7 @@ fn build_types(file: &ast::File) -> R<Types> {
         enums: RefCell::new(HashMap::new()),
         generic_structs: HashMap::new(),
         generic_enums: HashMap::new(),
+        assoc: RefCell::new(HashMap::new()),
         closures: RefCell::new(HashMap::new()),
         traits: file
             .items
@@ -2253,6 +2312,26 @@ fn build_types(file: &ast::File) -> R<Types> {
         }
     }
 
+    // Associated types (Ch. 4 §1.7). After the nominal types, since one may
+    // be chosen as another's.
+    for item in &file.items {
+        let ast::Item::Impl(imp) = item else { continue };
+        if !imp.generics.is_empty() && !imp.assoc.is_empty() {
+            return err(
+                imp.line,
+                "an associated type in a generic impl is not implemented: what it \
+                 chooses would depend on the instantiation",
+            );
+        }
+        for (name, t) in &imp.assoc {
+            let ty = resolve_ty(t, &types)?;
+            types
+                .assoc
+                .borrow_mut()
+                .insert((imp.self_ty.clone(), name.clone()), ty);
+        }
+    }
+
     // Ask the layout engine about every nominal type now, so that an
     // ill-formed one — an infinite type, a duplicate discriminant — is
     // reported here rather than at its first use.
@@ -2294,6 +2373,20 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
             *l,
             "`Self` names the implementing type, and there is none here",
         ),
+        // `T::Item` — the type this impl chose (Ch. 4 §1.7).
+        ast::Ty::Assoc(base, name, line) => {
+            let base = resolve_ty_env(base, types, env)?;
+            let Some(owner) = nominal_name(&base) else {
+                return err(*line, format!("{base} has no associated types"));
+            };
+            match types.assoc.borrow().get(&(owner.clone(), name.clone())) {
+                Some(t) => Ok(t.clone()),
+                None => err(
+                    *line,
+                    format!("`{owner}` chooses no type for `{name}` (Ch. 4 §1.7)"),
+                ),
+            }
+        }
         // `impl Fn(…)` is an anonymous type parameter, desugared to a named
         // one before lowering, so one surviving here was written somewhere
         // that has no parameter list to add it to.

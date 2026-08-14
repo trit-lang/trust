@@ -351,9 +351,45 @@ Two limits:
 to let a closure outlive its captures' scope, and a closure that cannot be
 returned never does.
 
-Not implemented, and rejected by name: `for` loops, associated types and
-constants, generic traits, `::<>`, and `impl !Copy`. Those are what is left of
-the chapter.
+**G0.13 — associated types, `for` loops, and `Option`/`Result` (Ch. 4 §§1.7,
+5.7, 5.8).**
+
+An associated type is declared `type Item;` in a trait and chosen
+`type Item = t27;` in an impl, and `Self::Item` resolves through the choice.
+Checking an impl against its trait therefore had to move from comparing types
+*as written* to comparing them *after resolution*: the trait says
+`Option<Self::Item>` and the impl says `Option<t27>`, and only resolution can
+see that those agree. A generic impl is still compared as written, because its
+parameters stand for nothing yet.
+
+`for x in e { … }` is expanded in the **parser**, into exactly §5.7's
+desugaring and nothing else, so no later pass learns it existed. The iterator
+binding is named with a dot in it, which no Trust identifier may contain, so
+it cannot shadow or be shadowed. `break` and `continue` therefore work in a
+`for` because they work in the `loop` it becomes.
+
+`Option` and `Result` are prepended to every file as source:
+
+```
+enum Option<T> { None, Some(T) }
+enum Result<T, E> { Ok(T), Err(E) }
+```
+
+§5.8 says they are ordinary enums laid out by Ch. 2's rules with no special
+case, and prepending their source is the most direct way to keep that honest —
+`Option<&t27>` is one word because niche optimization applies to a type the
+compiler was never told about, not because anyone arranged it.
+
+Two limits:
+
+- **No `IntoIterator`.** `for x in e` requires `e` itself to implement
+  `Iterator`. The blanket impl and the array/slice iterators are the library's,
+  and §5.7 already says the adaptors are.
+- **No associated type in a generic impl.** What it chose would depend on the
+  instantiation, which the current table (keyed by type name) cannot express.
+
+Not implemented, and rejected by name: generic traits, `::<>`, associated
+constants, and `impl !Copy`. Those are what is left of the chapter.
 
 Two limits worth naming:
 

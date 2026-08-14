@@ -287,7 +287,7 @@ fn the_deferred_features_say_what_they_are_waiting_for() {
         error("trait Shape { fn a(&self) -> t27; } fn main() -> t27 { let x: dyn Shape = 0; 0 }")
             .contains("has no size")
     );
-    assert!(error("fn main() -> t27 { for x in y { } 0 }").contains("§5.7"));
+    assert!(error("fn main() -> t27 { for x in y { } 0 }").contains("`y` is not in scope"));
     // References are Chapter 3; traits and generics are Chapter 4; all now
     // work. What is left of Ch. 4 says which section it is waiting for.
     tir_of("fn f(x: &t27) -> t27 { *x }");
@@ -1490,4 +1490,107 @@ fn a_closure_cannot_be_returned_and_says_why() {
     // A closure's signature must be the one the bound asks for.
     let e = error("fn go(f: impl Fn(t27) -> t27) -> t27 { 0 } fn main() -> t27 { go(1) }");
     assert!(e.contains("is not a closure"), "{e}");
+}
+
+// ------------------------------ Chapter 4: associated types, Iterator, for
+
+#[test]
+fn an_associated_type_is_chosen_by_the_implementation() {
+    // Ch. 4 §1.7: the trait declares it, the impl chooses it, and
+    // `Option<Self::Item>` and `Option<t27>` are the same signature.
+    let src = "trait Iterator { \
+                   type Item; \
+                   fn next(&mut self) -> Option<Self::Item>; \
+               } \
+               struct Counter { n: t27, limit: t27 } \
+               impl Iterator for Counter { \
+                   type Item = t27; \
+                   fn next(&mut self) -> Option<t27> { \
+                       if self.n < self.limit { self.n += 1; Option::Some(self.n) } \
+                       else { Option::None } \
+                   } \
+               } ";
+    assert_eq!(
+        run(&format!(
+            "{src} fn main() -> t27 {{ \
+                 let mut sum: t27 = 0; \
+                 for v in (Counter {{ n: 0, limit: 5 }}) {{ sum += v; }} \
+                 sum \
+             }}"
+        ))
+        .0,
+        15
+    );
+    // An impl must choose every associated type the trait declares.
+    let e = error(&format!(
+        "trait T {{ type Item; }} struct S {{ x: t27 }} impl T for S {{ }} \
+         fn main() -> t27 {{ 0 }}"
+    ));
+    assert!(e.contains("missing `type Item`"), "{e}");
+    // And may not invent one the trait did not declare.
+    let e = error(
+        "trait T { fn f(&self) -> t27; } struct S { x: t27 } \
+         impl T for S { type Item = t27; fn f(&self) -> t27 { 0 } } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("declares no associated type"), "{e}");
+}
+
+#[test]
+fn a_for_loop_is_the_desugaring_and_nothing_more() {
+    // Ch. 4 §5.7's desugaring uses only Ch. 0 constructs, so `for` adds no
+    // control flow the language did not have — `break` and `continue` work
+    // in one as in any loop.
+    let src = "trait Iterator { type Item; fn next(&mut self) -> Option<Self::Item>; } \
+               struct Upto { n: t27, limit: t27 } \
+               impl Iterator for Upto { \
+                   type Item = t27; \
+                   fn next(&mut self) -> Option<t27> { \
+                       if self.n < self.limit { self.n += 1; Option::Some(self.n) } \
+                       else { Option::None } \
+                   } \
+               } ";
+    assert_eq!(
+        run(&format!(
+            "{src} fn main() -> t27 {{ \
+                 let mut sum: t27 = 0; \
+                 for v in (Upto {{ n: 0, limit: 10 }}) {{ \
+                     if v == 3 {{ continue; }} \
+                     if v == 6 {{ break; }} \
+                     sum += v; \
+                 }} \
+                 sum \
+             }}"
+        ))
+        .0,
+        1 + 2 + 4 + 5
+    );
+}
+
+#[test]
+fn option_and_result_are_the_languages_own() {
+    // Ch. 4 §5.8: ordinary enums, laid out by Ch. 2's rules with no special
+    // case — which is why every niche guarantee holds for them.
+    assert_eq!(
+        run("fn get(o: Option<t27>) -> t27 { match o { Option::Some(v) => v, Option::None => 5, } } \
+             fn main() -> t27 { get(Option::Some(7)) + get(Option::None) }")
+            .0,
+        12
+    );
+    let m = tir_of(
+        "fn main() -> t27 { \
+             let a: Option<&t27> = Option::None; \
+             let b: Option<trit> = Option::None; \
+             0 \
+         }",
+    );
+    let printed = tir::print_module(&m);
+    assert!(printed.contains("%a.slot.4 = slot tryte[3]"), "{printed}");
+    // `Result` too, and it is not special either.
+    assert_eq!(
+        run("fn f(n: t27) -> Result<t27, t9> { if n > 0 { Result::Ok(n) } else { Result::Err(1) } } \
+             fn main() -> t27 { match f(7) { Result::Ok(v) => v, Result::Err(e) => e as t27, } }")
+            .0,
+        7
+    );
 }

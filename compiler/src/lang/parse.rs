@@ -12,6 +12,7 @@ type R<T> = Result<T, SyntaxError>;
 /// Parse a source file.
 pub fn parse(src: &str) -> R<File> {
     let mut p = Parser {
+        counter: 0,
         toks: lex(src)?,
         pos: 0,
         no_struct: false,
@@ -29,7 +30,13 @@ struct Parser {
     /// Set while parsing a condition, where a struct literal's `{` would be
     /// read as the block that follows (§2.8).
     no_struct: bool,
+    /// Names the parser has to invent, for §5.7's desugaring.
+    counter: u32,
 }
+
+/// What a `trait` or `impl` body contains: methods, and associated types
+/// either declared (`type Item;`) or chosen (`type Item = t27;`).
+type MethodBlock = (Vec<FnItem>, Vec<(String, Option<Ty>)>);
 
 /// §2.1's table, loosest level first, indexed by level so that the
 /// non-associative comparison levels can sit at their own index without
@@ -458,11 +465,22 @@ impl Parser {
                 }
             }
         }
-        let methods = self.method_block("trait")?;
+        let (methods, assoc) = self.method_block("trait")?;
+        let mut names = Vec::new();
+        for (n, v) in assoc {
+            if v.is_some() {
+                return self.err(format!(
+                    "`type {n} = …` chooses a type, which is an impl's business; a trait \
+                     declares `type {n};` (Ch. 4 §1.7)"
+                ));
+            }
+            names.push(n);
+        }
         Ok(TraitItem {
             name,
             supertraits,
             methods,
+            assoc: names,
             line,
         })
     }
@@ -494,10 +512,23 @@ impl Parser {
                  `impl<T> Name<T>` (Ch. 4 §2.1)",
             );
         }
-        let methods = self.method_block("impl")?;
+        let (methods, assoc) = self.method_block("impl")?;
+        let mut chosen = Vec::new();
+        for (n, v) in assoc {
+            match v {
+                Some(t) => chosen.push((n, t)),
+                None => {
+                    return self.err(format!(
+                        "`type {n};` declares an associated type, which is a trait's \
+                         business; an impl writes `type {n} = …;` (Ch. 4 §1.7)"
+                    ));
+                }
+            }
+        }
         Ok(ImplItem {
             generics,
             trait_name,
+            assoc: chosen,
             self_args,
             self_ty,
             methods,
@@ -505,24 +536,49 @@ impl Parser {
         })
     }
 
-    /// The `{ fn … fn … }` body shared by `trait` and `impl`.
-    fn method_block(&mut self, what: &str) -> R<Vec<FnItem>> {
+    /// The `{ type … fn … }` body shared by `trait` and `impl`.
+    ///
+    /// Returns the methods and the associated types: `type Item;` in a trait
+    /// declares one, `type Item = t27;` in an impl chooses it (Ch. 4 §1.7).
+    fn method_block(&mut self, what: &str) -> R<MethodBlock> {
         self.expect_op("{")?;
         let mut methods = Vec::new();
+        let mut assoc = Vec::new();
         while !self.eat_op("}") {
             if self.at(&Tok::Eof) {
                 return self.err(format!("unterminated `{what}` body"));
             }
+            if self.eat_kw("type") {
+                let name = self.expect_ident()?;
+                // A bound on an associated type is accepted and ignored: it
+                // constrains the impl, and the impl is checked directly.
+                if self.eat_op(":") {
+                    loop {
+                        self.expect_ident()?;
+                        if !self.eat_op("+") {
+                            break;
+                        }
+                    }
+                }
+                let value = if self.eat_op("=") {
+                    Some(self.ty()?)
+                } else {
+                    None
+                };
+                self.expect_op(";")?;
+                assoc.push((name, value));
+                continue;
+            }
             if !self.at_kw("fn") {
                 return self.err(format!(
-                    "expected `fn`, found {}; a {what} body contains functions, and \
-                     associated types and constants are Ch. 4 §1.7, not implemented yet",
+                    "expected `fn` or `type`, found {}; a {what} body contains \
+                     functions and associated types (Ch. 4 §1.7)",
                     self.peek()
                 ));
             }
             methods.push(self.fn_item()?);
         }
-        Ok(methods)
+        Ok((methods, assoc))
     }
 
     /// One of §1.4's four shortened receiver forms, if that is what comes
@@ -669,7 +725,7 @@ impl Parser {
         }
         if self.at_kw("Self") {
             self.bump();
-            return Ok(Ty::SelfTy(line));
+            return self.assoc_tail(Ty::SelfTy(line), line);
         }
         // `dyn Trait` (Ch. 4 §3.1).
         if self.eat_kw("dyn") {
@@ -700,10 +756,20 @@ impl Parser {
         }
         let name = self.expect_ident()?;
         let args = self.generic_args()?;
-        if args.is_empty() {
-            return Ok(Ty::Name(name, line));
+        let base = if args.is_empty() {
+            Ty::Name(name, line)
+        } else {
+            Ty::App(name, args, line)
+        };
+        self.assoc_tail(base, line)
+    }
+
+    /// `::Item` after a type, as many times as it is written (Ch. 4 §1.7).
+    fn assoc_tail(&mut self, mut base: Ty, line: Line) -> R<Ty> {
+        while self.eat_op("::") {
+            base = Ty::Assoc(Box::new(base), self.expect_ident()?, line);
         }
-        Ok(Ty::App(name, args, line))
+        Ok(base)
     }
 
     /// `<T, U>` after a type name (Ch. 4 §2.1), empty when there is none.
@@ -904,6 +970,73 @@ impl Parser {
         self.postfix()
     }
 
+    /// §5.7's desugaring, written out:
+    ///
+    /// ```text
+    /// { let mut it = e;
+    ///   loop { match it.next() { Some(x) => { body } None => break, } } }
+    /// ```
+    ///
+    /// The iterator's name contains a dot, which no Trust identifier may, so
+    /// it cannot shadow or be shadowed by anything a program wrote.
+    fn desugar_for(&mut self, name: String, iter: Expr, body: Block, line: Line) -> Expr {
+        self.counter += 1;
+        let it = format!("it.{}", self.counter);
+        let path = |segs: &[&str]| Path {
+            segments: segs.iter().map(|s| s.to_string()).collect(),
+            line,
+        };
+        let next = Expr::Method(
+            Box::new(Expr::Path(it.clone(), line)),
+            "next".to_string(),
+            Vec::new(),
+            line,
+        );
+        let arms = vec![
+            Arm {
+                patterns: vec![Pattern::Aggregate(
+                    path(&["Option", "Some"]),
+                    vec![("0".to_string(), Pattern::Bind(name, line))],
+                    line,
+                )],
+                guard: None,
+                body: Expr::Block(body),
+                line,
+            },
+            Arm {
+                patterns: vec![Pattern::Aggregate(
+                    path(&["Option", "None"]),
+                    Vec::new(),
+                    line,
+                )],
+                guard: None,
+                body: Expr::Break(None, line),
+                line,
+            },
+        ];
+        Expr::Block(Block {
+            stmts: vec![
+                Stmt::Let {
+                    mutable: true,
+                    name: it,
+                    ty: None,
+                    value: iter,
+                    line,
+                },
+                Stmt::Expr(Expr::Loop(
+                    Block {
+                        stmts: Vec::new(),
+                        tail: Some(Box::new(Expr::Match(Box::new(next), arms, line))),
+                        line,
+                    },
+                    line,
+                )),
+            ],
+            tail: None,
+            line,
+        })
+    }
+
     fn closure(&mut self, line: Line) -> R<Expr> {
         let mut params = Vec::new();
         if self.eat_op("||") {
@@ -1046,10 +1179,23 @@ impl Parser {
                 self.bump();
                 self.path_expr("Self".to_string(), line)
             }
-            Tok::Kw("for") => self.err(
-                "`for` loops are Ch. 4 §5.7, specified but not implemented; \
-                 write a `while` and an index",
-            ),
+            // `for name in iter { … }` (Ch. 4 §5.7) — sugar, and nothing
+            // more, so it is expanded here and no later pass learns it
+            // existed. The desugaring uses only Ch. 0 constructs, which is
+            // the point §5.7 makes about it.
+            Tok::Kw("for") => {
+                self.bump();
+                let name = self.expect_ident()?;
+                if !self.eat_kw("in") {
+                    return self.err("expected `in` after the binding of a `for` loop");
+                }
+                let saved = self.no_struct;
+                self.no_struct = true;
+                let iter = self.expr()?;
+                self.no_struct = saved;
+                let body = self.block()?;
+                Ok(self.desugar_for(name, iter, body, line))
+            }
             Tok::Kw("true") => {
                 self.bump();
                 Ok(Expr::Bool(true, line))

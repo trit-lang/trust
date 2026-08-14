@@ -59,14 +59,14 @@ impl std::error::Error for SyntaxError {}
 pub const KEYWORDS: &[&str] = &[
     "as", "break", "const", "continue", "dyn", "else", "enum", "false", "fn", "for", "if", "impl",
     "in", "let", "loop", "match", "mut", "return", "self", "Self", "struct", "trait", "true",
-    "where", "while",
+    "type", "where", "while",
 ];
 
 /// Reserved by §1.3 and claimed by Ch. 4, which is written but not
 /// implemented (Ch. 4 Appendix C). The diagnostic says so, because "wait for
 /// a chapter that does not exist" and "wait for that chapter to be built" are
 /// different pieces of news.
-pub const CHAPTER_4: &[&str] = &["type"];
+pub const CHAPTER_4: &[&str] = &[];
 
 /// Reserved for chapters that do not exist yet (§1.3). Using one is an error
 /// that names the reason, rather than a mysterious parse failure.
@@ -297,7 +297,7 @@ mod tests {
                 .message
                 .contains("library chapter")
         );
-        assert!(lex("type").unwrap_err().message.contains("Ch. 4"));
+
         assert!(lex("mod").unwrap_err().message.contains("reserved"));
         assert!(lex("a ^ b").unwrap_err().message.contains("tmul"));
     }

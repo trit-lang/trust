@@ -89,6 +89,8 @@ pub struct TraitItem {
     pub supertraits: Vec<String>,
     /// Its methods, required (no body) or provided (with one, §1.5).
     pub methods: Vec<FnItem>,
+    /// Its associated types, by name (Ch. 4 §1.7).
+    pub assoc: Vec<String>,
     /// Where it was written.
     pub line: Line,
 }
@@ -106,6 +108,8 @@ pub struct ImplItem {
     pub self_args: Vec<Ty>,
     /// Its methods and associated functions.
     pub methods: Vec<FnItem>,
+    /// The types it chooses for the trait's associated ones (Ch. 4 §1.7).
+    pub assoc: Vec<(String, Ty)>,
     /// Where it was written.
     pub line: Line,
 }
@@ -223,6 +227,8 @@ pub enum Ty {
     /// `dyn Trait` — dynamically sized, and legal only behind a reference
     /// (Ch. 4 §3.1).
     Dyn(String, Line),
+    /// `T::Item` — an associated type (Ch. 4 §1.7).
+    Assoc(Box<Ty>, String, Line),
     /// `impl Fn(T) -> R` in argument position: sugar for an anonymous type
     /// parameter bounded by one of §4.3's traits (Ch. 4 §2.2).
     ImplFn(FnKind, Vec<Ty>, Option<Box<Ty>>, Line),
@@ -241,6 +247,7 @@ impl Ty {
             | Ty::SelfTy(l)
             | Ty::App(_, _, l)
             | Ty::Dyn(_, l)
+            | Ty::Assoc(_, _, l)
             | Ty::ImplFn(_, _, _, l) => *l,
         }
     }
