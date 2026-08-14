@@ -847,3 +847,48 @@ fn the_register_a_long_interval_holds_can_be_taken_from_it() {
     );
     differential(&src, "pressure", &[&[0], &[1], &[-3], &[100]]);
 }
+
+#[test]
+fn a_swap_on_an_edge_is_a_swap_and_not_two_overwrites() {
+    // Block parameters are in registers now, so binding them on an edge is a
+    // parallel copy: every argument is read as it was before any parameter
+    // was written. A back edge that exchanges two values is the case that
+    // makes the difference visible — done in the obvious order it produces
+    // two copies of one value.
+    //
+    // `@fib` swaps on every iteration; `@rotate` cycles three, which needs
+    // the scratch to be freed and taken again.
+    let src = r#"tir 0.1 target "tritium"
+
+fn @fib(%n: t27) -> t27 {
+^entry:
+    br ^head(%n, const t27 0, const t27 1)
+^head(%i: t27, %a: t27, %b: t27):
+    %c = cmp t27 %i, const t27 0
+    br3 %c, ^done(%a), ^done(%a), ^step(%i, %a, %b)
+^step(%si: t27, %sa: t27, %sb: t27):
+    %sum = add.wrap t27 %sa, %sb
+    %i2 = sub.wrap t27 %si, const t27 1
+    br ^head(%i2, %sb, %sum)
+^done(%r: t27):
+    ret %r
+}
+
+fn @rotate(%n: t27) -> t27 {
+^entry:
+    br ^head(%n, const t27 1, const t27 2, const t27 3)
+^head(%i: t27, %x: t27, %y: t27, %z: t27):
+    %c = cmp t27 %i, const t27 0
+    br3 %c, ^done(%x), ^done(%x), ^step(%i, %x, %y, %z)
+^step(%si: t27, %sx: t27, %sy: t27, %sz: t27):
+    %i2 = sub.wrap t27 %si, const t27 1
+    br ^head(%i2, %sy, %sz, %sx)
+^done(%r: t27):
+    ret %r
+}
+"#;
+    // 0 1 1 2 3 5 8 13 21 34 55 …
+    differential(src, "fib", &[&[0], &[1], &[2], &[10], &[20], &[-1]]);
+    // 1 2 3 1 2 3 …
+    differential(src, "rotate", &[&[0], &[1], &[2], &[3], &[4], &[7]]);
+}

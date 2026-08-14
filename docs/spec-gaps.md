@@ -1245,6 +1245,41 @@ and one short-lived value read eight times, frame accesses fall from 48 to
 
 **Against the profile that started G8.6: −55.8%.**
 
+**G8.12 — block parameters get registers, and an edge becomes a parallel
+copy.** G8.9's allocator left every block parameter in memory, because a
+parameter has a different definition on each incoming edge and agreeing on a
+register for it is the parallel-copy problem. That was free at the time —
+the frontend emits no block parameters — and it is the thing standing between
+this backend and a real mem2reg, which cannot pay for itself while the block
+parameters it introduces cost four memory accesses per edge.
+
+Two changes.
+
+**The interval reaches back to the predecessors.** A parameter is written by
+the edge, in the predecessor, so its live interval starts at the earliest
+predecessor's terminator rather than at its own block's entry. Without that,
+the register could be handed to something live in the predecessor.
+
+**`move_args` is a parallel copy.** Every argument is read as it stood before
+any parameter was written. `parallel_copy` emits any move whose destination
+no remaining move still reads; when none is left, what remains is a cycle, so
+one register is parked in `t0` and whoever wanted it reads that instead —
+which turns the cycle into a chain the drain empties completely, including
+the move that reads the scratch, whose own destination nobody reads any more.
+So the scratch is free again before another cycle is broken, and one scratch
+suffices however many cycles an edge has.
+
+Parameters the scan leaves in memory keep the transfer area, and their
+arguments are read out *before* the register copy runs, since writing a
+transfer slot cannot disturb a register.
+
+`@fib` written with block parameters — the back edge exchanges two of them —
+now compiles to registers throughout, with no frame at all.
+
+**This changes nothing measurable yet.** HPL compiles to the identical
+instruction stream, because no Trust program has a block parameter to
+allocate. It is the prerequisite, and it is recorded as one.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

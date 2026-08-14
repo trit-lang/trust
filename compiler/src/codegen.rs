@@ -72,6 +72,11 @@ impl std::error::Error for CodegenError {}
 /// Trytes in a word.
 const WORD: i128 = 3;
 
+/// The name `parallel_copy` parks a register under. No TIR value can be
+/// called this: TIR values are named by the frontend, which mangles with `.`,
+/// and this has a character no identifier may contain.
+const SCRATCH: &str = "\u{1}t0";
+
 /// The reach of an I-format immediate: 14 trits, so (3¹⁴ − 1)/2 either way
 /// (TRISC-27 §3.2).
 const IMM_MAX: i128 = 2_391_484;
@@ -518,13 +523,12 @@ struct Gen<'a> {
 /// its definition, and an interval that did not reach back would let another
 /// value take the register there.
 ///
-/// **Block parameters are left in memory.** A parameter has a different
-/// definition on each incoming edge, so agreeing on a register for it is the
-/// parallel-copy problem, and `move_args` already solves it with a transfer
-/// area in the frame. The frontend emits no block parameters at all
-/// (`lang/lower.rs`: every local is a slot, so nothing crosses an edge in a
-/// register), so this costs real programs nothing; hand-written TIR uses
-/// them, and keeps working.
+/// **Block parameters too.** A parameter is written by the *edge*, in the
+/// predecessor, so its interval reaches back to every predecessor's
+/// terminator and not merely to its own block's entry. Binding it is then a
+/// parallel copy rather than a sequence of moves — see `parallel_copy` — and
+/// a parameter the scan leaves in memory keeps the transfer area `move_args`
+/// has always used.
 ///
 /// **Which registers.** `t0`…`t3` are the scratch the emitters use and are
 /// never allocated. `t4`…`t7` are caller-saved and free to take. `a0`…`a7`
@@ -543,11 +547,27 @@ fn allocate(f: &Function, folds: &[BTreeMap<String, Folded>]) -> BTreeMap<String
     let pos = positions(f);
     let (live_in, live_out) = liveness(f, folds);
 
-    // A block parameter is defined by its predecessors, not here.
-    let mut excluded: BTreeSet<String> = BTreeSet::new();
-    for b in &f.blocks {
-        for (n, _) in &b.params {
-            excluded.insert(n.clone());
+    // A block parameter is written by the edge, in the predecessor, so its
+    // interval has to reach back to every predecessor's terminator — not
+    // merely to its own block's entry.
+    let index: BTreeMap<&str, usize> = f
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.label.as_str(), i))
+        .collect();
+    let mut edge_writes: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for label in successors(&b.term) {
+            let Some(&j) = index.get(label.as_str()) else {
+                continue;
+            };
+            for (p, _) in &f.blocks[j].params {
+                edge_writes
+                    .entry(p.clone())
+                    .or_default()
+                    .push(pos.block_term[bi]);
+            }
         }
     }
 
@@ -598,11 +618,15 @@ fn allocate(f: &Function, folds: &[BTreeMap<String, Folded>]) -> BTreeMap<String
         });
     }
 
+    for (p, ats) in &edge_writes {
+        for at in ats {
+            mark(&mut span, p, *at);
+        }
+    }
+
     // A value the accesses absorbed, or one nothing ever reads, needs
     // nowhere to be.
-    span.retain(|n, _| {
-        !excluded.contains(n) && !folds.iter().any(|m| m.contains_key(n)) && uses.contains_key(n)
-    });
+    span.retain(|n, _| !folds.iter().any(|m| m.contains_key(n)) && uses.contains_key(n));
 
     let calls = &pos.calls;
     // A call is crossed only by a value that is still live after it
@@ -1070,8 +1094,11 @@ fn emit_function<'a>(
             .any(|i| matches!(i.kind, InstKind::Call { .. }))
     });
 
+    let mut regs = regs.clone();
+    // `parallel_copy` parks a register here; `read` finds it like any other.
+    regs.insert(SCRATCH.to_string(), "t0");
     let mut g = Gen {
-        regs: regs.clone(),
+        regs,
         func: f,
         frame,
         out: String::new(),
@@ -1117,8 +1144,8 @@ fn emit_function<'a>(
                 .push("more than eight arguments is not implemented".into());
             break;
         }
-        match regs.get(pname) {
-            Some(r) if *r == POOL_CALL_FREE[i] => {}
+        match g.regs.get(pname).copied() {
+            Some(r) if r == POOL_CALL_FREE[i] => {}
             Some(r) => g.line(format!("add.wrap {r}, a{i}, zero")),
             None => {
                 let at = g.slot(pname);
@@ -1451,15 +1478,96 @@ fn move_args(g: &mut Gen, target: &Target) {
         return;
     }
 
-    for (i, arg) in target.args.iter().enumerate() {
-        let from = g.read(arg, "t0");
-        let at = g.frame.transfer[i];
+    // Three groups, in an order that reads every source before writing any
+    // destination that another source depends on.
+    //
+    // A parameter in a **slot** keeps the transfer area: its argument may be
+    // the slot another parameter is about to overwrite — the back edge that
+    // swaps two values is the case that matters — so every such argument is
+    // read out first and only then written in.
+    //
+    // A parameter in a **register** is a parallel copy, resolved below. Its
+    // sources are registers, slots and constants, and none of those is
+    // disturbed by writing a transfer slot, so the reads above may come
+    // first.
+    let mut in_slots: Vec<(usize, String)> = Vec::new();
+    let mut copies: Vec<(&'static str, Operand)> = Vec::new();
+    for (i, (p, arg)) in params.iter().zip(&target.args).enumerate() {
+        match g.regs.get(p).copied() {
+            Some(r) => copies.push((r, arg.clone())),
+            None => in_slots.push((i, p.clone())),
+        }
+    }
+
+    for (i, _) in &in_slots {
+        let from = g.read(&target.args[*i], "t0");
+        let at = g.frame.transfer[*i];
         g.line(format!("st.word {from}, {at}(sp)"));
     }
-    for (i, p) in params.iter().enumerate() {
-        let from = g.frame.transfer[i];
-        g.line(format!("ld.word t0, {from}(sp)"));
+
+    parallel_copy(g, &copies);
+
+    for (i, p) in &in_slots {
+        let at = g.frame.transfer[*i];
+        g.line(format!("ld.word t0, {at}(sp)"));
         g.write(p, "t0");
+    }
+}
+
+/// Emit a set of moves that all take effect at once.
+///
+/// The destinations are registers and the sources are whatever an operand
+/// can be, so a source may be a register another move is about to write.
+/// Emitting a move whose destination is nobody's remaining source is always
+/// safe; when no such move is left, what remains is a cycle, and one register
+/// is parked in scratch to break it.
+///
+/// `t0` is scratch here as everywhere, and is never allocated.
+fn parallel_copy(g: &mut Gen, copies: &[(&'static str, Operand)]) {
+    // Identity moves are not moves.
+    let mut todo: Vec<(&'static str, Operand)> = copies
+        .iter()
+        .filter(|(r, o)| !matches!(o, Operand::Value(n) if g.regs.get(n) == Some(r)))
+        .cloned()
+        .collect();
+
+    loop {
+        // Emit everything that is safe: a move whose destination no
+        // remaining move still reads.
+        loop {
+            let sources: BTreeSet<&'static str> = todo
+                .iter()
+                .filter_map(|(_, o)| match o {
+                    Operand::Value(n) => g.regs.get(n).copied(),
+                    _ => None,
+                })
+                .collect();
+            let Some(i) = todo.iter().position(|(r, _)| !sources.contains(r)) else {
+                break;
+            };
+            let (r, o) = todo.swap_remove(i);
+            let from = g.read(&o, r);
+            if from != r {
+                g.line(format!("add.wrap {r}, {from}, zero"));
+            }
+        }
+        if todo.is_empty() {
+            return;
+        }
+
+        // What is left is a cycle: every destination is still someone's
+        // source. Park one register in scratch and let whoever wanted it read
+        // that instead, which turns the cycle into a chain the loop above
+        // drains completely — including the move that reads the scratch,
+        // whose own destination nobody reads any more. So the scratch is
+        // always free again before another cycle is broken.
+        let (r, _) = todo[0];
+        g.line(format!("add.wrap t0, {r}, zero"));
+        for (_, o) in todo.iter_mut() {
+            if matches!(o, Operand::Value(n) if g.regs.get(n) == Some(&r)) {
+                *o = Operand::Value(SCRATCH.to_string());
+            }
+        }
     }
 }
 
