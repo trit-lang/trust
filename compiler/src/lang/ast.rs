@@ -29,6 +29,28 @@ pub enum Item {
     Impl(ImplItem),
 }
 
+/// Which of §4.3's three traits a closure bound names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FnKind {
+    /// `Fn` — reads its captures only.
+    Fn,
+    /// `FnMut` — writes one.
+    FnMut,
+    /// `FnOnce` — moves one out.
+    FnOnce,
+}
+
+impl FnKind {
+    /// Its written name.
+    pub fn name(self) -> &'static str {
+        match self {
+            FnKind::Fn => "Fn",
+            FnKind::FnMut => "FnMut",
+            FnKind::FnOnce => "FnOnce",
+        }
+    }
+}
+
 /// One generic parameter (Ch. 4 §2.1). Lifetimes are parsed and dropped,
 /// since Ch. 3 §3.1 erases them; the other two reach code generation.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -201,6 +223,9 @@ pub enum Ty {
     /// `dyn Trait` — dynamically sized, and legal only behind a reference
     /// (Ch. 4 §3.1).
     Dyn(String, Line),
+    /// `impl Fn(T) -> R` in argument position: sugar for an anonymous type
+    /// parameter bounded by one of §4.3's traits (Ch. 4 §2.2).
+    ImplFn(FnKind, Vec<Ty>, Option<Box<Ty>>, Line),
 }
 
 impl Ty {
@@ -215,7 +240,8 @@ impl Ty {
             | Ty::Slice(_, l)
             | Ty::SelfTy(l)
             | Ty::App(_, _, l)
-            | Ty::Dyn(_, l) => *l,
+            | Ty::Dyn(_, l)
+            | Ty::ImplFn(_, _, _, l) => *l,
         }
     }
 }
@@ -310,6 +336,8 @@ pub enum Expr {
     Continue(Line),
     /// `return` with an optional value.
     Return(Option<Box<Expr>>, Line),
+    /// `|x| body` or `|x: T| -> R { body }` (Ch. 4 §4.1).
+    Closure(Vec<(String, Option<Ty>)>, Option<Ty>, Box<Expr>, Line),
 }
 
 impl Expr {
@@ -342,7 +370,8 @@ impl Expr {
             | While(_, _, l)
             | Break(_, l)
             | Continue(l)
-            | Return(_, l) => *l,
+            | Return(_, l)
+            | Closure(_, _, _, l) => *l,
             Block(b) => b.line,
         }
     }

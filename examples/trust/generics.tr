@@ -60,6 +60,17 @@ where
     x.area() * 2
 }
 
+// A closure, passed but not returned (Ch. 4 §4.5). It captures `k` by
+// shared reference; nothing here can outlive the frame that made it, which
+// is why `move` is neither provided nor missed.
+fn map_in_place(xs: &mut [t27], f: impl Fn(t27) -> t27) {
+    let mut i: taddr = 0;
+    while i < xs.len() {
+        xs[i] = f(xs[i]);
+        i += 1;
+    }
+}
+
 fn print_signed(value: t27) {
     let mut n = value;
     if n < 0 {
@@ -109,6 +120,11 @@ fn main() -> t27 {
 
     print_signed(twice_the_area(&sq));      // 18
     print_signed(twice_the_area(&rect));    // 20
+
+    let k: t27 = 3;
+    let mut zs: [t27; 3] = [1, 2, 3];
+    map_in_place(&mut zs, |x| x * k);
+    print_signed(zs[0] + zs[1] + zs[2]);    // 18
 
     p.first + p.second as t27 + *head       // 7 + 2 + 10
 }

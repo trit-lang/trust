@@ -675,6 +675,29 @@ impl Parser {
         if self.eat_kw("dyn") {
             return Ok(Ty::Dyn(self.expect_ident()?, line));
         }
+        // `impl Fn(T) -> R` in argument position (Ch. 4 §2.2, §4.3).
+        if self.eat_kw("impl") {
+            let name = self.expect_ident()?;
+            let kind = match name.as_str() {
+                "Fn" => FnKind::Fn,
+                "FnMut" => FnKind::FnMut,
+                "FnOnce" => FnKind::FnOnce,
+                other => {
+                    return self.err(format!(
+                        "`impl {other}` in argument position is an anonymous type parameter \
+                         (Ch. 4 §2.2), which is implemented only for the `Fn` traits; \
+                         write `<T: {other}>` instead"
+                    ));
+                }
+            };
+            let params = self.type_list("(", ")")?;
+            let ret = if self.eat_op("->") {
+                Some(Box::new(self.ty()?))
+            } else {
+                None
+            };
+            return Ok(Ty::ImplFn(kind, params, ret, line));
+        }
         let name = self.expect_ident()?;
         let args = self.generic_args()?;
         if args.is_empty() {
@@ -872,7 +895,47 @@ impl Parser {
         if self.eat_op("*") {
             return Ok(Expr::Deref(Box::new(self.unary()?), line));
         }
+        // A closure (Ch. 4 §4.1). `||` here is two parameter delimiters and
+        // not the logical-or of §2.1 — the re-examination of `|` that Ch. 0
+        // §7 anticipated, and the whole of it.
+        if self.at_op("|") || self.at_op("||") {
+            return self.closure(line);
+        }
         self.postfix()
+    }
+
+    fn closure(&mut self, line: Line) -> R<Expr> {
+        let mut params = Vec::new();
+        if self.eat_op("||") {
+            // no parameters
+        } else {
+            self.expect_op("|")?;
+            while !self.eat_op("|") {
+                let name = self.expect_ident()?;
+                let ty = if self.eat_op(":") {
+                    Some(self.ty()?)
+                } else {
+                    None
+                };
+                params.push((name, ty));
+                if !self.eat_op(",") && !self.at_op("|") {
+                    return self.err("expected `,` or `|` in a closure's parameters");
+                }
+            }
+        }
+        let ret = if self.eat_op("->") {
+            Some(self.ty()?)
+        } else {
+            None
+        };
+        // With a written return type the body is a block, as in Rust: the
+        // alternative is an ambiguity nobody enjoys.
+        let body = if ret.is_some() {
+            Expr::Block(self.block()?)
+        } else {
+            self.expr()?
+        };
+        Ok(Expr::Closure(params, ret, Box::new(body), line))
     }
 
     fn postfix(&mut self) -> R<Expr> {

@@ -317,9 +317,43 @@ Two gaps this uncovered, both pre-existing:
 `Box<dyn Trait>` is not implemented and cannot be until there is an allocator,
 which §3.1 already says. The representation above is the one it will use.
 
-Not implemented, and rejected by name: closures, `for` loops, associated types
-and constants, generic traits, `::<>`, and `impl !Copy`. Those are what is
-left of the chapter.
+**G0.12 — closures are implemented (Ch. 4 §4).** `|x| x * k`, capture
+inference, the anonymous type, `Fn`/`FnMut`, and `impl Fn(…)` in argument
+position all work end to end.
+
+A closure becomes two things: an anonymous struct holding one reference per
+captured place, and an ordinary function whose body is the closure's with
+every capture rewritten to a field of that struct. Neither is nameable from a
+program, and everything downstream sees a struct and a call — which is why
+capture is checked by Ch. 3 §4's borrow checker unchanged, including its
+non-lexical rule. §4.4's own example is rejected exactly as written, and the
+same program with the closure's last use moved earlier is accepted.
+
+`impl Fn(A) -> R` in argument position is desugared to a named type parameter
+with a bound that carries the signature, so a closure argument monomorphizes
+like any other type argument (§2.7). The bound then supplies the closure's
+parameter and result types, which is why `|x| x + k` needs no annotations;
+where nothing in the context says, the result type is read off the body.
+
+Two limits:
+
+- **`FnOnce` is not implemented.** Every capture is by reference — shared, or
+  exclusive when the body writes it. A closure that moves a capture out is
+  §4.3's `FnOnce`, and needs a move analysis of the closure body this
+  milestone does not do. `Fn` and `FnMut` are checked against each other, so
+  passing an `FnMut` where `Fn` is wanted is rejected with the reason.
+- **Capture is by variable, not by place.** §4.4 says a closure using `p.x`
+  borrows `p.x` and leaves `p.y` free; this one borrows `p`. Conservative in
+  the right direction, and it costs only programs that use disjoint fields of
+  one struct in a closure and outside it.
+
+`move` is not provided, and §4.5 explains why it is not missed: its purpose is
+to let a closure outlive its captures' scope, and a closure that cannot be
+returned never does.
+
+Not implemented, and rejected by name: `for` loops, associated types and
+constants, generic traits, `::<>`, and `impl !Copy`. Those are what is left of
+the chapter.
 
 Two limits worth naming:
 

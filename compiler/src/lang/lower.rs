@@ -295,12 +295,28 @@ pub struct Types {
     /// Generic struct and enum definitions, un-instantiated.
     generic_structs: HashMap<String, ast::StructItem>,
     generic_enums: HashMap<String, ast::EnumItem>,
+    /// The anonymous types closures were given, and what each one calls
+    /// (Ch. 4 §4.2).
+    closures: RefCell<HashMap<String, ClosureInfo>>,
     /// Trait declarations, so that `dyn Trait` can be checked for object
     /// safety where it is written rather than where it is coerced to.
     traits: HashMap<String, ast::TraitItem>,
     /// What each mangled name was an instantiation of. A mangled name is not
     /// parseable back into its arguments, and a generic impl needs them.
     instantiations: RefCell<HashMap<String, (String, Vec<Ty>)>>,
+}
+
+/// What a closure's anonymous type stands for (Ch. 4 §4.2).
+#[derive(Clone)]
+struct ClosureInfo {
+    /// The function its body became.
+    call: String,
+    /// Its parameter types, without the capture struct.
+    params: Vec<Ty>,
+    /// Its result type.
+    ret: Ty,
+    /// Which of §4.3's traits it implements.
+    kind: ast::FnKind,
 }
 
 /// One enum variant, resolved.
@@ -374,6 +390,21 @@ impl Types {
             .get(enum_name)?
             .iter()
             .position(|v| v.name == variant)
+    }
+
+    /// Register a struct built by the compiler — today, a closure's captures
+    /// (Ch. 4 §4.2). It is an ordinary nominal type from here on.
+    fn register_struct(&self, name: &str, fields: Vec<(String, Ty)>) -> Ty {
+        self.db.borrow_mut().struct_(
+            name,
+            layout::Repr::Lang,
+            fields
+                .iter()
+                .map(|(n, t)| (n.as_str(), t.layout_ty()))
+                .collect(),
+        );
+        self.structs.borrow_mut().insert(name.to_string(), fields);
+        Ty::Struct(name.to_string())
     }
 
     /// Instantiate a generic struct or enum, or return the one already made
@@ -565,6 +596,33 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
         .chain(expanded)
         .collect();
 
+    // `impl Fn(…)` in argument position is an anonymous type parameter
+    // (Ch. 4 §2.2). Naming it here is the whole of the desugaring, and it is
+    // what lets a closure argument monomorphize like any other.
+    let mut fn_bounds: HashMap<String, (ast::FnKind, Vec<ast::Ty>, Option<ast::Ty>)> =
+        HashMap::new();
+    let fns: Vec<ast::FnItem> = fns
+        .into_iter()
+        .map(|mut f| {
+            let mut i = 0;
+            for (_, t) in &mut f.params {
+                let ast::Ty::ImplFn(kind, ps, r, line) = t.clone() else {
+                    continue;
+                };
+                let pname = format!("#F{i}");
+                i += 1;
+                let key = format!("{}{pname}", f.name);
+                fn_bounds.insert(key.clone(), (kind, ps, r.map(|b| *b)));
+                *t = ast::Ty::Name(pname.clone(), line);
+                f.generics.push(ast::GenericParam::Type {
+                    name: pname,
+                    bounds: vec![format!("Fn@{key}")],
+                });
+            }
+            f
+        })
+        .collect();
+
     // A generic function is not code until it is instantiated (§2.7), so it
     // is set aside here and its body lowered once per instantiation.
     let mut generic_fns: HashMap<String, ast::FnItem> = HashMap::new();
@@ -674,9 +732,12 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
 
     let pending: RefCell<Vec<Job>> = RefCell::new(Vec::new());
     let vtables: RefCell<Vec<(String, String, ir::Global)>> = RefCell::new(Vec::new());
+    let extra_fns: RefCell<Vec<ast::FnItem>> = RefCell::new(Vec::new());
     let world = World {
         traits: &types.traits.clone(),
         vtables: &vtables,
+        extra_fns: &extra_fns,
+        fn_bounds: &fn_bounds,
         sigs: &sigs,
         generic_fns: &generic_fns,
         impls: &impls,
@@ -705,6 +766,19 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
     // (§2.7). The queue drains because every job is unique by key and the
     // depth limit stops a body that instantiates itself at a larger type.
     loop {
+        // A closure body is an ordinary function that did not exist when the
+        // file was read, so it joins the same queue (Ch. 4 §4.2).
+        let extra = extra_fns.borrow_mut().pop();
+        if let Some(f) = extra {
+            let key = f.name.clone();
+            let signature = signature_of(&f, &key, &sigs);
+            let body = f.body.clone().expect("a closure has a body");
+            match function(&f, signature, &body, &key, HashMap::new(), &world) {
+                Ok(func) => module.funcs.push(func),
+                Err(e) => errs.push(e),
+            }
+            continue;
+        }
         // Not `while let Some(job) = pending.borrow_mut().pop()`: that keeps
         // the mutable borrow alive for the whole body, and the body queues
         // more jobs.
@@ -737,6 +811,283 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
 /// One error, for the places that build one rather than return it.
 fn one_err(line: Line, message: String) -> Error {
     SyntaxError { line, message }
+}
+
+/// The names a closure body uses that it did not bind itself.
+///
+/// Deliberately over-approximate: a name that turns out not to be a local of
+/// the enclosing function is dropped by the caller, which knows the scope.
+fn free_names(e: &ast::Expr, bound: &mut Vec<String>, out: &mut Vec<String>) {
+    use ast::Expr::*;
+    let see = |n: &String, bound: &[String], out: &mut Vec<String>| {
+        if !bound.contains(n) && !out.contains(n) {
+            out.push(n.clone());
+        }
+    };
+    match e {
+        Path(n, _) => see(n, bound, out),
+        Aggregate(_, fields, _) => {
+            for (_, v) in fields {
+                free_names(v, bound, out);
+            }
+        }
+        Closure(ps, _, body, _) => {
+            let depth = bound.len();
+            bound.extend(ps.iter().map(|(n, _)| n.clone()));
+            free_names(body, bound, out);
+            bound.truncate(depth);
+        }
+        Block(b) => free_names_block(b, bound, out),
+        Loop(b, _) => free_names_block(b, bound, out),
+        If(c, t, e2, _) => {
+            free_names(c, bound, out);
+            free_names_block(t, bound, out);
+            if let Some(e2) = e2 {
+                free_names(e2, bound, out);
+            }
+        }
+        While(c, b, _) => {
+            free_names(c, bound, out);
+            free_names_block(b, bound, out);
+        }
+        Match(sc, arms, _) => {
+            free_names(sc, bound, out);
+            for a in arms {
+                let depth = bound.len();
+                for p in &a.patterns {
+                    bind_pattern(p, bound);
+                }
+                if let Some(g) = &a.guard {
+                    free_names(g, bound, out);
+                }
+                free_names(&a.body, bound, out);
+                bound.truncate(depth);
+            }
+        }
+        Cast(a, _, _) | Unary(_, a, _) | Deref(a, _) | Borrow(a, _, _) | Field(a, _, _) => {
+            free_names(a, bound, out)
+        }
+        Binary(_, a, b, _) | Assign(_, a, b, _) | Index(a, b, _) | Repeat(a, b, _) => {
+            free_names(a, bound, out);
+            free_names(b, bound, out);
+        }
+        Call(_, args, _) | Array(args, _) | Tuple(args, _) => {
+            args.iter().for_each(|a| free_names(a, bound, out))
+        }
+        Method(r, _, args, _) => {
+            free_names(r, bound, out);
+            args.iter().for_each(|a| free_names(a, bound, out));
+        }
+        Break(v, _) | Return(v, _) => {
+            if let Some(v) = v {
+                free_names(v, bound, out);
+            }
+        }
+        Int(..) | Trit(..) | Bool(..) | Unit(_) | Continue(_) => {}
+    }
+}
+
+fn free_names_block(b: &ast::Block, bound: &mut Vec<String>, out: &mut Vec<String>) {
+    let depth = bound.len();
+    for st in &b.stmts {
+        match st {
+            ast::Stmt::Let { name, value, .. } => {
+                free_names(value, bound, out);
+                bound.push(name.clone());
+            }
+            ast::Stmt::Expr(e) => free_names(e, bound, out),
+        }
+    }
+    if let Some(t) = &b.tail {
+        free_names(t, bound, out);
+    }
+    bound.truncate(depth);
+}
+
+fn bind_pattern(p: &ast::Pattern, bound: &mut Vec<String>) {
+    match p {
+        ast::Pattern::Bind(n, _) => bound.push(n.clone()),
+        ast::Pattern::Aggregate(_, fields, _) => {
+            fields.iter().for_each(|(_, p)| bind_pattern(p, bound))
+        }
+        ast::Pattern::Tuple(ps, _) => ps.iter().for_each(|p| bind_pattern(p, bound)),
+        _ => {}
+    }
+}
+
+/// Whether a closure body writes through this name, which decides whether it
+/// is captured by `&mut` and therefore whether the closure is `FnMut`
+/// (Ch. 4 §4.4).
+fn writes_name(e: &ast::Expr, name: &str) -> bool {
+    use ast::Expr::*;
+    let root = |mut e: &ast::Expr| loop {
+        match e {
+            Field(b, ..) | Index(b, ..) | Deref(b, _) => e = b,
+            Path(n, _) => return Some(n.clone()),
+            _ => return None,
+        }
+    };
+    let here = match e {
+        Assign(_, target, _, _) => root(target).as_deref() == Some(name),
+        Borrow(inner, true, _) => root(inner).as_deref() == Some(name),
+        // A method call may need `&mut`; assume it does, which costs a
+        // closure the `Fn` bound but never accepts a wrong program.
+        Method(recv, _, _, _) => root(recv).as_deref() == Some(name),
+        _ => false,
+    };
+    if here {
+        return true;
+    }
+    let mut found = false;
+    for_each_child(e, &mut |c| {
+        if writes_name(c, name) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Visit an expression's immediate sub-expressions.
+fn for_each_child(e: &ast::Expr, f: &mut impl FnMut(&ast::Expr)) {
+    use ast::Expr::*;
+    match e {
+        Cast(a, _, _)
+        | Unary(_, a, _)
+        | Deref(a, _)
+        | Borrow(a, _, _)
+        | Field(a, _, _)
+        | Closure(_, _, a, _) => f(a),
+        Binary(_, a, b, _) | Assign(_, a, b, _) | Index(a, b, _) | Repeat(a, b, _) => {
+            f(a);
+            f(b);
+        }
+        Call(_, args, _) | Array(args, _) | Tuple(args, _) => args.iter().for_each(f),
+        Aggregate(_, fields, _) => fields.iter().for_each(|(_, v)| f(v)),
+        Method(r, _, args, _) => {
+            f(r);
+            args.iter().for_each(f);
+        }
+        Block(b) | Loop(b, _) => for_each_child_block(b, f),
+        If(c, t, e2, _) => {
+            f(c);
+            for_each_child_block(t, f);
+            if let Some(e2) = e2 {
+                f(e2);
+            }
+        }
+        While(c, b, _) => {
+            f(c);
+            for_each_child_block(b, f);
+        }
+        Match(sc, arms, _) => {
+            f(sc);
+            for a in arms {
+                if let Some(g) = &a.guard {
+                    f(g);
+                }
+                f(&a.body);
+            }
+        }
+        Break(v, _) | Return(v, _) => {
+            if let Some(v) = v {
+                f(v);
+            }
+        }
+        Int(..) | Trit(..) | Bool(..) | Unit(_) | Continue(_) | Path(..) => {}
+    }
+}
+
+fn for_each_child_block(b: &ast::Block, f: &mut impl FnMut(&ast::Expr)) {
+    for st in &b.stmts {
+        match st {
+            ast::Stmt::Let { value, .. } => f(value),
+            ast::Stmt::Expr(e) => f(e),
+        }
+    }
+    if let Some(t) = &b.tail {
+        f(t);
+    }
+}
+
+/// Rewrite each captured name to a dereference of the capture struct's
+/// field, which is what makes the closure body an ordinary function body.
+fn rewrite_captures(e: &mut ast::Expr, captures: &[String]) {
+    use ast::Expr::*;
+    if let Path(n, line) = e
+        && captures.contains(n)
+    {
+        *e = Deref(
+            Box::new(Field(
+                Box::new(Path("self".to_string(), *line)),
+                n.clone(),
+                *line,
+            )),
+            *line,
+        );
+        return;
+    }
+    for_each_child_mut(e, &mut |c| rewrite_captures(c, captures));
+}
+
+fn for_each_child_mut(e: &mut ast::Expr, f: &mut impl FnMut(&mut ast::Expr)) {
+    use ast::Expr::*;
+    match e {
+        Cast(a, _, _)
+        | Unary(_, a, _)
+        | Deref(a, _)
+        | Borrow(a, _, _)
+        | Field(a, _, _)
+        | Closure(_, _, a, _) => f(a),
+        Binary(_, a, b, _) | Assign(_, a, b, _) | Index(a, b, _) | Repeat(a, b, _) => {
+            f(a);
+            f(b);
+        }
+        Call(_, args, _) | Array(args, _) | Tuple(args, _) => args.iter_mut().for_each(f),
+        Aggregate(_, fields, _) => fields.iter_mut().for_each(|(_, v)| f(v)),
+        Method(r, _, args, _) => {
+            f(r);
+            args.iter_mut().for_each(f);
+        }
+        Block(b) | Loop(b, _) => for_each_child_block_mut(b, f),
+        If(c, t, e2, _) => {
+            f(c);
+            for_each_child_block_mut(t, f);
+            if let Some(e2) = e2 {
+                f(e2);
+            }
+        }
+        While(c, b, _) => {
+            f(c);
+            for_each_child_block_mut(b, f);
+        }
+        Match(sc, arms, _) => {
+            f(sc);
+            for a in arms {
+                if let Some(g) = &mut a.guard {
+                    f(g);
+                }
+                f(&mut a.body);
+            }
+        }
+        Break(v, _) | Return(v, _) => {
+            if let Some(v) = v {
+                f(v);
+            }
+        }
+        Int(..) | Trit(..) | Bool(..) | Unit(_) | Continue(_) | Path(..) => {}
+    }
+}
+
+fn for_each_child_block_mut(b: &mut ast::Block, f: &mut impl FnMut(&mut ast::Expr)) {
+    for st in &mut b.stmts {
+        match st {
+            ast::Stmt::Let { value, .. } => f(value),
+            ast::Stmt::Expr(e) => f(e),
+        }
+    }
+    if let Some(t) = &mut b.tail {
+        f(t);
+    }
 }
 
 /// Every method reachable through `dyn Trait`, in vtable order: the
@@ -950,6 +1301,12 @@ fn subst_ty(t: &mut ast::Ty, self_ty: &SelfTy) {
         ast::Ty::Tuple(ts, _) | ast::Ty::App(_, ts, _) => {
             ts.iter_mut().for_each(|t| subst_ty(t, self_ty))
         }
+        ast::Ty::ImplFn(_, ps, r, _) => {
+            ps.iter_mut().for_each(|t| subst_ty(t, self_ty));
+            if let Some(r) = r {
+                subst_ty(r, self_ty);
+            }
+        }
         ast::Ty::Name(..) | ast::Ty::Unit(_) | ast::Ty::Dyn(..) => {}
     }
 }
@@ -1031,6 +1388,15 @@ fn subst_expr(e: &mut ast::Expr, self_ty: &SelfTy) {
                 subst_expr(v, self_ty);
             }
             return;
+        }
+        Closure(ps, r, body, _) => {
+            for (_, t) in ps.iter_mut().flat_map(|(n, t)| t.as_mut().map(|t| (n, t))) {
+                subst_ty(t, self_ty);
+            }
+            if let Some(r) = r {
+                subst_ty(r, self_ty);
+            }
+            kids.push(body);
         }
         Int(..) | Trit(..) | Bool(..) | Unit(_) | Continue(_) => {}
     }
@@ -1732,6 +2098,7 @@ fn build_types(file: &ast::File) -> R<Types> {
         enums: RefCell::new(HashMap::new()),
         generic_structs: HashMap::new(),
         generic_enums: HashMap::new(),
+        closures: RefCell::new(HashMap::new()),
         traits: file
             .items
             .iter()
@@ -1927,6 +2294,18 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
             *l,
             "`Self` names the implementing type, and there is none here",
         ),
+        // `impl Fn(…)` is an anonymous type parameter, desugared to a named
+        // one before lowering, so one surviving here was written somewhere
+        // that has no parameter list to add it to.
+        ast::Ty::ImplFn(k, _, _, l) => err(
+            *l,
+            format!(
+                "`impl {}` is a parameter type and nothing else (Ch. 4 §2.2). In return \
+                 position it would mean returning a closure, which needs an allocator \
+                 and waits for the library chapter (Ch. 4 §4.5)",
+                k.name()
+            ),
+        ),
         // `Name<T, U>` — instantiate now, so that everything downstream sees
         // an ordinary nominal type (Ch. 4 §2.7).
         ast::Ty::App(name, args, line) => {
@@ -2071,6 +2450,12 @@ struct Fn<'a> {
     traits: &'a HashMap<String, ast::TraitItem>,
     /// Vtables built so far (Ch. 4 §3.3).
     vtables: &'a RefCell<Vec<(String, String, ir::Global)>>,
+    /// Functions synthesized while lowering this one — closure bodies.
+    extra_fns: &'a RefCell<Vec<ast::FnItem>>,
+    /// The signature each `impl Fn(…)` parameter was written with.
+    fn_bounds: &'a HashMap<String, (ast::FnKind, Vec<ast::Ty>, Option<ast::Ty>)>,
+    /// This function's own name, so a closure inside it gets a unique one.
+    name: String,
     /// Generic function definitions, un-instantiated.
     generic_fns: &'a HashMap<String, ast::FnItem>,
     /// Every (type, trait) pair the file implements, for bounds (§2.2).
@@ -2139,6 +2524,10 @@ struct World<'a> {
     /// Vtables built so far, keyed by (concrete type, trait), and the
     /// globals they became.
     vtables: &'a RefCell<Vec<(String, String, ir::Global)>>,
+    /// Functions synthesized while lowering — closure bodies (Ch. 4 §4.2).
+    extra_fns: &'a RefCell<Vec<ast::FnItem>>,
+    /// The signature each `impl Fn(…)` parameter was written with.
+    fn_bounds: &'a HashMap<String, (ast::FnKind, Vec<ast::Ty>, Option<ast::Ty>)>,
     sigs: &'a RefCell<HashMap<String, (Vec<Ty>, Ty)>>,
     generic_fns: &'a HashMap<String, ast::FnItem>,
     impls: &'a std::collections::HashSet<(String, String)>,
@@ -2158,6 +2547,8 @@ fn function(
     let World {
         traits,
         vtables,
+        extra_fns,
+        fn_bounds,
         sigs,
         generic_fns,
         impls,
@@ -2170,6 +2561,9 @@ fn function(
     let mut fx = Fn {
         traits,
         vtables,
+        extra_fns,
+        fn_bounds,
+        name: key.to_string(),
         sigs,
         generic_fns,
         impls,
@@ -2310,6 +2704,26 @@ impl Fn<'_> {
     }
 
     // ------------------------------------------------------------- scopes
+
+    /// Give an existing slot a name, so that an argument the caller had to
+    /// lower before it could infer anything can still be referred to by an
+    /// expression. The name cannot collide: `#` is not an identifier
+    /// character.
+    fn bind_existing(&mut self, slot: String, ty: Ty) -> String {
+        self.counter += 1;
+        let name = format!("#a{}", self.counter);
+        let local = Local {
+            slot,
+            ty,
+            mutable: false,
+            drop_flag: None,
+        };
+        self.scopes
+            .last_mut()
+            .expect("a scope")
+            .insert(name.clone(), local);
+        name
+    }
 
     fn declare(&mut self, name: &str, ty: Ty, mutable: bool) -> Local {
         let slot = self.fresh(&format!("{name}.slot"));
@@ -2733,7 +3147,9 @@ impl Fn<'_> {
                 // binding, and lives until its last use (Ch. 3 §4.2). That
                 // covers a borrow written here and a reference returned from
                 // a call, which by elision borrows from that call's argument.
-                if contains_reference(&ty) {
+                let is_closure = nominal_name(&ty)
+                    .is_some_and(|n| self.types.closures.borrow().contains_key(&n));
+                if contains_reference(&ty) || is_closure {
                     let dies = self.last_use.get(name).copied().unwrap_or(self.stmt);
                     for loan in self.loans[loans_before..].iter_mut() {
                         loan.dies = loan.dies.max(dies);
@@ -3006,6 +3422,8 @@ impl Fn<'_> {
             }
 
             E::Aggregate(path, fields, line) => self.aggregate(path, fields, expected, *line),
+
+            E::Closure(params, ret, body, line) => self.closure(params, ret, body, None, *line),
 
             // A borrow is the address of a place — which every local already
             // has, since every local lives in a slot.
@@ -3586,11 +4004,28 @@ impl Fn<'_> {
             return self.aggregate(&path, &fields, None, line);
         }
 
+        // `f(args)` where `f` is a local holding a closure: the call goes to
+        // the function its body became, with the captures as the receiver
+        // (Ch. 4 §4.2).
+        if let Some(local) = self.lookup(name)
+            && let Some(cname) = nominal_name(&local.ty)
+            && let Some(info) = self.types.closures.borrow().get(&cname).cloned()
+        {
+            let recv = ast::Expr::Borrow(
+                Box::new(ast::Expr::Path(name.to_string(), line)),
+                false,
+                line,
+            );
+            let mut full = vec![recv];
+            full.extend(args.iter().cloned());
+            return self.call_key(&info.call, Vec::new(), &full, line);
+        }
+
         // A generic callee is instantiated here, at the call site, which is
         // also where its bounds are checked (Ch. 4 §2.2).
         if self.generic_fns.contains_key(name) {
-            let key = self.instantiate_fn(name, args, expected, line)?;
-            return self.call_key(&key, Vec::new(), args, line);
+            let (key, args) = self.instantiate_fn(name, args, expected, line)?;
+            return self.call_key(&key, Vec::new(), &args, line);
         }
 
         self.call_key(name, Vec::new(), args, line)
@@ -3604,7 +4039,7 @@ impl Fn<'_> {
         args: &[ast::Expr],
         expected: Option<&Ty>,
         line: Line,
-    ) -> R<String> {
+    ) -> R<(String, Vec<ast::Expr>)> {
         let def = self.generic_fns[name].clone();
         if def.params.len() != args.len() {
             return err(
@@ -3624,8 +4059,24 @@ impl Fn<'_> {
         if let (Some(want), Some(ret)) = (expected, &def.ret) {
             unify(ret, want, &def.generics, &mut env);
         }
-        for ((_, want), arg) in def.params.iter().zip(args) {
+        let mut args = args.to_vec();
+        for ((_, want), arg) in def.params.iter().zip(&mut args) {
             if let Some(got) = self.peek_ty(arg)? {
+                unify(want, &got, &def.generics, &mut env);
+                continue;
+            }
+            // A closure has no type until it is lowered, so lower it now and
+            // give the value a name the rest of the call can use.
+            if let ast::Expr::Closure(cps, cret, body, cline) = arg.clone() {
+                // The bound says what signature is wanted, so a closure need
+                // not write its own types (Ch. 4 §4.1).
+                let hint = self.fn_hint(&def, want)?;
+                let (v, got) = self.closure(&cps, &cret, &body, hint, cline)?;
+                let Operand::Value(slot) = v else {
+                    return err(line, "a closure must have a slot");
+                };
+                let bound = self.bind_existing(slot, got.clone());
+                *arg = ast::Expr::Path(bound, line);
                 unify(want, &got, &def.generics, &mut env);
             }
         }
@@ -3661,7 +4112,7 @@ impl Fn<'_> {
         }
 
         let _ = targs;
-        self.instantiate_with(name, env, line)
+        Ok((self.instantiate_with(name, env, line)?, args))
     }
 
     /// Instantiate a generic function with an environment already worked out,
@@ -3716,6 +4167,11 @@ impl Fn<'_> {
     fn check_bound(&self, ty: &Ty, bound: &str, callee: &str, param: &str, line: Line) -> R<()> {
         // `Copy` is structural and automatic (Ch. 4 §5.1); `Sized` is a fact
         // about the type, not a claim about it (§2.5).
+        // `Fn@…` is the bound an `impl Fn(…)` parameter was given: satisfied
+        // by a closure whose signature is the written one (Ch. 4 §§2.2, 4.3).
+        if let Some(key) = bound.strip_prefix("Fn@") {
+            return self.check_fn_bound(ty, key, callee, param, line);
+        }
         let ok = match bound {
             "Copy" => self.types.is_copyable(ty),
             "Sized" => !ty.is_unsized(),
@@ -4141,6 +4597,26 @@ impl Fn<'_> {
             }
             E::Cast(_, t, _) => Some(self.resolve(t)?),
             E::Call(name, _, _) => self.sigs.borrow().get(name).map(|(_, r)| r.clone()),
+            // Arithmetic keeps its operands' type; a comparison answers a
+            // bool, and `<=>` a trit (Ch. 1 §5).
+            E::Binary(op, a, b, _) => match *op {
+                "==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||" => Some(Ty::Bool),
+                "<=>" => Some(Ty::Trit),
+                _ => match self.peek_ty(a)? {
+                    Some(t) => Some(t),
+                    None => self.peek_ty(b)?,
+                },
+            },
+            E::Unary("!", _, _) => Some(Ty::Bool),
+            E::Unary(_, a, _) => self.peek_ty(a)?,
+            E::Block(b) => match &b.tail {
+                Some(t) => self.peek_ty(t)?,
+                None => Some(Ty::Unit),
+            },
+            E::If(_, then, _, _) => match &then.tail {
+                Some(t) => self.peek_ty(t)?,
+                None => Some(Ty::Unit),
+            },
             E::Method(..) | E::Aggregate(..) => None,
             _ => None,
         })
@@ -4235,6 +4711,243 @@ impl Fn<'_> {
                 Ok((r, Ty::Bool))
             }
         }
+    }
+
+    /// A closure satisfies `impl Fn(A) -> R` when its signature is that one
+    /// and it captures no more strongly than the bound allows (Ch. 4 §4.3).
+    fn check_fn_bound(&self, ty: &Ty, key: &str, callee: &str, param: &str, line: Line) -> R<()> {
+        let (kind, want_params, want_ret) = self.fn_bounds[key].clone();
+        let Some(name) = nominal_name(ty) else {
+            return err(line, format!("`{ty}` is not a closure"));
+        };
+        let Some(info) = self.types.closures.borrow().get(&name).cloned() else {
+            return err(
+                line,
+                format!(
+                    "`{ty}` is not a closure, and `{callee}` wants one for `{param}`; \
+                     a named type implementing `{}` is Ch. 4 §4.3, not implemented",
+                    kind.name()
+                ),
+            );
+        };
+        // `Fn` ⊂ `FnMut` ⊂ `FnOnce`: a closure that writes a capture cannot
+        // be passed where one that only reads is wanted.
+        let rank = |k: ast::FnKind| match k {
+            ast::FnKind::Fn => 0,
+            ast::FnKind::FnMut => 1,
+            ast::FnKind::FnOnce => 2,
+        };
+        if rank(info.kind) > rank(kind) {
+            return err(
+                line,
+                format!(
+                    "this closure is `{}` because it writes a capture, and `{callee}` \
+                     wants `{}` for `{param}` (Ch. 4 §4.3)",
+                    info.kind.name(),
+                    kind.name()
+                ),
+            );
+        }
+        let want_params: Vec<Ty> = want_params
+            .iter()
+            .map(|t| self.resolve(t))
+            .collect::<R<_>>()?;
+        let want_ret = match &want_ret {
+            None => Ty::Unit,
+            Some(t) => self.resolve(t)?,
+        };
+        if info.params != want_params || info.ret != want_ret {
+            return err(
+                line,
+                format!(
+                    "this closure does not have the signature `{callee}` wants for \
+                     `{param}` (Ch. 4 §4.3)"
+                ),
+            );
+        }
+        Ok(())
+    }
+
+    /// Lower a closure expression (Ch. 4 §§4.1–4.4).
+    ///
+    /// It becomes two things: an anonymous struct holding one reference per
+    /// captured place, and an ordinary function whose body is the closure's
+    /// with every capture rewritten to a field of that struct. Neither is
+    /// visible to a program, and everything downstream sees a struct and a
+    /// call.
+    /// The signature a parameter's `Fn@…` bound asks for, if it has one.
+    fn fn_hint(&self, def: &ast::FnItem, want: &ast::Ty) -> R<Option<(Vec<Ty>, Ty)>> {
+        let ast::Ty::Name(pname, _) = want else {
+            return Ok(None);
+        };
+        let Some(ast::GenericParam::Type { bounds, .. }) =
+            def.generics.iter().find(|g| g.name() == pname)
+        else {
+            return Ok(None);
+        };
+        let Some(key) = bounds.iter().find_map(|b| b.strip_prefix("Fn@")) else {
+            return Ok(None);
+        };
+        let (_, ps, r) = self.fn_bounds[key].clone();
+        let ps: Vec<Ty> = ps.iter().map(|t| self.resolve(t)).collect::<R<_>>()?;
+        let r = match &r {
+            None => Ty::Unit,
+            Some(t) => self.resolve(t)?,
+        };
+        Ok(Some((ps, r)))
+    }
+
+    fn closure(
+        &mut self,
+        params: &[(String, Option<ast::Ty>)],
+        ret: &Option<ast::Ty>,
+        body: &ast::Expr,
+        hint: Option<(Vec<Ty>, Ty)>,
+        line: Line,
+    ) -> R<(Operand, Ty)> {
+        // The free names that are locals here are the captures (§4.4).
+        let mut bound: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+        let mut free = Vec::new();
+        free_names(body, &mut bound, &mut free);
+
+        let mut captures: Vec<(String, Ty, bool)> = Vec::new();
+        for n in &free {
+            let Some(local) = self.lookup(n) else {
+                continue;
+            };
+            // By shared reference if it only reads, by exclusive reference if
+            // it writes. Capture by value is §4.3's `FnOnce`, which needs the
+            // move analysis this milestone does not do.
+            let mutable = writes_name(body, n);
+            captures.push((n.clone(), local.ty, mutable));
+        }
+
+        let mut kind = ast::FnKind::Fn;
+        if captures.iter().any(|(_, _, m)| *m) {
+            kind = ast::FnKind::FnMut;
+        }
+
+        // Parameter and result types are written or nothing: inference from
+        // the position a closure appears in is not implemented, and the
+        // diagnostic says so rather than guessing.
+        let mut param_tys: Vec<Ty> = Vec::new();
+        for (i, (n, t)) in params.iter().enumerate() {
+            match (t, hint.as_ref().and_then(|(ps, _)| ps.get(i))) {
+                (Some(t), _) => param_tys.push(self.resolve(t)?),
+                (None, Some(h)) => param_tys.push(h.clone()),
+                (None, None) => {
+                    return err(
+                        line,
+                        format!(
+                            "the type of `{n}` cannot be told from here; write it, as \
+                             `|{n}: t27|` (Ch. 4 §4.1)"
+                        ),
+                    );
+                }
+            }
+        }
+        let ret_ty = match (ret, hint.as_ref()) {
+            (Some(t), _) => self.resolve(t)?,
+            (None, Some((_, r))) => r.clone(),
+            // Nothing in the context says, so read it off the body — which
+            // works for the forms that carry their type plainly.
+            (None, None) => {
+                let saved = self.scopes.len();
+                self.scopes.push(HashMap::new());
+                for ((n, _), t) in params.iter().zip(&param_tys) {
+                    self.declare(n, t.clone(), false);
+                }
+                let guess = self.peek_ty(body)?;
+                self.scopes.truncate(saved);
+                match guess {
+                    Some(t) => t,
+                    None => {
+                        return err(
+                            line,
+                            "the result type of this closure cannot be told from here; \
+                             write it, as `|x: t27| -> t27 { … }` (Ch. 4 §4.1)",
+                        );
+                    }
+                }
+            }
+        };
+        // Written back out, because the synthesized function is an ordinary
+        // one and its parameters are written types like any other.
+        let ps: Vec<(String, ast::Ty)> = params
+            .iter()
+            .zip(&param_tys)
+            .map(|((n, _), t)| (n.clone(), ast::Ty::Name(t.to_string(), line)))
+            .collect();
+
+        self.counter += 1;
+        // A dot, not a `#`: this name reaches TIR and the assembler, and
+        // both accept a dot in an identifier while Trust accepts neither in
+        // one of its own, so it cannot collide with anything a program wrote.
+        let name = format!("{}.closure{}", self.name, self.counter);
+
+        // The capture struct: one reference per capture, in the order found.
+        let fields: Vec<(String, Ty)> = captures
+            .iter()
+            .map(|(n, t, m)| (n.clone(), Ty::Ref(Box::new(t.clone()), *m)))
+            .collect();
+        let ty = self.types.register_struct(&name, fields.clone());
+
+        // The body, as an ordinary function taking the captures by reference.
+        let mut body = body.clone();
+        let capture_names: Vec<String> = captures.iter().map(|(n, ..)| n.clone()).collect();
+        rewrite_captures(&mut body, &capture_names);
+        let mut call_params = vec![(
+            "self".to_string(),
+            ast::Ty::Ref(Box::new(ast::Ty::Name(name.clone(), line)), false, line),
+        )];
+        call_params.extend(ps.clone());
+        let call = format!("{name}.call");
+        let item = ast::FnItem {
+            name: call.clone(),
+            generics: Vec::new(),
+            params: call_params,
+            ret: Some(ast::Ty::Name(ret_ty.to_string(), line)),
+            body: Some(ast::Block {
+                stmts: Vec::new(),
+                tail: Some(Box::new(body)),
+                line,
+            }),
+            line,
+        };
+
+        let mut sig_params = vec![Ty::Ref(Box::new(ty.clone()), false)];
+        sig_params.extend(param_tys.clone());
+        self.sigs
+            .borrow_mut()
+            .insert(call.clone(), (sig_params, ret_ty.clone()));
+        self.extra_fns.borrow_mut().push(item);
+        self.types.closures.borrow_mut().insert(
+            name.clone(),
+            ClosureInfo {
+                call,
+                params: param_tys,
+                ret: ret_ty,
+                kind,
+            },
+        );
+
+        // The value: a struct of borrows of the captured places.
+        let slot = self.temp_slot(&ty);
+        for ((n, _, mutable), (_, ft, off)) in captures.iter().zip(self.types.fields(&ty)) {
+            let place = ast::Expr::Path(n.clone(), line);
+            if let Some(path) = self.path_of(&place) {
+                self.check_access(&path, Access::Borrow(*mutable), line)?;
+                // The loan lives as long as the closure does, which for a
+                // closure that cannot escape is the rest of the scope.
+                // The loan lives as long as the closure does. A closure used
+                // as an argument dies with the statement; one bound by `let`
+                // is extended to its last use, below.
+                self.add_loan(path, *mutable, line);
+            }
+            let (addr, _) = self.place(&place, line)?;
+            self.store_at(&slot, off, &ft, addr, line)?;
+        }
+        Ok((Operand::Value(slot), ty))
     }
 
     /// Call a method through a trait object's vtable (Ch. 4 §§3.1, 3.3).
@@ -5673,6 +6386,10 @@ fn walk_expr(e: &ast::Expr, index: &mut u32, out: &mut HashMap<String, u32>) {
     use ast::Expr as E;
     let go = |x: &ast::Expr, i: &mut u32, o: &mut HashMap<String, u32>| walk_expr(x, i, o);
     match e {
+        // A closure's body is walked in place: its uses of a capture count
+        // as uses at the point the closure is written, and the closure's own
+        // binding extends them to its last use.
+        E::Closure(_, _, body, _) => go(body, index, out),
         E::Path(name, _) => {
             let at = *index;
             out.entry(name.clone())

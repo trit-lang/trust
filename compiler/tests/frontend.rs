@@ -60,7 +60,7 @@ fn hello_world_runs_the_whole_way() {
 fn the_generics_example_runs_the_whole_way() {
     let (status, out) = run(include_str!("../../examples/trust/generics.tr"));
     assert_eq!(status, 19);
-    assert_eq!(out, "18\n20\n");
+    assert_eq!(out, "18\n20\n18\n");
 }
 
 #[test]
@@ -1413,4 +1413,81 @@ fn a_slice_reports_its_length() {
         run("fn main() -> t27 { let a: [t9; 7] = [0; 7]; a.len() as t27 }").0,
         7
     );
+}
+
+// ------------------------------------------------ Chapter 4: closures
+
+#[test]
+fn a_closure_captures_and_is_called() {
+    // Ch. 4 §4.1–4.4: the closure captures `k` by shared reference, and
+    // `map_in_place` is monomorphized for its anonymous type.
+    assert_eq!(
+        run("fn map_in_place(xs: &mut [t27], f: impl Fn(t27) -> t27) { \
+                 let mut i: taddr = 0; \
+                 while i < xs.len() { xs[i] = f(xs[i]); i += 1; } \
+             } \
+             fn main() -> t27 { \
+                 let k: t27 = 3; \
+                 let mut ys: [t27; 3] = [1, 2, 3]; \
+                 map_in_place(&mut ys, |x: t27| x * k); \
+                 ys[0] + ys[1] + ys[2] \
+             }")
+        .0,
+        18
+    );
+    // Types omitted entirely: the bound says what they are (§4.1).
+    assert_eq!(
+        run(
+            "fn twice(f: impl Fn(t27) -> t27, x: t27) -> t27 { f(f(x)) } \
+             fn main() -> t27 { let k: t27 = 2; twice(|x| x + k, 1) }"
+        )
+        .0,
+        5
+    );
+}
+
+#[test]
+fn a_closure_that_writes_a_capture_is_fn_mut() {
+    // §4.3: which trait a closure implements follows from how it uses its
+    // captures, and `FnMut` may not stand in for `Fn`.
+    assert_eq!(
+        run("fn run(f: impl FnMut(t27)) { f(1); f(2); } \
+             fn main() -> t27 { let mut n: t27 = 0; run(|x| n += x); n }")
+        .0,
+        3
+    );
+    let e = error(
+        "fn go(f: impl Fn(t27) -> t27) -> t27 { f(1) } \
+         fn main() -> t27 { let mut n: t27 = 0; go(|x| { n += x; n }) }",
+    );
+    assert!(e.contains("is `FnMut` because it writes a capture"), "{e}");
+}
+
+#[test]
+fn a_captured_place_is_borrowed_for_as_long_as_the_closure_lives() {
+    // §4.4's own example: the capture is subject to Ch. 3 §2.2 unchanged.
+    let src = "struct P { x: t27, y: t27 } \
+               fn use1(f: impl Fn(t27) -> t27) -> t27 { f(1) } \
+               fn main() -> t27 { \
+                   let mut p = P { x: 1, y: 2 }; \
+                   let f = |v: t27| p.x + v; ";
+    let e = error(&format!("{src} p.x = 9; use1(f) }}"));
+    assert!(e.contains("cannot be written to"), "{e}");
+    // And the borrow ends at the closure's last use, not at the end of the
+    // block — Ch. 3 §4.2 applies here too.
+    assert_eq!(
+        run(&format!("{src} let a = use1(f); p.x = 9; a + p.x }}")).0,
+        11
+    );
+}
+
+#[test]
+fn a_closure_cannot_be_returned_and_says_why() {
+    // §4.5: returning one needs `impl Trait` in return position or a `Box`,
+    // and both wait for an allocator.
+    let e = error("fn make() -> impl Fn(t27) -> t27 { |x| x } fn main() -> t27 { 0 }");
+    assert!(e.contains("allocator"), "{e}");
+    // A closure's signature must be the one the bound asks for.
+    let e = error("fn go(f: impl Fn(t27) -> t27) -> t27 { 0 } fn main() -> t27 { go(1) }");
+    assert!(e.contains("is not a closure"), "{e}");
 }
