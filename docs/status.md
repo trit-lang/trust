@@ -53,7 +53,7 @@ spec/                              4 866 lines of specification, 10 documents
 
 core/      2 082 lines  crate trit-core — Bt, Tint, flavors, faults, literals
 compiler/ 23 805 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
-vm/        4 148 lines  crate tritium  — machine, assembler, image format
+vm/        4 566 lines  crate tritium  — machine, assembler, image format, profiler
 docs/
 ├── spec-gaps.md               50 entries: every place the spec was silent or wrong
 └── status.md                  this file
@@ -124,9 +124,9 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | Trust frontend | Ch. 0–3 complete; Ch. 4 complete except generic traits |
 | Backend (TIR → TRISC-27) | works, with a **block-local register allocator** (G8.1: −31% instructions, −51% memory accesses against the frame-slot scheme) and instruction selection that uses the fields the encoding has — immediates, branch displacements, access displacements (G8.6−G8.8: a further −26.0% on HPL). A parameter stays in the register it arrived in where nothing can clobber it, and a function whose values all fit in registers opens no frame. Values crossing a block boundary still spill; no peephole pass |
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
-| `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region |
+| `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6) |
 
-**340 tests, zero clippy warnings, 45 commits.** `scripts/stats.sh`.
+**342 tests, zero clippy warnings, 46 commits.** `scripts/stats.sh`.
 
 ---
 

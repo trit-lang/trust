@@ -872,3 +872,92 @@ fn the_cycle_counter_counts_what_ran_between_two_readings() {
     // And the machine reports what it did.
     assert_eq!(vm.steps(), 7);
 }
+
+#[test]
+fn a_profile_counts_what_ran_and_says_what_kind_it_was() {
+    // The cycle counter answers "how many"; this answers "which". The
+    // distinctions it draws are the ones that are actionable: what an access
+    // is addressed from, what an `alui` is computed from, and whether a
+    // `jal` links.
+    let program = &[
+        // Ten iterations of: one frame store, one frame load, one add.
+        addi(r("sp"), r("zero"), 300), // a stack to store into
+        addi(r("t0"), r("zero"), 10),  // the counter
+        addi(r("t1"), r("zero"), 0),   // the sum
+        // ^loop
+        Inst::Store {
+            width: Width::Word,
+            rs2: r("t0"),
+            rs1: r("sp"),
+            imm: 0,
+        },
+        Inst::Load {
+            width: Width::Word,
+            rd: r("t2"),
+            rs1: r("sp"),
+            imm: 0,
+        },
+        alu(AluOp::Add, r("t1"), r("t1"), r("t2")),
+        addi(r("t0"), r("t0"), -1),
+        Inst::Br3 {
+            rs1: r("t0"),
+            neg: 1,
+            zero: 1,
+            pos: -4,
+        },
+        Inst::Halt { rs1: r("t1") },
+    ];
+    let words: Vec<i128> = program.iter().map(|i| i.encode()).collect();
+    let mut vm = Vm::with_default_memory();
+    vm.load_words(&words);
+    let p = tritium::profile(&mut vm, 1_000_000);
+
+    // 10 + 9 + … + 1 = 55, and the machine stopped of its own accord.
+    assert_eq!(p.stop, Some(Stop::Halted(55)));
+    // Three setup instructions, five per iteration, and the halt.
+    assert_eq!(p.total, 3 + 5 * 10 + 1);
+
+    // One store and one load per iteration, both through `sp`, and nothing
+    // through any other register.
+    assert_eq!(p.by_kind.get("st.word sp"), Some(&10));
+    assert_eq!(p.by_kind.get("ld.word sp"), Some(&10));
+    assert_eq!(p.frame_traffic(), 20);
+    assert_eq!(p.data_traffic(), 0);
+
+    // The three constants and the ten decrements are `alui`, and the profile
+    // separates them: three are computed from `zero` — a constant being
+    // materialized — and ten from a register.
+    assert_eq!(p.by_kind.get("alui.add zero"), Some(&3));
+    assert_eq!(p.by_kind.get("alui.add reg"), Some(&10));
+
+    // Nine branches taken back, one falling out.
+    assert_eq!(p.by_kind.get("br3"), Some(&10));
+
+    // The loop body is five words, executed ten times each, and they are the
+    // hottest thing here.
+    let hot = p.hottest();
+    assert_eq!(
+        &hot[..5].iter().map(|(_, n)| *n).collect::<Vec<_>>(),
+        &[10; 5]
+    );
+    assert!((p.share(10) - 1000.0 / 54.0).abs() < 0.01);
+}
+
+#[test]
+fn a_profile_of_a_program_that_faults_reports_the_fault() {
+    let program = &[
+        addi(r("t0"), r("zero"), 1),
+        alu(AluOp::Div, r("t1"), r("t0"), r("zero")),
+        Inst::Halt { rs1: r("t1") },
+    ];
+    let words: Vec<i128> = program.iter().map(|i| i.encode()).collect();
+    let mut vm = Vm::with_default_memory();
+    vm.load_words(&words);
+    let p = tritium::profile(&mut vm, 1_000_000);
+
+    // The faulting instruction is counted — it ran, and it is the one worth
+    // knowing about — and the halt after it is not.
+    assert_eq!(p.total, 2);
+    assert!(matches!(p.stop, Some(Stop::Fault(FaultCode::DivZero, _))));
+    assert_eq!(p.by_kind.get("alu.div"), Some(&1));
+}

@@ -1041,7 +1041,8 @@ been chosen by reasoning about the code rather than by measuring it, and the
 reasoning picked the hardest of the four items. The half-built instrument was
 already there — G8.2 added `CYCLES` — but nothing had ever decoded the
 instruction stream. A hundred lines of throwaway profiler reordered the whole
-backlog.
+backlog, and is now `tritium profile` and `vm/src/profile.rs` — an instrument
+that is not there does not leave you uninformed, it leaves you confident.
 
 Two things the profile also settled. **Concentration**: 200 words of code are
 64% of execution, so the target is a few hundred instructions, not a program.

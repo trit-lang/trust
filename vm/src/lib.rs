@@ -26,10 +26,12 @@ pub mod asm;
 pub mod image;
 pub mod inst;
 pub mod mem;
+pub mod profile;
 pub mod vm;
 pub mod word;
 
 pub use asm::{AsmError, assemble};
 pub use inst::{AluOp, Inst, Malformed, Reg, Width};
 pub use mem::Memory;
+pub use profile::{Profile, classify, profile};
 pub use vm::{DEFAULT_MEM_SIZE, Io, Stop, Vm, device};

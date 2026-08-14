@@ -84,6 +84,7 @@ trustc compile <file.tr|.tir> [@fn]        the whole way to TRISC-27 assembly
 tritium asm <file.t27> [-o <image>]        assemble source into an image
 tritium run <image> [--mem N]              run a TRISC-27 image
 tritium dump <image>                       disassemble an image
+tritium profile <image>                    run it and report what ran
 ```
 
 The whole pipeline runs, from Trust source to the machine:
