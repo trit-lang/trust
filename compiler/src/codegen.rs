@@ -246,6 +246,134 @@ fn layout(f: &Function, saved: &[&'static str]) -> Frame {
     }
 }
 
+/// An address a load or store can carry in its own displacement field.
+#[derive(Clone)]
+struct Folded {
+    /// What the displacement is measured from.
+    base: Base,
+    /// Trytes from that base.
+    disp: i128,
+}
+
+#[derive(Clone)]
+enum Base {
+    /// The frame, at the storage a `slot` instruction reserved — so the base
+    /// register is `sp`, which is always available and never allocated.
+    Slot(String),
+    /// Another value, which has to be in a register at the access.
+    Value(Operand),
+}
+
+/// The addresses this block computes that its loads and stores can carry
+/// themselves.
+///
+/// `ld` and `st` take a fourteen-trit displacement (TRISC-27 §3.2) and code
+/// generation was leaving it at zero, emitting an `add` for every address it
+/// had already been given a field for. Two shapes produce a foldable address:
+/// `%p = offset %b, const k`, and `%p = slot n`, whose value is a fixed
+/// displacement from `sp`.
+///
+/// Folding drops the address computation entirely, so it is sound only when
+/// **every** use of the value is a pointer operand of an access, and every
+/// one of those is in this block — otherwise something else still needs the
+/// address in a register. There is nothing to preserve about the arithmetic
+/// itself: `offset` performs no bounds reasoning, and leaving an allocation's
+/// provenance is already UB (TIR §§3.4, 4).
+fn block_folds(f: &Function, block: &Block) -> BTreeMap<String, Folded> {
+    // Candidates, before asking how they are used.
+    let mut candidates: BTreeMap<String, Folded> = BTreeMap::new();
+    for inst in &block.insts {
+        let Some(r) = inst.results.first() else {
+            continue;
+        };
+        let found = match &inst.kind {
+            InstKind::Slot { .. } => Some(Folded {
+                base: Base::Slot(r.clone()),
+                disp: 0,
+            }),
+            InstKind::Offset { p, d } => immediate(d).map(|k| Folded {
+                base: Base::Value(p.clone()),
+                disp: k,
+            }),
+            _ => None,
+        };
+        if let Some(fold) = found {
+            candidates.insert(r.clone(), fold);
+        }
+    }
+    if candidates.is_empty() {
+        return candidates;
+    }
+
+    // Every use, counted twice: once for all of them, once for the ones an
+    // access could carry. A candidate survives iff the two agree.
+    let mut all: BTreeMap<String, usize> = BTreeMap::new();
+    let mut foldable: BTreeMap<String, usize> = BTreeMap::new();
+    for b in &f.blocks {
+        let here = b.label == block.label;
+        for inst in &b.insts {
+            if let InstKind::Load { p, .. } | InstKind::Store { p, .. } = &inst.kind
+                && let Operand::Value(n) = p
+                && here
+            {
+                *foldable.entry(n.clone()).or_default() += 1;
+            }
+            operands_of(&inst.kind, &mut |o| {
+                if let Operand::Value(n) = o {
+                    *all.entry(n.clone()).or_default() += 1;
+                }
+            });
+        }
+        terminator_operands(&b.term, &mut |o| {
+            if let Operand::Value(n) = o {
+                *all.entry(n.clone()).or_default() += 1;
+            }
+        });
+    }
+
+    candidates.retain(|name, _| {
+        let n = foldable.get(name).copied().unwrap_or(0);
+        n > 0 && n == all.get(name).copied().unwrap_or(0)
+    });
+    candidates
+}
+
+/// Visit every operand an instruction reads, as the emitter will actually
+/// read it: an access whose address was folded reads the base instead of the
+/// address, and the folded-away computation reads nothing at all.
+fn effective_operands(
+    k: &InstKind,
+    folds: &BTreeMap<String, Folded>,
+    f: &mut impl FnMut(&Operand),
+) {
+    let folded = |p: &Operand| match p {
+        Operand::Value(n) => folds.get(n),
+        _ => None,
+    };
+    match k {
+        InstKind::Load { p, .. } => match folded(p) {
+            Some(Folded {
+                base: Base::Value(b),
+                ..
+            }) => f(b),
+            Some(_) => {}
+            None => f(p),
+        },
+        InstKind::Store { v, p, .. } => {
+            f(v);
+            match folded(p) {
+                Some(Folded {
+                    base: Base::Value(b),
+                    ..
+                }) => f(b),
+                Some(_) => {}
+                None => f(p),
+            }
+        }
+        _ => operands_of(k, f),
+    }
+}
+
 /// Visit every operand an instruction reads.
 fn operands_of(k: &InstKind, f: &mut impl FnMut(&Operand)) {
     match k {
@@ -352,6 +480,9 @@ struct Gen<'a> {
     /// The block emitted after the one being emitted, if any: a branch to it
     /// needs no jump at all.
     next_block: Option<String>,
+    /// Addresses the block's accesses carry in their own displacement, whose
+    /// computations are therefore not emitted at all.
+    folds: BTreeMap<String, Folded>,
     /// Values held in a register for the block being emitted. A value not
     /// here lives in its frame slot, as every value did before there was an
     /// allocator.
@@ -374,6 +505,7 @@ struct Gen<'a> {
 /// Caller-saved registers are preferred where they work, since they cost
 /// nothing to use. What is left in memory is a value another block reads.
 fn allocate(f: &Function, block: &Block) -> BTreeMap<String, &'static str> {
+    let folds = block_folds(f, block);
     // A value another block mentions has to be somewhere both agree on.
     let mut elsewhere: BTreeSet<String> = BTreeSet::new();
     for b in &f.blocks {
@@ -409,7 +541,13 @@ fn allocate(f: &Function, block: &Block) -> BTreeMap<String, &'static str> {
     let mut last: BTreeMap<String, usize> = BTreeMap::new();
     let mut uses: BTreeMap<String, usize> = BTreeMap::new();
     for (i, inst) in block.insts.iter().enumerate() {
-        operands_of(&inst.kind, &mut |o| {
+        // A computation the accesses absorbed emits nothing, so it reads
+        // nothing: counting its operands here would keep a register alive
+        // past the last instruction that actually looks at it.
+        if inst.results.first().is_some_and(|r| folds.contains_key(r)) {
+            continue;
+        }
+        effective_operands(&inst.kind, &folds, &mut |o| {
             if let Operand::Value(v) = o {
                 last.insert(v.clone(), i);
                 *uses.entry(v.clone()).or_default() += 1;
@@ -446,6 +584,9 @@ fn allocate(f: &Function, block: &Block) -> BTreeMap<String, &'static str> {
             }
         });
         for name in &inst.results {
+            if folds.contains_key(name) {
+                continue; // absorbed into the accesses that used it
+            }
             let Some(end) = last.get(name).copied() else {
                 continue; // never used; nothing to keep
             };
@@ -621,6 +762,32 @@ impl Gen<'_> {
         }
     }
 
+    /// The base register and displacement an access should use.
+    ///
+    /// When the address was folded (`block_folds`), the computation that
+    /// would have produced it was never emitted, and the access carries the
+    /// displacement itself.
+    fn address(&mut self, p: &Operand, scratch: &str) -> (String, i128) {
+        let fold = match p {
+            Operand::Value(n) => self.folds.get(n).cloned(),
+            _ => None,
+        };
+        match fold {
+            None => (self.read(p, scratch), 0),
+            Some(Folded {
+                base: Base::Slot(name),
+                disp,
+            }) => {
+                let at = self.slot(&format!("\u{1}storage.{name}"));
+                ("sp".to_string(), at + disp)
+            }
+            Some(Folded {
+                base: Base::Value(b),
+                disp,
+            }) => (self.read(&b, scratch), disp),
+        }
+    }
+
     /// Store a result to its slot, unless it lives in a register.
     fn write(&mut self, name: &str, reg: &str) {
         if self.regs.contains_key(name) {
@@ -680,6 +847,7 @@ fn emit_function<'a>(
         here: 0,
         offsets: offsets.clone(),
         next_block: None,
+        folds: BTreeMap::new(),
     };
 
     let name = f.sig.name.clone();
@@ -717,6 +885,7 @@ fn emit_function<'a>(
         // One allocation per block: a value that escapes it stays in its
         // frame slot, which is where every value used to live.
         g.regs = allocate(f, b);
+        g.folds = block_folds(f, b);
         let label = g.block_label(&b.label);
         g.offsets.insert(b.label.clone(), g.here);
         g.label(label);
@@ -752,6 +921,14 @@ fn epilogue(g: &mut Gen, calls: bool) {
 }
 
 fn emit_inst(g: &mut Gen, inst: &Inst, _calls: bool) {
+    // An address the accesses that use it absorbed needs no instruction.
+    if inst
+        .results
+        .first()
+        .is_some_and(|r| g.folds.contains_key(r))
+    {
+        return;
+    }
     match &inst.kind {
         InstKind::Flavored {
             op,
@@ -857,10 +1034,10 @@ fn emit_inst(g: &mut Gen, inst: &Inst, _calls: bool) {
         }
 
         InstKind::Load { ty, p } => {
-            let rp = g.read(p, "t0");
+            let (rp, disp) = g.address(p, "t0");
             let width = access_width(g, *ty);
             let rd = g.dest(inst.results.first(), "t2");
-            g.line(format!("ld.{width} {rd}, 0({rp})"));
+            g.line(format!("ld.{width} {rd}, {disp}({rp})"));
             if let Some(r) = inst.results.first() {
                 g.write(r, &rd);
             }
@@ -868,9 +1045,9 @@ fn emit_inst(g: &mut Gen, inst: &Inst, _calls: bool) {
 
         InstKind::Store { ty, v, p } => {
             let rv = g.read(v, "t1");
-            let rp = g.read(p, "t0");
+            let (rp, disp) = g.address(p, "t0");
             let width = access_width(g, *ty);
-            g.line(format!("st.{width} {rv}, 0({rp})"));
+            g.line(format!("st.{width} {rv}, {disp}({rp})"));
         }
 
         // Address arithmetic is ordinary addition; there is no GEP to lower.

@@ -37,7 +37,7 @@ them; a number nobody can reproduce quietly withdraws this document's opening
 claim.
 
 ```
-spec/                              4 781 lines of specification, 10 documents
+spec/                              4 866 lines of specification, 10 documents
 ├── 00-abstract-machine.md   304   the AM: trits, trytes, words, arithmetic, faults
 ├── 01-naming.md             191   names, radix notation, document conventions
 ├── 01-types.md              277   Ch. 1 — scalars, operators, overflow flavors
@@ -52,7 +52,7 @@ spec/                              4 781 lines of specification, 10 documents
     └── assembly-0.1.md      513   the assembly language
 
 core/      2 082 lines  crate trit-core — Bt, Tint, flavors, faults, literals
-compiler/ 20 112 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
+compiler/ 23 123 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
 vm/        4 148 lines  crate tritium  — machine, assembler, image format
 docs/
 ├── spec-gaps.md               50 entries: every place the spec was silent or wrong
@@ -121,11 +121,11 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | TIR legalization | promotion complete; **expansion complete**: `add`, `sub`, `mul`, `div`, `rem`, `shl`/`shr` by a constant, `neg`, `cmp`, `tmin`/`tmax`/`tmul`, `select3`, wide loads and stores, and wide values across a function boundary — a real Trust program legalizes for a nine-trit machine and computes the same answers (G6.11). `mul` expands (G6.6 closed — TIR §3.1 gained `mulh`), and so do `shl` and `shr` by a **constant** amount (G6.12); `div` and `rem` become a call to a helper written in TIR (G6.13). A wide value crosses a function boundary as its parts, with a wide result through a hidden pointer (G6.5). What is left: a shift by a *computed* amount |
 | Layout engine (Ch. 2) | complete: sizes, alignments, offsets, both `repr`s, discriminants, niche optimization |
 | Trust frontend | Ch. 0–3 complete; Ch. 4 complete except generic traits |
-| Backend (TIR → TRISC-27) | works, with a **block-local register allocator**: 31% fewer instructions and 51% fewer memory accesses than the frame-slot scheme it replaced (G8.1). Values crossing a block boundary or a call still spill; no peephole pass, no canonicalizer |
+| Backend (TIR → TRISC-27) | works, with a **block-local register allocator** (G8.1: −31% instructions, −51% memory accesses against the frame-slot scheme) and instruction selection that uses the fields the encoding has — immediates, branch displacements, access displacements (G8.6: a further −19.7% on HPL). Values crossing a block boundary still spill; no peephole pass, no canonicalizer |
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region |
 
-**302 tests, zero clippy warnings, 24 commits.** `scripts/stats.sh`.
+**333 tests, zero clippy warnings, 43 commits.** `scripts/stats.sh`.
 
 ---
 
@@ -162,7 +162,7 @@ inference and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
 | generic traits, `From`/`Into` | see below — the one substantial hole in Ch. 4 |
 | modules, `use`, `pub`, multiple files | reserved in Ch. 0 §1.3 |
 | `unsafe`, raw pointers, `?` | reserved |
-| values kept in registers across a **block boundary** | the allocator is block-local (G8.1). Across a *call* they are held in `s0`…`s6` when used more than once, which is measured at −7.3% instructions where it applies and neutral where it does not (G8.3) |
+| values kept in registers across a **block boundary** | the allocator is block-local (G8.1), and stack traffic is still 34.9% of everything HPL executes — 2.4× its real data traffic, and the largest single pool left (G8.6). Across a *call* a value is held in `s0`…`s6` when used more than once, which is measured at −7.3% instructions where it applies and neutral where it does not (G8.3) |
 
 **Generic traits** are the one substantial hole. Two things stand in the way
 and both must arrive together: a type may implement `trait From<T>` many
@@ -368,12 +368,13 @@ propagates. Everything it rests on is now defined, and writing the spec ahead
 of the implementation has repeatedly reduced the number of decisions made
 blind.
 
-**B. Backend quality.** A register allocator is the biggest single win —
-every value currently lives in a stack slot, so the generated code is
-correct and embarrassing. Then a peephole pass, a TIR canonicalizer, and
-expansion for `div`/`rem`/shifts. Expansion is complete except for a shift by a computed amount. What is left
-of the backend is a register allocator, a peephole pass and a TIR
-canonicalizer.
+**B. Backend quality.** **Cross-block register allocation** is the biggest
+single win left, and it is now a measured claim rather than an intuition:
+stack traffic is 34.9% of everything HPL executes, against 14.4% for the
+program's real data (G8.6). After it, a TIR canonicalizer — target-independent
+optimization is a slot TIR §6 names and nothing occupies — carrying index
+strength reduction and bounds-check elimination, and a peephole pass over the
+assembly. Expansion is complete except for a shift by a computed amount.
 
 **C. Generic traits.** §6 above says what it needs. It closes Ch. 4 and
 unblocks `From`/`Into`.

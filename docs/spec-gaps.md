@@ -1006,6 +1006,49 @@ instructions and false of memory, so it now says which. This is Naming §6's
 sweep rule failing in the direction it always fails — the document being
 edited was §2.2, and §6.4 was three sections away.
 
+**G8.6 — instruction selection was leaving three fields empty, and a profile
+said so.** `docs/status.md` named cross-block register allocation as the next
+backend work. A dynamic profile of `examples/trust/HPL.tr` — every instruction
+decoded before it executed, 10 862 143 of them — said otherwise:
+
+| | share of all executed |
+|---|---|
+| `ld`/`st` through `sp` | 34.9% |
+| `li` and nothing else (`alui.add` from `zero`) | 12.9% |
+| `ld`/`st` through a computed address | 14.4% |
+| unconditional jumps | 7.5% |
+| `br3` | 6.1% |
+
+Three of those are fields the encoding already had and code generation was
+not using:
+
+1. **The immediate field.** Every operation but `wrap` has an `i` form
+   (TRISC-27 §4.1) reaching ±2 391 484, and a constant operand was going
+   through `li` into a scratch register instead. **−10.3%.**
+2. **The branch displacements.** `br3` carries three of ±1093 words, and all
+   three were pointing at adjacent stubs holding one jump each — which is why
+   the jump count and the branch count differed by six. **−7.6%**, and 88% of
+   the unconditional jumps.
+3. **The access displacement.** `ld` and `st` carry fourteen trits, left at
+   zero, so every address was computed with an `add` first. **−3.2%**, and
+   47% of the *lines of assembly*.
+
+Together **−19.7%**, all inside `compiler/src/codegen.rs`, no specification
+touched, and the four residual checks byte-identical at every step.
+
+What is worth recording is not the number but the mistake: the next task had
+been chosen by reasoning about the code rather than by measuring it, and the
+reasoning picked the hardest of the four items. The half-built instrument was
+already there — G8.2 added `CYCLES` — but nothing had ever decoded the
+instruction stream. A hundred lines of throwaway profiler reordered the whole
+backlog.
+
+Two things the profile also settled. **Concentration**: 200 words of code are
+64% of execution, so the target is a few hundred instructions, not a program.
+And **the stack traffic is 2.4× the real data traffic**, which is the case for
+cross-block allocation — still the largest single pool, and now the next item
+rather than the first.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

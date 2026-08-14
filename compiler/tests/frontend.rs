@@ -2248,11 +2248,14 @@ fn a_constant_may_be_an_arrays_length() {
 }
 
 #[test]
-fn a_value_used_after_a_call_survives_in_a_callee_saved_register() {
-    // TRISC-27 §6.1: `s0`…`s6` survive a call, at the cost of a save in the
-    // prologue and a restore in the epilogue. A value read more than once
-    // after a call earns that; a value read once does not, which was
-    // measured rather than assumed (G8.3).
+fn a_local_is_reached_through_the_frame_pointer_and_not_an_address_register() {
+    // A `let` is storage, and every read of it is a load. Code generation
+    // used to compute the storage's address into a register first — one
+    // `addi` per local, kept alive across everything that read it, and across
+    // any call in between, which is what used to earn `s0`…`s6` here. `ld`
+    // and `st` carry a fourteen-trit displacement of their own (TRISC-27
+    // §3.2), so the address is folded into each access and the register is
+    // never needed.
     let m = tir_of(
         "fn f(x: t27) -> t27 { x * 3 + 1 } \
          fn work() -> t27 { \
@@ -2267,11 +2270,28 @@ fn a_value_used_after_a_call_survives_in_a_callee_saved_register() {
 
     let start = asm.find("f.work:").expect("the function");
     let body = &asm[start..asm[start..].find("\n\n").map_or(asm.len(), |i| start + i)];
-    // If a saved register is used it is saved and restored exactly once each.
-    let saved = body.matches("st.word s").count();
-    let restored = body.matches("ld.word s").count();
-    assert_eq!(saved, restored, "every save has its restore:\n{body}");
-    assert!(saved > 0, "a value read three times across a call:\n{body}");
+    // Every access to a local names `sp` directly.
+    assert!(body.contains("(sp)"), "{body}");
+    // The only `addi` on `sp` is the frame, twice: opening and closing it.
+    assert_eq!(
+        body.matches("addi.trap sp, sp,").count(),
+        2,
+        "no address of a local is computed:\n{body}"
+    );
+    // And with no address to keep, no callee-saved register is spent.
+    assert_eq!(body.matches("st.word s").count(), 0, "{body}");
+
+    // The answer is unchanged: 7·22 + 9·22 + 63.
+    assert_eq!(
+        run("fn f(x: t27) -> t27 { x * 3 + 1 } \
+         fn main() -> t27 { \
+             let a: t27 = 7; let b: t27 = 9; \
+             let r = f(1); \
+             a * r + b * r + a * b \
+         }")
+        .0,
+        7 * 4 + 9 * 4 + 63
+    );
 }
 
 #[test]

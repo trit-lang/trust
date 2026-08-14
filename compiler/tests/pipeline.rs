@@ -536,3 +536,131 @@ fn @far(%x: t27) -> t27 {{
     // that does not reach is an error there, not a slower program here.
     differential(&far, "far", &[&[-1], &[0], &[1]]);
 }
+
+#[test]
+fn a_value_read_more_than_once_across_a_call_earns_a_saved_register() {
+    // TRISC-27 §6.1: `s0`…`s6` survive a call, at the cost of a save in the
+    // prologue and a restore in the epilogue — once per invocation, while a
+    // spill costs once per use. So the allocator takes one only for a value
+    // used more than once, which was measured rather than assumed (G8.3):
+    // handing one to every call-crossing value made a benchmark 6% slower.
+    //
+    // The rule belongs to code generation, so it is stated in code
+    // generation's own input language. From Trust source a local is storage,
+    // and its reads are loads that carry their own displacement.
+    let src = r#"tir 0.1 target "tritium"
+
+fn @twice(%x: t27) -> t27 {
+^entry:
+    %r = mul.wrap t27 %x, const t27 2
+    ret %r
+}
+
+fn @thrice(%a: t27) -> t27 {
+^entry:
+    %b = call @twice(%a) -> t27
+    %c = call @twice(%b) -> t27
+    %d = mul.wrap t27 %b, %c
+    %e = add.wrap t27 %d, %b
+    ret %e
+}
+
+fn @once(%a: t27) -> t27 {
+^entry:
+    %b = call @twice(%a) -> t27
+    %c = call @twice(%a) -> t27
+    %d = mul.wrap t27 %b, %c
+    ret %d
+}
+"#;
+    let asm = compile_asm(src, "thrice");
+
+    // `%b` is read three times, and a call falls between its definition and
+    // its last read.
+    let thrice = body_of(&asm, "thrice");
+    let saved = thrice.matches("st.word s").count();
+    assert!(
+        saved > 0,
+        "a value read three times across a call:\n{thrice}"
+    );
+    assert_eq!(
+        saved,
+        thrice.matches("ld.word s").count(),
+        "every save has its restore:\n{thrice}"
+    );
+
+    // `%b` and `%c` are read once each; neither is worth a save and a
+    // restore, which cost more than the one spill they would replace.
+    let once = body_of(&asm, "once");
+    assert_eq!(
+        once.matches("st.word s").count(),
+        0,
+        "a value read once does not earn one:\n{once}"
+    );
+
+    for entry in ["thrice", "once"] {
+        differential(src, entry, &[&[0], &[1], &[-5], &[1000]]);
+    }
+}
+
+#[test]
+fn an_access_carries_its_own_displacement() {
+    // `ld` and `st` have a fourteen-trit displacement field (TRISC-27 §3.2)
+    // and code generation was leaving it at zero, emitting an `add` for every
+    // address the encoding already had room for. Two shapes fold: `slot`,
+    // whose value is a fixed displacement from `sp`, and `offset` by a
+    // constant.
+    let src = r#"tir 0.1 target "tritium"
+
+fn @frame(%x: t27) -> t27 {
+^entry:
+    %p = slot tryte[9]
+    store t27 %x, %p
+    %q = offset %p, const t27 3
+    store t27 const t27 5, %q
+    %a = load t27 %p
+    %b = load t27 %q
+    %r = add.wrap t27 %a, %b
+    ret %r
+}
+
+fn @escapes(%x: t27) -> t27 {
+^entry:
+    %p = slot tryte[9]
+    store t27 %x, %p
+    %r = call @reads(%p) -> t27
+    ret %r
+}
+
+fn @reads(%p: ptr) -> t27 {
+^entry:
+    %v = load t27 %p
+    ret %v
+}
+"#;
+    let asm = compile_asm(src, "frame");
+
+    // Nothing computes an address: every access names `sp` and its own
+    // displacement, and the frame is opened and closed once each.
+    let frame = body_of(&asm, "frame");
+    assert_eq!(
+        frame.matches("addi.trap sp, sp,").count(),
+        2,
+        "an address was computed:\n{frame}"
+    );
+    assert!(!frame.contains(", 0(sp)"), "a zero displacement:\n{frame}");
+
+    // An address that escapes the block — here into a call — still has to be
+    // computed, because something other than an access needs it.
+    let escapes = body_of(&asm, "escapes");
+    assert!(
+        escapes
+            .lines()
+            .any(|l| l.trim_start().starts_with("addi.trap") && !l.contains("addi.trap sp,")),
+        "an address a call takes must exist:\n{escapes}"
+    );
+
+    for entry in ["frame", "escapes"] {
+        differential(src, entry, &[&[0], &[7], &[-7], &[1_000_000]]);
+    }
+}
