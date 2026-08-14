@@ -215,8 +215,11 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
     };
     let target = tir::TargetDesc::tritium();
 
-    // The backend consumes legalized TIR only, so the pipeline runs the
-    // mandatory pass itself rather than trusting its input (TIR §6).
+    // TIR §6's pipeline: target-independent optimization, then the mandatory
+    // legalization stage, then instruction selection. The backend consumes
+    // legalized TIR only, so this runs the pass itself rather than trusting
+    // its input.
+    let module = tir::canonicalize_module(&module);
     let legalized = tir::legalize_module(&module, &target).map_err(|errs| {
         let mut msg = format!("{} instruction(s) could not be legalized:", errs.len());
         for e in &errs {

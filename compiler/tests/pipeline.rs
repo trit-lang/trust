@@ -42,6 +42,10 @@ fn interpret(m: &tir::Module, entry: &str, args: &[i128]) -> Outcome {
 
 /// Run through the whole pipeline on the machine.
 fn compile_and_run(m: &tir::Module, entry: &str, args: &[i128]) -> Outcome {
+    // The machine side runs TIR §6's whole pipeline; the oracle above runs
+    // the module as written. So a canonicalization that changes an answer
+    // shows up here, in every one of these tests.
+    let m = &tir::canonicalize_module(m);
     let legalized = tir::legalize_module(m, &TargetDesc::tritium())
         .unwrap_or_else(|e| panic!("legalization failed: {e:?}"));
     assert!(
@@ -86,7 +90,7 @@ fn differential(src: &str, entry: &str, cases: &[&[i128]]) {
 /// what the program wrote. There is no linker (TRISC-27 §8), so "linking" is
 /// concatenation.
 fn compile_link_and_run(src: &str, entry: &str) -> (i128, String) {
-    let m = parse(src);
+    let m = tir::canonicalize_module(&parse(src));
     let legalized = tir::legalize_module(&m, &TargetDesc::tritium())
         .unwrap_or_else(|e| panic!("legalization failed: {e:?}"));
     let mut asm = codegen::compile(&legalized, entry)
@@ -343,7 +347,7 @@ fn @dispatch(%which: t27, %x: t27) -> t27 {
 /// The assembly a module compiles to, for tests about the shape of the code
 /// rather than the answer it gives.
 fn compile_asm(src: &str, entry: &str) -> String {
-    let m = parse(src);
+    let m = tir::canonicalize_module(&parse(src));
     let legalized = tir::legalize_module(&m, &TargetDesc::tritium())
         .unwrap_or_else(|e| panic!("legalization failed: {e:?}"));
     codegen::compile(&legalized, entry).unwrap_or_else(|e| panic!("code generation failed: {e:?}"))

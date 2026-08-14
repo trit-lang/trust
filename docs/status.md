@@ -52,7 +52,7 @@ spec/                              4 866 lines of specification, 10 documents
     └── assembly-0.1.md      513   the assembly language
 
 core/      2 082 lines  crate trit-core — Bt, Tint, flavors, faults, literals
-compiler/ 23 123 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
+compiler/ 23 714 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
 vm/        4 148 lines  crate tritium  — machine, assembler, image format
 docs/
 ├── spec-gaps.md               50 entries: every place the spec was silent or wrong
@@ -118,14 +118,15 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | `trit-core` | complete: arbitrary-precision balanced ternary, width-typed `tN`, three overflow flavors, the AM's five fault codes, three-radix literals |
 | TIR data structures, text format, verifier | complete, round-trips |
 | TIR reference interpreter | complete, with provenance-tracking pointers and a function-address space |
+| TIR canonicalization | `promote_slots` only: a `slot` never escaping one block becomes the value it holds, which is the shape `lower.rs` emits for every parameter (G8.7). TIR §6's target-independent optimization stage, newly occupied |
 | TIR legalization | promotion complete; **expansion complete**: `add`, `sub`, `mul`, `div`, `rem`, `shl`/`shr` by a constant, `neg`, `cmp`, `tmin`/`tmax`/`tmul`, `select3`, wide loads and stores, and wide values across a function boundary — a real Trust program legalizes for a nine-trit machine and computes the same answers (G6.11). `mul` expands (G6.6 closed — TIR §3.1 gained `mulh`), and so do `shl` and `shr` by a **constant** amount (G6.12); `div` and `rem` become a call to a helper written in TIR (G6.13). A wide value crosses a function boundary as its parts, with a wide result through a hidden pointer (G6.5). What is left: a shift by a *computed* amount |
 | Layout engine (Ch. 2) | complete: sizes, alignments, offsets, both `repr`s, discriminants, niche optimization |
 | Trust frontend | Ch. 0–3 complete; Ch. 4 complete except generic traits |
-| Backend (TIR → TRISC-27) | works, with a **block-local register allocator** (G8.1: −31% instructions, −51% memory accesses against the frame-slot scheme) and instruction selection that uses the fields the encoding has — immediates, branch displacements, access displacements (G8.6: a further −19.7% on HPL). Values crossing a block boundary still spill; no peephole pass, no canonicalizer |
+| Backend (TIR → TRISC-27) | works, with a **block-local register allocator** (G8.1: −31% instructions, −51% memory accesses against the frame-slot scheme) and instruction selection that uses the fields the encoding has — immediates, branch displacements, access displacements (G8.6: a further −19.7% on HPL). Values crossing a block boundary still spill; no peephole pass |
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region |
 
-**333 tests, zero clippy warnings, 43 commits.** `scripts/stats.sh`.
+**339 tests, zero clippy warnings, 44 commits.** `scripts/stats.sh`.
 
 ---
 

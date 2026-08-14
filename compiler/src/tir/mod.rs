@@ -4,6 +4,7 @@
 //! repository's frontend and its backends, and may change without deprecation
 //! in any release.
 
+pub mod canon;
 pub mod interp;
 pub mod ir;
 pub mod legalize;
@@ -11,6 +12,7 @@ pub mod target;
 pub mod text;
 pub mod verify;
 
+pub use canon::{canonicalize_module, promote_slots};
 pub use interp::{Halt, Interp, Val};
 pub use ir::*;
 pub use legalize::{LegalizeError, legalize_module};

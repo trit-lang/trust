@@ -1049,6 +1049,60 @@ And **the stack traffic is 2.4× the real data traffic**, which is the case for
 cross-block allocation — still the largest single pool, and now the next item
 rather than the first.
 
+**G8.7 — the optimizer that did not exist.** `lang/lower.rs` opens by saying
+that every local gets a `slot` — a read is a `load`, a write is a `store` —
+because TIR is SSA and a mutable local is not, and that "the cost is real and
+is paid back by the optimizer that does not exist yet". TIR §6 names where
+that optimizer goes: legalization sits "between **target-independent
+optimization** and instruction selection". The stage on the left of that
+sentence had never been built.
+
+`compiler/src/tir/canon.rs` is it, with one transformation to start:
+`promote_slots` turns a `slot` whose every use is a `load` or `store` through
+it, all within one block, into the value it holds.
+
+**One block** is the restriction that keeps this from being SSA construction.
+A slot written in one block and read in another needs a value along each
+edge, which is block parameters and correct placement of them; within a
+block, the value at each load is unambiguously the last thing stored above
+it. The restriction is narrower than the shape it catches, because the
+shape the frontend emits most is a **parameter** — which arrives as an SSA
+value, is stored into a slot, and is read back:
+
+```
+%pa = slot tryte[3]     st.word a0, 3(sp)      ld.word t0, 3(sp)
+store t27 %a, %pa   →   ld.word t1, 3(sp)  →   ld.word t1, 6(sp)
+%v = load t27 %pa       st.word t1, 42(sp)     mulh    a7, t0, t1
+%w = load t27 %pa       ld.word a7, 42(sp)
+```
+
+`@fmul` in `examples/trust/HPL.tr` went from 18 machine instructions to 14.
+
+Promotion is refused when the address can be observed: passed to a call,
+given to an `offset`, stored as a value, accessed from another block,
+accessed at two different types, or read before it is written — the last
+because reading uninitialized `slot` storage is UB and yields poison (TIR §4
+item 4), and a pass is not the place to decide what poison is.
+
+**What the test suite caught.** A first version renamed only inside the
+promoted block, and a deleted load's *result* is often named in the blocks
+below it. Three frontend tests failed with `%v.2 is not defined in this
+function` — the verifier, doing exactly its job. The renaming is function-wide
+and sound there: a block naming the result is dominated by the block that
+defined it, and the value stored dominates everything the result did.
+
+The pass is now in the path of every whole-program test: `frontend.rs` and
+`pipeline.rs` canonicalize before legalizing, so the differential invariant
+runs the module *as written* on the interpreter against the *canonicalized*
+module on the machine. A canonicalization that changed an answer would fail
+about a hundred tests. `compiler/tests/canon.rs` adds six that ask directly
+what it promotes and what it refuses.
+
+Measured on `examples/trust/HPL.tr`: 8 719 102 → 8 496 620 dynamic
+instructions (−2.6%), output unchanged. Small statically — 66 lines — and
+larger dynamically, because what it promotes is in the leaf functions the
+inner loop calls.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The
