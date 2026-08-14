@@ -1995,3 +1995,131 @@ fn known_limit_diagnostics_print_mangled_names() {
     );
     assert!(e.contains("Pair.t27.t9"), "{e}");
 }
+
+// ------------------------------------------------- the drop ledger
+//
+// Ch. 3 §1.1 gives every value exactly one owner and Ch. 3 §1.4 exactly one
+// drop. Nothing in draft 0.1 owns a resource (§1.5), so a value dropped
+// twice or never releases the same nothing and no ordinary test can see it —
+// which is how three of these got in.
+//
+// This is the resource the language does not have: a destructor that prints,
+// and an assertion on the exact sequence. Every construct that can own a
+// value belongs in the table below. When you add one, add a row; if you
+// cannot say what the output should be, that is the bug.
+
+/// Declarations shared by every ledger case.
+const LEDGER: &str = "fn putchar(c: t9); \
+     struct P { id: t9 } impl Drop for P { fn drop(self) { putchar(self.id); } } \
+     struct Pair { a: P, b: P } struct Wrap<T> { v: T } \
+     enum Slot { Empty, Held(P) } \
+     fn eat(p: P) { } fn make(n: t9) -> P { P { id: n } } ";
+
+#[track_caller]
+fn ledger(what: &str, body: &str, want: &str) {
+    let (_, out) = run(&format!("{LEDGER} fn main() -> t27 {{ {body} }}"));
+    assert_eq!(out, want, "{what}");
+}
+
+#[test]
+fn every_owner_drops_exactly_once() {
+    // Storage.
+    ledger("a local", "let a = P { id: 65 }; 0", "A");
+    ledger(
+        "a nested scope",
+        "{ let a = P{id:65}; } let b = P{id:66}; 0",
+        "AB",
+    );
+    ledger(
+        "a struct field",
+        "let s = Pair { a: P{id:65}, b: P{id:66} }; 0",
+        "AB",
+    );
+    ledger(
+        "an array element",
+        "let xs: [P; 2] = [P{id:65}, P{id:66}]; 0",
+        "AB",
+    );
+    ledger(
+        "a tuple field",
+        "let t: (P, P) = (P{id:65}, P{id:66}); 0",
+        "AB",
+    );
+    ledger("an enum payload", "let s = Slot::Held(P{id:65}); 0", "A");
+    ledger(
+        "an Option payload",
+        "let o = Option::Some(P{id:65}); 0",
+        "A",
+    );
+    ledger(
+        "a generic field",
+        "let w: Wrap<P> = Wrap { v: P{id:65} }; 0",
+        "A",
+    );
+
+    // Moves: the value goes with the move and is dropped once, there.
+    ledger("moved into a function", "let a = P{id:65}; eat(a); 0", "A");
+    ledger("returned from a function", "let a = make(65); 0", "A");
+    ledger(
+        "moved out of a match arm",
+        "let s = Slot::Held(P{id:65}); \
+         match s { Slot::Held(p) => eat(p), Slot::Empty => (), } 0",
+        "A",
+    );
+    ledger(
+        "moved on one branch only",
+        "let a = P{id:65}; if 1 > 0 { eat(a); } 0",
+        "A",
+    );
+
+    // Overwriting: the value being replaced is going away, and it has one
+    // drop to spend. Draft 0.1 stored over it and leaked.
+    ledger(
+        "assignment over a local",
+        "let mut a = P{id:65}; a = P{id:66}; 0",
+        "AB",
+    );
+    ledger(
+        "assignment over a field",
+        "let mut s = Pair { a: P{id:65}, b: P{id:66} }; s.a = P{id:67}; 0",
+        "ACB",
+    );
+    // Shadowing: two bindings, two drops, reverse order of declaration.
+    // Draft 0.1 resolved both entries to the second binding — a double free
+    // and a leak in one line.
+    ledger("shadowing", "let a = P{id:65}; let a = P{id:66}; 0", "BA");
+
+    // Leaving a scope early is still leaving it.
+    ledger(
+        "early return",
+        "let a = P{id:65}; if 1 > 0 { return 0; } 0",
+        "A",
+    );
+    ledger(
+        "break out of a loop",
+        "loop { let a = P{id:65}; break; } 0",
+        "A",
+    );
+    ledger(
+        "break from a scope inside a loop",
+        "loop { let a = P{id:65}; { let b = P{id:66}; break; } } 0",
+        "BA",
+    );
+    ledger(
+        "continue past a local",
+        "let mut i: t27 = 0; while i < 2 { let a = P{id:65}; i += 1; continue; } 0",
+        "AA",
+    );
+    ledger(
+        "one local per iteration",
+        "let mut i: t27 = 0; while i < 2 { let a = P{id:65}; i += 1; } 0",
+        "AA",
+    );
+
+    // Destructors nest, and run before the fields they own.
+    ledger(
+        "a destructor and then its fields",
+        "let s = Pair { a: P{id:65}, b: P{id:66} }; 0",
+        "AB",
+    );
+}

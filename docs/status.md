@@ -268,6 +268,14 @@ The front half has two other checks and needs both:
   the regression test is an output assertion or a rejection — never a
   differential one.
 
+**2a. The drop ledger.** `every_owner_drops_exactly_once` enumerates every
+construct that can own a value and asserts the exact sequence a run prints.
+It exists because Ch. 3 §1.5 gives the language no resources, so a value
+dropped twice or never releases the same nothing and no ordinary test can see
+it — which is how six drop bugs got in, three found by review and three by
+this table on its first run. **Add a row before you add a feature test.** If
+you cannot say what the output should be, that is the bug.
+
 **2. `docs/spec-gaps.md` is not optional.** Every place the specification is
 silent gets an entry: what was ambiguous, what was decided, and why. 45
 entries. When you decide something the spec did not, write it down there in
@@ -419,6 +427,7 @@ pointed the wrong way, about a memory-safety hole.
 | a returned borrow is rooted syntactically | `known_limit_a_returned_borrow_is_rooted_syntactically` |
 | a closure captures by variable, not by place | `known_limit_a_closure_captures_by_variable_not_by_place` |
 | ownership is per local, not per place | `per_local_ownership_rejects_two_programs_that_are_legal` |
+| every owner drops exactly once | `every_owner_drops_exactly_once` (the ledger, §8.2a) |
 | diagnostics print mangled names | `known_limit_diagnostics_print_mangled_names` |
 
 **Two of these are one thing.** *A generic body is checked at instantiation*

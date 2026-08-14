@@ -2688,7 +2688,12 @@ struct Fn<'a> {
     scopes: Vec<HashMap<String, Local>>,
     loops: Vec<LoopCtx>,
     /// Ownership of every local that has a destructor, innermost last.
-    owned: Vec<(String, Owns, usize)>,
+    ///
+    /// Each entry carries the storage it will drop, not just a name to look
+    /// up later: two bindings may share a name, and only the newest is
+    /// reachable. Draft 0.1 stored names and resolved them at scope exit, so
+    /// a shadowed binding leaked and its shadower was dropped twice.
+    owned: Vec<Owned>,
     /// Live borrows, and the statement each dies after (Ch. 3 §4.2).
     loans: Vec<Loan>,
     /// The statement being lowered, numbered in traversal order.
@@ -2715,10 +2720,31 @@ struct Fn<'a> {
     done: bool,
 }
 
+/// One value a scope is responsible for dropping.
+#[derive(Clone)]
+struct Owned {
+    /// The name it was bound to, for `mark_moved` and `ownership`. Only the
+    /// last entry with a given name is reachable by that name.
+    name: String,
+    /// Its storage, which is unique even when the name is not.
+    slot: String,
+    /// Its type, which decides the glue.
+    ty: Ty,
+    /// The flag that decides at run time, where a branch left it undecided.
+    drop_flag: Option<String>,
+    /// Whether it is still owned here.
+    owns: Owns,
+    /// The scope it belongs to.
+    depth: usize,
+}
+
 #[derive(Clone)]
 struct LoopCtx {
     /// Where `break` goes.
     exit: String,
+    /// The scope depth the body opened at: `break` and `continue` leave
+    /// every scope from here inwards, and must drop what those own.
+    depth: usize,
     /// Where `continue` goes.
     head: String,
     /// The slot a `break` with a value writes to.
@@ -2964,16 +2990,22 @@ impl Fn<'_> {
             let one = Operand::Const(Type::Int(1), Bt::from_i128(1));
             let flag = flag.clone();
             self.store_slot(&flag, &Ty::Bool, one);
-            self.owned
-                .push((name.to_string(), Owns::Yes, self.scopes.len() - 1));
+            self.owned.push(Owned {
+                name: name.to_string(),
+                slot: local.slot.clone(),
+                ty: local.ty.clone(),
+                drop_flag: local.drop_flag.clone(),
+                owns: Owns::Yes,
+                depth: self.scopes.len() - 1,
+            });
         }
         local
     }
 
     /// Record that a place was moved out of (Ch. 3 §1.2).
     fn mark_moved(&mut self, name: &str) {
-        if let Some(entry) = self.owned.iter_mut().rev().find(|(n, _, _)| n == name) {
-            entry.1 = Owns::No;
+        if let Some(entry) = self.owned.iter_mut().rev().find(|o| o.name == name) {
+            entry.owns = Owns::No;
         }
         if let Some(local) = self.lookup(name)
             && let Some(flag) = local.drop_flag
@@ -2984,22 +3016,24 @@ impl Fn<'_> {
     }
 
     /// The ownership state, for saving across a branch.
-    fn owned_snapshot(&self) -> Vec<(String, Owns, usize)> {
+    fn owned_snapshot(&self) -> Vec<Owned> {
         self.owned.clone()
     }
 
     /// Join two paths' ownership: a value moved on either is not certainly
-    /// owned afterwards, and its drop is decided by its flag.
-    fn owned_join(&mut self, a: Vec<(String, Owns, usize)>, b: Vec<(String, Owns, usize)>) {
+    /// owned afterwards, and its drop is decided by its flag. Matched by
+    /// storage, since two entries may share a name.
+    fn owned_join(&mut self, a: Vec<Owned>, b: Vec<Owned>) {
         self.owned = a
             .into_iter()
-            .map(|(n, o, d)| {
+            .map(|mut e| {
                 let other = b
                     .iter()
-                    .find(|(m, _, _)| *m == n)
-                    .map(|(_, o, _)| *o)
-                    .unwrap_or(o);
-                (n, o.join(other), d)
+                    .find(|o| o.slot == e.slot)
+                    .map(|o| o.owns)
+                    .unwrap_or(e.owns);
+                e.owns = e.owns.join(other);
+                e
             })
             .collect();
     }
@@ -3009,8 +3043,8 @@ impl Fn<'_> {
         self.owned
             .iter()
             .rev()
-            .find(|(n, _, _)| n == name)
-            .map(|(_, o, _)| *o)
+            .find(|o| o.name == name)
+            .map(|o| o.owns)
     }
 
     fn lookup(&self, name: &str) -> Option<Local> {
@@ -3055,46 +3089,54 @@ impl Fn<'_> {
     /// Drop every local of this scope that still owns its value, in reverse
     /// order of declaration (Ch. 3 §1.4).
     fn drop_scope(&mut self, depth: usize, line: Line) -> R<()> {
-        if self.done {
-            // Control left by another path; whatever terminated it is
-            // responsible for its own drops.
-            self.owned.retain(|(_, _, d)| *d < depth);
-            return Ok(());
+        if !self.done {
+            self.drop_through(depth, line)?;
         }
-        let mine: Vec<(String, Owns)> = self
+        // Whether control left by this path or another, the scope is over.
+        self.owned.retain(|o| o.depth < depth);
+        Ok(())
+    }
+
+    /// Emit the drops that leaving these scopes needs, **without** retiring
+    /// them: `break`, `continue` and `return` leave along one path while the
+    /// scope's other paths still own the same values.
+    fn drop_through(&mut self, depth: usize, line: Line) -> R<()> {
+        let mine: Vec<Owned> = self
             .owned
             .iter()
-            .filter(|(_, _, d)| *d >= depth)
-            .map(|(n, o, _)| (n.clone(), *o))
+            .filter(|o| o.depth >= depth)
+            .cloned()
             .collect();
-        self.owned.retain(|(_, _, d)| *d < depth);
 
-        for (name, owns) in mine.into_iter().rev() {
-            if owns == Owns::No {
+        for e in mine.into_iter().rev() {
+            if e.owns == Owns::No {
                 continue;
             }
-            let Some(local) = self.lookup(&name) else {
-                continue;
-            };
-            // Inside a destructor, `self` is not dropped as a whole.
-            let fields_only = name == "self" && self.destructor_of.is_some();
-            match (owns, local.drop_flag.clone()) {
+            // Inside a destructor, `self` is not dropped as a whole — that
+            // would call this very destructor again (Ch. 3 §1.4).
+            let fields_only = e.name == "self" && self.destructor_of.is_some();
+            match (e.owns, e.drop_flag.clone()) {
                 (Owns::Yes, _) if fields_only => {
-                    let addr = Operand::Value(local.slot.clone());
-                    self.drop_fields(addr, &local.ty, line, 0)?;
+                    let addr = Operand::Value(e.slot.clone());
+                    self.drop_fields(addr, &e.ty, line, 0)?;
                 }
-                (Owns::Yes, _) => self.emit_drop(&local.slot, &local.ty, line)?,
+                (Owns::Yes, _) => self.emit_drop(&e.slot, &e.ty, line)?,
                 // Ownership depends on the path taken, so the flag decides.
                 (_, Some(flag)) => {
                     let f = self.load_slot(&flag, &Ty::Bool);
                     let (yes, join) = (self.fresh("drop.yes"), self.fresh("drop.join"));
                     self.br3(f, &join, &join, &yes);
                     self.start(yes);
-                    self.emit_drop(&local.slot, &local.ty, line)?;
+                    if fields_only {
+                        let addr = Operand::Value(e.slot.clone());
+                        self.drop_fields(addr, &e.ty, line, 0)?;
+                    } else {
+                        self.emit_drop(&e.slot, &e.ty, line)?;
+                    }
                     self.jump(&join);
                     self.start(join);
                 }
-                _ => self.emit_drop(&local.slot, &local.ty, line)?,
+                _ => self.emit_drop(&e.slot, &e.ty, line)?,
             }
         }
         Ok(())
@@ -3243,9 +3285,10 @@ impl Fn<'_> {
 
     /// A value moved out of inside a loop would be moved again on the next
     /// iteration.
-    fn check_no_move_in_loop(&mut self, before: &[(String, Owns, usize)], line: Line) -> R<()> {
-        for (name, was, _) in before {
-            if *was != Owns::Yes {
+    fn check_no_move_in_loop(&mut self, before: &[Owned], line: Line) -> R<()> {
+        for e in before {
+            let (name, was) = (&e.name, e.owns);
+            if was != Owns::Yes {
                 continue;
             }
             if let Some(now) = self.ownership(name)
@@ -3609,6 +3652,11 @@ impl Fn<'_> {
                     }
                     (None, _) => {}
                 }
+                // The scopes between here and the loop are being left, and
+                // what they own dies with them (Ch. 3 §1.1). Emitted rather
+                // than retired: the loop's other paths still own the same
+                // values.
+                self.drop_through(ctx.depth, *line)?;
                 self.jump(&ctx.exit);
                 Ok((unit(), Ty::Never))
             }
@@ -3617,6 +3665,7 @@ impl Fn<'_> {
                 let Some(ctx) = self.loops.last().cloned() else {
                     return err(*line, "`continue` outside a loop");
                 };
+                self.drop_through(ctx.depth, *line)?;
                 self.jump(&ctx.head);
                 Ok((unit(), Ty::Never))
             }
@@ -4007,6 +4056,20 @@ impl Fn<'_> {
         let v = if op == "=" {
             let (v, vt) = self.expr(value, Some(&ty))?;
             self.check(&vt, &ty, line, "assigned value")?;
+
+            // The value being overwritten is going away, and Ch. 3 §1.1 gives
+            // it exactly one owner and one drop. Draft 0.1 stored over it,
+            // which leaked whatever it owned. Emitted after the right-hand
+            // side, so that `a = f(a)` still reads `a` before it dies.
+            if self.types.needs_drop(&ty) {
+                let live = self
+                    .path_of(target)
+                    .map(|p| self.ownership(&p.root) != Some(Owns::No))
+                    .unwrap_or(true);
+                if live {
+                    self.drop_at(addr.clone(), &ty, line, 0)?;
+                }
+            }
             v
         } else {
             // `a op= b` is `a = a op b`, with `a` evaluated once (Ch. 0 §2.2).
@@ -6289,6 +6352,7 @@ impl Fn<'_> {
         self.start(body_l);
         let before = self.owned_snapshot();
         self.loops.push(LoopCtx {
+            depth: self.scopes.len(),
             exit: exit.clone(),
             head: head.clone(),
             result: None,
@@ -6319,6 +6383,7 @@ impl Fn<'_> {
         self.start(head.clone());
         let before = self.owned_snapshot();
         self.loops.push(LoopCtx {
+            depth: self.scopes.len(),
             exit: exit.clone(),
             head: head.clone(),
             result: result.clone(),

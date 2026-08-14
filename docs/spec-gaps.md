@@ -646,6 +646,40 @@ parameters, `let` bindings, fields, reads through a reference. That list is
 the kind that grows quietly. A new construct that needs a size must go
 through the same check rather than adding a fifth one.
 
+**G0.17 — three more drop bugs, found by giving the test suite the resource
+the language does not have.** Ch. 3 §1.5 is why the previous three (G0.16)
+were invisible: with no allocator, no file handle and no lock, dropping twice
+and not dropping release the same nothing. The fix is not to wait for an
+allocator but to **let the tests own something** — a destructor that prints,
+and an assertion on the exact sequence. `every_owner_drops_exactly_once`
+enumerates every construct that can own a value and states what each must
+print. Three of the twenty rows failed on the first run:
+
+1. **Assignment over an owned value leaked it.** `a = P { … }` stored over
+   whatever `a` held. Ch. 3 §1.1 gives a value one owner and §1.4 one drop;
+   the value being replaced is going away and has that drop to spend. It is
+   now dropped after the right-hand side is evaluated, so `a = f(a)` still
+   reads `a` before it dies.
+2. **Shadowing dropped the shadower twice and the shadowed never.**
+   `let a = P{1}; let a = P{2};` printed `22`. Ownership entries stored a
+   *name* and resolved it at scope exit, and both entries resolved to the
+   newer binding. An entry now carries the storage it will drop, which is
+   unique even when the name is not — so shadowing is fixed structurally
+   rather than by a special case.
+3. **`break` and `continue` did not drop what they left.** A local declared
+   inside a loop body simply leaked when the loop was left early. Leaving a
+   scope early is still leaving it (Ch. 3 §1.1). `drop_scope` is now split:
+   `drop_through` emits the drops, and only a scope that is genuinely ending
+   also retires the entries — because `break` leaves along one path while the
+   loop's other paths still own the same values.
+
+**The rule this establishes:** the language having no resources is a reason
+the *implementation* cannot observe a drop bug, not a reason the *test suite*
+cannot. Any new construct that can own a value gets a row in that table
+before it gets a feature test. §10's route A — the allocator — is what turns
+each of these into a real double-free or leak, and the whole point of doing
+this now is that nothing is at stake yet.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The
