@@ -1103,6 +1103,40 @@ instructions (−2.6%), output unchanged. Small statically — 66 lines — and
 larger dynamically, because what it promotes is in the leaf functions the
 inner loop calls.
 
+**G8.8 — a parameter had no reason to leave the register it arrived in.**
+Parameters arrive in `a0`…`a7` (TRISC-27 §6.1) and the prologue was storing
+every one of them to a frame slot, from which every use loaded it back. In
+the entry block of a function that makes **no call**, nothing can clobber
+them: they are caller-saved, and it is the arguments of a call that overwrite
+them. So there they stay.
+
+And with nothing else in the frame, there is no frame: the measuring pass
+already runs (G8.6), so it also reports whether anything touched `sp`, and a
+function where nothing did opens none.
+
+`@fmul` in `examples/trust/HPL.tr`, over the four changes of G8.6–G8.8:
+
+| | instructions | memory accesses |
+|---|---|---|
+| before | 22 | 8 |
+| after | 7 | 0 |
+
+**A bug the tests caught**, worth recording because of its shape: the first
+frame-elision test asked whether an emitted line contained `(sp)`. It missed
+`addi.trap a7, sp, 15` — taking the *address* of a slot, which mentions `sp`
+without the parentheses. Six frontend tests failed with an access above the
+stack top, because the frame the address pointed into had never been opened.
+The check is now "mentions `sp` at all, other than the frame adjust itself",
+which is conservative in the direction that costs two instructions rather
+than the direction that corrupts the caller's frame.
+
+Measured: 8 496 620 → 8 033 644 dynamic instructions (−5.5% over two steps),
+output unchanged. **Against the profile that started G8.6: −26.0%.**
+
+This is not yet cross-block register allocation, which remains the largest
+single item: stack traffic is still the biggest pool in the profile. It is
+the part of that pool that needed no liveness analysis across edges.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

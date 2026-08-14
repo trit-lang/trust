@@ -668,3 +668,45 @@ fn @reads(%p: ptr) -> t27 {
         differential(src, entry, &[&[0], &[7], &[-7], &[1_000_000]]);
     }
 }
+
+#[test]
+fn a_leaf_function_keeps_its_parameters_where_they_arrived() {
+    // Parameters arrive in `a0`…`a7` (TRISC-27 §6.1) and were being stored
+    // to frame slots by the prologue and loaded back by every use. In the
+    // entry block of a function that makes no call, nothing can clobber
+    // them, so they stay. And with every value in a register there is no
+    // frame to open: `@leaf` compiles to its arithmetic and a `ret`.
+    let src = r#"tir 0.1 target "tritium"
+
+fn @leaf(%a: t27, %b: t27) -> t27 {
+^entry:
+    %p = mul.wrap t27 %a, %b
+    %q = add.wrap t27 %p, %a
+    ret %q
+}
+
+fn @calls(%a: t27) -> t27 {
+^entry:
+    %r = call @leaf(%a, %a) -> t27
+    %s = add.wrap t27 %r, %a
+    ret %s
+}
+"#;
+    let asm = compile_asm(src, "calls");
+
+    let leaf = body_of(&asm, "leaf");
+    assert!(!leaf.contains("sp"), "no frame and no spill:\n{leaf}");
+    assert!(leaf.contains("a0") && leaf.contains("a1"), "{leaf}");
+
+    // A block that calls cannot keep them there — setting up the call's own
+    // arguments is what overwrites them.
+    let calls = body_of(&asm, "calls");
+    assert!(
+        calls.contains("(sp)"),
+        "a parameter live across a call needs somewhere else to be:\n{calls}"
+    );
+
+    for entry in ["leaf", "calls"] {
+        differential(src, entry, &[&[0, 0], &[3, 5], &[-7, 11], &[9841, -3]]);
+    }
+}

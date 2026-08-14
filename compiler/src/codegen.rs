@@ -15,6 +15,12 @@
 //! block mentions it. A value crossing a block boundary stays in memory,
 //! because this pass has no agreement between blocks about where it would be.
 //!
+//! Two things follow from that floor being narrow. A **parameter** arrives in
+//! `a0`…`a7` and, in the entry block of a function that makes no call, has no
+//! reason to leave: nothing can clobber it there. And a function whose values
+//! all fit in registers touches no frame, so it opens none — which is why
+//! `function` needs the measuring pass to tell it whether this one did.
+//!
 //! # Constants
 //!
 //! Every operation but `wrap` has an immediate form (TRISC-27 §4.1), so a
@@ -483,6 +489,14 @@ struct Gen<'a> {
     /// Addresses the block's accesses carry in their own displacement, whose
     /// computations are therefore not emitted at all.
     folds: BTreeMap<String, Folded>,
+    /// Whether anything in the body actually touched the frame. A function
+    /// that never did needs no frame, and therefore neither of the two
+    /// instructions that open and close one. The measuring pass observes it;
+    /// the final pass is told the answer, because the epilogue is emitted at
+    /// every `ret` and one of them may precede the first frame access.
+    frame_used: bool,
+    /// What the measuring pass concluded.
+    frame_needed: bool,
     /// Values held in a register for the block being emitted. A value not
     /// here lives in its frame slot, as every value did before there was an
     /// allocator.
@@ -569,6 +583,24 @@ fn allocate(f: &Function, block: &Block) -> BTreeMap<String, &'static str> {
     let mut regs: BTreeMap<String, &'static str> = BTreeMap::new();
     let mut expiry: Vec<(usize, &'static str, bool)> = Vec::new();
 
+    // A parameter arrives in `a0`…`a7` (TRISC-27 §6.1) and was being stored
+    // to its frame slot by the prologue and loaded back by every use. In the
+    // entry block of a function that makes no call, a parameter used nowhere
+    // else can simply stay where it arrived: no store, no load, and no
+    // register taken that was not already the caller's to clobber. A block
+    // that calls cannot, because the arguments of that call overwrite them.
+    let is_entry = f.blocks.first().map(|b| b.label.as_str()) == Some(block.label.as_str());
+    if is_entry && !has_call {
+        for (i, (pname, _)) in f.sig.params.iter().enumerate().take(POOL_CALL_FREE.len()) {
+            if elsewhere.contains(pname) {
+                continue;
+            }
+            let r = POOL_CALL_FREE[i];
+            regs.insert(pname.clone(), r);
+            fast.retain(|x| *x != r);
+        }
+    }
+
     for (i, inst) in block.insts.iter().enumerate() {
         // Registers whose value died before this instruction are free again.
         expiry.retain(|(end, r, is_saved)| {
@@ -639,6 +671,9 @@ impl Gen<'_> {
     fn line(&mut self, text: impl AsRef<str>) {
         let text = text.as_ref();
         self.here += words_of(text);
+        // Any mention of `sp` but the frame adjust itself: an access
+        // through it, or an address taken from it.
+        self.frame_used |= text.contains("sp") && !text.starts_with("addi.trap sp, sp,");
         let _ = writeln!(self.out, "    {text}");
     }
 
@@ -814,8 +849,8 @@ impl Gen<'_> {
 /// measured, and a branch judged to reach still reaches.
 fn function(f: &Function) -> Result<String, Vec<String>> {
     let saved = saved_registers(f);
-    let measured = emit_function(f, &saved, &BTreeMap::new());
-    let final_pass = emit_function(f, &saved, &measured.offsets);
+    let measured = emit_function(f, &saved, &BTreeMap::new(), true);
+    let final_pass = emit_function(f, &saved, &measured.offsets, measured.frame_used);
     if final_pass.errs.is_empty() {
         Ok(final_pass.out)
     } else {
@@ -827,6 +862,7 @@ fn emit_function<'a>(
     f: &'a Function,
     saved: &[&'static str],
     offsets: &BTreeMap<String, i128>,
+    needs_frame: bool,
 ) -> Gen<'a> {
     // The frame has to hold whatever the allocator decided to save, so the
     // allocation is settled before the layout that depends on it.
@@ -848,6 +884,8 @@ fn emit_function<'a>(
         offsets: offsets.clone(),
         next_block: None,
         folds: BTreeMap::new(),
+        frame_used: false,
+        frame_needed: needs_frame,
     };
 
     let name = f.sig.name.clone();
@@ -857,9 +895,13 @@ fn emit_function<'a>(
     let _ = writeln!(g.out, ".align 3");
     g.label(format!("f.{name}"));
 
-    // Prologue. `sp` grows downward and stays word-aligned (§6.2).
+    // Prologue. `sp` grows downward and stays word-aligned (§6.2). A
+    // function whose values all fit in registers touches no frame and opens
+    // none: the measuring pass says whether this one does.
     let size = g.frame.size;
-    g.line(format!("addi.trap sp, sp, -{size}"));
+    if needs_frame {
+        g.line(format!("addi.trap sp, sp, -{size}"));
+    }
     if calls {
         g.line("st.word ra, 0(sp)");
     }
@@ -869,12 +911,17 @@ fn emit_function<'a>(
         g.line(format!("st.word {r}, {at}(sp)"));
     }
 
-    // Arguments arrive in a0…a7 and are spilled to their slots at once.
+    // Arguments arrive in a0…a7 and are spilled to their slots, unless the
+    // entry block's allocation left one where it arrived.
+    let entry_regs = allocate(f, &f.blocks[0]);
     for (i, (pname, _)) in f.sig.params.iter().enumerate() {
         if i >= 8 {
             g.errs
                 .push("more than eight arguments is not implemented".into());
             break;
+        }
+        if entry_regs.contains_key(pname) {
+            continue;
         }
         let at = g.slot(pname);
         g.line(format!("st.word a{i}, {at}(sp)"));
@@ -916,7 +963,9 @@ fn epilogue(g: &mut Gen, calls: bool) {
         g.line(format!("ld.word {r}, {at}(sp)"));
     }
     let size = g.frame.size;
-    g.line(format!("addi.trap sp, sp, {size}"));
+    if g.frame_needed {
+        g.line(format!("addi.trap sp, sp, {size}"));
+    }
     g.line("ret");
 }
 
