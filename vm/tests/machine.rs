@@ -765,3 +765,86 @@ fn wrap_narrows_in_one_instruction() {
         assert_eq!(run(&program), Stop::Halted(expected), "wrap({value}, {n})");
     }
 }
+
+#[test]
+fn every_fault_the_isa_promises_is_raised() {
+    // TRISC-27 states thirteen conditions that fault, scattered over §§2, 4
+    // and 6. Each is exercised here rather than read, because a fault the
+    // machine does not raise is a fault a program cannot rely on.
+    let prelude = ".equ IO_IN, -1\n.equ IO_OUT, -2\n.equ MEM_SIZE, -6\n.equ CYCLES, -9\n";
+    for (what, body, code) in [
+        (
+            "a load at or above A (§2.1)",
+            "ld.word a0, MEM_SIZE(zero)\n    ld.word t0, 0(a0)",
+            FaultCode::Trap,
+        ),
+        (
+            "a word load from a tryte device (§2.2)",
+            "ld.word t0, IO_IN(zero)",
+            FaultCode::Trap,
+        ),
+        (
+            "a tryte load from a word device (§2.2)",
+            "ld.tryte t0, MEM_SIZE(zero)",
+            FaultCode::Trap,
+        ),
+        ("a load from IO_OUT (§2.2)", "ld.tryte t0, IO_OUT(zero)", FaultCode::Trap),
+        ("a store to IO_IN (§2.2)", "st.tryte zero, IO_IN(zero)", FaultCode::Trap),
+        ("a store to MEM_SIZE (§2.2)", "st.word zero, MEM_SIZE(zero)", FaultCode::Trap),
+        ("a store to CYCLES (§2.3)", "st.word zero, CYCLES(zero)", FaultCode::Trap),
+        ("a tryte load from CYCLES (§2.3)", "ld.tryte t0, CYCLES(zero)", FaultCode::Trap),
+        ("a reserved device address (§2.2)", "ld.tryte t0, -3(zero)", FaultCode::Trap),
+        (
+            "a shift amount above 26 (§4.1)",
+            "addi.wrap t1, zero, 27\n    shl.wrap t2, t1, t1",
+            FaultCode::Shift,
+        ),
+        (
+            "a negative shift amount (§4.1)",
+            "addi.wrap t1, zero, -1\n    shr t2, t1, t1",
+            FaultCode::Shift,
+        ),
+        (
+            "an unaligned word access (§4.4)",
+            "addi.wrap t0, zero, 1\n    ld.word t1, 0(t0)",
+            FaultCode::Align,
+        ),
+        (
+            "an unaligned jump target (§4.5)",
+            "addi.wrap t0, zero, 1\n    jalr ra, 0(t0)",
+            FaultCode::Align,
+        ),
+    ] {
+        let src = format!("{prelude}start:\n    {body}\n    halt zero\n");
+        let image = tritium::assemble(&src).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        let mut vm = Vm::with_default_memory();
+        vm.load_image(&image);
+        match vm.run(1_000) {
+            Stop::Fault(c, _) => assert_eq!(c, code, "{what}"),
+            other => panic!("{what}: expected a fault, got {other}"),
+        }
+    }
+}
+
+#[test]
+fn the_cycle_counter_counts_what_ran_between_two_readings() {
+    // TRISC-27 §2.3: the load has not retired when its value is produced, so
+    // the difference is the code between the readings with nothing to
+    // subtract for the measurement itself.
+    let src = ".equ CYCLES, -9\n\
+               start:\n\
+               \x20   ld.word t0, CYCLES(zero)\n\
+               \x20   addi.wrap t1, zero, 0\n\
+               \x20   addi.wrap t1, zero, 0\n\
+               \x20   addi.wrap t1, zero, 0\n\
+               \x20   ld.word t2, CYCLES(zero)\n\
+               \x20   sub.wrap a0, t2, t0\n\
+               \x20   halt a0\n";
+    let image = tritium::assemble(src).expect("assembles");
+    let mut vm = Vm::with_default_memory();
+    vm.load_image(&image);
+    // Three `addi`, plus the first `ld` retiring after its value was read.
+    assert_eq!(vm.run(1_000), Stop::Halted(4));
+    // And the machine reports what it did.
+    assert_eq!(vm.steps(), 7);
+}

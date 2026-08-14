@@ -976,6 +976,36 @@ store, and returns an `Option<T>` that is an ordinary enum laid out by Ch. 2's
 rules — including its niches, so `Option<trit>` from `checked_add` on a `trit`
 would still be one tryte.
 
+**G8.5 — an audit of the machine against its specification.** Every table
+and every normative claim in TRISC-27 and the assembly language, checked
+against `tritium` by running it rather than by reading both.
+
+**What holds.** All ten opcodes of §3.3 decode and execute. All thirteen
+functs of §4.1 execute, `mulh` included. The seven formats of §3.2 name their
+zero fields and the decoder checks all thirteen of them, so §3.4's
+"malformed" clause has referents rather than being a clause about nothing.
+Every directive of the assembly language assembles, every reserved one is
+rejected by name, and all nine pseudo-instructions expand. `targets/tritium.target`
+matches §§1–6: `word` 27, `addr_unit` 9, `ptr_width` 27, `legal` the word
+alone, `call_conv` `tritium0`.
+
+**Thirteen fault conditions, each now a test.** The specification states them
+across §§2, 4 and 6 and they were covered unevenly; each is exercised in
+`every_fault_the_isa_promises_is_raised`, because a fault the machine does not
+raise is a fault a program cannot rely on. Access at or above A; a word load
+from a tryte device and the reverse; a load from `IO_OUT`; stores to `IO_IN`,
+`MEM_SIZE` and `CYCLES`; a narrow load from `CYCLES`; a reserved device
+address; a shift amount above 26 and below 0; an unaligned word access; an
+unaligned jump target. All thirteen raise what §5 says they raise.
+
+**One inconsistency, and it was mine.** §6.4 said "the first instruction
+assembled is the first instruction executed", which stopped being true when
+G0.15 reserved the first word of memory: the first *assembled* instruction is
+now at address 3 and address 0 holds the `nop`. The sentence is still true of
+instructions and false of memory, so it now says which. This is Naming §6's
+sweep rule failing in the direction it always fails — the document being
+edited was §2.2, and §6.4 was three sections away.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

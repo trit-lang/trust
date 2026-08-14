@@ -605,9 +605,15 @@ Results come back the same way: `a0`, then `a1` for a second word.
 
 ### 6.4 Entry and exit
 
-Execution begins at address 0 (§1.3). In draft 0.1 there is no linker and no
-startup object: the first instruction assembled is the first instruction
-executed, and a program ends by executing `halt`.
+Execution begins at address 0 (§1.3), which holds the reserved word §2.2
+requires: the all-zeros `nop`. Control falls through it to address 3, so **the
+first instruction assembled is the first instruction executed** — it simply is
+not the first word of memory. In draft 0.1 there is no linker and no startup
+object, and a program ends by executing `halt`.
+
+An assembler emits the reserved word itself; nothing a program writes may
+claim address 0, which is what makes zero usable as "nothing" everywhere else
+(§2.2).
 
 ---
 
