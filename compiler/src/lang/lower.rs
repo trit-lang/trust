@@ -4974,14 +4974,65 @@ impl Fn<'_> {
                 }
             }
 
-            "checked_add" | "checked_sub" | "checked_mul" => err(
-                line,
-                format!(
-                    "`{name}` returns `Option<{ty}>`, which needs the layout of a \
-                     generic enum at a place this milestone builds before types \
-                     are instantiated"
-                ),
-            ),
+            // Ch. 1 §4: the Rust family, carried over with identical naming.
+            // The overflow trit already says whether the exact result fitted,
+            // so this is one `.flag` operation and a three-way branch — no
+            // second computation and no comparison against a bound.
+            "checked_add" | "checked_sub" | "checked_mul" => {
+                if !ty.is_arithmetic() {
+                    return err(line, format!("`{name}` does not apply to {ty}"));
+                }
+                let b = one_arg(self, &ty)?;
+                let op = match name.rsplit('_').next().expect("a suffix") {
+                    "add" => FlavoredOp::Add,
+                    "sub" => FlavoredOp::Sub,
+                    _ => FlavoredOp::Mul,
+                };
+                let value = self.fresh("a");
+                let flag = self.fresh("o");
+                self.push(Inst {
+                    results: vec![value.clone(), flag.clone()],
+                    kind: InstKind::Flavored {
+                        op,
+                        flavor: Flavor::Flag,
+                        ty: ty.tir(),
+                        a: v,
+                        b,
+                    },
+                });
+
+                let opt = self.types.instantiate("Option", std::slice::from_ref(&ty), line)?;
+                let ename = nominal_name(&opt).expect("an instantiation is nominal");
+                let (some, none) = (
+                    self.types
+                        .variant(&ename, "Some")
+                        .ok_or_else(|| one_err(line, "`Option` has no `Some`".into()))?,
+                    self.types
+                        .variant(&ename, "None")
+                        .ok_or_else(|| one_err(line, "`Option` has no `None`".into()))?,
+                );
+                let slot = self.temp_slot(&opt);
+                let (fits, over, join) = (
+                    self.fresh("chk.some"),
+                    self.fresh("chk.none"),
+                    self.fresh("chk.join"),
+                );
+                // The overflow trit is the *direction* of the overflow, so
+                // both nonzero arms mean the same thing here.
+                self.br3(Operand::Value(flag), &over, &fits, &over);
+
+                self.start(fits);
+                let payload = [("0".to_string(), Operand::Value(value))];
+                self.build_variant_into(&slot, &ename, some, &payload, line)?;
+                self.jump(&join);
+
+                self.start(over);
+                self.build_variant_into(&slot, &ename, none, &[], line)?;
+                self.jump(&join);
+
+                self.start(join);
+                Ok((Operand::Value(slot), opt))
+            }
 
             other => err(line, format!("`{other}` is not a method in this milestone")),
         }
@@ -4989,8 +5040,6 @@ impl Fn<'_> {
 
     // ------------------------------------------------------------ places
 
-    /// The address of a place, and its type (Ch. 3 §1.3). A place is a local,
-    /// a field of a place, an element of a place, or a dereference.
     /// The concrete name a literal's path head refers to.
     ///
     /// For a generic type the arguments are not written — `Pair { … }`, not
@@ -5778,6 +5827,8 @@ impl Fn<'_> {
         self.call_key(&key, Vec::new(), &full, line)
     }
 
+    /// The address of a place, and its type (Ch. 3 §1.3). A place is a local,
+    /// a field of a place, an element of a place, or a dereference.
     fn place(&mut self, e: &ast::Expr, line: Line) -> R<(Operand, Ty)> {
         match e {
             ast::Expr::Path(name, l) => {
@@ -6157,8 +6208,6 @@ impl Fn<'_> {
         line: Line,
     ) -> R<(Operand, Ty)> {
         let ty = Ty::Enum(enum_name.to_string());
-        let l = self.types.layout(&ty);
-        let e = l.enum_layout.clone().expect("an enum");
         let declared = self.types.variant_fields(enum_name, index);
         if declared.len() != fields.len() {
             return err(
@@ -6172,6 +6221,35 @@ impl Fn<'_> {
         }
 
         let slot = self.temp_slot(&ty);
+        let mut values = Vec::new();
+        for (name, value) in fields {
+            let Some((_, ft, _)) = declared.iter().find(|(n, _, _)| n == name).cloned() else {
+                return err(line, format!("this variant has no field `{name}`"));
+            };
+            let (v, vt) = self.expr(value, Some(&ft))?;
+            self.check(&vt, &ft, value.line(), "field")?;
+            values.push((name.clone(), v));
+        }
+        self.build_variant_into(&slot, enum_name, index, &values, line)?;
+        Ok((Operand::Value(slot), ty))
+    }
+
+    /// Write a variant into storage that already exists, from values rather
+    /// than from expressions — what a built-in method has to hand.
+    fn build_variant_into(
+        &mut self,
+        slot: &str,
+        enum_name: &str,
+        index: usize,
+        fields: &[(String, Operand)],
+        line: Line,
+    ) -> R<()> {
+        let ty = Ty::Enum(enum_name.to_string());
+        let l = self.types.layout(&ty);
+        let e = l.enum_layout.clone().expect("an enum");
+        let declared = self.types.variant_fields(enum_name, index);
+        let slot = slot.to_string();
+
         // Zero the storage first, so padding and unwritten payload trytes are
         // deterministic.
         for i in 0..l.size as i128 {
@@ -6186,17 +6264,14 @@ impl Fn<'_> {
             });
         }
 
-        for (name, value) in fields {
+        for (name, v) in fields {
             let Some((_, ft, off)) = declared.iter().find(|(n, _, _)| n == name).cloned() else {
                 return err(line, format!("this variant has no field `{name}`"));
             };
-            let (v, vt) = self.expr(value, Some(&ft))?;
-            self.check(&vt, &ft, value.line(), "field")?;
-            self.store_at(&slot, off, &ft, v, line)?;
+            self.store_at(&slot, off, &ft, v.clone(), line)?;
         }
 
-        self.write_tag(&slot, &e, index, line)?;
-        Ok((Operand::Value(slot), ty))
+        self.write_tag(&slot, &e, index, line)
     }
 
     /// Store the discriminant of variant `index`.

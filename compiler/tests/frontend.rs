@@ -560,8 +560,11 @@ fn saturating_and_overflowing_are_available() {
         6
     );
     // `checked_*` needs Option, and so needs generics.
-    let e = error("fn main() -> t27 { (1).checked_add(2) }");
-    assert!(e.contains("Option"), "{e}");
+    // `checked_*` is implemented; see `the_checked_family_returns_an_option`.
+    tir_of(
+        "fn main() -> t27 { match (1).checked_add(2) { \
+                Option::Some(v) => v, Option::None => 0, } }",
+    );
 }
 
 // ------------------------------------------- references and slices (Ch. 3)
@@ -2269,4 +2272,38 @@ fn a_value_used_after_a_call_survives_in_a_callee_saved_register() {
     let restored = body.matches("ld.word s").count();
     assert_eq!(saved, restored, "every save has its restore:\n{body}");
     assert!(saved > 0, "a value read three times across a call:\n{body}");
+}
+
+#[test]
+fn the_checked_family_returns_an_option() {
+    // Ch. 1 §4 carries the Rust family over with identical naming. The
+    // overflow trit already says whether the exact result fitted, so this is
+    // one `.flag` operation and a three-way branch — no second computation
+    // and no comparison against a bound.
+    assert_eq!(
+        run("fn get(o: Option<t27>, d: t27) -> t27 { \
+                 match o { Option::Some(v) => v, Option::None => d, } \
+             } \
+             fn main() -> t27 { \
+                 let a: t27 = 3812798742493; \
+                 get(a.checked_add(1), 100) \
+                     + get((5).checked_add(6), 0) \
+                     + get(a.checked_mul(2), 7) \
+                     + get((9).checked_sub(4), 0) \
+             }")
+        .0,
+        100 + 11 + 7 + 5
+    );
+    // And at a narrow width, where the overflow boundary is the narrow one.
+    assert_eq!(
+        run("fn get(o: Option<t9>, d: t9) -> t9 { \
+                 match o { Option::Some(v) => v, Option::None => d, } \
+             } \
+             fn main() -> t27 { \
+                 let m: t9 = 9841; \
+                 get(m.checked_add(1), 7) as t27 \
+             }")
+        .0,
+        7
+    );
 }

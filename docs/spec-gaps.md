@@ -954,6 +954,28 @@ the only instrument was counting lines of assembly, which would have shown
 the first attempt as an improvement — it emits *fewer* instructions
 statically, and executes more.
 
+**G8.4 — `checked_*` is implemented, and Ch. 1 §4 is complete.** The last
+method of that section, and the one whose recorded reason had outlived its
+truth twice: first "generics are Ch. 4, which is not written yet", then "the
+layout of a generic enum is not available where built-in methods are
+lowered". Neither survived a look. `Option` is in the prelude, so
+`Types::instantiate` produces `Option<t27>` on request like any other
+application, and `build_variant` already knew how to write a variant — it
+only needed a form that takes values rather than expressions, which a
+built-in method is what has.
+
+**It is one `.flag` operation and one three-way branch.** The overflow trit
+already says whether the exact result fitted, so there is no second
+computation and no comparison against a bound — and because the trit is the
+*direction* of the overflow, both nonzero arms of the branch lead to the same
+place. A binary machine computes the result, then tests a flag register, then
+branches two ways.
+
+`a.checked_add(b)` therefore costs the arithmetic plus a branch and a tag
+store, and returns an `Option<T>` that is an ordinary enum laid out by Ch. 2's
+rules — including its niches, so `Option<trit>` from `checked_add` on a `trit`
+would still be one tryte.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The
@@ -1319,10 +1341,8 @@ Specified well enough to build, simply not built yet:
   that a canonicalizer should clean up.
 - **Nothing of Ch. 2 remains unimplemented.** Structs, tuples, enums with
   payloads and explicit discriminants, both `repr`s, field access, variant
-  patterns and niche optimization all run end to end. `checked_*` is the one
-  method of Ch. 1 §4 still missing; the reason first written here — that it
-  returns `Option<T>` and generics are Ch. 4 — expired when Ch. 4 was
-  implemented, and G8.2 records what actually blocks it now.
+  patterns and niche optimization all run end to end, and so does `checked_*`
+  (G8.4), which was the last method of Ch. 1 §4 outstanding.
 - **Indirect calls** (TIR §3.7) — rejected with a diagnostic that says they
   are reserved, which is as far as "parsed but reserved" can go before the
   function-pointer chapter exists.
