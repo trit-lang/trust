@@ -118,7 +118,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | `trit-core` | complete: arbitrary-precision balanced ternary, width-typed `tN`, three overflow flavors, the AM's five fault codes, three-radix literals |
 | TIR data structures, text format, verifier | complete, round-trips |
 | TIR reference interpreter | complete, with provenance-tracking pointers and a function-address space |
-| TIR legalization | promotion complete; expansion complete for `add`/`sub`/`cmp`; `mul` blocked on G6.6, `div`/`rem`/shifts unwritten |
+| TIR legalization | promotion complete; expansion complete for `add`, `sub`, `neg`, `cmp`, `tmin`/`tmax`/`tmul`, `select3` and **wide loads and stores** — a real Trust program legalizes for a nine-trit machine and computes the same answers (G6.11). `mul` and `shl` blocked on G6.6; `div`, `rem`, `shr` unwritten; a wide value cannot cross a function boundary (G6.5) |
 | Layout engine (Ch. 2) | complete: sizes, alignments, offsets, both `repr`s, discriminants, niche optimization |
 | Trust frontend | Ch. 0–3 complete; Ch. 4 complete except generic traits |
 | Backend (TIR → TRISC-27) | works; **no register allocator** — every value lives in a stack slot |
@@ -254,6 +254,12 @@ caught here.
 
 The front half has two other checks and needs both:
 
+- **Legalization is checked as a transform.**
+  `compiler/tests/legalize_semantics.rs` interprets a module, legalizes it,
+  interprets it again and demands the same result. Nothing else checks that a
+  pass preserved meaning, and legalization is the only mandatory one. It also
+  pins the frontier: each thing expansion still refuses is asserted, so moving
+  it fails a test.
 - **`verify` runs at every seam**, so lowering cannot emit ill-formed TIR;
   and after legalization it runs as `verify_legalized`, which additionally
   enforces TIR §6's post-condition — every arithmetic width is one the target

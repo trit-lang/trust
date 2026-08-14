@@ -1,0 +1,19 @@
+; The nine-trit machine TIR §6 names as the reason legalization is in the core
+; design: "lets one frontend serve a t27 reference machine and a t9
+; SBTCVM-class target from identical mid-level IR". Nothing generates code for
+; it, and it does not need to — `compiler/tests/legalize_semantics.rs` runs
+; programs legalized for it on the reference interpreter and demands the same
+; answers as the unlegalized module.
+;
+; Its pointers are nine trits because §7 requires the legal set to contain a
+; width at least `ptr_width`: a machine whose widest register is nine trits
+; cannot hold a 27-trit address, and therefore addresses at most 3^9 units.
+; That is SBTCVM-class, which is the point.
+
+target "t9" {
+    addr_unit   = 9
+    ptr_width   = 9
+    legal       = [1, 9]
+    word        = 9
+    call_conv   = "t9"
+}

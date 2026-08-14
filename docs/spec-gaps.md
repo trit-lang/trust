@@ -680,6 +680,69 @@ before it gets a feature test. §10's route A — the allocator — is what turn
 each of these into a real double-free or leak, and the whole point of doing
 this now is that nothing is at stake yet.
 
+**G6.11 — legalization is now a checked transform, and TIR §6's central
+claim holds further than the documentation said.**
+
+Nothing checked that legalization preserved meaning. `pipeline.rs` runs a
+program on the interpreter and through the whole pipeline, but both sides take
+the same TIR, so it covers `TIR → machine` and says nothing about the passes
+in between. `compiler/tests/legalize_semantics.rs` closes that: interpret,
+legalize, interpret again, demand the same result — faults included. The
+interpreter is width-generic, so it can execute a module legalized for a
+machine that does not exist.
+
+**Expansion covers more than was claimed.** `docs/status.md` said "expansion
+complete for `add`/`sub`/`cmp`". Run against a t9 target, it also handles
+`neg`, `tmin`, `tmax`, `tmul`, `select3`, the trapping flavors, and — the one
+that matters for anything a frontend emits — **wide loads and stores**, split
+into parts at addressable boundaries. A real Trust program compiles, legalizes
+for a nine-trit machine, and computes the same answers as on the reference
+one. TIR §6 justifies putting legalization in the core design by saying it
+"lets one frontend serve a t27 reference machine and a t9 SBTCVM-class target
+from identical mid-level IR"; that claim is now executed rather than asserted,
+for every operation except the five below.
+
+**The frontier, each with the reason it gives:** `mul` and `shl` need a
+widening multiply TIR does not define (**G6.6** — TRISC-27 §4.1 now has
+`mulh`, so the machine is ahead of the IR); `div`, `rem` and `shr` are
+unwritten; and a wide value cannot cross a function boundary (**G6.5**). The
+test asserts each refusal, so moving the frontier fails a test and forces this
+entry to move with it.
+
+**Two things this uncovered along the way.**
+
+- **A hand-built `TargetDesc` skips `check()`.** The CLI validates what it
+  parses; a test constructing the struct does not. Two of the diagnoses in
+  this session were wrong because the probe used `ptr_width = 27` with a
+  nine-trit legal set, which §7 forbids — a machine whose widest register is
+  nine trits cannot hold a 27-trit address. `t9_target()` now asserts
+  `check()` is empty, and `targets/t9.target` is in tree.
+- **Alignment and `addr_unit` disagree.** TIR §3.4 says a load or store
+  requires "the AM natural alignment of the access width (AM §2.3)", and
+  AM §2.3's table is in *trytes*, which AM §1 fixes at nine trits. But §7
+  lets a target set `addr_unit` to something else — `targets/sbtcvm.target`
+  uses six. Expansion strides parts in the target's addressable units while
+  the interpreter checks alignment in the AM's trytes, so legalizing for
+  `sbtcvm` produces stores the interpreter calls misaligned, which is UB by
+  §4 item 2. See G7.6.
+
+**G7.6 — alignment is defined in AM trytes, but a target may not have them.**
+AM §2.3 gives natural alignment as a table in trytes; TIR §3.4 imports it for
+every load and store; TIR §7 lets a target declare `addr_unit` freely, and
+`targets/sbtcvm.target` declares six trits. For that target the two rules
+speak different units, and legalization and the reference interpreter
+disagree about whether an expanded store is aligned.
+
+*Not decided.* Three readings are available: alignment is a target property
+that §7 should let a target state, defaulting to AM §2.3 when `addr_unit` is
+nine; or alignment is always in AM trytes and a target with a different
+addressable unit must round up to them; or the AM's table generalizes as
+"align to the target's word". The first is most likely right — everything else
+in §7 is target-supplied data rather than an assumption baked into a pass, and
+this is the one place a pass still assumes. It is recorded rather than decided
+because it changes a normative rule in two documents, and because the target
+it currently affects has no code generator.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The
