@@ -1,0 +1,896 @@
+// HPL.tr — High-Performance Linpack, in Trust, on TRISC-27.
+//
+// The benchmark itself: a dense system per test size, LU with partial
+// pivoting, a triangular solve, and HPL's own scaled residual check, reported
+// in HPL's own output format. Four test sizes, which are the four HPL.dat
+// ships with.
+//
+// What is measured and what is assumed
+// ------------------------------------
+// `elapsed()` reads the cycle counter (ISA §2.3, device −9) and returns
+// instructions retired. That number is real, and the difference of two
+// readings is exactly the cost of the code between them.
+//
+// Seconds are not real. TRISC-27 defines no clock rate — there is no such
+// thing as a second on this machine — and HPL's format is built around them,
+// so `CLOCK_HZ` below is an invention: one instruction per cycle at 1 MHz.
+// It is the only made-up number in this file, it is a single constant, and
+// every Time and Gflops printed is that constant away from the honest
+// measurement. The residual check does not touch it. When TRISC-27 acquires
+// a defined rate, change that one line.
+//
+// Arithmetic
+// ----------
+// Fixed point at scale 3^11, so eps is 3^-11 ≈ 5.64e-6, printed in the
+// header the way HPL prints a machine epsilon. There is no floating point on
+// this machine (AM §7).
+//
+// `fmul` is exact for any product whose *result* fits, because `mulh` gives
+// the high half of the 54-trit product and the two halves recombine with no
+// rounding but the final one. What is *not* available is a widening divide,
+// and that is what fixes the scale at 3^11 rather than higher: `fdiv` forms
+// `a << 11` before dividing, so it needs |a| below 3^(26.5−22), about 121 —
+// comfortable for values that reach N, and the reason 3^12 is not on offer.
+//
+// Rescaling itself is free of apology: `x >> 11` *is* division by 3^11 under
+// round-to-nearest, no tie case, no fixup (Ch. 1 §4).
+
+fn putchar(c: t9);
+
+// Instructions retired since reset. The body is in `examples/trisc/runtime.t27`,
+// which reads device −9; the difference of two readings needs nothing
+// subtracted for the measurement, since reading through a call adds the same
+// instructions to both.
+fn elapsed() -> t27;
+
+const NMAX: taddr = 35;         // the largest test; every array is this size
+const ONE: t27 = 177147;        // 3^11, the fixed-point unit
+const HI: t27 = 43046721;       // 3^(27−11), for recombining a wide product
+
+// The invented number. See the header.
+const CLOCK_HZ: t27 = 1000000;
+
+// ------------------------------------------------------------- printing
+
+fn print_str(s: &[t9]) {
+    let mut i: taddr = 0;
+    while i < s.len() {
+        putchar(s[i]);
+        i += 1;
+    }
+}
+
+fn print_line(s: &[t9]) {
+    print_str(s);
+    putchar(10);
+}
+
+fn print_rule(c: t9, n: taddr) {
+    let mut i: taddr = 0;
+    while i < n {
+        putchar(c);
+        i += 1;
+    }
+    putchar(10);
+}
+
+fn spaces(n: taddr) {
+    let mut i: taddr = 0;
+    while i < n {
+        putchar(32);
+        i += 1;
+    }
+}
+
+// Division rounding toward zero. `/` rounds to nearest (Ch. 1 §4), which is
+// what arithmetic wants and what a digit loop must not have.
+fn div_floor(a: t27, b: t27) -> t27 {
+    let q = a / b;
+    if q * b > a { q - 1 } else { q }
+}
+
+fn decimal_width(v: t27) -> taddr {
+    let mut n = if v < 0 { -v } else { v };
+    let mut w: taddr = if v < 0 { 2 } else { 1 };
+    while n >= 10 {
+        n = div_floor(n, 10);
+        w += 1;
+    }
+    w
+}
+
+fn print_decimal(value: t27) {
+    let mut n = value;
+    if n < 0 {
+        putchar(45);
+        n = -n;
+    }
+    if n == 0 {
+        putchar(48);
+        return;
+    }
+    let mut digits: [t9; 16] = [0; 16];
+    let mut i: taddr = 0;
+    while n > 0 {
+        digits[i] = (n % 10) as t9;
+        n = n / 10;
+        if digits[i] < 0 {              // the balanced remainder's one price
+            digits[i] += 10;
+            n -= 1;
+        }
+        i += 1;
+    }
+    while i > 0 {
+        i -= 1;
+        putchar(digits[i] + 48);
+    }
+}
+
+// Right-aligned in a field, which is how every column of HPL's table is set.
+fn print_field(v: t27, width: taddr) {
+    spaces(width - decimal_width(v));
+    print_decimal(v);
+}
+
+// `whole.frac` with `places` digits after the point, right-aligned.
+fn print_ratio(num: t27, den: t27, places: taddr, width: taddr) {
+    let whole = div_floor(num, den);
+    let mut rest = num - whole * den;
+    let mut w = decimal_width(whole) + 1 + places;
+    spaces(width - w);
+    print_decimal(whole);
+    putchar(46);                        // '.'
+    let mut k: taddr = 0;
+    while k < places {
+        rest = rest * 10;
+        let d = div_floor(rest, den);
+        putchar((d as t9) + 48);
+        rest -= d * den;
+        k += 1;
+    }
+}
+
+// `v · 10^exp_off` as `d.ddde±NN`, which is HPL's `%e`. Normalizing in
+// integers costs nothing here: shifting the decimal point is multiplying or
+// dividing by ten, and the exponent is a running count of how often.
+fn print_sci(v: t27, exp_off: t27, digits: taddr, width: taddr) {
+    spaces(width - (digits + 5));
+    if v == 0 {
+        putchar(48);
+        putchar(46);
+        let mut z: taddr = 1;
+        while z < digits {
+            putchar(48);
+            z += 1;
+        }
+        // "e+00"
+        let e0: [t9; 4] = [101, 43, 48, 48];
+        print_str(&e0);
+        return;
+    }
+    let mut m = if v < 0 { -v } else { v };
+    let mut e: t27 = 0;
+    let mut lo: t27 = 1;
+    let mut k: taddr = 1;
+    while k < digits {
+        lo = lo * 10;
+        k += 1;
+    }
+    let hi = lo * 10;
+    while m >= hi {
+        m = div_floor(m, 10);
+        e += 1;
+    }
+    while m < lo {
+        m = m * 10;
+        e -= 1;
+    }
+    if v < 0 {
+        putchar(45);
+    }
+    // The mantissa, one digit before the point and the rest after it.
+    let lead = div_floor(m, lo);
+    putchar((lead as t9) + 48);
+    putchar(46);
+    let mut rest = m - lead * lo;
+    let mut place = lo;
+    let mut j: taddr = 1;
+    while j < digits {
+        place = div_floor(place, 10);
+        let d = div_floor(rest, place);
+        putchar((d as t9) + 48);
+        rest -= d * place;
+        j += 1;
+    }
+    putchar(101);                       // 'e'
+    let mut ex = e + (digits as t27) - 1 + exp_off;
+    if ex < 0 {
+        putchar(45);
+        ex = -ex;
+    } else {
+        putchar(43);
+    }
+    if ex < 10 {
+        putchar(48);
+    }
+    print_decimal(ex);
+}
+
+// ---------------------------------------------------------- fixed point
+
+// The exact product, rescaled. `mulh` is the high 27 trits of the 54-trit
+// product and `wrapping_mul` is the low 27 (TIR §3.2: the two reconstruct P
+// exactly), so this is P >> 11 with one rounding, not two — and it does not
+// care how large P was, only that the answer fits.
+fn fmul(a: t27, b: t27) -> t27 {
+    a.mulh(b) * HI + (a.wrapping_mul(b) >> 11)
+}
+
+// The other direction, and the one with a ceiling: there is no widening
+// divide, so `a << 11` must fit, which holds for |a| up to about 121.
+fn fdiv(a: t27, b: t27) -> t27 {
+    (a << 11) / b
+}
+
+fn fabs(x: t27) -> t27 {
+    if x < 0 { -x } else { x }
+}
+
+fn wrap_index(v: taddr, n: taddr) -> taddr {
+    let r = v % n;
+    if r < 0 { r + n } else { r }
+}
+fn print_banner() {
+    print_rule(61, 80);
+    // "HPL-Trust 0.1  --  High-Performance Linpack  --  balanced ternary machine"
+    let l1: [t9; 73] = [72, 80, 76, 45, 84, 114, 117, 115, 116, 32, 48, 46, 49, 32, 32, 45,
+                          45, 32, 32, 72, 105, 103, 104, 45, 80, 101, 114, 102, 111, 114, 109,
+                          97, 110, 99, 101, 32, 76, 105, 110, 112, 97, 99, 107, 32, 32, 45,
+                          45, 32, 32, 98, 97, 108, 97, 110, 99, 101, 100, 32, 116, 101, 114,
+                          110, 97, 114, 121, 32, 109, 97, 99, 104, 105, 110, 101];
+    print_line(&l1);
+    // "An independent implementation in the output format of HPLinpack 2.3 (A."
+    let l2: [t9; 71] = [65, 110, 32, 105, 110, 100, 101, 112, 101, 110, 100, 101, 110, 116,
+                          32, 105, 109, 112, 108, 101, 109, 101, 110, 116, 97, 116, 105, 111,
+                          110, 32, 105, 110, 32, 116, 104, 101, 32, 111, 117, 116, 112, 117,
+                          116, 32, 102, 111, 114, 109, 97, 116, 32, 111, 102, 32, 72, 80, 76,
+                          105, 110, 112, 97, 99, 107, 32, 50, 46, 51, 32, 40, 65, 46];
+    print_line(&l2);
+    // "Petitet, R. C. Whaley, J. Dongarra and A. Cleary, Innovative Computing"
+    let l3: [t9; 70] = [80, 101, 116, 105, 116, 101, 116, 44, 32, 82, 46, 32, 67, 46, 32,
+                          87, 104, 97, 108, 101, 121, 44, 32, 74, 46, 32, 68, 111, 110, 103,
+                          97, 114, 114, 97, 32, 97, 110, 100, 32, 65, 46, 32, 67, 108, 101,
+                          97, 114, 121, 44, 32, 73, 110, 110, 111, 118, 97, 116, 105, 118,
+                          101, 32, 67, 111, 109, 112, 117, 116, 105, 110, 103];
+    print_line(&l3);
+    // "Laboratory, UTK).  Not their code, not validated by them, and not IEEE"
+    let l4: [t9; 70] = [76, 97, 98, 111, 114, 97, 116, 111, 114, 121, 44, 32, 85, 84, 75,
+                          41, 46, 32, 32, 78, 111, 116, 32, 116, 104, 101, 105, 114, 32, 99,
+                          111, 100, 101, 44, 32, 110, 111, 116, 32, 118, 97, 108, 105, 100,
+                          97, 116, 101, 100, 32, 98, 121, 32, 116, 104, 101, 109, 44, 32, 97,
+                          110, 100, 32, 110, 111, 116, 32, 73, 69, 69, 69];
+    print_line(&l4);
+    // "double -- this machine has no floating point at all.  See eps below."
+    let l5: [t9; 68] = [100, 111, 117, 98, 108, 101, 32, 45, 45, 32, 116, 104, 105, 115, 32,
+                          109, 97, 99, 104, 105, 110, 101, 32, 104, 97, 115, 32, 110, 111, 32,
+                          102, 108, 111, 97, 116, 105, 110, 103, 32, 112, 111, 105, 110, 116,
+                          32, 97, 116, 32, 97, 108, 108, 46, 32, 32, 83, 101, 101, 32, 101,
+                          112, 115, 32, 98, 101, 108, 111, 119, 46];
+    print_line(&l5);
+    print_rule(61, 80);
+    putchar(10);
+    // "An explanation of the input/output parameters follows:"
+    let l8: [t9; 54] = [65, 110, 32, 101, 120, 112, 108, 97, 110, 97, 116, 105, 111, 110,
+                          32, 111, 102, 32, 116, 104, 101, 32, 105, 110, 112, 117, 116, 47,
+                          111, 117, 116, 112, 117, 116, 32, 112, 97, 114, 97, 109, 101, 116,
+                          101, 114, 115, 32, 102, 111, 108, 108, 111, 119, 115, 58];
+    print_line(&l8);
+    // "T/V    : Wall time / encoded variant."
+    let l9: [t9; 37] = [84, 47, 86, 32, 32, 32, 32, 58, 32, 87, 97, 108, 108, 32, 116, 105,
+                          109, 101, 32, 47, 32, 101, 110, 99, 111, 100, 101, 100, 32, 118, 97,
+                          114, 105, 97, 110, 116, 46];
+    print_line(&l9);
+    // "N      : The order of the coefficient matrix A."
+    let l10: [t9; 47] = [78, 32, 32, 32, 32, 32, 32, 58, 32, 84, 104, 101, 32, 111, 114, 100,
+                          101, 114, 32, 111, 102, 32, 116, 104, 101, 32, 99, 111, 101, 102,
+                          102, 105, 99, 105, 101, 110, 116, 32, 109, 97, 116, 114, 105, 120,
+                          32, 65, 46];
+    print_line(&l10);
+    // "NB     : The partitioning blocking factor."
+    let l11: [t9; 42] = [78, 66, 32, 32, 32, 32, 32, 58, 32, 84, 104, 101, 32, 112, 97, 114,
+                          116, 105, 116, 105, 111, 110, 105, 110, 103, 32, 98, 108, 111, 99,
+                          107, 105, 110, 103, 32, 102, 97, 99, 116, 111, 114, 46];
+    print_line(&l11);
+    // "P      : The number of process rows."
+    let l12: [t9; 36] = [80, 32, 32, 32, 32, 32, 32, 58, 32, 84, 104, 101, 32, 110, 117, 109,
+                          98, 101, 114, 32, 111, 102, 32, 112, 114, 111, 99, 101, 115, 115,
+                          32, 114, 111, 119, 115, 46];
+    print_line(&l12);
+    // "Q      : The number of process columns."
+    let l13: [t9; 39] = [81, 32, 32, 32, 32, 32, 32, 58, 32, 84, 104, 101, 32, 110, 117, 109,
+                          98, 101, 114, 32, 111, 102, 32, 112, 114, 111, 99, 101, 115, 115,
+                          32, 99, 111, 108, 117, 109, 110, 115, 46];
+    print_line(&l13);
+    // "Time   : Time in seconds to solve the linear system."
+    let l14: [t9; 52] = [84, 105, 109, 101, 32, 32, 32, 58, 32, 84, 105, 109, 101, 32, 105,
+                          110, 32, 115, 101, 99, 111, 110, 100, 115, 32, 116, 111, 32, 115,
+                          111, 108, 118, 101, 32, 116, 104, 101, 32, 108, 105, 110, 101, 97,
+                          114, 32, 115, 121, 115, 116, 101, 109, 46];
+    print_line(&l14);
+    // "Gflops : Rate of execution for solving the linear system."
+    let l15: [t9; 57] = [71, 102, 108, 111, 112, 115, 32, 58, 32, 82, 97, 116, 101, 32, 111,
+                          102, 32, 101, 120, 101, 99, 117, 116, 105, 111, 110, 32, 102, 111,
+                          114, 32, 115, 111, 108, 118, 105, 110, 103, 32, 116, 104, 101, 32,
+                          108, 105, 110, 101, 97, 114, 32, 115, 121, 115, 116, 101, 109, 46];
+    print_line(&l15);
+    putchar(10);
+    // "The following parameter values will be used:"
+    let l17: [t9; 44] = [84, 104, 101, 32, 102, 111, 108, 108, 111, 119, 105, 110, 103, 32,
+                          112, 97, 114, 97, 109, 101, 116, 101, 114, 32, 118, 97, 108, 117,
+                          101, 115, 32, 119, 105, 108, 108, 32, 98, 101, 32, 117, 115, 101,
+                          100, 58];
+    print_line(&l17);
+    putchar(10);
+}
+
+fn print_params() {
+    // "NB     :       1 "
+    let l0: [t9; 17] = [78, 66, 32, 32, 32, 32, 32, 58, 32, 32, 32, 32, 32, 32, 32, 49, 32];
+    print_line(&l0);
+    // "PMAP   : Row-major process mapping"
+    let l1: [t9; 34] = [80, 77, 65, 80, 32, 32, 32, 58, 32, 82, 111, 119, 45, 109, 97, 106,
+                          111, 114, 32, 112, 114, 111, 99, 101, 115, 115, 32, 109, 97, 112,
+                          112, 105, 110, 103];
+    print_line(&l1);
+    // "P      :       1 "
+    let l2: [t9; 17] = [80, 32, 32, 32, 32, 32, 32, 58, 32, 32, 32, 32, 32, 32, 32, 49, 32];
+    print_line(&l2);
+    // "Q      :       1 "
+    let l3: [t9; 17] = [81, 32, 32, 32, 32, 32, 32, 58, 32, 32, 32, 32, 32, 32, 32, 49, 32];
+    print_line(&l3);
+    // "PFACT  :    Right"
+    let l4: [t9; 17] = [80, 70, 65, 67, 84, 32, 32, 58, 32, 32, 32, 32, 82, 105, 103, 104,
+                          116];
+    print_line(&l4);
+    // "NBMIN  :       1 "
+    let l5: [t9; 17] = [78, 66, 77, 73, 78, 32, 32, 58, 32, 32, 32, 32, 32, 32, 32, 49, 32];
+    print_line(&l5);
+    // "NDIV   :       1 "
+    let l6: [t9; 17] = [78, 68, 73, 86, 32, 32, 32, 58, 32, 32, 32, 32, 32, 32, 32, 49, 32];
+    print_line(&l6);
+    // "RFACT  :    Right"
+    let l7: [t9; 17] = [82, 70, 65, 67, 84, 32, 32, 58, 32, 32, 32, 32, 82, 105, 103, 104,
+                          116];
+    print_line(&l7);
+    // "BCAST  :     none"
+    let l8: [t9; 17] = [66, 67, 65, 83, 84, 32, 32, 58, 32, 32, 32, 32, 32, 110, 111, 110,
+                          101];
+    print_line(&l8);
+    // "DEPTH  :       0 "
+    let l9: [t9; 17] = [68, 69, 80, 84, 72, 32, 32, 58, 32, 32, 32, 32, 32, 32, 32, 48, 32];
+    print_line(&l9);
+    // "SWAP   : Binary-exchange"
+    let l10: [t9; 24] = [83, 87, 65, 80, 32, 32, 32, 58, 32, 66, 105, 110, 97, 114, 121, 45,
+                          101, 120, 99, 104, 97, 110, 103, 101];
+    print_line(&l10);
+    // "L1     : no-transpose form"
+    let l11: [t9; 26] = [76, 49, 32, 32, 32, 32, 32, 58, 32, 110, 111, 45, 116, 114, 97, 110,
+                          115, 112, 111, 115, 101, 32, 102, 111, 114, 109];
+    print_line(&l11);
+    // "U      : no-transpose form"
+    let l12: [t9; 26] = [85, 32, 32, 32, 32, 32, 32, 58, 32, 110, 111, 45, 116, 114, 97, 110,
+                          115, 112, 111, 115, 101, 32, 102, 111, 114, 109];
+    print_line(&l12);
+    // "EQUIL  :      no"
+    let l13: [t9; 16] = [69, 81, 85, 73, 76, 32, 32, 58, 32, 32, 32, 32, 32, 32, 110, 111];
+    print_line(&l13);
+    // "ALIGN  : 3 trytes"
+    let l14: [t9; 17] = [65, 76, 73, 71, 78, 32, 32, 58, 32, 51, 32, 116, 114, 121, 116, 101,
+                          115];
+    print_line(&l14);
+    putchar(10);
+    print_rule(45, 80);
+    putchar(10);
+    // "- The matrix A is pseudo-randomly generated for each test, and then one"
+    let l18: [t9; 71] = [45, 32, 84, 104, 101, 32, 109, 97, 116, 114, 105, 120, 32, 65, 32,
+                          105, 115, 32, 112, 115, 101, 117, 100, 111, 45, 114, 97, 110, 100,
+                          111, 109, 108, 121, 32, 103, 101, 110, 101, 114, 97, 116, 101, 100,
+                          32, 102, 111, 114, 32, 101, 97, 99, 104, 32, 116, 101, 115, 116, 44,
+                          32, 97, 110, 100, 32, 116, 104, 101, 110, 32, 111, 110, 101];
+    print_line(&l18);
+    // "  entry per row is weighted by N: fixed point has an absolute resolution,"
+    let l19: [t9; 73] = [32, 32, 101, 110, 116, 114, 121, 32, 112, 101, 114, 32, 114, 111,
+                          119, 32, 105, 115, 32, 119, 101, 105, 103, 104, 116, 101, 100, 32,
+                          98, 121, 32, 78, 58, 32, 102, 105, 120, 101, 100, 32, 112, 111, 105,
+                          110, 116, 32, 104, 97, 115, 32, 97, 110, 32, 97, 98, 115, 111, 108,
+                          117, 116, 101, 32, 114, 101, 115, 111, 108, 117, 116, 105, 111, 110,
+                          44];
+    print_line(&l19);
+    // "  not a relative one, so an unweighted random matrix at these sizes reports"
+    let l20: [t9; 75] = [32, 32, 110, 111, 116, 32, 97, 32, 114, 101, 108, 97, 116, 105, 118,
+                          101, 32, 111, 110, 101, 44, 32, 115, 111, 32, 97, 110, 32, 117, 110,
+                          119, 101, 105, 103, 104, 116, 101, 100, 32, 114, 97, 110, 100, 111,
+                          109, 32, 109, 97, 116, 114, 105, 120, 32, 97, 116, 32, 116, 104,
+                          101, 115, 101, 32, 115, 105, 122, 101, 115, 32, 114, 101, 112, 111,
+                          114, 116, 115];
+    print_line(&l20);
+    // "  its own condition number rather than this machine's arithmetic."
+    let l21: [t9; 65] = [32, 32, 105, 116, 115, 32, 111, 119, 110, 32, 99, 111, 110, 100,
+                          105, 116, 105, 111, 110, 32, 110, 117, 109, 98, 101, 114, 32, 114,
+                          97, 116, 104, 101, 114, 32, 116, 104, 97, 110, 32, 116, 104, 105,
+                          115, 32, 109, 97, 99, 104, 105, 110, 101, 39, 115, 32, 97, 114, 105,
+                          116, 104, 109, 101, 116, 105, 99, 46];
+    print_line(&l21);
+    // "- The following scaled residual check will be computed:"
+    let l22: [t9; 55] = [45, 32, 84, 104, 101, 32, 102, 111, 108, 108, 111, 119, 105, 110,
+                          103, 32, 115, 99, 97, 108, 101, 100, 32, 114, 101, 115, 105, 100,
+                          117, 97, 108, 32, 99, 104, 101, 99, 107, 32, 119, 105, 108, 108, 32,
+                          98, 101, 32, 99, 111, 109, 112, 117, 116, 101, 100, 58];
+    print_line(&l22);
+    // "      ||Ax-b||_oo / ( eps * ( || x ||_oo * || A ||_oo + || b ||_oo ) * N )"
+    let l23: [t9; 74] = [32, 32, 32, 32, 32, 32, 124, 124, 65, 120, 45, 98, 124, 124, 95,
+                          111, 111, 32, 47, 32, 40, 32, 101, 112, 115, 32, 42, 32, 40, 32,
+                          124, 124, 32, 120, 32, 124, 124, 95, 111, 111, 32, 42, 32, 124, 124,
+                          32, 65, 32, 124, 124, 95, 111, 111, 32, 43, 32, 124, 124, 32, 98,
+                          32, 124, 124, 95, 111, 111, 32, 41, 32, 42, 32, 78, 32, 41];
+    print_line(&l23);
+}
+
+fn print_thresholds() {
+    // "- Computational tests pass if scaled residuals are less than                16.0"
+    let l0: [t9; 80] = [45, 32, 67, 111, 109, 112, 117, 116, 97, 116, 105, 111, 110, 97,
+                          108, 32, 116, 101, 115, 116, 115, 32, 112, 97, 115, 115, 32, 105,
+                          102, 32, 115, 99, 97, 108, 101, 100, 32, 114, 101, 115, 105, 100,
+                          117, 97, 108, 115, 32, 97, 114, 101, 32, 108, 101, 115, 115, 32,
+                          116, 104, 97, 110, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32,
+                          32, 32, 32, 32, 49, 54, 46, 48];
+    print_line(&l0);
+    putchar(10);
+    print_rule(61, 80);
+}
+
+fn print_table_head() {
+    // "T/V                N    NB     P     Q               Time                 Gflops"
+    let l0: [t9; 80] = [84, 47, 86, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32,
+                          32, 32, 78, 32, 32, 32, 32, 78, 66, 32, 32, 32, 32, 32, 80, 32, 32,
+                          32, 32, 32, 81, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32,
+                          32, 32, 84, 105, 109, 101, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32,
+                          32, 32, 32, 32, 32, 32, 32, 71, 102, 108, 111, 112, 115];
+    print_line(&l0);
+    print_rule(45, 80);
+}
+
+// -------------------------------------------------------- the system
+
+// A linear congruential generator over the whole word — `wrapping_mul` is
+// the release-profile flavor of `*`, asked for by name (Ch. 1 §4) — reduced
+// into ±1 by a balanced remainder, whose range is |r| ≤ |b|/2 and so is
+// exactly ±3^11 for this divisor. No fold and no bias correction.
+struct Rng { s: t27 }
+
+impl Rng {
+    fn next_unit(&mut self) -> t27 {
+        self.s = self.s.wrapping_mul(1103515).wrapping_add(12345);
+        self.s % 354295                 // 2·3^11 + 1, so |r| ≤ 3^11
+    }
+}
+
+// Where row i carries its weight. This is a permutation of the columns only
+// when the multiplier is coprime with N, and it has to be one for every size
+// tested: 11 is, against 29, 30 (2·3·5), 34 (2·17) and 35 (5·7). 5 is not —
+// it shares a factor with two of the four, which collapses the map onto a
+// fifth of the columns, leaves the rest unweighted, and produces exactly the
+// small pivots the weighting exists to avoid.
+fn sigma(i: taddr, n: taddr) -> taddr {
+    wrap_index(11 * i + 3, n)
+}
+
+// HPL generates A at random and so does this, with one departure that is not
+// cosmetic and one that is.
+//
+// Not cosmetic: one entry per row carries N. A uniformly random matrix has a
+// condition number in the hundreds at these sizes, and fixed point has an
+// *absolute* resolution rather than a relative one — so the small pivots such
+// a matrix produces are exactly where 3^-11 runs out, and what comes back is
+// a coin toss rather than a measurement. Weighting one entry per row buys a
+// system whose residual reports the arithmetic instead of the draw.
+//
+// Cosmetic, but worth the two lines: the weight goes on a *permuted*
+// diagonal, not the diagonal. On the diagonal, every pivot search would find
+// the element already in place and the partial pivoting this benchmark is
+// supposed to be doing would never once exchange a row. Permuted, it costs
+// nothing in conditioning — the matrix is a row permutation of the same one —
+// and the factorization has to hunt down all N of them. `main` checks that it
+// found exactly the permutation planted here, which is a sharper question
+// than the residual asks.
+fn generate(a: &mut [[t27; NMAX]], b: &mut [t27], n: taddr, rng: &mut Rng) {
+    let mut i: taddr = 0;
+    while i < n {
+        let mut j: taddr = 0;
+        while j < n {
+            a[i][j] = rng.next_unit();
+            j += 1;
+        }
+        a[i][sigma(i, n)] += (n as t27) * ONE;
+        b[i] = rng.next_unit() * (n as t27);
+        i += 1;
+    }
+}
+
+// ------------------------------------------- factor, solve, check
+
+// LU with partial pivoting, in place. `perm[i]` is the original row now
+// sitting at row i. Returns the number of row exchanges, or `None` if a pivot
+// column was entirely zero.
+fn factor(a: &mut [[t27; NMAX]], perm: &mut [taddr], n: taddr) -> Option<t27> {
+    let mut swaps: t27 = 0;
+    let mut k: taddr = 0;
+    while k < n {
+        // The largest magnitude at or below the diagonal, which is what holds
+        // every multiplier below to |m| ≤ 1 — and with it the growth of the
+        // entries that `fdiv`'s ceiling cares about.
+        let mut best = k;
+        let mut i = k + 1;
+        while i < n {
+            if fabs(a[i][k]) > fabs(a[best][k]) {
+                best = i;
+            }
+            i += 1;
+        }
+        if a[best][k] == 0 {
+            return Option::None;
+        }
+        if best != k {
+            let mut j: taddr = 0;
+            while j < n {
+                let t = a[k][j];
+                a[k][j] = a[best][j];
+                a[best][j] = t;
+                j += 1;
+            }
+            let t = perm[k];
+            perm[k] = perm[best];
+            perm[best] = t;
+            swaps += 1;
+        }
+        // The elimination: the 2/3·N³ of the reported operation count.
+        let mut r = k + 1;
+        while r < n {
+            let m = fdiv(a[r][k], a[k][k]);
+            a[r][k] = m;
+            let mut c = k + 1;
+            while c < n {
+                a[r][c] -= fmul(m, a[k][c]);
+                c += 1;
+            }
+            r += 1;
+        }
+        k += 1;
+    }
+    Option::Some(swaps)
+}
+
+// Forward then back substitution — the 2·N² — with L's unit diagonal implied
+// and `perm` putting the right-hand side in the order the rows ended up in.
+fn solve(a: &[[t27; NMAX]], perm: &[taddr], b: &[t27], x: &mut [t27], n: taddr) {
+    let mut i: taddr = 0;
+    while i < n {
+        let mut sum = b[perm[i]];
+        let mut j: taddr = 0;
+        while j < i {
+            sum -= fmul(a[i][j], x[j]);
+            j += 1;
+        }
+        x[i] = sum;
+        i += 1;
+    }
+    let mut r = n;
+    while r > 0 {
+        r -= 1;
+        let mut sum = x[r];
+        let mut j = r + 1;
+        while j < n {
+            sum -= fmul(a[r][j], x[j]);
+            j += 1;
+        }
+        x[r] = fdiv(sum, a[r][r]);
+    }
+}
+
+// ‖Ax − b‖∞, against the system as it stood before the factorization ate it.
+fn residual_inf(a0: &[[t27; NMAX]], x: &[t27], b0: &[t27], n: taddr) -> t27 {
+    let mut worst: t27 = 0;
+    let mut i: taddr = 0;
+    while i < n {
+        let mut sum: t27 = 0;
+        let mut j: taddr = 0;
+        while j < n {
+            sum += fmul(a0[i][j], x[j]);
+            j += 1;
+        }
+        let r = fabs(sum - b0[i]);
+        if r > worst {
+            worst = r;
+        }
+        i += 1;
+    }
+    worst
+}
+
+fn norm_inf_matrix(a: &[[t27; NMAX]], n: taddr) -> t27 {
+    let mut worst: t27 = 0;
+    let mut i: taddr = 0;
+    while i < n {
+        let mut row: t27 = 0;
+        let mut j: taddr = 0;
+        while j < n {
+            row += fabs(a[i][j]);
+            j += 1;
+        }
+        if row > worst {
+            worst = row;
+        }
+        i += 1;
+    }
+    worst
+}
+
+fn norm_inf_vector(v: &[t27], n: taddr) -> t27 {
+    let mut worst: t27 = 0;
+    let mut i: taddr = 0;
+    while i < n {
+        let m = fabs(v[i]);
+        if m > worst {
+            worst = m;
+        }
+        i += 1;
+    }
+    worst
+}
+
+// HPL's check is
+//
+//     ‖Ax−b‖∞ ⁄ ( eps · ( ‖x‖∞·‖A‖∞ + ‖b‖∞ ) · N )
+//
+// and on this machine it collapses to a single division. eps is the
+// fixed-point resolution 3^-11, so eps is the value 1; writing the norm
+// expression as the fixed-point value D, the whole quotient is
+//
+//     (R/3^11) ⁄ ( 3^-11 · (D/3^11) · N )  =  R ⁄ ((D·N) >> 11)
+//
+// — the residual, in ULPs, over one integer. That integer is worth computing
+// once and keeping: printing the quotient and deciding the verdict then ask
+// the same question two ways, and only the division can be made to lie.
+fn residual_scale(anorm: t27, xnorm: t27, bnorm: t27, n: t27) -> t27 {
+    let d = fmul(xnorm, anorm) + bnorm;
+    (d * n) >> 11
+}
+
+// The number HPL prints, to seven places, as an integer scaled by 10^7. The
+// numerator is what overflows; `checked_mul` says so rather than wrapping,
+// and the fallback divides first — which loses digits of a residual that is
+// already reporting a disaster, and cannot underflow there, because reaching
+// it at all means R is larger than the scale by four orders of magnitude.
+fn residual_e7(r: t27, scale: t27) -> t27 {
+    match r.checked_mul(10000000) {
+        Option::Some(v) => v / scale,
+        Option::None => (r / scale).saturating_mul(10000000),
+    }
+}
+
+// The verdict, deliberately not read back off the printed number: `resid < 16`
+// is `R < 16·scale`, which is exact, and a comparison cannot be pushed toward
+// passing by a numerator that would not fit.
+fn residual_passes(r: t27, scale: t27) -> bool {
+    r < scale.saturating_mul(16)
+}
+// ---------------------------------------------------------------- main
+
+fn main() -> t27 {
+    // HPL.dat's own four default sizes, which is why they are these.
+    let sizes: [taddr; 4] = [29, 30, 34, 35];
+
+    let mut a: [[t27; NMAX]; NMAX] = [[0; NMAX]; NMAX];
+    let mut a0: [[t27; NMAX]; NMAX] = [[0; NMAX]; NMAX];
+    let mut b: [t27; NMAX] = [0; NMAX];
+    let mut x: [t27; NMAX] = [0; NMAX];
+    let mut perm: [taddr; NMAX] = [0; NMAX];
+
+    print_banner();
+
+    // The N line carries every size, which is why it is not in the
+    // static block with the rest of the parameters.
+    // "N      :"
+    let l_nrow: [t9; 8] = [78, 32, 32, 32, 32, 32, 32, 58];
+    print_str(&l_nrow);
+    let mut t: taddr = 0;
+    while t < 4 {
+        print_field(sizes[t] as t27, 8);
+        putchar(32);
+        t += 1;
+    }
+    putchar(10);
+    print_params();
+
+    // eps is 3^-11 exactly. Printing it needs no float: 10^12 divided by
+    // 3^11 is its first thirteen digits, and `print_sci` puts the point
+    // and the exponent where HPL's `%e` would.
+    // "- The relative machine precision (eps) is taken to be"
+    let l_eps: [t9; 53] = [45, 32, 84, 104, 101, 32, 114, 101, 108, 97, 116, 105, 118, 101,
+                             32, 109, 97, 99, 104, 105, 110, 101, 32, 112, 114, 101, 99, 105,
+                             115, 105, 111, 110, 32, 40, 101, 112, 115, 41, 32, 105, 115, 32,
+                             116, 97, 107, 101, 110, 32, 116, 111, 32, 98, 101];
+    print_str(&l_eps);
+    print_sci(1000000000000 / ONE, -12, 7, 27);
+    putchar(10);
+    print_thresholds();
+
+    let mut passed: t27 = 0;
+    let mut failed: t27 = 0;
+    let mut skipped: t27 = 0;
+
+    let mut test: taddr = 0;
+    while test < 4 {
+        let n = sizes[test];
+        let nn = n as t27;
+
+        // Each test draws its own system, from a seed of its own, so no
+        // test inherits the state the one before it left.
+        let mut rng = Rng { s: 20250814 + nn * 7919 };
+        generate(&mut a, &mut b, n, &mut rng);
+
+        // Keep the system: the factorization overwrites it, and a residual
+        // is worth nothing measured against the matrix that produced it.
+        let mut i: taddr = 0;
+        while i < n {
+            perm[i] = i;
+            let mut j: taddr = 0;
+            while j < n {
+                a0[i][j] = a[i][j];
+                j += 1;
+            }
+            i += 1;
+        }
+
+        // The measured region: everything HPL times, and nothing else.
+        let start = elapsed();
+        let outcome = factor(&mut a, &mut perm, n);
+        let swaps = match outcome {
+            Option::Some(s) => s,
+            Option::None => -1,
+        };
+        if swaps >= 0 {
+            solve(&a, &perm, &b, &mut x, n);
+        }
+        let finish = elapsed();
+        let cycles = finish - start;
+
+        // 2/3·N³ for the factorization, 2·N² for the two substitutions.
+        let ops = (2 * nn * nn * nn) / 3 + 2 * nn * nn;
+
+        print_table_head();
+
+        // The variant code. Every character of HPL's is a parameter this
+        // machine has exactly one setting for: wall time, row-major, no
+        // broadcast, depth zero, right-looking, one block.
+        // "WR00R1R1"
+        let l_tv: [t9; 8] = [87, 82, 48, 48, 82, 49, 82, 49];
+        print_str(&l_tv);
+        print_field(nn, 12);
+        print_field(1, 6);
+        print_field(1, 6);
+        print_field(1, 6);
+        print_ratio(cycles, CLOCK_HZ, 2, 19);
+        // Gflops: operations per second, then the 10^-9. Both stay in
+        // integers — `ops · CLOCK_HZ` fits a word at every size here.
+        print_sci((ops * CLOCK_HZ) / cycles, -9, 4, 23);
+        putchar(10);
+
+        // HPL prints a start and end wall-clock time here. This machine
+        // has no calendar and no clock; it has a count of instructions
+        // retired, which is the measurement those two lines exist to
+        // bracket, so it is what is printed.
+        // "HPL_trsolve() start cycle"
+        let l_c0: [t9; 25] = [72, 80, 76, 95, 116, 114, 115, 111, 108, 118, 101, 40, 41, 32,
+                                115, 116, 97, 114, 116, 32, 99, 121, 99, 108, 101];
+        print_str(&l_c0);
+        print_field(start, 22);
+        putchar(10);
+        // "HPL_trsolve() end cycle"
+        let l_c1: [t9; 23] = [72, 80, 76, 95, 116, 114, 115, 111, 108, 118, 101, 40, 41, 32,
+                                101, 110, 100, 32, 99, 121, 99, 108, 101];
+        print_str(&l_c1);
+        print_field(finish, 24);
+        putchar(10);
+        print_rule(45, 80);
+
+        let r = residual_inf(&a0, &x, &b, n);
+        let scale = residual_scale(norm_inf_matrix(&a0, n),
+                                   norm_inf_vector(&x, n),
+                                   norm_inf_vector(&b, n), nn);
+
+        // Did the pivoting recover the permutation `generate` planted?
+        // Row i is heavy in column sigma(i), so the row belonging at
+        // position k is the one whose sigma is k, and perm[k] is the one
+        // that got there.
+        let mut pivots_ok = swaps >= 0;
+        let mut k: taddr = 0;
+        while k < n {
+            if sigma(perm[k], n) != k {
+                pivots_ok = false;
+            }
+            k += 1;
+        }
+
+        // "||Ax-b||_oo/(eps*(||A||_oo*||x||_oo+||b||_oo)*N)="
+        let l_res: [t9; 49] = [124, 124, 65, 120, 45, 98, 124, 124, 95, 111, 111, 47, 40, 101,
+                                 112, 115, 42, 40, 124, 124, 65, 124, 124, 95, 111, 111, 42, 124,
+                                 124, 120, 124, 124, 95, 111, 111, 43, 124, 124, 98, 124, 124, 95,
+                                 111, 111, 41, 42, 78, 41, 61];
+        print_str(&l_res);
+        print_ratio(residual_e7(r, scale), 10000000, 7, 17);
+        if swaps < 0 {
+            // A zero pivot column: HPL's third outcome, not its second.
+            // " ...... SKIPPED"
+            let l_skip: [t9; 15] = [32, 46, 46, 46, 46, 46, 46, 32, 83, 75, 73, 80, 80, 69, 68];
+            print_line(&l_skip);
+            skipped += 1;
+        } else {
+            if pivots_ok && residual_passes(r, scale) {
+                // " ...... PASSED"
+                let l_pass: [t9; 14] = [32, 46, 46, 46, 46, 46, 46, 32, 80, 65, 83, 83, 69, 68];
+                print_line(&l_pass);
+                passed += 1;
+            } else {
+                // " ...... FAILED"
+                let l_fail: [t9; 14] = [32, 46, 46, 46, 46, 46, 46, 32, 70, 65, 73, 76, 69, 68];
+                print_line(&l_fail);
+                failed += 1;
+            }
+        }
+        print_rule(61, 80);
+        test += 1;
+    }
+
+    putchar(10);
+    // "Finished"
+    let l_f0: [t9; 8] = [70, 105, 110, 105, 115, 104, 101, 100];
+    print_str(&l_f0);
+    print_field(4, 7);
+    // " tests with the following results:"
+    let l_f1: [t9; 34] = [32, 116, 101, 115, 116, 115, 32, 119, 105, 116, 104, 32, 116, 104,
+                            101, 32, 102, 111, 108, 108, 111, 119, 105, 110, 103, 32, 114,
+                            101, 115, 117, 108, 116, 115, 58];
+    print_line(&l_f1);
+    print_field(passed, 15);
+    // " tests completed and passed residual checks,"
+    let l_f2: [t9; 44] = [32, 116, 101, 115, 116, 115, 32, 99, 111, 109, 112, 108, 101, 116,
+                            101, 100, 32, 97, 110, 100, 32, 112, 97, 115, 115, 101, 100, 32,
+                            114, 101, 115, 105, 100, 117, 97, 108, 32, 99, 104, 101, 99, 107,
+                            115, 44];
+    print_line(&l_f2);
+    print_field(failed, 15);
+    // " tests completed and failed residual checks,"
+    let l_f3: [t9; 44] = [32, 116, 101, 115, 116, 115, 32, 99, 111, 109, 112, 108, 101, 116,
+                            101, 100, 32, 97, 110, 100, 32, 102, 97, 105, 108, 101, 100, 32,
+                            114, 101, 115, 105, 100, 117, 97, 108, 32, 99, 104, 101, 99, 107,
+                            115, 44];
+    print_line(&l_f3);
+    print_field(skipped, 15);
+    // " tests skipped because of illegal input values."
+    let l_f4: [t9; 47] = [32, 116, 101, 115, 116, 115, 32, 115, 107, 105, 112, 112, 101,
+                            100, 32, 98, 101, 99, 97, 117, 115, 101, 32, 111, 102, 32, 105,
+                            108, 108, 101, 103, 97, 108, 32, 105, 110, 112, 117, 116, 32, 118,
+                            97, 108, 117, 101, 115, 46];
+    print_line(&l_f4);
+    print_rule(45, 80);
+    putchar(10);
+    // "End of Tests."
+    let l_end: [t9; 13] = [69, 110, 100, 32, 111, 102, 32, 84, 101, 115, 116, 115, 46];
+    print_line(&l_end);
+    print_rule(61, 80);
+
+    // The exit status is the number of tests that did not pass, so the
+    // shell learns the same thing the last block of the report says.
+    failed + skipped
+}
