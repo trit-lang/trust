@@ -1109,6 +1109,38 @@ fn expand_inst(e: &mut Emit, inst: &Inst, wide: Wide) -> bool {
             expand::mul(e, inst, *flavor, wide, a, b);
             true
         }
+        // AM §3.3: `x << k` *is* `x · 3ᵏ`. With `k` a constant that is the
+        // whole expansion, and `mul` already knows how. A variable amount
+        // would need `3ᵏ` computed from `k`, which is a shift — so this is
+        // where the road ends until expansion grows a select chain over the
+        // widths or a loop.
+        InstKind::Flavored {
+            op: FlavoredOp::Shl,
+            flavor,
+            a,
+            b,
+            ..
+        } => {
+            let w = wide.logical();
+            let Operand::Const(_, k) = b else {
+                e.errs.push(format!(
+                    "`shl` at t{w} needs expansion, and its amount is not a constant: \
+                     a wide shift by a computed amount is not implemented"
+                ));
+                return true;
+            };
+            let Some(k) = k.to_i128().filter(|k| (0..w as i128).contains(k)) else {
+                // Out of range at every execution, so the block ends here
+                // (TRISC-27 §4.1 and TIR §3.1 both make this `F_SHIFT`).
+                e.halted = Some(Terminator::Trap(FaultCode::Shift));
+                return true;
+            };
+            // 3ᵏ, exactly: one trit set at position k, which is what a
+            // shift by k means and what `Bt::shl` builds.
+            let three_k = Operand::Const(Type::Int(w), Bt::from_i128(1).shl(k as u32));
+            expand::mul(e, inst, *flavor, wide, a, &three_k);
+            true
+        }
         InstKind::Plain {
             op: PlainOp::MulH, ..
         } => {
@@ -1182,23 +1214,33 @@ fn expand_inst(e: &mut Emit, inst: &Inst, wide: Wide) -> bool {
             }
             true
         }
-        // Everything else at a wide width needs a technique this pass does
-        // not have; say which, rather than emit something plausible.
-        InstKind::Flavored { op, .. } => {
-            e.errs.push(format!(
-                "`{}` at t{} needs expansion, which requires a widening multiply \
-                 (a `mulhi`-style instruction TIR does not define): the product of \
-                 two t{} parts does not fit in a legal width",
-                op.name(),
-                wide.logical(),
-                wide.part
-            ));
+        InstKind::Plain {
+            op: PlainOp::Shr,
+            a,
+            b,
+            ..
+        } => {
+            let w = wide.logical();
+            let Operand::Const(_, k) = b else {
+                e.errs.push(format!(
+                    "`shr` at t{w} needs expansion, and its amount is not a constant: \
+                     a wide shift by a computed amount is not implemented"
+                ));
+                return true;
+            };
+            let Some(k) = k.to_i128().filter(|k| (0..w as i128).contains(k)) else {
+                e.halted = Some(Terminator::Trap(FaultCode::Shift));
+                return true;
+            };
+            expand::shr(e, inst, wide, a, k as u32);
             true
         }
+        // Everything else at a wide width needs a technique this pass does
+        // not have; say which, rather than emit something plausible.
         InstKind::Plain { op, .. } => {
             e.errs.push(format!(
                 "`{}` at t{} needs expansion, which is not implemented \
-                 (multi-part division and shifts are still to be written)",
+                 (multi-part division and the right shift are still to be written)",
                 op.name(),
                 wide.logical()
             ));

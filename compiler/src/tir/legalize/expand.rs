@@ -336,6 +336,119 @@ pub(super) fn mul(e: &mut Emit, inst: &Inst, flavor: Flavor, wide: Wide, a: &Ope
     }
 }
 
+/// Right shift by a constant, part by part — and **without any carry**.
+///
+/// Write the amount as `k = q·L + r` over parts of width `L`. Dropping `q`
+/// parts is a reindex; the remainder shifts each part down by `r` and pulls
+/// the low `r` trits of the part above into the vacated top:
+///
+/// > `out[i] = shr(a[i+q], r) + wrap(a[i+q+1], r) · 3^(L−r)`
+///
+/// Both terms are bounded so that their sum still fits one part —
+/// `|shr(a,r)| ≤ (3^(L−r)−1)/2` and the other `≤ (3^L − 3^(L−r))/2` — so no
+/// carry can escape. That is a property of the balanced representation, not
+/// an arrangement.
+///
+/// **Truncation is round-to-nearest here, exactly.** The discarded remainder
+/// is `Σ_{i<q} a[i]·B^i + wrap(a[q], r)·B^q`, whose magnitude is at most
+/// `(3^k − 1)/2` — strictly less than half of `3^k`. So no correction is
+/// needed and no tie can arise, which is AM §3.3's claim about `shr` seen
+/// from the multi-part side, with the bound tight.
+pub(super) fn shr(e: &mut Emit, inst: &Inst, wide: Wide, a: &Operand, k: u32) {
+    let parts = parts_of(e, a, wide);
+    let ty = wide.ty();
+    let l = wide.part;
+    let (q, r) = ((k / l) as usize, k % l);
+
+    let mut out = Vec::with_capacity(wide.k as usize);
+    for i in 0..wide.k as usize {
+        // Everything shifted in from above the top is zero: `shr` is exact
+        // division, and there is nothing above.
+        let Some(lower) = parts.get(i + q) else {
+            out.push(konst(l, 0));
+            continue;
+        };
+        if r == 0 {
+            out.push(lower.clone());
+            continue;
+        }
+        let down = e.emit(
+            "sd",
+            ty,
+            InstKind::Plain {
+                op: PlainOp::Shr,
+                ty,
+                a: lower.clone(),
+                b: konst(l, r as i128),
+            },
+        );
+        let Some(upper) = parts.get(i + q + 1) else {
+            out.push(down);
+            continue;
+        };
+        // The low `r` trits of the part above: `x − shr(x, r)·3^r`, which is
+        // `wrap(x, r)` written with the operations a legal width has.
+        let up_down = e.emit(
+            "sd",
+            ty,
+            InstKind::Plain {
+                op: PlainOp::Shr,
+                ty,
+                a: upper.clone(),
+                b: konst(l, r as i128),
+            },
+        );
+        let back = mul_by_pow3(e, ty, up_down, r);
+        let (low, _) = e.emit2(
+            "sv",
+            ty,
+            Type::Int(1),
+            InstKind::Flavored {
+                op: FlavoredOp::Sub,
+                flavor: Flavor::Flag,
+                ty,
+                a: upper.clone(),
+                b: back,
+            },
+        );
+        let lifted = mul_by_pow3(e, ty, low, l - r);
+        let (sum, _) = e.emit2(
+            "ss",
+            ty,
+            Type::Int(1),
+            InstKind::Flavored {
+                op: FlavoredOp::Add,
+                flavor: Flavor::Flag,
+                ty,
+                a: down,
+                b: lifted,
+            },
+        );
+        out.push(sum);
+    }
+    bind(e, inst, out);
+}
+
+/// `v · 3^n` at a legal width, wrapping — every use above is bounded so that
+/// nothing is lost.
+fn mul_by_pow3(e: &mut Emit, ty: Type, v: Operand, n: u32) -> Operand {
+    let w = ty.width().expect("an integer width");
+    let (r, _) = e.emit2(
+        "sp",
+        ty,
+        Type::Int(1),
+        InstKind::Flavored {
+            op: FlavoredOp::Mul,
+            flavor: Flavor::Flag,
+            ty,
+            a: v,
+            b: Operand::Const(ty, Bt::from_i128(1).shl(n)),
+        },
+    );
+    let _ = w;
+    r
+}
+
 /// The direction of an overflow out of the whole wide value: the carry out of
 /// the top part if there is one, otherwise whatever spilled past the top
 /// part's logical width.

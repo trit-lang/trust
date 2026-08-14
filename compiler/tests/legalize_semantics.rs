@@ -196,16 +196,14 @@ fn the_expansion_frontier_is_exactly_this() {
         )
     };
 
-    // G6.6 is closed: `mulh` exists and `mul` expands. `shl` is next, and
-    // still says what it needs.
-    let msg = refusal(&wide("%r = shl.wrap t27 %a, %b"), &target);
-    assert!(msg.contains("widening multiply"), "{msg}");
-    // Unwritten: multi-part division and shifts.
-    for op in [
-        "%r = div t27 %a, %b",
-        "%r = rem t27 %a, %b",
-        "%r = shr t27 %a, %b",
-    ] {
+    // Shifts expand when the amount is a constant. By a computed amount they
+    // do not: that would need 3ᵏ from k, which is itself a shift.
+    for op in ["%r = shl.wrap t27 %a, %b", "%r = shr t27 %a, %b"] {
+        let msg = refusal(&wide(op), &target);
+        assert!(msg.contains("not a constant"), "{msg}");
+    }
+    // Unwritten: multi-part division.
+    for op in ["%r = div t27 %a, %b", "%r = rem t27 %a, %b"] {
         let msg = refusal(&wide(op), &target);
         assert!(msg.contains("not implemented"), "{msg}");
     }
@@ -297,4 +295,54 @@ fn a_multi_part_multiply_carries_and_overflows_correctly() {
             }
         }
     }
+}
+
+#[test]
+fn wide_shifts_by_a_constant_expand() {
+    // `shl` is `mul` by 3ᵏ, which is what AM §3.3 says a shift is. `shr` is
+    // carry-free, and its truncation is round-to-nearest exactly — the
+    // discarded remainder is at most (3ᵏ−1)/2, strictly under half, which is
+    // §3.3's "no tie case ever arising" seen from the multi-part side.
+    let target = t9_target();
+    const VALS: [i128; 6] = [
+        1,
+        -1,
+        9841,
+        -1_000_003,
+        3_812_798_742_493,
+        -3_812_798_742_493,
+    ];
+    for k in [0, 1, 2, 8, 9, 10, 13, 18, 26] {
+        for x in VALS {
+            for op in [
+                format!("%r = shl.wrap t27 const t27 {x}, const t27 {k}"),
+                format!("%r = shl.trap t27 const t27 {x}, const t27 {k}"),
+                format!("%r = shr t27 const t27 {x}, const t27 {k}"),
+            ] {
+                let src = format!(
+                    "tir 0.1 target \"tritium\"\n\nfn @f(%z: t9) -> t9 {{\n^entry:\n\
+                     \x20   {op}\n    %n = trunc t27 %r -> t9\n    ret %n\n}}\n"
+                );
+                let m = tir::parse_module(&src).expect("parses");
+                let legalized =
+                    tir::legalize_module(&m, &target).unwrap_or_else(|e| panic!("{op}: {e:?}"));
+                assert_eq!(
+                    interpret(&m, "f", &[0]),
+                    interpret(&legalized, "f", &[0]),
+                    "{op}"
+                );
+            }
+        }
+    }
+    // An amount out of range is a fault at every execution, so the block ends
+    // there rather than computing something (TIR §3.1).
+    let src = "tir 0.1 target \"tritium\"\n\nfn @f(%z: t9) -> t9 {\n^entry:\n\
+               \x20   %r = shl.wrap t27 const t27 5, const t27 27\n\
+               \x20   %n = trunc t27 %r -> t9\n    ret %n\n}\n";
+    let m = tir::parse_module(src).expect("parses");
+    let legalized = tir::legalize_module(&m, &target).expect("legalizes to a trap");
+    assert_eq!(
+        interpret(&legalized, "f", &[0]),
+        Err(trit_core::FaultCode::Shift)
+    );
 }

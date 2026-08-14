@@ -743,6 +743,42 @@ this is the one place a pass still assumes. It is recorded rather than decided
 because it changes a normative rule in two documents, and because the target
 it currently affects has no code generator.
 
+**G6.12 — the shifts expand, by a constant amount.**
+
+`shl` needed no algorithm of its own. AM §3.3 says `x << k` **is** `x · 3ᵏ`,
+and `mul` expands now (G6.6), so a constant shift is a rewrite: build `3ᵏ` as
+one trit set at position k and hand it to the multiply. The flavors carry over
+unchanged, and an amount outside 0…N−1 is a fault at every execution, so the
+block ends in `F_SHIFT` rather than computing something.
+
+`shr` is more interesting: **it needs no carries at all.** With `k = q·L + r`
+over parts of width L, dropping q parts is a reindex and the rest is
+
+> `out[i] = shr(a[i+q], r) + wrap(a[i+q+1], r) · 3^(L−r)`
+
+and the two terms are bounded — `|shr(a,r)| ≤ (3^(L−r)−1)/2` and the other
+`≤ (3^L − 3^(L−r))/2` — so their sum still fits one part and nothing can
+escape. `wrap(x, r)` is written `x − shr(x, r)·3ʳ`, using only operations a
+legal width has.
+
+**And truncation is round-to-nearest, exactly.** The discarded remainder is
+`Σ_{i<q} a[i]·Bⁱ + wrap(a[q], r)·B^q`, whose magnitude is at most
+`(3ᵏ − 1)/2` — strictly less than half of 3ᵏ. So no correction is needed and
+no tie can arise. That is AM §3.3's "exact rounding for free" seen from the
+multi-part side, with the bound tight rather than comfortable: it is the
+symmetric range doing the work, and the same computation in two's complement
+needs a rounding fixup whose omission is a classic bug.
+
+**Not done: a shift by a computed amount.** It needs `3ᵏ` from `k`, which is
+itself a shift, so it wants either a select chain over the N possible amounts
+or a loop. Refused by name.
+
+**What is left of expansion:** `div` and `rem`. They are the only operations
+that still cannot cross the wide boundary, and they are the hard ones — a
+multi-part division is an algorithm rather than a rewrite. The likely shape is
+a helper function in legal-width TIR, which will first have to get past G6.5,
+since a wide value cannot cross a function boundary.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The
