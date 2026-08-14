@@ -2123,3 +2123,31 @@ fn every_owner_drops_exactly_once() {
         "AB",
     );
 }
+
+#[test]
+fn values_that_do_not_leave_their_block_stay_in_registers() {
+    // The frame-slot scheme spent a load on every operand and a store on
+    // every result. A block-local allocator removes both for a value the
+    // block produces and consumes, which is most of them.
+    let module = tir_of(
+        "#[derive(Ord)] struct V { a: t27, b: t27, c: t27 } \
+         fn main() -> t27 { let x = V { a: 1, b: 2, c: 3 }; if x < x { 1 } else { 0 } }",
+    );
+    let legalized = tir::legalize_module(&module, &tir::TargetDesc::tritium()).unwrap();
+    let asm = trustc::codegen::compile(&legalized, "main").unwrap();
+
+    let start = asm.find("f.V.cmp.entry:").expect("the derived cmp");
+    let body = &asm[start..];
+    let body = &body[..body.find("\n    ret").expect("a return")];
+
+    // Three comparisons and two selects, as §5.3.3 promises — and now the
+    // trits they pass between them never touch memory. Each field still
+    // needs one load, since the fields are in the caller's memory.
+    assert_eq!(body.matches("cmp ").count(), 3, "{body}");
+    assert_eq!(body.matches("sel3").count(), 2, "{body}");
+    let stores = body.matches("st.word").count();
+    assert_eq!(
+        stores, 0,
+        "nothing spills in a straight-line comparison:\n{body}"
+    );
+}

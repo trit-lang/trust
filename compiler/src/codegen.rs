@@ -25,7 +25,7 @@
 //! should shorten the common case later.
 
 use crate::tir::ir::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use trit_core::{FaultCode, Flavor};
 
@@ -202,12 +202,177 @@ fn layout(f: &Function) -> Frame {
     }
 }
 
+/// Visit every operand an instruction reads.
+fn operands_of(k: &InstKind, f: &mut impl FnMut(&Operand)) {
+    match k {
+        InstKind::Flavored { a, b, .. } | InstKind::Plain { a, b, .. } => {
+            f(a);
+            f(b);
+        }
+        InstKind::Cmp { a, b, .. } => {
+            f(a);
+            f(b);
+        }
+        InstKind::Neg { a, .. } | InstKind::Widen { a, .. } | InstKind::Trunc { a, .. } => f(a),
+        InstKind::Select3 {
+            t, neg, zero, pos, ..
+        } => {
+            f(t);
+            f(neg);
+            f(zero);
+            f(pos);
+        }
+        InstKind::Slot { .. } => {}
+        InstKind::Load { p, .. } => f(p),
+        InstKind::Store { v, p, .. } => {
+            f(v);
+            f(p);
+        }
+        InstKind::Offset { p, d } => {
+            f(p);
+            f(d);
+        }
+        InstKind::Call { callee, args, .. } => {
+            if let Callee::Indirect(p) = callee {
+                f(p);
+            }
+            args.iter().for_each(f);
+        }
+    }
+}
+
+/// Visit every operand a terminator reads, block arguments included.
+fn terminator_operands(t: &Terminator, f: &mut impl FnMut(&Operand)) {
+    match t {
+        Terminator::Br3 { t, neg, zero, pos } => {
+            f(t);
+            for d in [neg, zero, pos] {
+                d.args.iter().for_each(&mut *f);
+            }
+        }
+        Terminator::Br(d) => d.args.iter().for_each(f),
+        Terminator::Ret(Some(v)) => f(v),
+        Terminator::Ret(None) | Terminator::Trap(_) | Terminator::Unreachable => {}
+    }
+}
+
+/// Registers a block-local value may be kept in.
+///
+/// `t0`…`t3` are the scratch every emitter uses and are never allocated.
+/// `t4`…`t7` are always available. `a0`…`a7` are too, but only in a block
+/// that makes no call: they are the argument registers, so a call both
+/// clobbers them and overwrites them while its arguments are set up.
+const POOL_ALWAYS: &[&str] = &["t4", "t5", "t6", "t7"];
+const POOL_CALL_FREE: &[&str] = &["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"];
+
 struct Gen<'a> {
     func: &'a Function,
     frame: Frame,
     out: String,
     errs: Vec<String>,
     counter: u32,
+    /// Values held in a register for the block being emitted. A value not
+    /// here lives in its frame slot, as every value did before there was an
+    /// allocator.
+    regs: BTreeMap<String, &'static str>,
+}
+
+/// Choose which of a block's values can live in a register.
+///
+/// The rule is deliberately narrow, and each clause pays for itself:
+///
+/// - **Defined and used only in this block.** A value crossing a block
+///   boundary would need agreement between blocks about where it lives, and
+///   this pass has none.
+/// - **No call between the definition and the last use.** Every register in
+///   the pool is caller-saved (TRISC-27 §6.1), so a call ends every live
+///   range whether the allocator likes it or not.
+///
+/// What is left is the common case and the one that hurts most: a value
+/// produced by one instruction and consumed by the next, which the frame-slot
+/// scheme wrote to memory and read straight back.
+fn allocate(f: &Function, block: &Block) -> BTreeMap<String, &'static str> {
+    // A value another block mentions has to be somewhere both agree on.
+    let mut elsewhere: BTreeSet<String> = BTreeSet::new();
+    for b in &f.blocks {
+        if b.label == block.label {
+            continue;
+        }
+        for inst in &b.insts {
+            operands_of(&inst.kind, &mut |o| {
+                if let Operand::Value(n) = o {
+                    elsewhere.insert(n.clone());
+                }
+            });
+        }
+        terminator_operands(&b.term, &mut |o| {
+            if let Operand::Value(n) = o {
+                elsewhere.insert(n.clone());
+            }
+        });
+        for (n, _) in &b.params {
+            elsewhere.insert(n.clone());
+        }
+    }
+    for (n, _) in &block.params {
+        elsewhere.insert(n.clone());
+    }
+
+    let n = block.insts.len();
+    let is_call = |i: usize| matches!(block.insts[i].kind, InstKind::Call { .. });
+    let has_call = (0..n).any(is_call);
+
+    // The last instruction index that uses each value; `n` for a use in the
+    // terminator, which runs after them all.
+    let mut last: BTreeMap<String, usize> = BTreeMap::new();
+    for (i, inst) in block.insts.iter().enumerate() {
+        operands_of(&inst.kind, &mut |o| {
+            if let Operand::Value(v) = o {
+                last.insert(v.clone(), i);
+            }
+        });
+    }
+    terminator_operands(&block.term, &mut |o| {
+        if let Operand::Value(v) = o {
+            last.insert(v.clone(), n);
+        }
+    });
+
+    let mut pool: Vec<&'static str> = POOL_ALWAYS.to_vec();
+    if !has_call {
+        pool.extend_from_slice(POOL_CALL_FREE);
+    }
+    let mut free = pool;
+    let mut regs: BTreeMap<String, &'static str> = BTreeMap::new();
+    let mut expiry: Vec<(usize, &'static str)> = Vec::new();
+
+    for (i, inst) in block.insts.iter().enumerate() {
+        // Registers whose value died before this instruction are free again.
+        expiry.retain(|(end, r)| {
+            if *end < i {
+                free.push(r);
+                false
+            } else {
+                true
+            }
+        });
+        for name in &inst.results {
+            let Some(end) = last.get(name).copied() else {
+                continue; // never used; nothing to keep
+            };
+            if elsewhere.contains(name) {
+                continue;
+            }
+            // A call between here and the last use clobbers the register.
+            if (i + 1..=end.min(n.saturating_sub(1))).any(is_call) {
+                continue;
+            }
+            let Some(r) = free.pop() else { continue };
+            regs.insert(name.clone(), r);
+            expiry.push((end, r));
+        }
+    }
+    regs
 }
 
 impl Gen<'_> {
@@ -237,23 +402,45 @@ impl Gen<'_> {
     }
 
     /// Load an operand into a register.
-    fn read(&mut self, o: &Operand, reg: &str) {
+    /// The register an operand's value is in, materializing it into
+    /// `scratch` when it is not already somewhere.
+    ///
+    /// A value the allocator kept in a register costs **no instruction at
+    /// all** here, which is the whole point: the frame-slot scheme spent a
+    /// load on every operand of every instruction.
+    fn read(&mut self, o: &Operand, scratch: &str) -> String {
         match o {
             Operand::Value(name) => {
+                if let Some(r) = self.regs.get(name) {
+                    return (*r).to_string();
+                }
                 let at = self.slot(name);
-                self.line(format!("ld.word {reg}, {at}(sp)"));
+                self.line(format!("ld.word {scratch}, {at}(sp)"));
             }
             Operand::Const(_, v) => {
-                self.line(format!("li      {reg}, {}", v.to_decimal()));
+                self.line(format!("li      {scratch}, {}", v.to_decimal()));
             }
             Operand::Global(g) => {
-                self.line(format!("la      {reg}, g.{g}"));
+                self.line(format!("la      {scratch}, g.{g}"));
             }
+        }
+        scratch.to_string()
+    }
+
+    /// Where to compute a result: its own register if it has one, otherwise
+    /// the scratch it will be stored from.
+    fn dest(&mut self, name: Option<&String>, scratch: &str) -> String {
+        match name.and_then(|n| self.regs.get(n)) {
+            Some(r) => (*r).to_string(),
+            None => scratch.to_string(),
         }
     }
 
-    /// Store a register into a value's slot.
+    /// Store a result to its slot, unless it lives in a register.
     fn write(&mut self, name: &str, reg: &str) {
+        if self.regs.contains_key(name) {
+            return;
+        }
         let at = self.slot(name);
         self.line(format!("st.word {reg}, {at}(sp)"));
     }
@@ -272,6 +459,7 @@ fn function(f: &Function) -> Result<String, Vec<String>> {
     });
 
     let mut g = Gen {
+        regs: BTreeMap::new(),
         func: f,
         frame,
         out: String::new(),
@@ -307,6 +495,9 @@ fn function(f: &Function) -> Result<String, Vec<String>> {
     g.line(format!("j       {entry}"));
 
     for b in &f.blocks {
+        // One allocation per block: a value that escapes it stays in its
+        // frame slot, which is where every value used to live.
+        g.regs = allocate(f, b);
         let label = g.block_label(&b.label);
         g.label(label);
         for inst in &b.insts {
@@ -342,8 +533,8 @@ fn emit_inst(g: &mut Gen, inst: &Inst, _calls: bool) {
             ty,
         } => {
             check_width(g, *ty);
-            g.read(a, "t0");
-            g.read(b, "t1");
+            let ra = g.read(a, "t0");
+            let rb = g.read(b, "t1");
             let mnemonic = match op {
                 FlavoredOp::Add => "add",
                 FlavoredOp::Sub => "sub",
@@ -351,26 +542,28 @@ fn emit_inst(g: &mut Gen, inst: &Inst, _calls: bool) {
                 FlavoredOp::Shl => "shl",
             };
             let suffix = flavor.suffix();
+            let rd = g.dest(inst.results.first(), "t2");
             if *flavor == Flavor::Flag {
-                g.line(format!("{mnemonic}{suffix} t2, t0, t1, t3"));
+                let rf = g.dest(inst.results.get(1), "t3");
+                g.line(format!("{mnemonic}{suffix} {rd}, {ra}, {rb}, {rf}"));
                 if let Some(r) = inst.results.first() {
-                    g.write(r, "t2");
+                    g.write(r, &rd);
                 }
                 if let Some(r) = inst.results.get(1) {
-                    g.write(r, "t3");
+                    g.write(r, &rf);
                 }
             } else {
-                g.line(format!("{mnemonic}{suffix} t2, t0, t1"));
+                g.line(format!("{mnemonic}{suffix} {rd}, {ra}, {rb}"));
                 if let Some(r) = inst.results.first() {
-                    g.write(r, "t2");
+                    g.write(r, &rd);
                 }
             }
         }
 
         InstKind::Plain { op, a, b, ty } => {
             check_width(g, *ty);
-            g.read(a, "t0");
-            g.read(b, "t1");
+            let ra = g.read(a, "t0");
+            let rb = g.read(b, "t1");
             let mnemonic = match op {
                 PlainOp::MulH => "mulh",
                 PlainOp::Div => "div",
@@ -380,9 +573,10 @@ fn emit_inst(g: &mut Gen, inst: &Inst, _calls: bool) {
                 PlainOp::TMax => "tmax",
                 PlainOp::TMul => "tmul",
             };
-            g.line(format!("{mnemonic}    t2, t0, t1"));
+            let rd = g.dest(inst.results.first(), "t2");
+            g.line(format!("{mnemonic}    {rd}, {ra}, {rb}"));
             if let Some(r) = inst.results.first() {
-                g.write(r, "t2");
+                g.write(r, &rd);
             }
         }
 
@@ -390,20 +584,22 @@ fn emit_inst(g: &mut Gen, inst: &Inst, _calls: bool) {
         // because `r0` is a register like any other (TRISC-27 §4.1).
         InstKind::Neg { a, ty } => {
             check_width(g, *ty);
-            g.read(a, "t0");
-            g.line("neg     t2, t0");
+            let ra = g.read(a, "t0");
+            let rd = g.dest(inst.results.first(), "t2");
+            g.line(format!("neg     {rd}, {ra}"));
             if let Some(r) = inst.results.first() {
-                g.write(r, "t2");
+                g.write(r, &rd);
             }
         }
 
         InstKind::Cmp { a, b, ty } => {
             check_width(g, *ty);
-            g.read(a, "t0");
-            g.read(b, "t1");
-            g.line("cmp     t2, t0, t1");
+            let ra = g.read(a, "t0");
+            let rb = g.read(b, "t1");
+            let rd = g.dest(inst.results.first(), "t2");
+            g.line(format!("cmp     {rd}, {ra}, {rb}"));
             if let Some(r) = inst.results.first() {
-                g.write(r, "t2");
+                g.write(r, &rd);
             }
         }
 
@@ -416,13 +612,17 @@ fn emit_inst(g: &mut Gen, inst: &Inst, _calls: bool) {
             ty,
         } => {
             check_width(g, *ty);
-            g.read(t, "t0");
-            g.read(neg, "t1");
-            g.read(zero, "t2");
-            g.read(pos, "t3");
-            g.line("sel3    t2, t0, t1, t2, t3");
+            let rt = g.read(t, "t0");
+            let rn = g.read(neg, "t1");
+            let rz = g.read(zero, "t2");
+            let rp = g.read(pos, "t3");
+            // The destination may alias a source: `sel3` reads its selector
+            // and the chosen arm before it writes (TRISC-27 §4.2), which is
+            // what lets the result go straight into its own register.
+            let rd = g.dest(inst.results.first(), "t2");
+            g.line(format!("sel3    {rd}, {rt}, {rn}, {rz}, {rp}"));
             if let Some(r) = inst.results.first() {
-                g.write(r, "t2");
+                g.write(r, &rd);
             }
         }
 
@@ -430,53 +630,61 @@ fn emit_inst(g: &mut Gen, inst: &Inst, _calls: bool) {
         InstKind::Slot { .. } => {
             if let Some(r) = inst.results.first() {
                 let at = g.slot(&format!("\u{1}storage.{r}"));
-                g.line(format!("addi.trap t0, sp, {at}"));
-                g.write(r, "t0");
+                let rd = g.dest(Some(r), "t0");
+                g.line(format!("addi.trap {rd}, sp, {at}"));
+                g.write(r, &rd);
             }
         }
 
         InstKind::Load { ty, p } => {
-            g.read(p, "t0");
+            let rp = g.read(p, "t0");
             let width = access_width(g, *ty);
-            g.line(format!("ld.{width} t2, 0(t0)"));
+            let rd = g.dest(inst.results.first(), "t2");
+            g.line(format!("ld.{width} {rd}, 0({rp})"));
             if let Some(r) = inst.results.first() {
-                g.write(r, "t2");
+                g.write(r, &rd);
             }
         }
 
         InstKind::Store { ty, v, p } => {
-            g.read(v, "t1");
-            g.read(p, "t0");
+            let rv = g.read(v, "t1");
+            let rp = g.read(p, "t0");
             let width = access_width(g, *ty);
-            g.line(format!("st.{width} t1, 0(t0)"));
+            g.line(format!("st.{width} {rv}, 0({rp})"));
         }
 
         // Address arithmetic is ordinary addition; there is no GEP to lower.
         InstKind::Offset { p, d } => {
-            g.read(p, "t0");
-            g.read(d, "t1");
-            g.line("add.trap t2, t0, t1");
+            let rp = g.read(p, "t0");
+            let rd2 = g.read(d, "t1");
+            let rd = g.dest(inst.results.first(), "t2");
+            g.line(format!("add.trap {rd}, {rp}, {rd2}"));
             if let Some(r) = inst.results.first() {
-                g.write(r, "t2");
+                g.write(r, &rd);
             }
         }
 
         // Widening is a copy: a balanced value's high trits are already zero,
         // and there is no second extension to choose (AM §3.5).
         InstKind::Widen { a, .. } => {
-            g.read(a, "t0");
+            let ra = g.read(a, "t0");
             if let Some(r) = inst.results.first() {
-                g.write(r, "t0");
+                match g.regs.get(r).copied() {
+                    Some(own) if own != ra => g.line(format!("add.wrap {own}, {ra}, zero")),
+                    Some(_) => {}
+                    None => g.write(r, &ra),
+                }
             }
         }
 
         // Narrowing is `wrap`, the instruction the legalizer's mask becomes.
         InstKind::Trunc { a, to, .. } => {
-            g.read(a, "t0");
+            let ra = g.read(a, "t0");
             let n = to.width().unwrap_or(27);
-            g.line(format!("wrap    t2, t0, {n}"));
+            let rd = g.dest(inst.results.first(), "t2");
+            g.line(format!("wrap    {rd}, {ra}, {n}"));
             if let Some(r) = inst.results.first() {
-                g.write(r, "t2");
+                g.write(r, &rd);
             }
         }
 
@@ -486,21 +694,31 @@ fn emit_inst(g: &mut Gen, inst: &Inst, _calls: bool) {
                     .push("more than eight arguments is not implemented".into());
                 return;
             }
+            // Arguments are read into `a0`…`a7` in order. Nothing allocated
+            // is live here — the allocator gives a register only where no
+            // call falls inside the live range — so writing them is safe.
             for (i, a) in args.iter().enumerate() {
                 let reg = format!("a{i}");
-                g.read(a, &reg);
+                let from = g.read(a, &reg);
+                if from != reg {
+                    g.line(format!("add.wrap {reg}, {from}, zero"));
+                }
             }
             match callee {
                 Callee::Direct(name) => g.line(format!("call    f.{name}")),
                 // An indirect call is `jalr` through the pointer, which is
                 // the same linkage the direct form expands to.
                 Callee::Indirect(p) => {
-                    g.read(p, "t0");
-                    g.line("jalr    ra, 0(t0)");
+                    let rp = g.read(p, "t0");
+                    g.line(format!("jalr    ra, 0({rp})"));
                 }
             }
             if let Some(r) = inst.results.first() {
-                g.write(r, "a0");
+                match g.regs.get(r).copied() {
+                    Some(own) if own != "a0" => g.line(format!("add.wrap {own}, a0, zero")),
+                    Some(_) => {}
+                    None => g.write(r, "a0"),
+                }
             }
         }
     }
@@ -510,7 +728,10 @@ fn emit_term(g: &mut Gen, t: &Terminator, calls: bool) {
     match t {
         Terminator::Ret(v) => {
             if let Some(v) = v {
-                g.read(v, "a0");
+                let from = g.read(v, "a0");
+                if from != "a0" {
+                    g.line(format!("add.wrap a0, {from}, zero"));
+                }
             }
             epilogue(g, calls);
         }
@@ -525,10 +746,10 @@ fn emit_term(g: &mut Gen, t: &Terminator, calls: bool) {
         // always 1, 2 and 3 words, so they always reach, and the jumps reach
         // the whole address space.
         Terminator::Br3 { t, neg, zero, pos } => {
-            g.read(t, "t0");
+            let rt = g.read(t, "t0");
             let names = [g.fresh("bn"), g.fresh("bz"), g.fresh("bp")];
             g.line(format!(
-                "br3     t0, {}, {}, {}",
+                "br3     {rt}, {}, {}, {}",
                 names[0], names[1], names[2]
             ));
             for (name, target) in names.iter().zip([neg, zero, pos]) {
@@ -574,9 +795,9 @@ fn move_args(g: &mut Gen, target: &Target) {
     }
 
     for (i, arg) in target.args.iter().enumerate() {
-        g.read(arg, "t0");
+        let from = g.read(arg, "t0");
         let at = g.frame.transfer[i];
-        g.line(format!("st.word t0, {at}(sp)"));
+        g.line(format!("st.word {from}, {at}(sp)"));
     }
     for (i, p) in params.iter().enumerate() {
         let from = g.frame.transfer[i];

@@ -828,6 +828,41 @@ which is still `F_DIVZERO` after the rewrite.
 only ever a step inside the multiply expansion and whose result would be twice
 as wide again. Both are refused by name.
 
+**G8.1 — a block-local register allocator.** Every SSA value used to live in
+a frame slot, so code generation spent a load on every operand and a store on
+every result — correct, and embarrassing.
+
+Values are now kept in registers under a rule narrow enough to state in two
+clauses, each of which pays for itself:
+
+- **Defined and used only within one block.** A value crossing a block
+  boundary needs the blocks to agree on where it lives, and this pass has no
+  mechanism for that.
+- **No call between the definition and the last use.** Every register in the
+  pool is caller-saved (TRISC-27 §6.1), so a call ends a live range whether
+  the allocator likes it or not.
+
+The pool is `t4`…`t7` always, plus `a0`…`a7` in a block that makes no call —
+the argument registers are free exactly when nothing is going to overwrite
+them. `t0`…`t3` stay scratch, so an emitter always has somewhere to
+materialize a constant or a spilled operand.
+
+Measured on the three examples: **31% fewer instructions and 51% fewer memory
+accesses.** `demo.tr` went from 4 379 instructions and 2 767 loads and stores
+to 3 004 and 1 365.
+
+Two things made this safe to do quickly. The differential invariant means a
+mis-allocated register shows up as a wrong answer in a test rather than as a
+subtle miscompile, and `sel3` was confirmed against the VM to read its
+selector and chosen arm before writing its destination (TRISC-27 §4.2), which
+is what lets a select write into a register it also reads.
+
+**What is left in the backend:** values live across a block boundary or a call
+still spill, which the callee-saved `s0`…`s6` could hold at the cost of
+saving them in the prologue; there is no peephole pass, so the moves a
+`widen` becomes are still emitted; and there is no TIR canonicalizer, so
+expansion's `add.wrap %x, const 0` reaches the machine as written.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

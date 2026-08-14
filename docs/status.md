@@ -121,7 +121,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | TIR legalization | promotion complete; **expansion complete**: `add`, `sub`, `mul`, `div`, `rem`, `shl`/`shr` by a constant, `neg`, `cmp`, `tmin`/`tmax`/`tmul`, `select3`, wide loads and stores, and wide values across a function boundary — a real Trust program legalizes for a nine-trit machine and computes the same answers (G6.11). `mul` expands (G6.6 closed — TIR §3.1 gained `mulh`), and so do `shl` and `shr` by a **constant** amount (G6.12); `div` and `rem` become a call to a helper written in TIR (G6.13). A wide value crosses a function boundary as its parts, with a wide result through a hidden pointer (G6.5). What is left: a shift by a *computed* amount |
 | Layout engine (Ch. 2) | complete: sizes, alignments, offsets, both `repr`s, discriminants, niche optimization |
 | Trust frontend | Ch. 0–3 complete; Ch. 4 complete except generic traits |
-| Backend (TIR → TRISC-27) | works; **no register allocator** — every value lives in a stack slot |
+| Backend (TIR → TRISC-27) | works, with a **block-local register allocator**: 31% fewer instructions and 51% fewer memory accesses than the frame-slot scheme it replaced (G8.1). Values crossing a block boundary or a call still spill; no peephole pass, no canonicalizer |
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region |
 
