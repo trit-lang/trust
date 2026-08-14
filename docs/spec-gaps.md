@@ -490,6 +490,98 @@ so loading or storing through one is out of range, which is what §1.2 says.
 `compiler/tests/pipeline.rs` builds a vtable, dispatches through it, and
 requires both engines to agree.
 
+**G0.15 — a review of the ten specification documents, and what execution
+said about it.** Findings raised against `spec/`, each checked against the
+implementation rather than argued about. Four were real errors, and two of
+those had reached code.
+
+**AM Appendix A.2 was wrong.** It gave `abs(x) = tmul(x, sign(x))`. `cmp`
+yields one trit (AM §3.5) and widening is value-preserving, so an unsplatted
+sign reaches a word as `0…0s`; `tmul` against it keeps the lowest trit and
+zeroes the rest. Run on `trit-core`, the identity returns ±1 for every nonzero
+input — never a magnitude. It needs a **broadcast**, which is what a binary
+machine spells `x >> 31` when it writes branchless `abs`, so nothing was saved
+by omitting it. `splat` is now an AM §3.4 primitive; it already existed in
+`trit-core`, which is its own small piece of evidence that the spec was
+missing something the implementation needed. `core/tests/am.rs` now tests the
+identity both ways.
+
+TRISC-27 §4.1 had inherited the error verbatim. It now gives `sub` + `sel3` —
+the same two instructions, no branch, no new primitive — and says why `splat`
+is not being added as an instruction until legalization needs a broadcast for
+its own reasons.
+
+**Heptavintimal digit values were never specified**, and the consequence was
+undocumented: `D` is the zero digit, so `0hJ` is 6 but `0h0J` is −345 and
+`0h00J` is −9822. Leading zeros are neutral in every other notation in this
+project and in the binary world. Ch. 1 §3.1 now carries the full table and
+says so in a warning; `0h2C9`, the original and only example, is −8050 and is
+retained solely as that warning. G1.1 had recorded the decision; the spec had
+not.
+
+**Ch. 0 §6's grammar had fallen two chapters behind.** It admitted neither
+`&mut` (Ch. 3 §2.1's other reference form) nor `Name<T>`, while Ch. 0 §7
+claimed "the type grammar admits `Name<T>` so that adding them changes no
+other rule". It now covers Ch. 3 and Ch. 4 — references, generics, traits,
+impls, associated items, `dyn`, closures, `for`, the turbofish — because a
+reader asking "can I write this?" should not have to read four chapters.
+
+**Ch. 4 §6's own example was ill-formed** by Ch. 4 §1.6: `#[derive(Ord, Clone)]`
+without `Eq`, where `Ord: Eq`. Deriving `Ord` now derives `Eq`, which is what
+the implementation already did.
+
+**Ch. 4 §3.3's drop sentinel was unsound.** A vtable's drop slot is 0 when the
+type has no destructor, justified by "0 is not the address of anything" — but
+ISA §1.3 starts execution at address 0, and a vtable holds *function*
+addresses, which Ch. 3 §2.4's non-null rule says nothing about. ISA §2.2 now
+**reserves the first word of memory**: it is the all-zeros word, which §3.4
+makes a `nop`, so execution still begins at 0 and falls through. The
+assembler emits it, so hand-written `.t27` files get it too. The ISA had
+listed this as an open question and observed that reserving it later would
+break nothing; this is that later, and the drop sentinel is the motivation
+that decided it. As a side effect the language's non-null invariant becomes
+hardware-checkable rather than only type-checked.
+
+**Three gaps rather than errors**, all now written down: alignment above 27
+trits was undefined (AM §2.3 now caps it at a word, with the reason —
+expansion produces word-sized parts and a chain of word-aligned parts is
+word-aligned); `trap`'s code field was described as three trits in one table
+and as the 14-trit immediate a paragraph later; and `Into` was open to hand
+implementation despite a blanket impl that §1.8 makes every such impl overlap.
+`AddAssign`'s absence is now recorded in §7 with what it costs: `c[i] += x`
+through a user `Index` whose `Output` does not copy.
+
+**One recommendation reversed.** Ch. 3 §5.5 presented its corrected fused
+bounds check as the thing to reach for. Counted out it is five instructions
+and one branch against two comparisons and two branches, so it is *slower*,
+and it also converts one class of out-of-range index into `F_OVERFLOW`. The
+section now recommends the naive form and confines the fusion to a
+compile-time-constant length, where `len − 1` folds.
+
+**One trade-off that read as a free win.** Ch. 3 §2.5 argued the reference
+niche from "memory occupies only the non-negative half" while ISA §2.2 puts
+the device region at negative addresses. Both hold, and together they mean no
+reference can ever point at memory-mapped hardware. The choice is still right
+— the niches are worth more than `&`-able device memory in a draft with no
+volatile model — but §2.5 now states the cost, since every other trade-off in
+these documents is stated.
+
+**And a process finding.** Naming §6 required a sweep of all citing documents
+on any change to 00 or 01, but nothing equivalent between chapters, so five
+corrections were living only at the correcting end. The rule now applies to
+every document, with two mechanics: `Supersedes` / `Superseded by` rows in
+each header table, and a correction written at *both* ends — the correcting
+document saying what it corrects, the corrected one saying it was corrected
+and pointing forward.
+
+*The review's closing recommendation was to stop writing specifications and
+build the VM. That work was already done — `tritium`, `trustc`, the
+assembler and 297 tests — which is why every finding above could be settled by
+running something rather than by reading again. The recommendation was right
+about the method and wrong about the state: two of the four real errors were
+found by executing the specification's own claims, which is exactly what it
+predicted, and the machine that did it already existed.*
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

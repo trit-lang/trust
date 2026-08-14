@@ -453,21 +453,45 @@ be rare.
 Informative; the normative content is §§1–5. `A*` is zero or more, `A?`
 optional, `A,*` a comma-separated list with an optional trailing comma.
 
+This summary covers Chapters 0, 3 and 4. It is *this* chapter's job to be
+complete about the surface syntax, so productions the later chapters
+introduce — references, generics, traits, closures — are here even though
+their meaning is not.
+
 ```
 file        := item*
-item        := attr* ( fn | struct | enum | const )
-attr        := '#' '[' ident ( '(' ident,* ')' )? ']'
+item        := attr* ( fn | struct | enum | const | trait | impl )
+attr        := '#' '[' ident '(' ident,* ')' ']'
 
-fn          := 'fn' ident '(' param,* ')' ( '->' type )? ( block | ';' )
-param       := ident ':' type
-struct      := 'struct' ident ( '{' field,* '}' | '(' type,* ')' ';' | ';' )
+generics    := ( '<' ( lifetime | ident bounds? | 'const' ident ':' type ),* '>' )?
+bounds      := ':' ( lifetime | ident ) ( '+' ( lifetime | ident ) )*
+where       := ( 'where' ( ( lifetime | ident ) bounds ),* )?
+lifetime    := "'" ident ( ':' lifetime ( '+' lifetime )* )?
+
+fn          := 'fn' ident generics '(' param,* ')' ( '->' type )? where
+               ( block | ';' )
+param       := self_param | ident ':' type
+self_param  := 'self' | '&' lifetime? 'mut'? 'self'          -- Ch. 4 §1.4
+struct      := 'struct' ident generics
+               ( '{' field,* '}' | '(' type,* ')' ';' | ';' )
 field       := ident ':' type
-enum        := 'enum' ident '{' variant,* '}'
+enum        := 'enum' ident generics '{' variant,* '}'
 variant     := ident ( '(' type,* ')' | '{' field,* '}' )? ( '=' expr )?
 const       := 'const' ident ':' type '=' expr ';'
 
-type        := 'trit' | 'bool' | 't9' | 't27' | 'taddr'
-             | '(' type,* ')' | '[' type ';' expr ']' | '&' type | path
+trait       := 'trait' ident bounds? '{' assoc_item* '}'    -- Ch. 4 §1.1
+impl        := 'impl' generics '!'? ident ( 'for' ident targs )? where
+               '{' assoc_item* '}'                          -- Ch. 4 §§1.2, 5.1
+assoc_item  := fn | 'type' ident bounds? ( '=' type )? ';'
+             | 'const' ident ':' type ( '=' expr )? ';'      -- Ch. 4 §1.7
+
+targs       := ( '<' ( type | lifetime ),* '>' )?
+type        := 'trit' | 'bool' | 't9' | 't27' | 'taddr' | 'Self'
+             | '(' type,* ')' | '[' type ( ';' expr )? ']'
+             | '&' lifetime? 'mut'? type                     -- Ch. 3 §2.1
+             | 'dyn' ident                                   -- Ch. 4 §3.1
+             | 'impl' ident '(' type,* ')' ( '->' type )?    -- Ch. 4 §2.2
+             | ident targs ( '::' ident )*                   -- Ch. 4 §§2.1, 1.7
 
 block       := '{' stmt* expr? '}'
 stmt        := 'let' 'mut'? pattern ( ':' type )? '=' expr ';'
@@ -483,12 +507,16 @@ shift       := sum ( ( '<<' | '>>' ) sum )*
 sum         := product ( ( '+' | '-' ) product )*
 product     := cast ( ( '*' | '/' | '%' ) cast )*
 cast        := unary ( 'as' type )*
-unary       := ( '-' | '!' | '&' )* postfix
+unary       := ( '-' | '!' | '&' 'mut'? | '*' )* postfix
 postfix     := primary ( '(' expr,* ')' | '.' ident | '.' int
                        | '.' ident '(' expr,* ')' | '[' expr ']' )*
 primary     := literal | path | '(' expr,* ')' | array | struct_lit
-             | block | if | match | loop | while | 'break' expr? | 'continue'
-             | 'return' expr?
+             | block | if | match | loop | while | for | closure
+             | 'break' expr? | 'continue' | 'return' expr?
+
+for         := 'for' ident 'in' expr block                   -- Ch. 4 §5.7
+closure     := ( '||' | '|' ( ident ( ':' type )? ),* '|' )
+               ( '->' type block | expr )                    -- Ch. 4 §4.1
 
 array       := '[' expr,* ']' | '[' expr ';' expr ']'
 struct_lit  := path '{' ( ident ( ':' expr )? ),* '}'
@@ -502,16 +530,26 @@ pattern     := alt ( '|' alt )*
 alt         := '_' | literal | ident ( '@' alt )? | path
              | path '(' pattern,* ')' | path '{' field_pat,* '}'
              | '(' pattern,* ')'
-path        := ident ( '::' ident )*
+path        := ident ( '::' ( ident | '<' type,* '>' ) )*    -- Ch. 4 §2.3
 ```
+
+> **Note on keeping this current (informative).** Draft 0.1 shipped this
+> summary describing §§1–5 only, while claiming in §7 that "the type grammar
+> admits `Name<T>` so that adding them changes no other rule" — which it did
+> not, since the production had no such alternative. It also omitted `&mut`,
+> which Ch. 3 §2.1 makes one of the two reference forms. A grammar summary
+> that lags the chapters citing it is worse than none, because a reader
+> checking whether something is writable will believe it. Naming §6's sweep
+> rule applies here.
 
 ---
 
 ## 7. What this chapter deliberately does not define
 
 - **Strings and characters.** §1.4; they wait on the library chapter.
-- **Generics, traits, `impl`.** Chapter 4. The type grammar admits `Name<T>`
-  so that adding them changes no other rule.
+- **Generics, traits, `impl`.** Their meaning is Chapter 4's; their syntax is
+  in §6, because a reader asking "can I write this?" should not have to read
+  four chapters to find out.
 - **References and borrowing beyond `&T`'s spelling.** Chapter 3.
 - **Modules, visibility, multiple files.** `mod`, `use` and `pub` are
   reserved.

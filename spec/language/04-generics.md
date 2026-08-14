@@ -426,8 +426,17 @@ A vtable is a compiler-generated constant in read-only memory, one per
 | methods | 9, 12, … | one address per object-safe method, supertrait methods first, then the trait's own in declaration order |
 
 A vtable's address is the address of an ordinary object, and is therefore
-strictly positive (Ch. 3 §2.4). A drop slot of 0 is unambiguous for the same
-reason: 0 is not the address of anything.
+strictly positive (Ch. 3 §2.4). A drop slot of 0 is unambiguous because
+**ISA §2.2 reserves the first word of memory**: no function's entry may be at
+address 0, so zero cannot be mistaken for a destructor.
+
+> **Note (informative).** That reservation was an open question in the ISA
+> until this slot needed it. Ch. 3 §2.4 says no *value a reference can name*
+> may occupy address 0, which says nothing about function addresses — and a
+> vtable holds function addresses. Without the reservation a destructor that
+> the layout happened to place first would be indistinguishable from having
+> none. The ISA now reserves the word, at a cost of one `nop`, and the
+> language's non-null invariant becomes hardware-checkable as a side effect.
 
 The `size` and `align` slots are what a future `Box<dyn Trait>` needs in order
 to free what it points at; they are specified now because adding a slot later
@@ -746,6 +755,17 @@ Three restrictions:
 - **Comparison is `Eq`/`Ord`, not an operator trait.** There is no `PartialEq`
   to implement in its place.
 
+> **A consequence of having no `AddAssign` (informative).** `c[i] += x` on a
+> user type that implements `Index` desugars to `c[i] = c[i] + x`, and
+> `Index::index` yields `&Self::Output` — so the right-hand side reads through
+> a reference, which is only legal when `Output` is copyable. For a
+> non-copyable `Output` the compound form is not writable and the long form
+> is not either; the type must offer a method. This is exactly the case Rust
+> keeps `AddAssign` for. Built-in arrays and slices are unaffected: the
+> language indexes them itself (§5.4's second restriction), and reading an
+> element is a read of a place rather than of a borrow. §7 records the gap
+> rather than leaving it to be discovered.
+
 ### 5.5 `Clone`
 
 ```
@@ -777,6 +797,13 @@ impl<T, U: From<T>> Into<U> for T {
 ```
 
 Implement `From`; get `Into`. This is Rust's arrangement, inherited whole.
+
+**`Into` may not be implemented by hand.** The blanket impl above covers every
+type, so any hand-written `impl Into<Foo> for Bar` overlaps it, and §1.8 makes
+overlapping impls an error. Rather than leave that as a collision a reader
+discovers by hitting it, the trait is closed to hand implementation in the
+same way §4.3 closes the `Fn` family. `TryInto` does not exist for the same
+reason and would be added the same way.
 
 These traits do **not** change Ch. 1 P2: there are still no implicit numeric
 conversions. `x.into()` is as explicit as `x as t27`; it is written, it is
@@ -868,6 +895,13 @@ design it against.
 struct Point { x: t27, y: t27 }
 ```
 
+**Deriving `Ord` derives `Eq`.** §1.6 makes `Eq` a supertrait of `Ord`, so an
+impl of one without the other is ill-formed, and a derive that produced an
+ill-formed impl would be a trap rather than a convenience. Writing both is
+permitted and means the same thing. (Draft 0.1's first version of this
+example wrote `#[derive(Ord, Clone)]` while requiring `Eq` separately, which
+was ill-formed by this chapter's own §1.6.)
+
 `derive` is the second attribute the language defines; Ch. 0 §3.4 defines
 `repr` and reserves the rest, so this section un-reserves exactly one name.
 
@@ -907,6 +941,10 @@ one else can write for you.
   modules will inherit; the imports themselves are still reserved.
 - **Negative impls beyond `!Copy`.** §5.1 defines the one the language needs
   and does not generalize it.
+- **`AddAssign` and its relatives.** §5.4 explains what their absence costs: a
+  compound assignment through a user `Index` whose `Output` does not copy. The
+  trait is not defined here because adding it later changes no program that
+  compiles today, and defining it now would double every operator impl.
 
 ---
 

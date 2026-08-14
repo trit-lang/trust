@@ -226,6 +226,16 @@ mod tests {
     fn hept_is_trit_exact() {
         assert_eq!(int("0hD"), 0);
         assert_eq!(int("0hE"), 1);
+        // Ch. 1 §3.1: `D` is the zero digit, not `0`, so a leading zero is
+        // not neutral. Every other notation here permits padding; this one
+        // does not, and the table exists to say so.
+        assert_eq!(int("0hJ"), 6);
+        assert_eq!(int("0h0J"), -345);
+        assert_eq!(int("0h00J"), -9822);
+        assert_eq!(int("0h2C9"), -8050);
+        // Whereas padding a `0t` literal or a decimal one changes nothing.
+        assert_eq!(int("0t1T0"), int("0t01T0"));
+        assert_eq!(int("6"), int("06"));
         assert_eq!(int("0hC"), -1);
         assert_eq!(int("0hQ"), 13);
         assert_eq!(int("0h0"), -13);

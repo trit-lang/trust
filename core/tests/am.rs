@@ -112,6 +112,36 @@ fn wrapping_is_congruence_modulo_three_to_the_n() {
 }
 
 #[test]
+fn appendix_a2_needs_the_splat_and_says_so() {
+    // AM Appendix A.2: `abs(x) = tmul(x, splat(sign(x)))`.
+    //
+    // Draft 0.1 wrote `tmul(x, sign(x))` without the splat, and this test is
+    // why that erratum exists. `cmp` yields one trit (§3.5) and widening is
+    // value-preserving, so an unsplatted sign reaches a word as `0…0s`;
+    // `tmul` against it keeps the lowest trit and zeroes the rest.
+    for x in [-9841i128, -100, -13, -4, -1, 0, 1, 2, 4, 13, 100, 9841] {
+        let bx = t(x);
+        let sign = bx.sign();
+        let splatted = Tint::wrapping(W, Bt::splat(sign, W));
+        assert_eq!(
+            bx.tmul(&splatted).to_i128(),
+            Some(x.abs()),
+            "the identity with the splat is absolute value"
+        );
+        // And without it, it is not — which is the whole point.
+        let widened = t(i128::from(sign.to_i8()));
+        let unsplatted = bx.tmul(&widened).to_i128().expect("in range");
+        assert!(
+            unsplatted.abs() <= 1,
+            "an unsplatted sign leaves only the lowest trit, not {x}'s magnitude"
+        );
+        if x.abs() > 1 {
+            assert_ne!(unsplatted, x.abs());
+        }
+    }
+}
+
+#[test]
 fn neg_and_abs_never_overflow_at_any_width() {
     // AM §3.1: total, hence flavorless.
     for w in [1u32, 2, 9, 27, 81, 243] {

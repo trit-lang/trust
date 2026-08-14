@@ -169,3 +169,23 @@ The two shared-base documents (00, 01) version in lockstep with whichever
 document forces a change to them, and every change to 00 or 01 requires a
 sweep of all citing documents in the same commit — the monorepo exists so
 that this is possible.
+
+**The sweep rule applies to every document, not only 00 and 01.** A chapter
+that corrects, supersedes or discharges something another one said must fix
+the other one's text in the same commit. The rule was first written for the
+shared base because that is where a stale citation obviously hurts; it turns
+out to hurt everywhere. Draft 0.1 accumulated at least five corrections
+living only at the correcting end — a bounds check, a niche count, a copy
+rule, a discharged checklist, a settled open question — which together made
+an invisible errata chain that a reader could only assemble by reading all ten
+documents in order.
+
+Two mechanics enforce it:
+
+1. **Every document's header table carries `Supersedes` and `Superseded by`
+   rows** naming the section on each side, or `—`. A reader who lands on a
+   section can see whether it still stands without leaving it.
+2. **A correction is written at both ends.** The correcting document says what
+   it corrects and why; the corrected document says it was corrected and
+   points forward. Neither alone is enough: the first leaves a reader of the
+   old text wrong, and the second leaves them without the answer.

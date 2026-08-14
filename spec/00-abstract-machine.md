@@ -101,7 +101,13 @@ Natural alignment is defined per width:
 | Value width | Natural alignment |
 |---|---|
 | 1 trit … 9 trits | 1 tryte |
-| 10 … 27 trits | 3 trytes |
+| 10 trits and above | 3 trytes |
+
+Alignment is capped at a word. A value wider than 27 trits does not exist on
+any machine as a single register value; it exists as a chain of word-sized
+parts (TIR §6 calls the pass that makes the chain *expansion*), and a chain of
+word-aligned parts is word-aligned. Requiring more would align a `t54` to 9
+trytes and waste a tryte per value for nothing any load or store can use.
 
 A load or store of a value at an address that is not a multiple of its natural
 alignment has **undefined behavior** at the AM level. (The language's safe
@@ -208,6 +214,20 @@ each trit position of same-width operands:
 | `tmax(a, b)` | max(a, b) | OR |
 | `tmul(a, b)` | a · b | XOR-like (nonzero iff both nonzero; sign composes) |
 
+One further primitive is not trit-*wise* but belongs here, because every use
+of it is:
+
+| Op | Definition | Binary analogue |
+|---|---|---|
+| `splat(t)` | every trit position takes the value of the single trit `t` | `x >> 31`, sign broadcast |
+
+`splat` exists because the four operations above take **same-width** operands,
+so a one-trit result — and `cmp` produces one (§3.5) — cannot combine with a
+word without first being broadcast. Widening will not do it: widening is
+value-preserving, so it pads with zeros. A binary machine spells the same
+broadcast as an arithmetic shift by the width less one, and needs it for
+exactly the same reason. Appendix A.2 is the case that makes it unavoidable.
+
 This set is closed, each operation is its own kind of monotone or involutive,
 and each has O(1)-depth hardware realizations. Other ternary logic connectives
 (consensus, implication, the full 3⁹ space of dyadic functions) are definable
@@ -266,8 +286,17 @@ A few identities that follow from the definitions above and that optimizer
 rule tables may rely on:
 
 1. `neg(neg(x)) = x`; `tneg` is an involution trit-wise and word-wise.
-2. `abs(x) = tmul(x, sign(x))` where `sign(x) = cmp(x, 0)` — absolute value
-   with no branch and no overflow case.
+2. `abs(x) = tmul(x, splat(sign(x)))` where `sign(x) = cmp(x, 0)` — absolute
+   value with no branch and no overflow case.
+
+   > **Erratum (informative).** Draft 0.1 first wrote this as
+   > `tmul(x, sign(x))`, which is wrong. `cmp` yields **one trit** (§3.5) and
+   > widening is value-preserving, so `sign(x)` reaches a word as `0…0s`;
+   > `tmul` applied to that keeps the lowest trit and zeroes the rest,
+   > yielding `t₀(x)·sign(x)` — a value in −1…1 — rather than `|x|`. The
+   > `splat` (§3.4) is what the identity needs, and it is the same broadcast a
+   > binary machine performs with an arithmetic shift when it writes branchless
+   > `abs`. Nothing was saved by omitting it; it was simply missing.
 3. `shr(shl(x, k), k) = x` whenever the `shl` did not overflow.
 4. `wrap(x + y) = neg(wrap(neg(x) + neg(y)))` — wrapping arithmetic commutes
    with negation, unlike two's complement where MIN breaks the symmetry.

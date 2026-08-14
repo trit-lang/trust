@@ -4,7 +4,8 @@
 |---|---|
 | **Status** | Draft 0.1 |
 | **Depends on** | `spec/00-abstract-machine.md` (*AM*), `spec/01-naming.md` (*Naming*), Language Ch. 1 §3 (literal notation) |
-| **Depends on, unwritten** | the TRISC-27 ISA specification, which must supply the instruction set (§6) and the encoding and object format (§8) |
+| **Depends on** | `spec/isa/trisc-27-0.1.md` (*ISA*), which supplies the instruction set (§6) and the encoding and object format (§8) |
+| **Superseded by** | ISA §7 answers this document's §6.2 checklist item by item; where the two disagree, the ISA is normative |
 | **Stability** | Draft. This document becomes a stable artifact when the ISA freezes, on the same terms as the ISA itself (TIR stability notice). |
 
 This document defines the source language a TRISC-27 assembler accepts: its
@@ -124,7 +125,11 @@ whereas `"1T0"` is three specific trits that happen to encode 6.
 `: , ( ) + - * / % < >` and the shift digraphs `<<` `>>`, plus `$` (§4.5).
 
 `&`, `|`, `^`, `~`, `!`, `&&` and `||` are **reserved and must be rejected**.
-Language Ch. 1 §4 leaves open whether `& | ^` should be repurposed as
+Language Ch. 0 §2.5 has since settled this: `& | ^` stay reserved and the
+trit-wise operations are the methods `tmin`, `tmax`, `tmul` and `tneg`. The
+paragraph below is retained as the reasoning that fed that decision.
+
+Language Ch. 1 §4 left open whether `& | ^` should be repurposed as
 `tmin`/`tmax`/`tmul` operators; an assembler that answered that question on
 its own would prejudge the language's syntax. The named forms of §4.3 are the
 only spelling in draft 0.1.

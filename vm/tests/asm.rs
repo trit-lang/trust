@@ -2,9 +2,24 @@
 
 use tritium::{Inst, Io, Stop, Vm, assemble};
 
+/// How many trytes ISA §2.2 reserves before the program: one word, the
+/// all-zeros `nop` at address 0.
+const RESERVED: usize = 3;
+
 /// Assemble, or panic with the diagnostics.
 fn asm(src: &str) -> Vec<i16> {
-    assemble(src).unwrap_or_else(|e| panic!("assembly failed: {e:?}\n{src}"))
+    let image = assemble(src).unwrap_or_else(|e| panic!("assembly failed: {e:?}\n{src}"));
+    assert_eq!(
+        &image[..RESERVED],
+        &[0, 0, 0],
+        "the first word is reserved and must be the all-zeros nop (ISA §2.2)"
+    );
+    image
+}
+
+/// The program's own trytes, past the reserved word.
+fn body(src: &str) -> Vec<i16> {
+    asm(src)[RESERVED..].to_vec()
 }
 
 /// The message of the first error, for checking diagnostics.
@@ -74,7 +89,7 @@ fn every_instruction_form_assembles_and_disassembles() {
     halt      a0
     trap      F_DIVZERO
 ";
-    let image = asm(src);
+    let image = body(src);
     let disassembled: Vec<String> = words(&image)
         .into_iter()
         .map(|w| Inst::decode(w).expect("decodes").to_string())
@@ -90,7 +105,8 @@ fn every_instruction_form_assembles_and_disassembles() {
 
 #[test]
 fn pseudo_instructions_expand() {
-    let image = asm("
+    let image = body(
+        "
     nop
     mv   a0, a1
     neg  a0, a1
@@ -98,7 +114,8 @@ fn pseudo_instructions_expand() {
     j    0
     call 0
     br2  t0, 0, 0
-");
+",
+    );
     let text: Vec<String> = words(&image)
         .into_iter()
         .map(|w| Inst::decode(w).unwrap().to_string())
@@ -107,20 +124,23 @@ fn pseudo_instructions_expand() {
     assert_eq!(text[1], "add.wrap a0, a1, zero"); // mv
     assert_eq!(text[2], "sub.wrap a0, zero, a1"); // neg
     assert_eq!(text[3], "jalr zero, 0(ra)"); // ret
-    assert_eq!(text[4], "jal zero, -4"); // j 0, from address 12
-    assert_eq!(text[5], "jal ra, -5"); // call 0
+    // Displacements count from the instruction's own address, and the
+    // program starts one word in (ISA §2.2), so each is a word further from
+    // address 0 than it would otherwise be.
+    assert_eq!(text[4], "jal zero, -5"); // j 0, from address 15
+    assert_eq!(text[5], "jal ra, -6"); // call 0
     // br2 puts `then` on the +1 arm and `else` on both others.
-    assert_eq!(text[6], "br3 t0, -6, -6, -6");
+    assert_eq!(text[6], "br3 t0, -7, -7, -7");
 }
 
 #[test]
 fn li_uses_one_word_when_it_fits_and_two_when_it_does_not() {
-    assert_eq!(asm("    li a0, 100").len(), 3);
-    assert_eq!(asm("    li a0, 2391484").len(), 3);
-    assert_eq!(asm("    li a0, 2391485").len(), 6);
+    assert_eq!(body("    li a0, 100").len(), 3);
+    assert_eq!(body("    li a0, 2391484").len(), 3);
+    assert_eq!(body("    li a0, 2391485").len(), 6);
     // `la` of a label is always two words, so a statement's size never
     // depends on something pass one cannot see (§7.1).
-    assert_eq!(asm("    la a0, later\nlater:").len(), 6);
+    assert_eq!(body("    la a0, later\nlater:").len(), 6);
 }
 
 #[test]
@@ -184,26 +204,32 @@ fn all_three_radices_and_separators_work() {
 #[test]
 fn the_location_counter_is_the_statements_own_address() {
     // `$` does not advance within a statement (§4.5).
-    let image = asm("
+    let image = body(
+        "
     .word 0, 0
 here:
     .word $, $, $
-");
+",
+    );
+    // Addresses count from the start of memory, and the first word of it is
+    // reserved (ISA §2.2), so `here` is at tryte 3 + 6.
     let ws = words(&image);
-    assert_eq!(ws[2..5], [6, 6, 6]);
+    assert_eq!(ws[2..5], [9, 9, 9]);
 }
 
 // --------------------------------------------------------------- directives
 
 #[test]
 fn data_directives_emit_what_they_say() {
-    let image = asm("
+    let image = body(
+        "
     .tryte 1, -1, 9841
     .word  6
     .trits \"1T0\"
     .zero  2
     .fill  3, -4
-");
+",
+    );
     assert_eq!(image[0..3], [1, -1, 9841]);
     assert_eq!(image[3..6], [6, 0, 0]); // little-trytean
     assert_eq!(image[6], 6); // 0t1T0 packed into one tryte
@@ -214,7 +240,7 @@ fn data_directives_emit_what_they_say() {
 #[test]
 fn a_trit_string_packs_nine_trits_per_tryte() {
     // 12 trits become two trytes, the top one zero-padded (§5.1).
-    let image = asm("    .trits \"111_111111111\"");
+    let image = body("    .trits \"111_111111111\"");
     assert_eq!(image.len(), 2);
     assert_eq!(image[0], 9841); // the low nine 1 trits
     assert_eq!(image[1], 13); // 0t111
@@ -222,6 +248,8 @@ fn a_trit_string_packs_nine_trits_per_tryte() {
 
 #[test]
 fn align_and_org_pad_with_zeros() {
+    // `.org` is an absolute address, so this one reads the whole image —
+    // reserved first word included (ISA §2.2).
     let image = asm("
     .tryte 1
     .align 3
@@ -229,10 +257,10 @@ fn align_and_org_pad_with_zeros() {
     .org   10
     .tryte 3
 ");
-    assert_eq!(image[0], 1);
-    assert_eq!(image[1..3], [0, 0]); // aligned to 3
-    assert_eq!(image[3], 2);
-    assert_eq!(image[4..10], [0, 0, 0, 0, 0, 0]);
+    assert_eq!(image[3], 1);
+    assert_eq!(image[4..6], [0, 0]); // aligned to 3
+    assert_eq!(image[6], 2);
+    assert_eq!(image[7..10], [0, 0, 0]);
     assert_eq!(image[10], 3);
 }
 
@@ -243,16 +271,19 @@ fn equ_defines_a_constant() {
 
 #[test]
 fn labels_may_be_referred_to_forward_and_are_addresses() {
-    let image = asm("
+    let image = body(
+        "
     la a0, target
     j  target
     .word 0
 target:
     .word 99
-");
-    // `la` is two words, `j` one, `.word` one — target is at tryte 12.
+",
+    );
+    // `la` is two words, `j` one, `.word` one — target is at tryte 3 + 12,
+    // the 3 being the reserved first word (ISA §2.2).
     assert_eq!(words(&image)[4], 99);
-    assert_eq!(value_of("    la a0, here\nhere:"), 6);
+    assert_eq!(value_of("    la a0, here\nhere:"), 9);
 }
 
 #[test]
@@ -367,6 +398,8 @@ fn the_checked_in_images_match_their_sources() {
             include_str!("../../examples/trisc/hello.timg"),
         ),
     ] {
+        // The whole image, reserved first word included: that is what the
+        // assembler writes and what the machine loads.
         let checked_in = tritium::image::parse(image).expect("the image parses");
         assert_eq!(asm(source), checked_in);
     }

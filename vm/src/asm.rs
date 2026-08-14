@@ -416,7 +416,13 @@ fn assemble_inner(src: &str) -> R<Vec<i16>> {
         values: BTreeMap::new(),
     };
     let mut stmts: Vec<Stmt> = Vec::new();
-    let mut loc: i128 = 0;
+
+    // ISA §2.2: the first word of memory is reserved. It is the all-zeros
+    // word, which is a `nop`, so execution begins there and falls through to
+    // the program — and no function, global or object can be at address 0,
+    // which is what makes zero usable as "nothing" everywhere else.
+    const RESERVED: i128 = 3;
+    let mut loc: i128 = RESERVED;
 
     // ---- pass one: addresses, labels and every size-determining value.
     for (n, raw) in src.lines().enumerate() {
@@ -449,7 +455,8 @@ fn assemble_inner(src: &str) -> R<Vec<i16>> {
     }
 
     // ---- pass two: evaluate operands and emit.
-    let mut image: Vec<i16> = Vec::new();
+    // The reserved first word, all zeros — a `nop` (ISA §2.2, §3.4).
+    let mut image: Vec<i16> = vec![0; RESERVED as usize];
     for stmt in &stmts {
         let at = image.len() as i128;
         if at < stmt.addr {

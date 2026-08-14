@@ -194,11 +194,26 @@ guarantees, not observations:
 Ch. 2 §6 states the reference case conservatively as "at least 1 niche",
 which was written before this chapter. The stronger promise supersedes it.
 
-> **Design note (informative).** This is the clearest example in the language
-> of the radix paying a dividend rather than merely costing a translation.
-> Nothing was designed to obtain it: addresses are signed because *everything*
-> is signed (Ch. 1, P1), and memory is non-negative because addresses index
-> from zero. The niches fall out.
+**What it costs.** The niches are the non-positive addresses, and a device
+region has to live somewhere; TRISC-27 §2.2 puts one at −1, −2 and −6. Those
+two facts together mean **no reference can ever point at a memory-mapped
+device**: the address a `&t9` would have to hold is a value the type system
+has already spent as a niche. Device registers are reached by calling a
+bodyless declaration instead (Ch. 0 §3.1), which is what that section's
+"a memory-mapped device port, most immediately" refers to.
+
+This is a trade, not a free win. It is taken deliberately: (3²⁷+1)/2 niches
+against a form of access that a safe language would have to wrap in `unsafe`
+anyway, and that 0.1 has no allocator or volatile model to give meaning to.
+A revision that wants `&`-able device memory would have to move the device
+region into the positive addresses and give up the guarantee above; it should
+know that before it starts.
+
+> **Design note (informative).** With that cost stated, this is still the
+> clearest example in the language of the radix paying a dividend rather than
+> merely costing a translation. Nothing was designed to obtain it: addresses
+> are signed because *everything* is signed (Ch. 1, P1), and memory is
+> non-negative because addresses index from zero. The niches fall out.
 
 ---
 
@@ -402,15 +417,24 @@ is incorrect**: for an in-bounds index `i <=> len` is −1 and `sign(i)` is 0 or
 suggestion is marked informative, and the normative requirement it accompanies
 (that an out-of-bounds access faults and never proceeds) is unaffected.
 
-A fusion that does work is
+**Two comparisons and two branches is the recommended form**, and it is what
+the reference compiler emits.
+
+A fusion that is at least *correct* is
 
 > `tmin(sign(i), sign(len − 1 − i))`
 
 which is −1 exactly when the index is out of bounds, so one `br3` decides.
-It is valid only where `len − 1 − i` cannot overflow, which a trapping
+It is not recommended, and the arithmetic says why: it costs `cmp i, 0`, a
+subtract, a subtract, a `cmp` and a `tmin` — five instructions before the one
+branch, against two comparisons and two branches for the naive form. It is
+also valid only where `len − 1 − i` cannot overflow, which a trapping
 subtraction guarantees at the cost of turning one class of out-of-range index
-into `F_OVERFLOW` instead. An implementation may emit either form; two
-comparisons and two branches are always correct.
+into `F_OVERFLOW` instead of a clean bounds fault.
+
+The fusion earns its keep in one case: `len` a compile-time constant, where
+`len − 1` folds and the count drops to three instructions and one branch. An
+implementation may emit either form.
 
 Negative indices are out of bounds. They are **not** end-relative, and no
 future revision will make them so — Ch. 2 §3 claims this already, and it is

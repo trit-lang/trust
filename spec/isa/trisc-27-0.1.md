@@ -156,14 +156,32 @@ Text is carried as UTF-8 code units, one per tryte, per AM §5's interop
 default. A native ternary text encoding remains reserved there, and this
 document does not anticipate it.
 
-> **Note on address 0 (informative).** The machine does not reserve address 0,
-> and execution begins there (§1.3). Composites Ch. 2 §6's guarantee that a
-> reference is never null is therefore a *language* invariant enforced by the
-> type system, not a hardware trap: a `ld.word` through zero reads the first
-> instruction of the program rather than faulting. Whether a future revision
-> should reserve the first word to make that invariant hardware-checkable is an
-> open question, and reserving it later would break no program that does not
-> already rely on executing from 0.
+**The first word of memory is reserved.** Address 0 holds one word that no
+program may claim: not a function's entry, not a global, not an object. It is
+the all-zeros word, which §3.4 makes a `nop`, so execution begins there (§1.3)
+and falls through to address 3.
+
+This costs one word and buys three things:
+
+1. **A null pointer is a pointer to a nop, not to code.** Composites Ch. 2 §6
+   and References Ch. 3 §2.4 guarantee that a reference is never null; that
+   guarantee is still enforced by the type system, but an implementation may
+   now also make address 0 unreadable and have the hardware say so.
+2. **Zero is available as a sentinel for "no function here."** Generics Ch. 4
+   §3.3's virtual tables use a drop slot of 0 to mean "this type has no
+   destructor", and that is only unambiguous if no function can begin at 0.
+   Without this reservation the sentinel is indistinguishable from a real
+   destructor that the layout happened to place first.
+3. **The entry point stops being an accident.** §6.4 says the first
+   instruction assembled is the first executed; now the first *assembled* word
+   is one the assembler emits, and a program's own first instruction is at a
+   fixed, non-zero address.
+
+> **Note (informative).** Draft 0.1 first left this open, observing that
+> "reserving it later would break no program that does not already rely on
+> executing from 0". Reserving it is that later. The motivation that decided
+> it was Ch. 4 §3.3's drop sentinel, which is a use of zero that a language
+> cannot make safe on its own.
 
 ---
 
@@ -325,7 +343,23 @@ For unflavored operations the flavor trit must be 0.
 
 `neg` is not an instruction: negation is `sub rd, r0, rs1`, and AM §3.4 notes
 that `tneg` and `neg` are the same operation. `abs` is not one either — it is
-`cmp` followed by `tmul` (AM Appendix A.2), two instructions and no branch.
+
+```
+sub  rt, r0, rs1          ; the negation
+sel3 rd, rs1, rt, rs1, rs1 ; pick it when rs1 is negative
+```
+
+two instructions and no branch, using the three-way select this machine
+already has (§4.2).
+
+> **Erratum (informative).** Draft 0.1 wrote this as "`cmp` followed by
+> `tmul` (AM Appendix A.2)". That identity was wrong, and AM Appendix A.2 now
+> carries the correction: `cmp` yields one trit, and `tmul` against a widened
+> one keeps only the lowest trit. The AM's repaired identity needs `splat`,
+> which this machine does not have as an instruction; the `sel3` form above
+> is the same two instructions and needs nothing new. A `splat` funct is
+> worth adding when the legalization pass needs a broadcast for its own
+> reasons, and not before.
 
 **`mulh` exists to make multi-part multiplication possible.** Expanding a
 multiply beyond the word needs the full 54-trit product, and no
@@ -438,14 +472,17 @@ well-defined.
 | Digit | funct | Instruction | Effect |
 |---|---|---|---|
 | `D` | 0 | `halt rs1` | the machine stops; `rs1` is the exit status |
-| `E` | +1 | `trap code` | raise the fault named by the 3-trit `code` field |
+| `E` | +1 | `trap code` | raise the fault named by the `code` immediate |
 
 `halt` is a normal termination and is **not** a fault: a fault is a defined
 halt *with a fault code* (AM §4), and a program that finishes has none. The
 exit status is delivered to whatever hosts the machine.
 
-`trap` carries the fault code in its **immediate field**, `rd` and `rs1` being
-`r0`:
+`trap` carries the fault code in its **immediate field** — 14 trits, of which
+draft 0.1 uses five values and reserves the rest — with `rd` and `rs1` being
+`r0`. (Draft 0.1 first described this field as three trits in the table above
+and as the immediate here; the immediate is what it is, and no encoding ever
+used the three-trit reading.)
 
 | Immediate | Code |
 |---|---|

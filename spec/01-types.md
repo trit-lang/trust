@@ -96,7 +96,7 @@ Integer literals may be written in three radices:
 |---|---|---|
 | decimal | `6`, `-9841` | usual meaning |
 | balanced ternary, prefix `0t` | `0t1T0` | digits `1`, `0`, `T` (= −1), MST first; `0t1T0` = 6 |
-| heptavintimal (base 27), prefix `0h` | `0h2C9` | digits `0-9` `A-Q`; compact form, 1 digit = 1 heptavintimal group = 3 trits |
+| heptavintimal (base 27), prefix `0h` | `0hJ` = 6 | digits `0-9` `A-Q`; compact form, 1 digit = 1 heptavintimal group = 3 trits |
 
 `0t` literals are trit-exact: each character is one trit of the
 representation, which makes them the natural notation for masks and
@@ -104,6 +104,34 @@ trit-pattern constants. `0h` is the compact professional notation (3 trits
 per digit, so a `t27` value is at most 9 digits), playing the role hex plays
 in the binary world. There is no hexadecimal or octal: both are artifacts of
 the bit.
+
+### 3.1 The heptavintimal digits
+
+A heptavintimal digit is a **balanced** group of three trits, so it denotes
+−13 … +13 and not 0 … 26. That is what "playing the role hex plays" requires:
+hex's defining property is that it is digit-exact over the underlying radix,
+and for balanced ternary that means balanced digits. It is also the only
+reading under which a `0h` literal can denote a negative number without a
+sign, matching `0t`.
+
+| Digit | `0` | `1` | `2` | `3` | `4` | `5` | `6` | `7` | `8` | `9` | `A` | `B` | `C` | `D` |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Value | −13 | −12 | −11 | −10 | −9 | −8 | −7 | −6 | −5 | −4 | −3 | −2 | −1 | **0** |
+
+| Digit | `E` | `F` | `G` | `H` | `I` | `J` | `K` | `L` | `M` | `N` | `O` | `P` | `Q` |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Value | +1 | +2 | +3 | +4 | +5 | +6 | +7 | +8 | +9 | +10 | +11 | +12 | +13 |
+
+> **A leading zero is not neutral.** `D` is the zero digit, not `0`. So `0hJ`
+> is 6, `0h0J` is −13 × 27 + 6 = **−345**, and `0h00J` is −9822. Every other
+> notation in this document and in the binary world permits padding a literal
+> with leading zeros; this one does not, because its zero is written `D`.
+> Pad with `D` or do not pad. A formatter must not zero-pad a `0h` literal,
+> and a reader should treat a `0h` literal beginning with `0` as suspicious.
+
+`0h2C9`, the example given in earlier drafts, is −8050. It was a poor first
+example for exactly this reason and is retained only here, as the warning it
+turned out to be.
 
 A leading `-` on a `0t` literal is permitted but redundant (`-0t1T` = `0tT1`);
 style tooling normalizes to the unsigned-magnitude-free canonical form.
