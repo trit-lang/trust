@@ -26,9 +26,11 @@
 //   * N = 27, written as a literal everywhere it appears. A `const` cannot
 //     be an array length in draft 0.1 and const generics are not
 //     implemented, so changing the size means changing every `27` marked
-//     `// N` — and `t27` is not one of them. 27 is also the honest size: at
-//     ~160 instructions per inner multiply-accumulate (there is no register
-//     allocator), N = 48 already costs 17 million steps.
+//     `// N` — and `t27` is not one of them. 27 is also about as large as
+//     is polite: this program takes 2.34 million steps at N = 27, and the
+//     cost is cubic. A bare triple loop of the same arithmetic measures
+//     ~160 instructions per inner multiply-accumulate, which is what a
+//     backend that gives every value a stack slot costs.
 //
 //   * A system built to be solvable at this precision, and built to make the
 //     pivoting work for its living. See `generate`.
@@ -438,7 +440,10 @@ fn main() -> t27 {
         print_decimal(took);
         print_str(&l_sc);
         // Operations per thousand units of whatever the counter counts:
-        // this machine's honest analogue of a flop rate.
+        // this machine's honest analogue of a flop rate. The `<< 9` here is
+        // the one piece of this file with a size limit of its own — it
+        // overflows above N = 65, which is well past what the step budget
+        // would sit still for, but it will fault rather than mislead.
         print_fixed((ops * 1000 << 9) / took);
     }
     putchar(10);
