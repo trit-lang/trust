@@ -8,6 +8,7 @@ pub mod canon;
 pub mod interp;
 pub mod ir;
 pub mod legalize;
+pub mod mem2reg;
 pub mod target;
 pub mod text;
 pub mod verify;

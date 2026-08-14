@@ -16,7 +16,9 @@
 //!
 //! `promote_slots`: a `slot` whose every use is a `load` or `store` **through
 //! it**, all within one block, becomes an SSA value. Stores are deleted and
-//! each load is replaced by whatever was last stored.
+//! each load is replaced by whatever was last stored. `mem2reg::promote` then
+//! does the same across blocks, where the answer at a block's entry may
+//! depend on which path arrived and a block parameter is what says so.
 //!
 //! `branch_through_select`: a `br3` on a `select3` of constants is a `br3` on
 //! the select's own selector, with the arms permuted. This is the shape the
@@ -75,6 +77,7 @@ pub fn canonicalize_module(m: &Module) -> Module {
     let mut out = m.clone();
     for f in &mut out.funcs {
         promote_slots(f);
+        crate::tir::mem2reg::promote(f);
         branch_through_select(f);
         remove_dead(f);
     }
@@ -398,19 +401,19 @@ fn rewrite_block(block: &mut Block, promoted: &BTreeSet<String>) -> BTreeMap<Str
 // ------------------------------------------------------- operand traversal
 
 /// Visit every operand an instruction reads.
-fn visit_operands(k: &InstKind, f: &mut impl FnMut(&Operand)) {
+pub(crate) fn visit_operands(k: &InstKind, f: &mut impl FnMut(&Operand)) {
     let mut k = k.clone();
     map_operands(&mut k, &mut |o| f(o));
 }
 
 /// Visit every operand a terminator reads.
-fn visit_terminator(t: &Terminator, f: &mut impl FnMut(&Operand)) {
+pub(crate) fn visit_terminator(t: &Terminator, f: &mut impl FnMut(&Operand)) {
     let mut t = t.clone();
     map_terminator(&mut t, &mut |o| f(o));
 }
 
 /// Apply a function to every operand an instruction reads, in place.
-fn map_operands(k: &mut InstKind, f: &mut impl FnMut(&mut Operand)) {
+pub(crate) fn map_operands(k: &mut InstKind, f: &mut impl FnMut(&mut Operand)) {
     match k {
         InstKind::Flavored { a, b, .. }
         | InstKind::Plain { a, b, .. }
@@ -447,7 +450,7 @@ fn map_operands(k: &mut InstKind, f: &mut impl FnMut(&mut Operand)) {
 }
 
 /// Apply a function to every operand a terminator reads, in place.
-fn map_terminator(t: &mut Terminator, f: &mut impl FnMut(&mut Operand)) {
+pub(crate) fn map_terminator(t: &mut Terminator, f: &mut impl FnMut(&mut Operand)) {
     match t {
         Terminator::Br3 { t, neg, zero, pos } => {
             f(t);
@@ -458,5 +461,16 @@ fn map_terminator(t: &mut Terminator, f: &mut impl FnMut(&mut Operand)) {
         Terminator::Br(d) => d.args.iter_mut().for_each(f),
         Terminator::Ret(Some(v)) => f(v),
         Terminator::Ret(None) | Terminator::Trap(_) | Terminator::Unreachable => {}
+    }
+}
+
+/// The blocks a terminator may transfer to.
+pub(crate) fn successors(t: &Terminator) -> Vec<String> {
+    match t {
+        Terminator::Br3 { neg, zero, pos, .. } => {
+            vec![neg.label.clone(), zero.label.clone(), pos.label.clone()]
+        }
+        Terminator::Br(d) => vec![d.label.clone()],
+        Terminator::Ret(_) | Terminator::Trap(_) | Terminator::Unreachable => Vec::new(),
     }
 }

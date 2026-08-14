@@ -52,7 +52,7 @@ spec/                              4 866 lines of specification, 10 documents
     └── assembly-0.1.md      513   the assembly language
 
 core/      2 082 lines  crate trit-core — Bt, Tint, flavors, faults, literals
-compiler/ 24 316 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
+compiler/ 25 154 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
 vm/        4 566 lines  crate tritium  — machine, assembler, image format, profiler
 docs/
 ├── spec-gaps.md               50 entries: every place the spec was silent or wrong
@@ -118,7 +118,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | `trit-core` | complete: arbitrary-precision balanced ternary, width-typed `tN`, three overflow flavors, the AM's five fault codes, three-radix literals |
 | TIR data structures, text format, verifier | complete, round-trips |
 | TIR reference interpreter | complete, with provenance-tracking pointers and a function-address space |
-| TIR canonicalization | three transformations: `promote_slots` (a `slot` never escaping one block becomes the value it holds — the shape `lower.rs` emits for every parameter, G8.7), `branch_through_select` (a branch on a select of constants reads the select's selector, G8.10) and `remove_dead`. TIR §6's target-independent optimization stage, newly occupied |
+| TIR canonicalization | four transformations: `promote_slots` (a `slot` never escaping one block becomes the value it holds — the shape `lower.rs` emits for every parameter, G8.7), `mem2reg::promote` (the same across blocks, inserting block parameters where the predecessors disagree, G8.13), `branch_through_select` (a branch on a select of constants reads the select's selector, G8.10) and `remove_dead`. TIR §6's target-independent optimization stage, newly occupied |
 | TIR legalization | promotion complete; **expansion complete**: `add`, `sub`, `mul`, `div`, `rem`, `shl`/`shr` by a constant, `neg`, `cmp`, `tmin`/`tmax`/`tmul`, `select3`, wide loads and stores, and wide values across a function boundary — a real Trust program legalizes for a nine-trit machine and computes the same answers (G6.11). `mul` expands (G6.6 closed — TIR §3.1 gained `mulh`), and so do `shl` and `shr` by a **constant** amount (G6.12); `div` and `rem` become a call to a helper written in TIR (G6.13). A wide value crosses a function boundary as its parts, with a wide result through a hidden pointer (G6.5). What is left: a shift by a *computed* amount |
 | Layout engine (Ch. 2) | complete: sizes, alignments, offsets, both `repr`s, discriminants, niche optimization |
 | Trust frontend | Ch. 0–3 complete; Ch. 4 complete except generic traits |
@@ -126,7 +126,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6) |
 
-**349 tests, zero clippy warnings, 50 commits.** `scripts/stats.sh`.
+**350 tests, zero clippy warnings, 51 commits.** `scripts/stats.sh`.
 
 ---
 
@@ -163,7 +163,7 @@ inference and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
 | generic traits, `From`/`Into` | see below — the one substantial hole in Ch. 4 |
 | modules, `use`, `pub`, multiple files | reserved in Ch. 0 §1.3 |
 | `unsafe`, raw pointers, `?` | reserved |
-| local variables kept in registers **across blocks** | `promote_slots` is single-block (G8.7); a local read in one block and written in another is still a `slot`. Full mem2reg needs block parameters, which now cost registers rather than memory (G8.12), so the way is open. Across a *call* a value is held in `s0`…`s6` when used more than once, measured (G8.3) |
+| bounds checks a loop condition already implies | every array index still costs two comparisons and two branches; branches and comparisons are 36% of everything HPL executes (G8.13). Removing them needs range analysis, which nothing here does |
 
 **Generic traits** are the one substantial hole. Two things stand in the way
 and both must arrive together: a type may implement `trait From<T>` many
@@ -369,13 +369,14 @@ propagates. Everything it rests on is now defined, and writing the spec ahead
 of the implementation has repeatedly reduced the number of decisions made
 blind.
 
-**B. Backend quality.** The instruction stream is under half what it was
-(G8.6–G8.10, −53.3% on HPL). What is left is analysis rather than encoding:
-the canonicalizer has three transformations and room for index strength
-reduction, bounds-check elimination and common subexpressions — HPL still
-computes `i * NMAX + j` with a real multiply for every element access, and
-checks bounds a loop condition already established. Expansion is complete
-except for a shift by a computed amount.
+**B. Backend quality.** The instruction stream is a third of what it was
+(G8.6–G8.13, −66.6% on HPL), and memory is nearly out of the picture: frame
+traffic is 3.6%. What is left is analysis. Branches and comparisons are 36%
+of everything executed — loop conditions, and the two bounds checks every
+array index still pays — and the index multiply is 7.9%. Bounds-check
+elimination and strength reduction both need a range analysis, which is the
+next thing this compiler does not have. Expansion is complete except for a
+shift by a computed amount.
 
 **C. Generic traits.** §6 above says what it needs. It closes Ch. 4 and
 unblocks `From`/`Into`.

@@ -1280,6 +1280,53 @@ now compiles to registers throughout, with no frame at all.
 instruction stream, because no Trust program has a block parameter to
 allocate. It is the prerequisite, and it is recorded as one.
 
+**G8.13 — mem2reg, and the optimizer `lower.rs` was written against.**
+`lang/lower.rs` opens by saying every local gets a `slot` because TIR is SSA
+and a mutable local is not, and that the cost "is paid back by the optimizer
+that does not exist yet". G8.7 built the single-block half of that optimizer;
+this is the rest.
+
+`compiler/src/tir/mem2reg.rs` answers, at a block's *entry*, what was stored
+into a slot along the path that got here. Where the predecessors disagree the
+answer is a new **block parameter** — which is what block parameters are for,
+and which G8.12 made cost registers rather than memory.
+
+**The algorithm** is Braun et al.'s on-demand SSA construction, which never
+computes a dominance frontier. Three memoized questions: what a block stores,
+what holds at its end, what holds at its entry. The entry question inserts a
+parameter when the predecessors disagree *or when it is asked again while
+still being answered* — which is a loop, and the parameter recorded before
+the recursion is what a back edge finds instead of running forever. A
+parameter whose arguments all turn out to be one operand is trivial, is
+removed, and may make another trivial; that fixpoint is what stops a loop
+collecting a parameter for every variable it does not touch.
+
+**What it refuses.** The escape test of G8.7 minus the single-block
+condition, and one thing more: a slot is promoted only when every load has a
+store reaching it on **every path** (`definitely_assigned`, a forward
+fixpoint). Reading uninitialized `slot` storage is UB and yields poison (TIR
+§4 item 4). UB permits any answer — zero would do, since that is what the
+frame holds — but a pass that quietly chose one would be deciding what poison
+is, and that decision belongs in the specification.
+
+**A test that had to be rewritten, for a good reason.** `@stored_as_a_value`
+checked that storing a slot's address into another slot stops promotion. It
+now returns its argument directly, and correctly: promoting the *second* slot
+removes the store that let the first one out, after which the first is no
+longer escaping. The test hands the second slot to a call, so the address
+really does leave.
+
+Measured on `examples/trust/HPL.tr`: 4 803 365 → 3 623 789 dynamic
+instructions (**−24.6%**), assembly 32 944 → 27 521 lines, frame traffic
+13.54% → **3.64%**, data traffic 25.83% → 13.93%, output unchanged.
+
+**Against the profile that started G8.6: −66.6%.**
+
+The profile it leaves is a different program. Branches and comparisons are
+now 36% of everything executed — `br3` 18.2%, `alui.cmp` 12.1%, `alu.cmp`
+6.1% — which is loop conditions and the two bounds checks every array index
+still pays. The index multiply is 7.9%. Both are analysis, not encoding.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

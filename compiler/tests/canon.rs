@@ -119,7 +119,10 @@ fn @f(%a: t27) -> t27 {
 
 #[test]
 fn a_slot_whose_address_gets_out_is_left_alone() {
-    // Four ways for the address to escape, and each has to stop the pass.
+    // Three ways for the address to escape, and each has to stop the pass.
+    // `@stored_as_a_value` has to hand `%q` to something, or promoting `%q`
+    // would remove the store that let `%p` out and both would be promotable
+    // after all — which is correct, and not what this test is about.
     // TIR §5's provenance rules mean an address that got out may be read
     // through later, so "nothing else names it" is the whole condition.
     let src = r#"tir 0.1 target "tritium"
@@ -150,14 +153,10 @@ fn @offset_into(%a: t27) -> t27 {
     ret %r
 }
 
-fn @read_in_another_block(%a: t27) -> t27 {
+fn @via(%pp: ptr) -> t27 {
 ^entry:
-    %p = slot tryte[3]
-    store t27 %a, %p
-    %c = cmp t27 %a, const t27 0
-    br3 %c, ^other, ^other, ^other
-^other:
-    %v = load t27 %p
+    %inner = load ptr %pp
+    %v = load t27 %inner
     ret %v
 }
 
@@ -167,18 +166,12 @@ fn @stored_as_a_value(%a: t27) -> t27 {
     %q = slot tryte[3]
     store ptr %p, %q
     store t27 %a, %p
-    %r = load ptr %q
-    %v = load t27 %r
-    ret %v
+    %r = call @via(%q) -> t27
+    ret %r
 }
 "#;
     let cases: &[&[i128]] = &[&[0], &[7], &[-7]];
-    for entry in [
-        "passed",
-        "offset_into",
-        "read_in_another_block",
-        "stored_as_a_value",
-    ] {
+    for entry in ["passed", "offset_into", "stored_as_a_value"] {
         let out = canonical(src, entry, cases);
         assert!(
             slots(&out, entry) > 0,
@@ -368,4 +361,102 @@ fn @faulting(%x: t27) -> t27 {
         interpret(&after, "faulting", &[0])
     );
     assert!(interpret(&after, "faulting", &[0]).is_err());
+}
+
+#[test]
+fn a_slot_read_in_another_block_becomes_a_block_parameter() {
+    // What `promote_slots` cannot do and `mem2reg` can: the value at the
+    // load depends on which path arrived, so the answer is a parameter on
+    // the block — and where the predecessors agree, no parameter at all.
+    let src = r#"tir 0.1 target "tritium"
+
+fn @same(%a: t27) -> t27 {
+^entry:
+    %p = slot tryte[3]
+    store t27 %a, %p
+    %c = cmp t27 %a, const t27 0
+    br3 %c, ^other, ^other, ^other
+^other:
+    %v = load t27 %p
+    ret %v
+}
+
+fn @differs(%a: t27) -> t27 {
+^entry:
+    %p = slot tryte[3]
+    %c = cmp t27 %a, const t27 0
+    br3 %c, ^lo, ^zero, ^hi
+^lo:
+    store t27 const t27 -1, %p
+    br ^join
+^zero:
+    store t27 const t27 0, %p
+    br ^join
+^hi:
+    store t27 %a, %p
+    br ^join
+^join:
+    %v = load t27 %p
+    %d = mul.wrap t27 %v, const t27 2
+    ret %d
+}
+
+fn @counts(%n: t27) -> t27 {
+^entry:
+    %i = slot tryte[3]
+    %s = slot tryte[3]
+    store t27 const t27 0, %i
+    store t27 const t27 0, %s
+    br ^head
+^head:
+    %iv = load t27 %i
+    %c = cmp t27 %iv, %n
+    br3 %c, ^body, ^done, ^done
+^body:
+    %sv = load t27 %s
+    %s2 = add.wrap t27 %sv, %iv
+    store t27 %s2, %s
+    %i2 = add.wrap t27 %iv, const t27 1
+    store t27 %i2, %i
+    br ^head
+^done:
+    %r = load t27 %s
+    ret %r
+}
+"#;
+    // Every path stores the same thing, so the parameter that would carry it
+    // is trivial and is removed again.
+    let out = canonical(src, "same", &[&[-5], &[0], &[5]]);
+    assert_eq!(slots(&out, "same"), 0, "{}", tir::print_module(&out));
+    assert!(
+        out.function("same").unwrap().blocks[1].params.is_empty(),
+        "the predecessors agree:\n{}",
+        tir::print_module(&out)
+    );
+
+    // Here they do not, and `^join` takes one.
+    let out = canonical(src, "differs", &[&[-5], &[0], &[5], &[9841]]);
+    assert_eq!(slots(&out, "differs"), 0, "{}", tir::print_module(&out));
+    let join = out
+        .function("differs")
+        .unwrap()
+        .blocks
+        .iter()
+        .find(|b| b.label == "join")
+        .expect("^join");
+    assert_eq!(join.params.len(), 1, "{}", tir::print_module(&out));
+
+    // A loop: the counter and the accumulator both come round the back edge,
+    // so `^head` takes two — and no more, because the parameters a loop does
+    // not need are trivial and removed.
+    let out = canonical(src, "counts", &[&[0], &[1], &[5], &[50]]);
+    assert_eq!(slots(&out, "counts"), 0, "{}", tir::print_module(&out));
+    let head = out
+        .function("counts")
+        .unwrap()
+        .blocks
+        .iter()
+        .find(|b| b.label == "head")
+        .expect("^head");
+    assert_eq!(head.params.len(), 2, "{}", tir::print_module(&out));
 }
