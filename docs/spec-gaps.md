@@ -1191,6 +1191,42 @@ instructions (**−31.1%**), frame traffic 43.97% → 16.67%, output unchanged.
 
 **Against the profile that started G8.6: −49.0%.**
 
+**G8.10 — the comparison, and the two instructions between it and the
+branch.** The frontend has no `bool`-producing comparison. `i < n` is
+
+```
+%c = cmp t27 %i, %n
+%b = select3 %c, t1 const t1 1, const t1 0, const t1 0
+br2 %b, ^body, ^done
+```
+
+and `br2` is a `br3` on the **sign of `%b`** — which is the sign of whichever
+constant `%c` chose. So the branch can read `%c` directly, with each arm sent
+where the constant it would have produced pointed.
+
+On the machine the difference is seven instructions against two. `sel3` is
+the one instruction with four register sources (TRISC-27 §3.2, format R4) and
+has no immediate form, so its three constants each cost an `li`; and
+legalization then adds a `cmp` against zero to project the widened `bool`
+back down to a condition trit. 148 of the 185 `cmpi` in HPL's assembly were
+that projection. All of it disappears, because `%c` is *already* a `t1` — the
+result of a `cmp` — and needs no conversion at all.
+
+`branch_through_select` and `remove_dead` in `compiler/src/tir/canon.rs`. The
+second is what makes the first worth anything: rewriting the branch only
+orphans the `select3`, and something has to notice.
+
+**What `remove_dead` will not remove.** An instruction that can raise, whether
+or not anything reads it: `store`, `call`, a trapping flavor, `div` and `rem`
+(a zero divisor), `shl` and `shr` (an amount outside 0…26 faults `F_SHIFT`
+whatever the flavor). `load` stays too — this pass has no reason to reason
+about memory. A test asserts that a dead `div` by zero still faults.
+
+Measured on `examples/trust/HPL.tr`: 5 538 068 → 5 076 223 dynamic
+instructions (**−8.3%**), output unchanged.
+
+**Against the profile that started G8.6: −53.3%.** Under half.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

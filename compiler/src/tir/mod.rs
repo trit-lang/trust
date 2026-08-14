@@ -12,7 +12,7 @@ pub mod target;
 pub mod text;
 pub mod verify;
 
-pub use canon::{canonicalize_module, promote_slots};
+pub use canon::{branch_through_select, canonicalize_module, promote_slots, remove_dead};
 pub use interp::{Halt, Interp, Val};
 pub use ir::*;
 pub use legalize::{LegalizeError, legalize_module};

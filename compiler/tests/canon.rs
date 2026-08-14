@@ -259,3 +259,113 @@ fn @f(%a: t27) -> t27 {
     let out = canonical(src, "f", &[&[-5], &[0], &[5]]);
     assert_eq!(slots(&out, "f"), 0, "{}", tir::print_module(&out));
 }
+
+#[test]
+fn a_branch_on_a_select_of_constants_branches_on_the_selector() {
+    // The frontend has no `bool`-producing comparison: `i < n` is a `cmp`
+    // and then a `select3` turning its trit into a `bool`, and `br2` then
+    // asks for the sign of that `bool` — which is the trit again. The branch
+    // reads the comparison directly, with each arm sent where the constant it
+    // would have produced points.
+    let src = r#"tir 0.1 target "tritium"
+
+fn @less(%i: t27, %n: t27) -> t27 {
+^entry:
+    %c = cmp t27 %i, %n
+    %b = select3 %c, t1 const t1 1, const t1 0, const t1 0
+    br2 %b, ^yes, ^no
+^yes:
+    ret const t27 1
+^no:
+    ret const t27 0
+}
+"#;
+    let out = canonical(
+        src,
+        "less",
+        &[&[0, 0], &[1, 2], &[2, 1], &[-5, 5], &[9841, -9841]],
+    );
+    let f = out.function("less").unwrap();
+    // The `select3` is dead and gone, and the block holds only the compare.
+    assert_eq!(f.blocks[0].insts.len(), 1, "{}", tir::print_module(&out));
+    match &f.blocks[0].term {
+        tir::Terminator::Br3 { t, neg, zero, pos } => {
+            assert_eq!(t, &tir::Operand::Value("c".into()));
+            // `%c` negative chose 1, which is positive, which went to ^yes.
+            assert_eq!(neg.label, "yes");
+            assert_eq!(zero.label, "no");
+            assert_eq!(pos.label, "no");
+        }
+        other => panic!("expected a branch, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_select_something_else_still_reads_is_left_where_it_is() {
+    // The branch is rewritten either way; the `select3` survives because
+    // `^yes` names it, and only then is nothing gained but nothing lost.
+    let src = r#"tir 0.1 target "tritium"
+
+fn @f(%i: t27, %n: t27) -> t27 {
+^entry:
+    %c = cmp t27 %i, %n
+    %b = select3 %c, t1 const t1 1, const t1 0, const t1 0
+    br2 %b, ^yes, ^no
+^yes:
+    %w = widen t1 %b -> t27
+    ret %w
+^no:
+    ret const t27 0
+}
+"#;
+    let out = canonical(src, "f", &[&[1, 2], &[2, 1], &[3, 3]]);
+    assert_eq!(
+        out.function("f").unwrap().blocks[0].insts.len(),
+        2,
+        "{}",
+        tir::print_module(&out)
+    );
+}
+
+#[test]
+fn what_cannot_fault_and_nothing_reads_is_not_emitted() {
+    // And what can fault stays, whether anything reads it or not: `@f`'s
+    // dead `div` still has to raise F_DIVZERO.
+    let src = r#"tir 0.1 target "tritium"
+
+fn @pure(%x: t27) -> t27 {
+^entry:
+    %a = mul.wrap t27 %x, const t27 3
+    %b = cmp t27 %x, const t27 0
+    %c = tmin t27 %x, const t27 7
+    %d = add.wrap t27 %x, const t27 1
+    ret %d
+}
+
+fn @faulting(%x: t27) -> t27 {
+^entry:
+    %q = div t27 const t27 1, %x
+    %s = shl.wrap t27 %x, %x
+    %o = add.trap t27 %x, const t27 3812798742493
+    ret %x
+}
+"#;
+    let out = canonical(src, "pure", &[&[0], &[5], &[-5]]);
+    assert_eq!(
+        out.function("pure").unwrap().blocks[0].insts.len(),
+        1,
+        "{}",
+        tir::print_module(&out)
+    );
+
+    // Three instructions that can raise, none of whose results is read.
+    assert_eq!(out.function("faulting").unwrap().blocks[0].insts.len(), 3);
+    // Dividing by zero still faults, which is the whole point of keeping it.
+    let m = parse(src);
+    let after = tir::canonicalize_module(&m);
+    assert_eq!(
+        interpret(&m, "faulting", &[0]),
+        interpret(&after, "faulting", &[0])
+    );
+    assert!(interpret(&after, "faulting", &[0]).is_err());
+}
