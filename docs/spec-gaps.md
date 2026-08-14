@@ -388,8 +388,43 @@ Two limits:
 - **No associated type in a generic impl.** What it chose would depend on the
   instantiation, which the current table (keyed by type name) cannot express.
 
-Not implemented, and rejected by name: generic traits, `::<>`, associated
-constants, and `impl !Copy`. Those are what is left of the chapter.
+**G0.14 — `::<>`, `impl !Copy`, associated constants, and an exact constant
+evaluator.**
+
+`f::<T>(…)` and `Option::<t27>::None` give type arguments in declaration
+order, and any omitted are inferred (Ch. 4 §2.3). `impl !Copy for T` is the
+one negative implementation the language has (§5.1), and it is the opt-out
+Ch. 3 §1.2 said it lacked: a type with it moves, and so does anything
+containing it. Associated constants are ordinary constants under a qualified
+name (§1.7), which is all `Type::NAME` needs them to be.
+
+**A pre-existing gap this uncovered: `const N: t27 = -9;` did not compile.**
+The constant evaluator accepted integer literals and nothing else, so a
+negative constant — a unary minus applied to a literal — was rejected outright,
+as was any arithmetic. Ch. 0 §3.2 requires a constant to be "evaluated at
+compile time, exactly, in balanced ternary — the same evaluation the assembler
+performs". It now evaluates `+ - * / % << >>`, unary minus and casts, with
+division being the AM's one division so that a folded constant is what the
+machine would have computed: `8 / 3` is 3 and `8 % 3` is −1 in a constant
+exactly as at run time.
+
+**What is left of Ch. 4, and why.** Generic traits — `trait From<T>`, and the
+blanket impl `impl<T, U: From<T>> Into<U> for T` that §5.6 presents `Into` as
+coming from — are not implemented. Two things stand in the way, and neither is
+small:
+
+- A type may implement a generic trait many times, so a method key must carry
+  the trait's arguments and resolution must pick by argument type. Today a
+  method is keyed `Type.method` and there is one.
+- A blanket impl is quantified over types that satisfy a bound, so deciding
+  whether it applies is a search rather than a lookup. Every other impl in
+  this compiler is found by name.
+
+Doing the first half without the second would leave the hole exactly where the
+chapter puts its example, so both are recorded rather than half-built. `Fn`,
+`FnMut` and `FnOnce` are generic traits in §4.3's presentation, and they work
+because they are not resolved as traits at all: a closure's call is a direct
+call to the function its body became.
 
 Two limits worth naming:
 

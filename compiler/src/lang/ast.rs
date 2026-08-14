@@ -91,6 +91,8 @@ pub struct TraitItem {
     pub methods: Vec<FnItem>,
     /// Its associated types, by name (Ch. 4 §1.7).
     pub assoc: Vec<String>,
+    /// Its associated constants: name and type (Ch. 4 §1.7).
+    pub consts: Vec<(String, Ty)>,
     /// Where it was written.
     pub line: Line,
 }
@@ -100,6 +102,9 @@ pub struct TraitItem {
 pub struct ImplItem {
     /// Its generic parameters (Ch. 4 §2.1).
     pub generics: Vec<GenericParam>,
+    /// `impl !Copy for T` — the one negative implementation the language has
+    /// (Ch. 4 §5.1).
+    pub negative: bool,
     /// The trait being implemented, or `None` for an inherent impl.
     pub trait_name: Option<String>,
     /// The type being implemented.
@@ -110,6 +115,8 @@ pub struct ImplItem {
     pub methods: Vec<FnItem>,
     /// The types it chooses for the trait's associated ones (Ch. 4 §1.7).
     pub assoc: Vec<(String, Ty)>,
+    /// The values it gives the trait's associated constants (Ch. 4 §1.7).
+    pub consts: Vec<ConstItem>,
     /// Where it was written.
     pub line: Line,
 }
@@ -310,8 +317,8 @@ pub enum Expr {
     Assign(&'static str, Box<Expr>, Box<Expr>, Line),
     /// `x as T`.
     Cast(Box<Expr>, Ty, Line),
-    /// `f(args)`.
-    Call(String, Vec<Expr>, Line),
+    /// `f(args)`, with any type arguments written `f::<T>(args)`.
+    Call(String, Vec<Ty>, Vec<Expr>, Line),
     /// `receiver.method(args)` — how the trit-wise operations are spelled
     /// (Ch. 1 §4, Ch. 0 §2.5).
     Method(Box<Expr>, String, Vec<Expr>, Line),
@@ -363,7 +370,7 @@ impl Expr {
             | Binary(_, _, _, l)
             | Assign(_, _, _, l)
             | Cast(_, _, l)
-            | Call(_, _, l)
+            | Call(_, _, _, l)
             | Method(_, _, _, l)
             | Index(_, _, l)
             | Field(_, _, l)
@@ -402,6 +409,8 @@ pub struct Arm {
 pub struct Path {
     /// The segments, in order.
     pub segments: Vec<String>,
+    /// Type arguments written with `::<…>` (Ch. 4 §2.3).
+    pub targs: Vec<Ty>,
     /// Where it was written.
     pub line: Line,
 }

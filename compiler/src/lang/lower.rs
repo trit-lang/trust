@@ -288,6 +288,8 @@ pub struct Types {
     db: RefCell<layout::TypeDb>,
     /// Types with a destructor of their own.
     destructors: std::collections::BTreeSet<String>,
+    /// Types that opted out of copying with `impl !Copy` (Ch. 4 §5.1).
+    no_copy: std::collections::BTreeSet<String>,
     /// Field names and semantic types of each struct, in declaration order.
     structs: RefCell<HashMap<String, Vec<(String, Ty)>>>,
     /// Variants of each enum, in declaration order.
@@ -363,13 +365,19 @@ impl Types {
     /// (Ch. 3 §1.2, §1.4).
     fn needs_drop(&self, ty: &Ty) -> bool {
         match ty {
+            // §5.1: a negative `Copy` impl makes a type move, and so does
+            // anything containing it — the same rule a destructor triggers,
+            // without the destructor.
             Ty::Struct(n) => {
                 let fields = self.structs.borrow()[n].clone();
-                self.destructors.contains(n) || fields.iter().any(|(_, t)| self.needs_drop(t))
+                self.destructors.contains(n)
+                    || self.no_copy.contains(n)
+                    || fields.iter().any(|(_, t)| self.needs_drop(t))
             }
             Ty::Enum(n) => {
                 let variants = self.enums.borrow()[n].clone();
                 self.destructors.contains(n)
+                    || self.no_copy.contains(n)
                     || variants
                         .iter()
                         .any(|v| v.fields.iter().any(|(_, t)| self.needs_drop(t)))
@@ -692,10 +700,36 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
         }
     }
 
-    // Constants next, since a function body may use one.
-    let mut globals: HashMap<String, Global> = HashMap::new();
+    // Constants next, since a function body may use one. An impl's
+    // associated constants are ordinary constants under a qualified name
+    // (Ch. 4 §1.7), which is all `Type::NAME` needs them to be.
+    let mut consts: Vec<ast::ConstItem> = Vec::new();
     for item in &file.items {
-        if let ast::Item::Const(c) = item {
+        match item {
+            ast::Item::Const(c) => consts.push(c.clone()),
+            ast::Item::Impl(imp) => {
+                let self_repr = SelfTy {
+                    ty: ast::Ty::Name(imp.self_ty.clone(), imp.line),
+                    name: imp.self_ty.clone(),
+                };
+                for c in &imp.consts {
+                    let mut value = c.value.clone();
+                    subst_expr(&mut value, &self_repr);
+                    consts.push(ast::ConstItem {
+                        name: format!("{}.{}", imp.self_ty, c.name),
+                        ty: subst_self_ty(&c.ty, &self_repr),
+                        value,
+                        line: c.line,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut globals: HashMap<String, Global> = HashMap::new();
+    for c in &consts {
+        {
             match const_item(c, &mut module, &types) {
                 Ok(g) => {
                     if globals.insert(c.name.clone(), g).is_some() {
@@ -874,7 +908,7 @@ fn free_names(e: &ast::Expr, bound: &mut Vec<String>, out: &mut Vec<String>) {
             free_names(a, bound, out);
             free_names(b, bound, out);
         }
-        Call(_, args, _) | Array(args, _) | Tuple(args, _) => {
+        Call(_, _, args, _) | Array(args, _) | Tuple(args, _) => {
             args.iter().for_each(|a| free_names(a, bound, out))
         }
         Method(r, _, args, _) => {
@@ -964,7 +998,7 @@ fn for_each_child(e: &ast::Expr, f: &mut impl FnMut(&ast::Expr)) {
             f(a);
             f(b);
         }
-        Call(_, args, _) | Array(args, _) | Tuple(args, _) => args.iter().for_each(f),
+        Call(_, _, args, _) | Array(args, _) | Tuple(args, _) => args.iter().for_each(f),
         Aggregate(_, fields, _) => fields.iter().for_each(|(_, v)| f(v)),
         Method(r, _, args, _) => {
             f(r);
@@ -1045,7 +1079,7 @@ fn for_each_child_mut(e: &mut ast::Expr, f: &mut impl FnMut(&mut ast::Expr)) {
             f(a);
             f(b);
         }
-        Call(_, args, _) | Array(args, _) | Tuple(args, _) => args.iter_mut().for_each(f),
+        Call(_, _, args, _) | Array(args, _) | Tuple(args, _) => args.iter_mut().for_each(f),
         Aggregate(_, fields, _) => fields.iter_mut().for_each(|(_, v)| f(v)),
         Method(r, _, args, _) => {
             f(r);
@@ -1358,7 +1392,7 @@ fn subst_expr(e: &mut ast::Expr, self_ty: &SelfTy) {
             kids.push(a);
             kids.push(b);
         }
-        Call(_, args, _) | Array(args, _) | Tuple(args, _) => kids.extend(args.iter_mut()),
+        Call(_, _, args, _) | Array(args, _) | Tuple(args, _) => kids.extend(args.iter_mut()),
         Method(r, _, args, _) => {
             kids.push(r);
             kids.extend(args.iter_mut());
@@ -1494,6 +1528,10 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
             },
             name: self_ty.clone(),
         };
+
+        if imp.negative {
+            continue;
+        }
 
         let mut methods: Vec<ast::FnItem> = imp.methods.clone();
 
@@ -1672,6 +1710,18 @@ fn check_trait_impl(
         }
         if m.body.is_none() {
             return err(m.line, format!("`{}` needs a body here", m.name));
+        }
+    }
+    for (c, _) in &decl.consts {
+        if !imp.consts.iter().any(|k| &k.name == c) {
+            return err(
+                imp.line,
+                format!(
+                    "`impl {} for {}` is missing `const {c}`, which the trait requires \
+                     (Ch. 4 §1.7)",
+                    decl.name, imp.self_ty
+                ),
+            );
         }
     }
     for a in &decl.assoc {
@@ -2152,6 +2202,7 @@ fn build_types(file: &ast::File) -> R<Types> {
     let mut types = Types {
         db: RefCell::new(layout::TypeDb::new()),
         destructors: std::collections::BTreeSet::new(),
+        no_copy: std::collections::BTreeSet::new(),
         structs: RefCell::new(HashMap::new()),
         enums: RefCell::new(HashMap::new()),
         generic_structs: HashMap::new(),
@@ -2310,6 +2361,26 @@ fn build_types(file: &ast::File) -> R<Types> {
         if !types.destructors.insert(name.clone()) {
             return err(f.line, format!("`{name}` has more than one destructor"));
         }
+    }
+
+    // `impl !Copy for T` (Ch. 4 §5.1) — the only negative impl, and it is
+    // read here because copyability decides how every use of a type lowers.
+    for item in &file.items {
+        let ast::Item::Impl(imp) = item else { continue };
+        if !imp.negative {
+            continue;
+        }
+        if imp.trait_name.as_deref() != Some("Copy") {
+            return err(
+                imp.line,
+                "`!Copy` is the only negative implementation the language has, and \
+                 §5.1 says why it exists at all",
+            );
+        }
+        if !imp.methods.is_empty() {
+            return err(imp.line, "`impl !Copy` has an empty body");
+        }
+        types.no_copy.insert(imp.self_ty.clone());
     }
 
     // Associated types (Ch. 4 §1.7). After the nominal types, since one may
@@ -2476,15 +2547,60 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
 }
 
 /// Evaluate a constant expression. Ch. 0 §3.2: exactly, in balanced ternary.
+/// Evaluate a constant expression, exactly and in balanced ternary — the
+/// same evaluation the assembler performs, and for the reason Ch. 0 §3.2
+/// gives: a constant that means one thing to the compiler and another to the
+/// assembler is a bug with nowhere to live.
 fn const_int(e: &ast::Expr) -> R<i128> {
-    match e {
-        ast::Expr::Int(v, line) => v
-            .to_i128()
+    let big = |v: &Bt, line: Line| {
+        v.to_i128()
             .ok_or(())
-            .or_else(|()| err(*line, format!("{v} is too large"))),
+            .or_else(|()| err(line, format!("{v} is too large")))
+    };
+    match e {
+        ast::Expr::Int(v, line) => big(v, *line),
+        ast::Expr::Trit(t, _) => Ok(i128::from(t.to_i8())),
+        ast::Expr::Bool(b, _) => Ok(i128::from(*b)),
+        ast::Expr::Unary("-", inner, _) => Ok(-const_int(inner)?),
+        ast::Expr::Unary(op, _, line) => err(*line, format!("`{op}` is not a constant operation")),
+        ast::Expr::Binary(op, a, b, line) => {
+            let (a, b) = (const_int(a)?, const_int(b)?);
+            let bt = |v: i128| Bt::from_i128(v);
+            match *op {
+                "+" => Ok(a + b),
+                "-" => Ok(a - b),
+                "*" => Ok(a * b),
+                // Round-to-nearest, ties away from zero — the AM's only
+                // division, so that a constant folds to what the machine
+                // would compute (Ch. 1 §4).
+                "/" | "%" => {
+                    if b == 0 {
+                        return err(*line, "division by zero in a constant");
+                    }
+                    let Some((q, r)) = bt(a).divrem(&bt(b)) else {
+                        return err(*line, "division by zero in a constant");
+                    };
+                    big(if *op == "/" { &q } else { &r }, *line)
+                }
+                ">>" | "<<" => {
+                    let k = u32::try_from(b.abs()).map_err(|_| SyntaxError {
+                        line: *line,
+                        message: "shift too large".into(),
+                    })?;
+                    if *op == "<<" {
+                        big(&bt(a).shl(k), *line)
+                    } else {
+                        big(&bt(a).shr(k), *line)
+                    }
+                }
+                other => err(*line, format!("`{other}` is not a constant operation")),
+            }
+        }
+        ast::Expr::Cast(inner, _, _) => const_int(inner),
         other => err(
             other.line(),
-            "this milestone evaluates only integer literals in constant position",
+            "this is not a constant expression: draft 0.1 evaluates literals and \
+             arithmetic on them (Ch. 0 §3.2)",
         ),
     }
 }
@@ -3371,7 +3487,7 @@ impl Fn<'_> {
             E::Binary(op, a, b, line) => self.binary(op, a, b, expected, *line),
             E::Assign(op, target, value, line) => self.assign(op, target, value, *line),
             E::Cast(inner, ty, line) => self.cast(inner, ty, *line),
-            E::Call(name, args, line) => self.call(name, args, expected, *line),
+            E::Call(name, targs, args, line) => self.call(name, targs, args, expected, *line),
             E::Method(recv, name, args, line) => self.method(recv, name, args, *line),
 
             E::Block(b) => self.block(b, expected),
@@ -4056,6 +4172,7 @@ impl Fn<'_> {
     fn call(
         &mut self,
         name: &str,
+        targs: &[ast::Ty],
         args: &[ast::Expr],
         expected: Option<&Ty>,
         line: Line,
@@ -4092,6 +4209,7 @@ impl Fn<'_> {
                 .collect();
             let path = ast::Path {
                 segments: vec![name.to_string()],
+                targs: Vec::new(),
                 line,
             };
             return self.aggregate(&path, &fields, None, line);
@@ -4117,10 +4235,13 @@ impl Fn<'_> {
         // A generic callee is instantiated here, at the call site, which is
         // also where its bounds are checked (Ch. 4 §2.2).
         if self.generic_fns.contains_key(name) {
-            let (key, args) = self.instantiate_fn(name, args, expected, line)?;
+            let (key, args) = self.instantiate_fn(name, targs, args, expected, line)?;
             return self.call_key(&key, Vec::new(), &args, line);
         }
 
+        if !targs.is_empty() {
+            return err(line, format!("`{name}` takes no type arguments"));
+        }
         self.call_key(name, Vec::new(), args, line)
     }
 
@@ -4129,6 +4250,7 @@ impl Fn<'_> {
     fn instantiate_fn(
         &mut self,
         name: &str,
+        targs: &[ast::Ty],
         args: &[ast::Expr],
         expected: Option<&Ty>,
         line: Line,
@@ -4148,7 +4270,22 @@ impl Fn<'_> {
         // Infer each parameter from the arguments it appears in, and from
         // the type the result is expected to have — which is the only way to
         // tell `id(2)` bound to a `t9` from the same call bound to a `t27`.
+        // `f::<T>(…)` gives the arguments outright, in declaration order,
+        // and any it omits are inferred (Ch. 4 §2.3).
         let mut env: HashMap<String, Ty> = HashMap::new();
+        if targs.len() > def.generics.len() {
+            return err(
+                line,
+                format!(
+                    "`{name}` takes {} type argument(s), {} given",
+                    def.generics.len(),
+                    targs.len()
+                ),
+            );
+        }
+        for (p, t) in def.generics.iter().zip(targs) {
+            env.insert(p.name().to_string(), self.resolve(t)?);
+        }
         if let (Some(want), Some(ret)) = (expected, &def.ret) {
             unify(ret, want, &def.generics, &mut env);
         }
@@ -4610,6 +4747,17 @@ impl Fn<'_> {
         line: Line,
     ) -> R<String> {
         let head = path.segments[0].clone();
+        // `Option::<t27>::None` — the arguments are written, so nothing has
+        // to be inferred (Ch. 4 §2.3).
+        if !path.targs.is_empty() {
+            let args: Vec<Ty> = path
+                .targs
+                .iter()
+                .map(|t| self.resolve(t))
+                .collect::<R<_>>()?;
+            let ty = self.types.instantiate(&head, &args, line)?;
+            return Ok(nominal_name(&ty).expect("an instantiation is nominal"));
+        }
         let generic = self.types.generic_structs.get(&head).map(|s| {
             (
                 s.generics.clone(),
@@ -4689,7 +4837,7 @@ impl Fn<'_> {
                 self.peek_ty(inner)?.map(|t| Ty::Ref(Box::new(t), *mutable))
             }
             E::Cast(_, t, _) => Some(self.resolve(t)?),
-            E::Call(name, _, _) => self.sigs.borrow().get(name).map(|(_, r)| r.clone()),
+            E::Call(name, _, _, _) => self.sigs.borrow().get(name).map(|(_, r)| r.clone()),
             // Arithmetic keeps its operands' type; a comparison answers a
             // bool, and `<=>` a trit (Ch. 1 §5).
             E::Binary(op, a, b, _) => match *op {
@@ -5669,6 +5817,15 @@ impl Fn<'_> {
     ) -> R<(Operand, Ty)> {
         let head = self.instantiate_head(path, fields, expected, line)?;
 
+        // `Type::NAME` — an associated constant, which is a constant under a
+        // qualified name (Ch. 4 §1.7).
+        if path.segments.len() == 2 && fields.is_empty() {
+            let key = format!("{head}.{}", path.segments[1]);
+            if self.globals.contains_key(&key) {
+                return self.expr(&ast::Expr::Path(key, line), None);
+            }
+        }
+
         // `Type::function(args)` — an associated function, which is written
         // like a variant and told apart by what the names are (Ch. 4 §1.4).
         if path.segments.len() == 2 {
@@ -6509,7 +6666,7 @@ fn walk_expr(e: &ast::Expr, index: &mut u32, out: &mut HashMap<String, u32>) {
         | E::Field(a, _, _)
         | E::Borrow(a, _, _)
         | E::Deref(a, _) => go(a, index, out),
-        E::Call(_, args, _) => {
+        E::Call(_, _, args, _) => {
             for a in args {
                 go(a, index, out);
             }

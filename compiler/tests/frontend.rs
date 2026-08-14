@@ -1522,10 +1522,10 @@ fn an_associated_type_is_chosen_by_the_implementation() {
         15
     );
     // An impl must choose every associated type the trait declares.
-    let e = error(&format!(
-        "trait T {{ type Item; }} struct S {{ x: t27 }} impl T for S {{ }} \
-         fn main() -> t27 {{ 0 }}"
-    ));
+    let e = error(
+        "trait T { type Item; } struct S { x: t27 } impl T for S { } \
+         fn main() -> t27 { 0 }",
+    );
     assert!(e.contains("missing `type Item`"), "{e}");
     // And may not invent one the trait did not declare.
     let e = error(
@@ -1593,4 +1593,98 @@ fn option_and_result_are_the_languages_own() {
             .0,
         7
     );
+}
+
+// -------------------------------- Chapter 4: the last of it
+
+#[test]
+fn a_turbofish_says_what_inference_cannot() {
+    // Ch. 4 §2.3: arguments in declaration order, and any omitted are
+    // inferred.
+    assert_eq!(
+        run("fn zero<T>() -> t27 { 0 } fn main() -> t27 { zero::<t27>() + 7 }").0,
+        7
+    );
+    assert_eq!(
+        run("fn main() -> t27 { \
+                 let o = Option::<t27>::None; \
+                 match o { Option::Some(v) => v, Option::None => 5, } \
+             }")
+        .0,
+        5
+    );
+    let e = error("fn id<T>(x: T) -> T { x } fn main() -> t27 { id::<t27, t9>(1) }");
+    assert!(e.contains("takes 1 type argument"), "{e}");
+    let e = error("fn f(x: t27) -> t27 { x } fn main() -> t27 { f::<t27>(1) }");
+    assert!(e.contains("takes no type arguments"), "{e}");
+}
+
+#[test]
+fn a_negative_copy_impl_makes_a_type_move() {
+    // Ch. 4 §5.1: the one negative implementation the language has, and the
+    // opt-out Ch. 3 §1.2 said it lacked.
+    let e = error(
+        "struct H { x: t27 } impl !Copy for H { } \
+         fn take(h: H) -> t27 { h.x } \
+         fn main() -> t27 { let a = H { x: 1 }; let n = take(a); let m = a.x; n }",
+    );
+    assert!(e.contains("moved out of"), "{e}");
+    // Without it the same type copies, which is the automatic rule of §5.1.
+    assert_eq!(
+        run("struct P { x: t27 } fn take(p: P) -> t27 { p.x } \
+             fn main() -> t27 { let a = P { x: 1 }; take(a) + a.x }")
+        .0,
+        2
+    );
+    // Nothing else may be negated.
+    let e = error("trait T { } struct S { x: t27 } impl !T for S { } fn main() -> t27 { 0 }");
+    assert!(e.contains("only negative implementation"), "{e}");
+}
+
+#[test]
+fn an_associated_constant_is_a_constant_under_a_qualified_name() {
+    // Ch. 4 §1.7.
+    assert_eq!(
+        run("trait Bounded { const MIN: t27; const MAX: t27; } \
+             struct Small { v: t27 } \
+             impl Bounded for Small { const MIN: t27 = -9; const MAX: t27 = 9; } \
+             fn main() -> t27 { Small::MAX - Small::MIN }")
+        .0,
+        18
+    );
+    // An inherent one needs no trait.
+    assert_eq!(
+        run("struct C { r: t27 } \
+             impl C { const UNIT: t27 = 1; fn r(&self) -> t27 { self.r } } \
+             fn main() -> t27 { let c = C { r: 5 }; c.r() + C::UNIT }")
+        .0,
+        6
+    );
+    let e = error(
+        "trait B { const MIN: t27; } struct S { x: t27 } impl B for S { } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("missing `const MIN`"), "{e}");
+}
+
+#[test]
+fn a_constant_is_evaluated_exactly_at_compile_time() {
+    // Ch. 0 §3.2: the same evaluation the assembler performs, which until
+    // now was "integer literals only" — so a negative constant did not
+    // compile at all.
+    assert_eq!(
+        run("const N: t27 = -9; \
+             const M: t27 = 3 * 4 + 1; \
+             const K: [t9; 2] = [-1, 2]; \
+             fn main() -> t27 { N + M + K[0] as t27 }")
+        .0,
+        3
+    );
+    // Division is the AM's one division, so a constant folds to what the
+    // machine would compute (Ch. 1 §4).
+    assert_eq!(run("const Q: t27 = 8 / 3; fn main() -> t27 { Q }").0, 3);
+    assert_eq!(run("const R: t27 = 8 % 3; fn main() -> t27 { R }").0, -1);
+    assert_eq!(run("const S: t27 = 100 >> 2; fn main() -> t27 { S }").0, 11);
+    let e = error("const Z: t27 = 1 / 0; fn main() -> t27 { 0 }");
+    assert!(e.contains("division by zero"), "{e}");
 }

@@ -36,7 +36,11 @@ struct Parser {
 
 /// What a `trait` or `impl` body contains: methods, and associated types
 /// either declared (`type Item;`) or chosen (`type Item = t27;`).
-type MethodBlock = (Vec<FnItem>, Vec<(String, Option<Ty>)>);
+type MethodBlock = (
+    Vec<FnItem>,
+    Vec<(String, Option<Ty>)>,
+    Vec<(String, Ty, Option<Expr>)>,
+);
 
 /// §2.1's table, loosest level first, indexed by level so that the
 /// non-associative comparison levels can sit at their own index without
@@ -465,7 +469,7 @@ impl Parser {
                 }
             }
         }
-        let (methods, assoc) = self.method_block("trait")?;
+        let (methods, assoc, consts) = self.method_block("trait")?;
         let mut names = Vec::new();
         for (n, v) in assoc {
             if v.is_some() {
@@ -476,11 +480,22 @@ impl Parser {
             }
             names.push(n);
         }
+        let mut declared = Vec::new();
+        for (n, ty, v) in consts {
+            if v.is_some() {
+                return self.err(format!(
+                    "`const {n} = …` gives a value, which is an impl's business; a trait \
+                     declares `const {n}: T;` (Ch. 4 §1.7)"
+                ));
+            }
+            declared.push((n, ty));
+        }
         Ok(TraitItem {
             name,
             supertraits,
             methods,
             assoc: names,
+            consts: declared,
             line,
         })
     }
@@ -491,12 +506,7 @@ impl Parser {
         self.bump(); // impl
         let mut generics = self.generic_params()?;
         // `impl !Copy for T` — the one negative impl (Ch. 4 §5.1).
-        if self.at_op("!") {
-            return self.err(
-                "a negative impl is Ch. 4 §5.1, which is specified but not implemented; \
-                 a type opts out of copying by having a destructor",
-            );
-        }
+        let negative = self.eat_op("!");
         let first = self.expect_ident()?;
         let (trait_name, self_ty) = if self.eat_kw("for") {
             (Some(first), self.expect_ident()?)
@@ -512,7 +522,7 @@ impl Parser {
                  `impl<T> Name<T>` (Ch. 4 §2.1)",
             );
         }
-        let (methods, assoc) = self.method_block("impl")?;
+        let (methods, assoc, consts) = self.method_block("impl")?;
         let mut chosen = Vec::new();
         for (n, v) in assoc {
             match v {
@@ -525,9 +535,28 @@ impl Parser {
                 }
             }
         }
+        let mut given = Vec::new();
+        for (name, ty, v) in consts {
+            match v {
+                Some(value) => given.push(ConstItem {
+                    name,
+                    ty,
+                    value,
+                    line,
+                }),
+                None => {
+                    return self.err(format!(
+                        "`const {name}: T;` declares one, which is a trait's business; an \
+                         impl writes `const {name}: T = …;` (Ch. 4 §1.7)"
+                    ));
+                }
+            }
+        }
         Ok(ImplItem {
             generics,
+            negative,
             trait_name,
+            consts: given,
             assoc: chosen,
             self_args,
             self_ty,
@@ -544,6 +573,7 @@ impl Parser {
         self.expect_op("{")?;
         let mut methods = Vec::new();
         let mut assoc = Vec::new();
+        let mut consts = Vec::new();
         while !self.eat_op("}") {
             if self.at(&Tok::Eof) {
                 return self.err(format!("unterminated `{what}` body"));
@@ -569,16 +599,31 @@ impl Parser {
                 assoc.push((name, value));
                 continue;
             }
+            // `const MIN: Self;` declares one, `const MIN: t27 = …;` gives
+            // it a value (Ch. 4 §1.7).
+            if self.eat_kw("const") {
+                let name = self.expect_ident()?;
+                self.expect_op(":")?;
+                let ty = self.ty()?;
+                let value = if self.eat_op("=") {
+                    Some(self.expr()?)
+                } else {
+                    None
+                };
+                self.expect_op(";")?;
+                consts.push((name, ty, value));
+                continue;
+            }
             if !self.at_kw("fn") {
                 return self.err(format!(
-                    "expected `fn` or `type`, found {}; a {what} body contains \
-                     functions and associated types (Ch. 4 §1.7)",
+                    "expected `fn`, `type` or `const`, found {}; that is what a {what} \
+                     body contains (Ch. 4 §1.7)",
                     self.peek()
                 ));
             }
             methods.push(self.fn_item()?);
         }
-        Ok((methods, assoc))
+        Ok((methods, assoc, consts))
     }
 
     /// One of §1.4's four shortened receiver forms, if that is what comes
@@ -984,6 +1029,7 @@ impl Parser {
         let it = format!("it.{}", self.counter);
         let path = |segs: &[&str]| Path {
             segments: segs.iter().map(|s| s.to_string()).collect(),
+            targs: Vec::new(),
             line,
         };
         let next = Expr::Method(
@@ -1106,10 +1152,21 @@ impl Parser {
     /// The tail of a path expression, after its first segment.
     fn path_expr(&mut self, first: String, line: Line) -> R<Expr> {
         let mut segments = vec![first];
+        let mut targs = Vec::new();
         while self.eat_op("::") {
+            // `f::<T>` — the turbofish (Ch. 4 §2.3). The `::` is what tells
+            // it from a comparison, which is why Rust has one too.
+            if self.at_op("<") {
+                targs = self.generic_args()?;
+                continue;
+            }
             segments.push(self.expect_ident()?);
         }
-        let path = Path { segments, line };
+        let path = Path {
+            segments,
+            targs,
+            line,
+        };
 
         // `Name(args)` is a call when the name is a function and a
         // tuple-struct or variant literal when it is a type; the two are told
@@ -1117,7 +1174,7 @@ impl Parser {
         if self.at_op("(") {
             let args = self.args()?;
             if path.segments.len() == 1 {
-                return Ok(Expr::Call(path.segments[0].clone(), args, line));
+                return Ok(Expr::Call(path.segments[0].clone(), path.targs, args, line));
             }
             let fields = args
                 .into_iter()
@@ -1457,7 +1514,11 @@ impl Parser {
                 while self.eat_op("::") {
                     segments.push(self.expect_ident()?);
                 }
-                let path = Path { segments, line };
+                let path = Path {
+                    segments,
+                    targs: Vec::new(),
+                    line,
+                };
 
                 if self.at_op("(") {
                     let inner = self.pattern_list("(", ")")?;
@@ -1481,6 +1542,7 @@ impl Parser {
                     return Ok(Pattern::Aggregate(
                         Path {
                             segments: vec![path.segments[0].clone()],
+                            targs: Vec::new(),
                             line,
                         },
                         vec![("@".to_string(), inner)],
