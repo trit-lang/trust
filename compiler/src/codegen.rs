@@ -661,19 +661,49 @@ fn allocate(f: &Function, folds: &[BTreeMap<String, Folded>]) -> BTreeMap<String
                 true
             }
         });
-        let picked = if crosses_call(lo, hi) {
-            if uses.get(&name).copied().unwrap_or(0) < 2 {
-                continue;
-            }
+        let needs_saved = crosses_call(lo, hi);
+        if needs_saved && uses.get(&name).copied().unwrap_or(0) < 2 {
+            continue;
+        }
+        let picked = if needs_saved {
             saved.pop().map(|r| (r, true))
         } else {
             fast.pop()
                 .map(|r| (r, false))
                 .or_else(|| saved.pop().map(|r| (r, true)))
         };
-        let Some((r, is_saved)) = picked else {
+        if let Some((r, is_saved)) = picked {
+            regs.insert(name, r);
+            active.push((hi, r, is_saved));
+            continue;
+        }
+
+        // Nothing free. Spilling *this* interval is the easy answer and the
+        // wrong one: an interval that ends further away occupies its register
+        // for longer and is therefore worth less per instruction it saves. So
+        // take the register from whichever active interval runs longest, if
+        // that one runs longer than this.
+        let candidate = active
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, r, is_saved))| {
+                // A value living across a call cannot be moved into a
+                // caller-saved register, so only like may replace like.
+                *is_saved
+                    || !needs_saved && POOL_ALWAYS.contains(r)
+                    || !needs_saved && POOL_CALL_FREE.contains(r)
+            })
+            .max_by_key(|(_, (end, _, _))| *end);
+        let Some((i, (end, r, is_saved))) = candidate.map(|(i, e)| (i, *e)) else {
             continue;
         };
+        if end <= hi {
+            continue;
+        }
+        // The evicted value goes back to its frame slot, which is where every
+        // value lives by default.
+        regs.retain(|_, held| *held != r);
+        active.swap_remove(i);
         regs.insert(name, r);
         active.push((hi, r, is_saved));
     }

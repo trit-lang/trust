@@ -801,3 +801,49 @@ global @cell : tryte[3] = [0, 0, 0]
     differential(src, "sum", &[&[0], &[1], &[5], &[100]]);
     differential(src, "count", &[&[0], &[3]]);
 }
+
+#[test]
+fn the_register_a_long_interval_holds_can_be_taken_from_it() {
+    // More values live at once than there are registers. The easy answer is
+    // to spill whichever interval arrives when the pool is empty; the better
+    // one is to take the register from whichever interval runs *longest*,
+    // because a long interval holds its register over more instructions and
+    // saves fewer of them per instruction held.
+    //
+    // Twenty-six values are defined at the top and read once each at the bottom.
+    // Between them, `%hot` is defined and read eight times in a row: it can
+    // only be in a register if something gives one up.
+    let mut body = String::new();
+    for i in 0..26 {
+        body.push_str(&format!(
+            "    %long{i} = mul.wrap t27 %x, const t27 {}\n",
+            i + 2
+        ));
+    }
+    body.push_str("    %hot = add.wrap t27 %x, const t27 1\n");
+    let mut acc = String::from("%hot");
+    for i in 0..8 {
+        body.push_str(&format!("    %h{i} = mul.wrap t27 {acc}, %hot\n"));
+        acc = format!("%h{i}");
+    }
+    for i in 0..26 {
+        body.push_str(&format!("    %acc{i} = add.wrap t27 {acc}, %long{i}\n"));
+        acc = format!("%acc{i}");
+    }
+    let src = format!(
+        "tir 0.1 target \"tritium\"\n\nfn @pressure(%x: t27) -> t27 {{\n^entry:\n{body}    ret {acc}\n}}\n"
+    );
+
+    let asm = compile_asm(&src, "pressure");
+    let f = body_of(&asm, "pressure");
+    let traffic = f.matches("(sp)").count();
+    // 48 without the eviction rule, because `%hot` arrives to find nothing
+    // free and pays a load on each of its eight reads; 34 with it. The
+    // assertion is an upper bound, so an allocator that does better still
+    // passes.
+    assert!(
+        traffic <= 36,
+        "{traffic} frame accesses under register pressure:\n{f}"
+    );
+    differential(&src, "pressure", &[&[0], &[1], &[-3], &[100]]);
+}

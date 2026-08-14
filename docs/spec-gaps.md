@@ -1227,6 +1227,24 @@ instructions (**−8.3%**), output unchanged.
 
 **Against the profile that started G8.6: −53.3%.** Under half.
 
+**G8.11 — which interval gives up its register.** G8.9's linear scan, faced
+with an empty pool, spilled whichever interval had just arrived. That is the
+easy answer and the wrong one: an interval that runs longer holds its
+register over more instructions and saves fewer of them per instruction held.
+The scan now takes the register from whichever *active* interval ends
+furthest away, if that one ends further than the arriving interval — the
+classical rule, and one this backend had simply not implemented.
+
+A caller-saved register cannot be given to a value that lives across a call,
+so only like replaces like.
+
+Measured twice. On a synthetic function with twenty-six values live at once
+and one short-lived value read eight times, frame accesses fall from 48 to
+34. On `examples/trust/HPL.tr`: 5 076 223 → 4 803 365 dynamic instructions
+(**−5.4%**), frame traffic 16.67% → 13.54%, output unchanged.
+
+**Against the profile that started G8.6: −55.8%.**
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

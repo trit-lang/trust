@@ -122,11 +122,11 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | TIR legalization | promotion complete; **expansion complete**: `add`, `sub`, `mul`, `div`, `rem`, `shl`/`shr` by a constant, `neg`, `cmp`, `tmin`/`tmax`/`tmul`, `select3`, wide loads and stores, and wide values across a function boundary — a real Trust program legalizes for a nine-trit machine and computes the same answers (G6.11). `mul` expands (G6.6 closed — TIR §3.1 gained `mulh`), and so do `shl` and `shr` by a **constant** amount (G6.12); `div` and `rem` become a call to a helper written in TIR (G6.13). A wide value crosses a function boundary as its parts, with a wide result through a hidden pointer (G6.5). What is left: a shift by a *computed* amount |
 | Layout engine (Ch. 2) | complete: sizes, alignments, offsets, both `repr`s, discriminants, niche optimization |
 | Trust frontend | Ch. 0–3 complete; Ch. 4 complete except generic traits |
-| Backend (TIR → TRISC-27) | works, with a **linear-scan register allocator over live intervals**, decided once per function (G8.9: −31.1%, and frame traffic down from 44% of everything executed to 17%) and instruction selection that uses the fields the encoding has — immediates, branch displacements, access displacements (G8.6−G8.8: a further −26.0% on HPL). A parameter stays in the register it arrived in where nothing can clobber it, and a function whose values all fit in registers opens no frame. Block parameters keep the frame's transfer area, which the frontend never uses; no peephole pass |
+| Backend (TIR → TRISC-27) | works, with a **linear-scan register allocator over live intervals**, decided once per function (G8.9, G8.11: −34.8%, and frame traffic down from 44% of everything executed to 13.5%) and instruction selection that uses the fields the encoding has — immediates, branch displacements, access displacements (G8.6−G8.8: a further −26.0% on HPL). A parameter stays in the register it arrived in where nothing can clobber it, and a function whose values all fit in registers opens no frame. Block parameters keep the frame's transfer area, which the frontend never uses; no peephole pass |
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6) |
 
-**347 tests, zero clippy warnings, 48 commits.** `scripts/stats.sh`.
+**348 tests, zero clippy warnings, 49 commits.** `scripts/stats.sh`.
 
 ---
 
