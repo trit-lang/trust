@@ -437,3 +437,102 @@ fn @flagged(%x: t27) -> t27 {
         differential(src, entry, &[&[0], &[1], &[-1], &[7], &[-3_812_798]]);
     }
 }
+
+#[test]
+fn a_branch_names_the_block_it_can_reach_and_a_stub_otherwise() {
+    // `br3` carries three displacements of seven trits each — ±1093 words
+    // (TRISC-27 §3.2) — so it can usually name its targets itself. It used to
+    // name three adjacent stubs instead, each holding one jump, which cost a
+    // jump on every branch the program took. On examples/trust/HPL.tr that
+    // was 6% of everything executed.
+    let near = r#"tir 0.1 target "tritium"
+
+fn @near(%x: t27) -> t27 {
+^entry:
+    %c = cmp t27 %x, const t27 0
+    br3 %c, ^neg, ^zero, ^pos
+^neg:
+    ret const t27 -1
+^zero:
+    ret const t27 0
+^pos:
+    ret const t27 1
+}
+"#;
+    let asm = compile_asm(near, "near");
+    let branch = asm
+        .lines()
+        .find(|l| l.trim_start().starts_with("br3"))
+        .expect("a branch");
+    assert!(branch.contains("f.near.neg"), "{branch}");
+    assert!(branch.contains("f.near.zero"), "{branch}");
+    assert!(branch.contains("f.near.pos"), "{branch}");
+    differential(near, "near", &[&[-7], &[0], &[7]]);
+
+    // A target with block arguments keeps its stub, because binding the
+    // parameters is code and the edge is the only place it belongs.
+    let args = r#"tir 0.1 target "tritium"
+
+fn @withargs(%x: t27) -> t27 {
+^entry:
+    %c = cmp t27 %x, const t27 0
+    br3 %c, ^join(const t27 -1), ^join(const t27 0), ^join(const t27 1)
+^join(%s: t27):
+    %r = mul.wrap t27 %s, %x
+    ret %r
+}
+"#;
+    let asm = compile_asm(args, "withargs");
+    let branch = asm
+        .lines()
+        .find(|l| l.trim_start().starts_with("br3"))
+        .expect("a branch");
+    assert!(
+        !branch.contains("f.withargs.join"),
+        "an edge with arguments needs its stub: {branch}"
+    );
+    differential(args, "withargs", &[&[-7], &[0], &[7]]);
+
+    // And a target genuinely out of reach falls back to a stub too. `^far`
+    // sits beyond a block long enough that no plausible error in the word
+    // count this pass keeps could bring it inside ±1093 words.
+    let mut pad = String::new();
+    for i in 0..1500 {
+        let prev = if i == 0 {
+            "%x".to_string()
+        } else {
+            format!("%v{}", i - 1)
+        };
+        pad.push_str(&format!("    %v{i} = add.wrap t27 {prev}, const t27 1\n"));
+    }
+    let far = format!(
+        r#"tir 0.1 target "tritium"
+
+fn @far(%x: t27) -> t27 {{
+^entry:
+    %c = cmp t27 %x, const t27 0
+    br3 %c, ^far, ^near, ^near
+^near:
+{pad}    ret %v1499
+^far:
+    ret const t27 42
+}}
+"#
+    );
+    let asm = compile_asm(&far, "far");
+    let branch = asm
+        .lines()
+        .find(|l| l.trim_start().starts_with("br3"))
+        .expect("a branch");
+    assert!(
+        branch.contains("f.far.near"),
+        "the near arm reaches: {branch}"
+    );
+    assert!(
+        !branch.contains("f.far.far"),
+        "the far arm cannot reach: {branch}"
+    );
+    // The assembler is the judge of whether the estimate was right: a `br3`
+    // that does not reach is an error there, not a slower program here.
+    differential(&far, "far", &[&[-1], &[0], &[1]]);
+}

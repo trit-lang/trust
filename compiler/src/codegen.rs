@@ -23,14 +23,22 @@
 //! on `examples/trust/HPL.tr`, that fold alone was 10% of the instructions the
 //! program executed.
 //!
-//! # Why every branch is four instructions
+//! # Branches, and the two passes they need
 //!
 //! A `br3` displacement reaches ±1093 words (TRISC-27 §4.5), and a branch
 //! that cannot reach is an assembly-time error rather than something the
 //! assembler expands — expansion would make an instruction's size depend on
-//! its operands. So each three-way branch is emitted as a `br3` into three
-//! adjacent jumps, whose range is the whole address space. A peephole pass
-//! should shorten the common case later.
+//! its operands. Code generation therefore has to know how far away a block
+//! is before it can name it, which is why `function` runs `emit_function`
+//! twice: the first pass sends every arm through an adjacent stub and records
+//! where each block landed, and the second lets `br3` name the arms it can
+//! reach. The second pass only removes instructions, so no distance it sees
+//! is longer than the one the first measured.
+//!
+//! An arm still needs a stub when its target takes block arguments — the edge
+//! has code, and it has to live somewhere — or when the target is genuinely
+//! far. On `examples/trust/HPL.tr` that leaves 12% of the jumps that used to
+//! be there.
 
 use crate::tir::ir::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -306,12 +314,44 @@ const POOL_CALL_FREE: &[&str] = &["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"
 /// caller-saved register can hold.
 const POOL_SAVED: &[&str] = &["s0", "s1", "s2", "s3", "s4", "s5", "s6"];
 
+/// How far a `br3` displacement reaches: seven trits of words, so ±1093
+/// (TRISC-27 §3.2). A margin is left because the estimate below has to agree
+/// with the assembler's own sizing, and being wrong here is an assembly-time
+/// error rather than a slower program.
+const BR3_REACH: i128 = 1000;
+
+/// How many words a line of generated assembly assembles to.
+///
+/// Every instruction is one word. The two pseudo-instructions that are not
+/// are `li`, which is one word when the value fits the fourteen-trit
+/// immediate and two otherwise, and `la`, which is always two (`vm/src/asm.rs`
+/// — a forward reference must not change a statement's size).
+fn words_of(line: &str) -> i128 {
+    let t = line.trim_start();
+    if let Some(rest) = t.strip_prefix("li ") {
+        let v: Option<i128> = rest.rsplit(',').next().and_then(|n| n.trim().parse().ok());
+        return match v {
+            Some(n) if n.abs() <= IMM_MAX => 1,
+            _ => 2,
+        };
+    }
+    if t.starts_with("la ") { 2 } else { 1 }
+}
+
 struct Gen<'a> {
     func: &'a Function,
     frame: Frame,
     out: String,
     errs: Vec<String>,
     counter: u32,
+    /// Words emitted so far, counted the way the assembler counts them.
+    here: i128,
+    /// Word offset of each block, from the measuring pass. Empty during that
+    /// pass, when every branch takes the long way.
+    offsets: BTreeMap<String, i128>,
+    /// The block emitted after the one being emitted, if any: a branch to it
+    /// needs no jump at all.
+    next_block: Option<String>,
     /// Values held in a register for the block being emitted. A value not
     /// here lives in its frame slot, as every value did before there was an
     /// allocator.
@@ -456,11 +496,34 @@ fn saved_registers(f: &Function) -> Vec<&'static str> {
 
 impl Gen<'_> {
     fn line(&mut self, text: impl AsRef<str>) {
-        let _ = writeln!(self.out, "    {}", text.as_ref());
+        let text = text.as_ref();
+        self.here += words_of(text);
+        let _ = writeln!(self.out, "    {text}");
     }
 
     fn label(&mut self, text: impl AsRef<str>) {
         let _ = writeln!(self.out, "{}:", text.as_ref());
+    }
+
+    /// Whether a `br3` here can name this target itself, rather than a jump
+    /// standing in for it.
+    ///
+    /// Two things stop it. A target with block arguments needs code on the
+    /// edge to bind them, and the only place to put that code is a stub. And
+    /// a target out of the displacement's reach needs a jump, whose range is
+    /// the whole address space.
+    ///
+    /// The reach is judged by the measuring pass's layout, which is sound
+    /// because this pass only *removes* instructions: no distance it computes
+    /// is longer than the one measured.
+    fn reaches(&self, target: &Target) -> bool {
+        if !target.args.is_empty() {
+            return false;
+        }
+        match self.offsets.get(&target.label) {
+            Some(at) => (at - self.here).abs() <= BR3_REACH,
+            None => false,
+        }
     }
 
     fn fresh(&mut self, what: &str) -> String {
@@ -572,11 +635,35 @@ impl Gen<'_> {
     }
 }
 
+/// Generate a function, twice.
+///
+/// The first pass measures: it emits every branch the long way and records
+/// where each block landed. The second uses those offsets to let a `br3`
+/// name its targets directly wherever they are in reach — which is the common
+/// case, and saves the jump that used to stand in for every one of them.
+///
+/// Two passes are needed and two suffice. The second only removes
+/// instructions, so no distance it sees is longer than the one the first
+/// measured, and a branch judged to reach still reaches.
 fn function(f: &Function) -> Result<String, Vec<String>> {
+    let saved = saved_registers(f);
+    let measured = emit_function(f, &saved, &BTreeMap::new());
+    let final_pass = emit_function(f, &saved, &measured.offsets);
+    if final_pass.errs.is_empty() {
+        Ok(final_pass.out)
+    } else {
+        Err(final_pass.errs)
+    }
+}
+
+fn emit_function<'a>(
+    f: &'a Function,
+    saved: &[&'static str],
+    offsets: &BTreeMap<String, i128>,
+) -> Gen<'a> {
     // The frame has to hold whatever the allocator decided to save, so the
     // allocation is settled before the layout that depends on it.
-    let saved = saved_registers(f);
-    let frame = layout(f, &saved);
+    let frame = layout(f, saved);
     let calls = f.blocks.iter().any(|b| {
         b.insts
             .iter()
@@ -590,6 +677,9 @@ fn function(f: &Function) -> Result<String, Vec<String>> {
         out: String::new(),
         errs: Vec::new(),
         counter: 0,
+        here: 0,
+        offsets: offsets.clone(),
+        next_block: None,
     };
 
     let name = f.sig.name.clone();
@@ -606,7 +696,7 @@ fn function(f: &Function) -> Result<String, Vec<String>> {
         g.line("st.word ra, 0(sp)");
     }
     // A callee-saved register belongs to whoever called us (TRISC-27 §6.1).
-    for r in &saved {
+    for r in saved {
         let at = g.slot(&format!("\u{1}saved.{r}"));
         g.line(format!("st.word {r}, {at}(sp)"));
     }
@@ -621,26 +711,23 @@ fn function(f: &Function) -> Result<String, Vec<String>> {
         let at = g.slot(pname);
         g.line(format!("st.word a{i}, {at}(sp)"));
     }
-    let entry = g.block_label(&f.blocks[0].label);
-    g.line(format!("j       {entry}"));
+    // The entry block is emitted next, so the prologue falls into it.
 
-    for b in &f.blocks {
+    for (i, b) in f.blocks.iter().enumerate() {
         // One allocation per block: a value that escapes it stays in its
         // frame slot, which is where every value used to live.
         g.regs = allocate(f, b);
         let label = g.block_label(&b.label);
+        g.offsets.insert(b.label.clone(), g.here);
         g.label(label);
+        g.next_block = f.blocks.get(i + 1).map(|n| n.label.clone());
         for inst in &b.insts {
             emit_inst(&mut g, inst, calls);
         }
         emit_term(&mut g, &b.term, calls);
     }
 
-    if g.errs.is_empty() {
-        Ok(g.out)
-    } else {
-        Err(g.errs)
-    }
+    g
 }
 
 /// The epilogue, emitted at every `ret`.
@@ -865,22 +952,42 @@ fn emit_term(g: &mut Gen, t: &Terminator, calls: bool) {
 
         Terminator::Br(target) => {
             move_args(g, target);
-            let label = g.block_label(&target.label);
-            g.line(format!("j       {label}"));
+            // A jump to the block emitted next is a jump to the next
+            // instruction. Binding the parameters still has to happen; the
+            // transfer of control does not.
+            if g.next_block.as_deref() != Some(target.label.as_str()) {
+                let label = g.block_label(&target.label);
+                g.line(format!("j       {label}"));
+            }
         }
 
-        // A `br3` into three adjacent jumps: the branch displacements are
-        // always 1, 2 and 3 words, so they always reach, and the jumps reach
-        // the whole address space.
+        // `br3` names its three targets itself wherever it can reach them.
+        // An arm it cannot — a target with block arguments to bind, or one
+        // out of the displacement's ±1093 words — goes through a stub holding
+        // the edge's code and a jump, whose range is the whole address space.
         Terminator::Br3 { t, neg, zero, pos } => {
             let rt = g.read(t, "t0");
-            let names = [g.fresh("bn"), g.fresh("bz"), g.fresh("bp")];
+            let arms: Vec<(&Target, Option<String>)> = [neg, zero, pos]
+                .into_iter()
+                .map(|d| {
+                    let stub = (!g.reaches(d)).then(|| g.fresh("b"));
+                    (d, stub)
+                })
+                .collect();
+            let named: Vec<String> = arms
+                .iter()
+                .map(|(d, stub)| match stub {
+                    Some(s) => s.clone(),
+                    None => g.block_label(&d.label),
+                })
+                .collect();
             g.line(format!(
                 "br3     {rt}, {}, {}, {}",
-                names[0], names[1], names[2]
+                named[0], named[1], named[2]
             ));
-            for (name, target) in names.iter().zip([neg, zero, pos]) {
-                g.label(name);
+            for (target, stub) in &arms {
+                let Some(stub) = stub else { continue };
+                g.label(stub);
                 move_args(g, target);
                 let label = g.block_label(&target.label);
                 g.line(format!("j       {label}"));
