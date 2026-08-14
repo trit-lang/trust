@@ -55,17 +55,13 @@ fn verify_for(m: &Module, target: Option<&crate::tir::TargetDesc>) -> Vec<Verify
         for f in &m.funcs {
             for b in &f.blocks {
                 for inst in &b.insts {
-                    if let Some(w) = arithmetic_width(&inst.kind)
-                        && w != 1
-                        && !t.legal.contains(&w)
-                    {
+                    for (w, why) in unlegal_widths(&inst.kind, t) {
                         errs.push(VerifyError {
                             function: Some(f.sig.name.clone()),
                             block: Some(b.label.clone()),
                             message: format!(
-                                "`{}` operates at t{w}, which `{}` has no native operation \
-                                 for: this module is not legalized, and TIR §6 lets a \
-                                 backend do anything with it",
+                                "`{}` {why} t{w}, which `{}` cannot: this module is not \
+                                 legalized, and TIR §6 lets a backend do anything with it",
                                 inst_name(&inst.kind),
                                 t.name
                             ),
@@ -388,23 +384,57 @@ fn callee_signature<'a>(m: &'a Module, callee: &Callee) -> Option<&'a Signature>
     }
 }
 
-/// The width an instruction *computes* at, for the legalization
-/// post-condition — the five kinds a backend must select a native machine
-/// operation for.
+/// Widths an instruction uses that this target cannot, with what it was
+/// doing with them — TIR §6's post-condition, checked per width rather than
+/// per opcode.
 ///
-/// `widen` and `trunc` are excluded, and deliberately: they are the bridge
-/// between a legal register width and a memory access width, which TIR §6.2
-/// does not promote because a `t9` in memory is one tryte whatever the
-/// registers are. A `trunc` to `t9` feeding a `store t9` is legalized code,
-/// not unlegalized code.
-fn arithmetic_width(k: &InstKind) -> Option<u32> {
+/// Two rules, because there are two kinds of width:
+///
+/// - An **operation** must be at a width the target has a native instruction
+///   for: one of `legal`, or `t1`, which is a condition and not an arithmetic
+///   width (G6.1).
+/// - A **conversion** — `widen`, `trunc` — spans a register width and
+///   something narrower. Its wider end is where it operates, so that must be
+///   legal; its narrower end may also be a *memory* access width, which TIR
+///   §6.2 deliberately does not promote because a `t9` in memory occupies one
+///   tryte whatever the registers hold.
+///
+/// Excluding conversions by opcode instead, as this first did, reopens the
+/// hole the check exists to close: `trunc %x to t54` would pass on a target
+/// whose widest legal width is 27.
+fn unlegal_widths(k: &InstKind, t: &crate::tir::TargetDesc) -> Vec<(u32, &'static str)> {
+    let operates = |w: Option<u32>| -> Vec<(u32, &'static str)> {
+        match w {
+            Some(w) if w != 1 && !t.legal.contains(&w) => vec![(w, "operates at")],
+            _ => Vec::new(),
+        }
+    };
+    let converts = |from: Option<u32>, to: Option<u32>| -> Vec<(u32, &'static str)> {
+        let (Some(a), Some(b)) = (from, to) else {
+            return Vec::new();
+        };
+        let (narrow, wide) = if a < b { (a, b) } else { (b, a) };
+        let mut out = Vec::new();
+        if wide != 1 && !t.legal.contains(&wide) {
+            out.push((wide, "converts at"));
+        }
+        // The narrow end must at least be storable: a width no memory access
+        // could hold is not a memory bridge, it is unlegalized arithmetic.
+        if narrow != 1 && !t.legal.contains(&narrow) && t.legal_at_least(narrow).is_none() {
+            out.push((narrow, "converts to"));
+        }
+        out
+    };
     match k {
         InstKind::Flavored { ty, .. }
         | InstKind::Plain { ty, .. }
         | InstKind::Neg { ty, .. }
         | InstKind::Cmp { ty, .. }
-        | InstKind::Select3 { ty, .. } => ty.width(),
-        _ => None,
+        | InstKind::Select3 { ty, .. } => operates(ty.width()),
+        InstKind::Widen { from, to, .. } | InstKind::Trunc { from, to, .. } => {
+            converts(from.width(), to.width())
+        }
+        _ => Vec::new(),
     }
 }
 

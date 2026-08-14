@@ -65,7 +65,7 @@ pub enum Val {
     /// An address.
     Ptr(Ptr),
     /// Poison: the result of reading uninitialized storage. Propagates
-    /// through every operation; branching on it is UB (TIR §4.4).
+    /// through every operation; branching on it is UB (TIR §4 item 4).
     Poison,
 }
 
@@ -492,7 +492,7 @@ impl<'m> Interp<'m> {
             Terminator::Br3 { t, neg, zero, pos } => {
                 let sel = self.operand(t, env)?;
                 let Val::Int(sel) = sel else {
-                    // TIR §4.4: branching on poison is UB.
+                    // TIR §4 item 4: branching on poison is UB.
                     return Err(Halt::Ub("`br3` on a poison selector".into()));
                 };
                 let target = match sel.sign() {
@@ -506,9 +506,9 @@ impl<'m> Interp<'m> {
             Terminator::Ret(None) => Ok(Flow::Return(None)),
             Terminator::Ret(Some(v)) => Ok(Flow::Return(Some(self.operand(v, env)?))),
             Terminator::Trap(code) => Err(Halt::Fault(Fault::new(*code))),
-            Terminator::Unreachable => {
-                Err(Halt::Ub("control reached `unreachable` (TIR §4.1)".into()))
-            }
+            Terminator::Unreachable => Err(Halt::Ub(
+                "control reached `unreachable` (TIR §4 item 1)".into(),
+            )),
         }
     }
 
@@ -546,7 +546,7 @@ impl<'m> Interp<'m> {
         let align = align_trytes(width) as i128;
         if p.offset % align != 0 {
             return Err(Halt::Ub(format!(
-                "misaligned `{what}` of t{width}: offset {} is not a multiple of {align} trytes (TIR §4.2)",
+                "misaligned `{what}` of t{width}: offset {} is not a multiple of {align} trytes (TIR §4 item 2)",
                 p.offset
             )));
         }
@@ -554,7 +554,7 @@ impl<'m> Interp<'m> {
         let alloc = &self.allocs[p.alloc];
         if p.offset < 0 || p.offset + size > alloc.trytes.len() as i128 {
             return Err(Halt::Ub(format!(
-                "`{what}` of t{width} at offset {} escapes {} ({} trytes) (TIR §4.3)",
+                "`{what}` of t{width} at offset {} escapes {} ({} trytes) (TIR §4 item 3)",
                 p.offset,
                 alloc.name,
                 alloc.trytes.len()

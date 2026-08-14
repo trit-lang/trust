@@ -353,7 +353,7 @@ impl Emit<'_> {
     /// promoted**: a `t9` in memory occupies one tryte whatever width the
     /// registers have, so a promoted value must come back down to be stored.
     /// It is exact because promotion renormalizes into the narrow type's own
-    /// symmetric range after every operation (TIR §6.2), so the trits being
+    /// symmetric range after every operation (TIR §6), so the trits being
     /// dropped are already zero.
     fn coerce(&mut self, o: &Operand, want: Type) -> Operand {
         let o = self.resolve(o);

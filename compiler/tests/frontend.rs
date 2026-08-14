@@ -193,7 +193,7 @@ fn casts_are_explicit_and_follow_chapter_one() {
     assert_eq!(value("1t as t27"), 1);
     // A *runtime* narrowing, which constant folding cannot hide: `t9` is not
     // a legal register width on this target, so the value is promoted to a
-    // word and must come back down to be stored (TIR §6.2).
+    // word and must come back down to be stored (TIR §6).
     assert_eq!(
         run("fn main() -> t27 { let n: t27 = 9842; let d: t9 = n as t9; d as t27 }").0,
         -9841
@@ -1763,6 +1763,75 @@ fn a_field_the_destructor_moved_out_of_is_not_dropped_again() {
     );
 }
 
+/// The shared declarations of the field-move family below.
+const MOVE_FAMILY: &str = "fn putchar(c: t9); \
+     struct B { id: t9 } impl Drop for B { fn drop(self) { putchar(self.id); } } \
+     struct O { a: B, b: B } struct N { inner: O } \
+     fn take(x: B) { } fn takeo(x: O) { } ";
+
+#[test]
+fn the_field_move_family_is_rejected() {
+    // One direct case is not evidence for a whole rule. Each of these moves
+    // a field out and then does something that must not be allowed.
+    for (what, body) in [
+        (
+            "reading the whole struct afterwards",
+            "let o = O { a: B{id:1}, b: B{id:2} }; take(o.a); takeo(o); 0",
+        ),
+        (
+            "moving the same field twice",
+            "let o = O { a: B{id:1}, b: B{id:2} }; take(o.a); take(o.a); 0",
+        ),
+        (
+            "moving a nested field, then reading its parent",
+            "let n = N { inner: O { a: B{id:1}, b: B{id:2} } }; \
+             take(n.inner.a); takeo(n.inner); 0",
+        ),
+        (
+            "moving a field inside a loop",
+            "let o = O { a: B{id:1}, b: B{id:2} }; let mut i: t27 = 0; \
+             while i < 2 { take(o.a); i += 1; } 0",
+        ),
+        (
+            "one match arm moving and the others not, then using the whole",
+            "let o = O { a: B{id:1}, b: B{id:2} }; let t: trit = 0t; \
+             match t { -1t => take(o.a), 0t => (), 1t => (), } takeo(o); 0",
+        ),
+    ] {
+        let e = error(&format!("{MOVE_FAMILY} fn main() -> t27 {{ {body} }}"));
+        assert!(
+            e.contains("moved out of") || e.contains("moved out of here"),
+            "{what}: {e}"
+        );
+    }
+}
+
+#[test]
+fn per_local_ownership_rejects_two_programs_that_are_legal() {
+    // The evidence for calling the approximation *conservative*, which is a
+    // claim about which direction it errs in and needs a wrongly-rejected
+    // program to support. Ownership is tracked per local, not per place, so
+    // a move out of one field takes the whole local with it.
+    //
+    // Both of these are legal by Ch. 3 §1.3 — "moving out of a place leaves
+    // *that place* uninitialized, not the whole variable" — and both are
+    // accepted by Rust. If per-place ownership ever arrives, these two
+    // assertions are what must flip.
+    for (what, body) in [
+        (
+            "moving out of disjoint fields",
+            "let o = O { a: B{id:1}, b: B{id:2} }; take(o.a); take(o.b); 0",
+        ),
+        (
+            "moving a field out and putting one back",
+            "let mut o = O { a: B{id:1}, b: B{id:2} }; take(o.a); o.a = B{id:3}; takeo(o); 0",
+        ),
+    ] {
+        let e = error(&format!("{MOVE_FAMILY} fn main() -> t27 {{ {body} }}"));
+        assert!(e.contains("moved out of"), "{what}: {e}");
+    }
+}
+
 #[test]
 fn moving_a_field_out_moves_the_value() {
     // Reading a place of non-copyable type moves it (Ch. 3 §1.2), and that
@@ -1809,4 +1878,120 @@ fn an_enum_payload_is_dropped_by_variant() {
          impl Drop for Port { fn drop(self) { putchar(self.id); } } \
          fn main() -> t27 { let o = Option::Some(Port { id: 90 }); 0 }");
     assert_eq!(out, "Z");
+}
+
+// --------------------------------------------------- docs/status.md §11
+//
+// One test per entry in that section. A claim about how the implementation
+// falls short is worth no more than a claim about anything else without
+// something that runs, and the entries claiming *conservatism* need a
+// wrongly-rejected program specifically: "conservative" says which direction
+// the error goes, and that is exactly what a passing test cannot show.
+//
+// Where an entry describes behaviour that is wrong rather than merely
+// limited, the test asserts the wrong behaviour, so that fixing it fails
+// here and forces §11 to be updated.
+
+#[test]
+fn known_limit_a_generic_body_is_checked_at_instantiation() {
+    // §11: the bound half of Ch. 4 §2.2 holds — a failed bound is reported
+    // at the call site…
+    let e = error(
+        "trait Area { fn area(&self) -> t27; } struct S { x: t27 } \
+         fn m<T: Area>(x: &T) -> t27 { 0 } \
+         fn main() -> t27 { let s = S { x: 1 }; m(&s) }",
+    );
+    assert!(e.contains("does not implement `Area`"), "{e}");
+
+    // …but a generic function that is never called is never checked, so a
+    // body that could not compile for any instantiation compiles.
+    tir_of(
+        "trait Area { fn area(&self) -> t27; } \
+         fn never_called<T: Area>(x: &T) -> t27 { x.no_such_method() } \
+         fn main() -> t27 { 0 }",
+    );
+}
+
+#[test]
+fn known_limit_there_is_no_sized_bound() {
+    // §11: Ch. 4 §2.5 gives every type parameter an implicit `Sized` bound
+    // and `?Sized` to remove it; there is neither, so a parameter behaves as
+    // `?Sized`. Rust rejects this call; here it works.
+    assert_eq!(
+        run("trait Shape { fn area(&self) -> t27; } \
+             struct C { r: t27 } \
+             impl Shape for C { fn area(&self) -> t27 { self.r * 2 } } \
+             fn twice<S: Shape>(s: &S) -> t27 { s.area() * 2 } \
+             fn main() -> t27 { let c = C { r: 5 }; let d: &dyn Shape = &c; twice(d) }")
+        .0,
+        20
+    );
+    // Sound, because every use that needs a size is checked at that use.
+    for (what, src, call) in [
+        ("a parameter", "fn f<T: Shape>(x: T) -> t27 { 0 }", "f(*d)"),
+        (
+            "a local",
+            "fn f<T: Shape>(x: &T) -> t27 { let y = *x; 0 }",
+            "f(d)",
+        ),
+        (
+            "a field",
+            "struct W<T> { v: T } \
+             fn f<T: Shape>(x: &T) -> t27 { let w: W<T> = W { v: *x }; 0 }",
+            "f(d)",
+        ),
+    ] {
+        let e = error(&format!(
+            "trait Shape {{ fn area(&self) -> t27; }} struct C {{ r: t27 }} \
+             impl Shape for C {{ fn area(&self) -> t27 {{ self.r }} }} \
+             {src} \
+             fn main() -> t27 {{ let c = C {{ r: 1 }}; let d: &dyn Shape = &c; {call} }}"
+        ));
+        assert!(
+            e.contains("no size") || e.contains("cannot read"),
+            "{what}: {e}"
+        );
+    }
+}
+
+#[test]
+fn known_limit_a_returned_borrow_is_rooted_syntactically() {
+    // §11: there is no region inference, so the root must be a parameter.
+    // Every program accepted would be accepted by full inference; this one
+    // would be too, and is rejected.
+    let e = error(
+        "struct P { x: t27 } \
+         fn pick<'a>(a: &'a P, b: &'a P) -> &'a t27 { &a.x } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("elision cannot choose"), "{e}");
+}
+
+#[test]
+fn known_limit_a_closure_captures_by_variable_not_by_place() {
+    // §11: Ch. 4 §4.4 says a closure using `p.x` borrows `p.x` and leaves
+    // `p.y` free. This one borrows `p`, so writing `p.y` under a live
+    // closure is rejected where the chapter permits it.
+    let e = error(
+        "struct P { x: t27, y: t27 } \
+         fn use1(f: impl Fn(t27) -> t27) -> t27 { f(1) } \
+         fn main() -> t27 { \
+             let mut p = P { x: 1, y: 2 }; \
+             let f = |v: t27| p.x + v; \
+             p.y = 9; \
+             use1(f) \
+         }",
+    );
+    assert!(e.contains("cannot be written to"), "{e}");
+}
+
+#[test]
+fn known_limit_diagnostics_print_mangled_names() {
+    // §11: `Pair.t27.t9`, not `Pair<t27, t9>`. Recorded so that improving it
+    // fails here rather than silently leaving §11 stale.
+    let e = error(
+        "struct Pair<A, B> { first: A, second: B } \
+         fn main() -> t27 { let p: Pair<t27, t9> = Pair { first: 1, second: 2 }; p.z }",
+    );
+    assert!(e.contains("Pair.t27.t9"), "{e}");
 }

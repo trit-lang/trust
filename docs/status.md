@@ -57,7 +57,9 @@ vm/        4 148 lines  crate tritium  — machine, assembler, image format
 docs/
 ├── spec-gaps.md               50 entries: every place the spec was silent or wrong
 └── status.md                  this file
-scripts/stats.sh               produces every number in this document
+scripts/
+├── stats.sh                   produces every number in this document
+└── citations.sh               checks that every `Ch. N §M` in the source exists
 examples/{trust,tir,trisc}
 ```
 
@@ -283,11 +285,24 @@ table carries `Supersedes` / `Superseded by`. This was extended from the
 shared base to all documents after five corrections were found living only at
 the correcting end.
 
-**5. Prose style.** Specification text and code comments both cite the section
-they implement (`Ch. 3 §2.2`, `AM §3.4`, `TIR §6.2`). Comments say *why*, not
-*what*. Neither hedges. Where something is missing, it says it is missing and
-what it is waiting for. Match this; it is most of what makes the documents
-usable.
+**5. Prose style, and citations that are checked.** Specification text and
+code comments both cite the section they implement (`Ch. 3 §2.2`, `AM §3.4`,
+`TIR §6`). Comments say *why*, not *what*. Neither hedges. Where something is
+missing, it says it is missing and what it is waiting for. Match this; it is
+most of what makes the documents usable.
+
+`scripts/citations.sh` checks all 102 distinct citations in the source
+against the documents they name. It cannot tell whether a citation is *apt* —
+only whether its section exists — and that low bar still caught five on its
+first run: `TIR §4.1`–`§4.4` and `TIR §6.2` name subsections that do not
+exist, because §4's UB sources are a numbered *list* and §6's contract is a
+bulleted one. They are now `TIR §4 item N` and `TIR §6`.
+
+The stronger version of this check is worth building. The drop-glue
+double-free would have failed it: `drop_at` cited Ch. 3 §1.4, whose item 3
+says "a field the destructor moved out of is not dropped again", while the
+code dropped every field twice. A citation that names a real section it
+contradicts is the next thing to catch.
 
 ---
 
@@ -384,39 +399,71 @@ allocator.** Anything of this shape still hiding here becomes a real
 double-free or leak on that day, in a session whose attention is on the
 allocator. Prefer finding it now.
 
-What remains, none of it unsound:
+**Every entry below cites a test.** A claim about how the implementation
+falls short is worth no more than any other claim without something that
+runs, and the entries claiming *conservatism* need a **wrongly-rejected
+program** specifically: "conservative" is an assertion about which direction
+the error goes, and no passing test can show that. Where an entry describes
+behaviour that is simply wrong, the test asserts the wrong behaviour, so that
+fixing it fails here and forces this section to be updated. An entry with no
+test is an unverified claim and must say so.
 
-- **A generic body is checked at instantiation, not once against its bounds.**
-  The bound half of Ch. 4 §2.2 holds — a failed bound is reported at the call
-  site — but a generic function that is never called is never checked at all.
-  This is the C++ failure mode Ch. 4's Appendix B claims is removed by
-  construction, and it is removed at the call site only.
+That rule exists because of the second bug above. It sat here for a draft
+labelled "conservative, harmless" — a claim nobody had evidence for, that
+pointed the wrong way, about a memory-safety hole.
 
-  **This follows from §7's first decision and cannot be fixed without
-  introducing `Ty::Param`.** Checking a body against its bounds means
-  representing "some type known only to implement `Shape`", and resolving
-  `s.area()` from the bound alone. There is deliberately no such type: §7
-  explains that its absence is what keeps the layout engine, the drop
-  machinery, the borrow checker and code generation ignorant of generics, and
-  a test asserts that no generic construct reaches TIR. Adding `Ty::Param` is
-  not adding an enum variant; it is four downstream components meeting a kind
-  of type they were designed never to see. Decide whether that is worth it
-  before starting, not after.
+| Limit | Test |
+|---|---|
+| a generic body is checked at instantiation, not once against its bounds | `known_limit_a_generic_body_is_checked_at_instantiation` |
+| there is no `Sized` bound | `known_limit_there_is_no_sized_bound` |
+| a returned borrow is rooted syntactically | `known_limit_a_returned_borrow_is_rooted_syntactically` |
+| a closure captures by variable, not by place | `known_limit_a_closure_captures_by_variable_not_by_place` |
+| ownership is per local, not per place | `per_local_ownership_rejects_two_programs_that_are_legal` |
+| diagnostics print mangled names | `known_limit_diagnostics_print_mangled_names` |
 
-- **There is no `Sized` bound.** Ch. 4 §2.5 gives every type parameter an
-  implicit one and `?Sized` to remove it; the implementation has neither, so
-  every parameter behaves as `?Sized` and the size requirement is enforced at
-  each use. `fn f<T: Shape>(x: &T)` therefore accepts `T = dyn Shape`, which
-  Rust would reject without `?Sized`. Sound — every use needing a size is
-  checked — but more permissive than the chapter says, and the error surfaces
-  in the body rather than at the call.
+**Two of these are one thing.** *A generic body is checked at instantiation*
+and *there is no `Sized` bound* have the same root, and it is §7's first
+decision:
 
+- The bound half of Ch. 4 §2.2 holds — a failed bound is reported at the call
+  site, naming the call, the parameter and the trait — but a generic function
+  that is never called is never checked at all. This is the C++ failure mode
+  Ch. 4's Appendix B claims is removed by construction, and it is removed at
+  the call site only.
+- Ch. 4 §2.5 gives every type parameter an implicit `Sized` bound and `?Sized`
+  to remove it. There is neither: a parameter behaves as `?Sized`, and the
+  size requirement is enforced at each *use*, so the error surfaces in the
+  body rather than at the call — **which is the same failure mode again.**
+
+Both need the same thing: the ability to represent "some type known only to
+implement `Shape`", and to resolve `s.area()` from the bound alone. That is
+`Ty::Param`, and **§7 explains that its absence is load-bearing**: it is what
+keeps the layout engine, the drop machinery, the borrow checker and code
+generation ignorant of generics, and a test asserts that no generic construct
+reaches TIR. Adding it is not adding an enum variant; it is four downstream
+components meeting a kind of type they were designed never to see. Do not
+attempt either limit in isolation — you will reach the same wall from two
+directions.
+
+The `?Sized` behaviour is sound *provided the list of use sites that require
+a size is exhaustive*, and that list is the kind that grows quietly as a
+language does: parameters, `let` bindings, fields, reads through a reference
+today; return positions, array elements, tuple members, closure captures and
+enum payloads tomorrow. If you add a construct that needs a size, route it
+through the same check rather than writing a fifth one.
+
+The rest:
+
+- **Ownership is per local, not per place.** Ch. 3 §1.3 says moving out of a
+  place leaves *that place* uninitialized, not the whole variable. Moving out
+  of `o.a` here moves `o`. Two legal programs are rejected as a result —
+  moving out of disjoint fields, and moving a field out and putting one
+  back — and those two assertions are what must flip if per-place ownership
+  arrives.
 - **Region inference does not exist.** A returned borrow must be rooted
   syntactically at a parameter. Every program accepted would be accepted by
   full region inference; some rejected ones would not be, and those are the
   ones needing written lifetimes.
-
 - **Capture is by variable, not by place.** Ch. 4 §4.4 says a closure using
   `p.x` borrows `p.x` and leaves `p.y` free; this one borrows `p`.
-
 - **Diagnostics print mangled names**: `Pair.t27.t9`, not `Pair<t27, t9>`.

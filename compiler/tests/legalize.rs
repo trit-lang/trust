@@ -486,3 +486,33 @@ fn @f(%x: t9, %y: t9) -> t9 {
     let legalized = tir::legalize_module(&m, &target).expect("legalizes");
     assert!(tir::verify_legalized(&legalized, &target).is_empty());
 }
+
+#[test]
+fn the_post_condition_is_by_width_not_by_opcode() {
+    // A conversion spans a register width and something narrower. Excluding
+    // conversions wholesale — which this check first did, to stop it firing
+    // on the memory bridge — reopens the hole it exists to close.
+    let target = tir::TargetDesc::tritium(); // legal = [27]
+    let module = |body: &str| {
+        tir::parse_module(&format!(
+            "tir 0.1 target \"tritium\"\n\nfn @f(%x: t27) -> t27 {{\n^entry:\n{body}\n}}\n"
+        ))
+        .expect("parses")
+    };
+
+    // The memory bridge: t27 down to a width memory can hold. Legal.
+    let ok = module("    %n = trunc t27 %x -> t9\n    %w = widen t9 %n -> t27\n    ret %w");
+    assert!(
+        tir::verify_legalized(&ok, &target).is_empty(),
+        "{:?}",
+        tir::verify_legalized(&ok, &target)
+    );
+
+    // A conversion whose wide end is not a register width is not a bridge,
+    // it is unlegalized arithmetic — and this is what the opcode-wide
+    // exclusion let through.
+    let bad = module("    %w = widen t27 %x -> t54\n    %n = trunc t54 %w -> t27\n    ret %n");
+    let errs = tir::verify_legalized(&bad, &target);
+    assert_eq!(errs.len(), 2, "{errs:?}");
+    assert!(errs[0].message.contains("t54"), "{:?}", errs[0]);
+}

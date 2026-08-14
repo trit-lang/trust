@@ -625,7 +625,8 @@ legal register width and a memory access width, and TIR §6.2 does not promote
 the latter because a `t9` in memory is one tryte whatever the registers are.
 The check caught this on its first run, which is a fair test of the check.
 
-**G4.4 — `Sized` and `?Sized` are not implemented.** Ch. 4 §2.5 gives every
+**G4.4 — `Sized` and `?Sized` are not implemented, which is G0.14's limit
+seen from another side.** Ch. 4 §2.5 gives every
 type parameter an implicit `Sized` bound and `?Sized` to remove it. The
 implementation has neither: a parameter behaves as `?Sized`, and the size
 requirement is enforced at each *use* — a parameter of unsized type, a `let`
@@ -633,10 +634,17 @@ of one, a field of one, a read through a reference to one. `fn f<T: Shape>(x: &T
 therefore accepts `T = dyn Shape`, which Rust rejects without `?Sized`.
 
 *Decision:* sound but more permissive than the chapter, and the difference is
-where the error appears. Left as is, because implementing the bound properly
-interacts with G0.14's note on checking generic bodies once: a `Sized` bound
-is a bound, and bounds on an uninstantiated body are exactly what is not
-checked today.
+where the error appears — **in the body rather than at the call**, which is the
+same failure mode G0.14 records for generic bodies generally. Both have one
+root: there is no `Ty::Param`, so nothing can be checked against a bound
+without first being made concrete. `docs/status.md` §11 states the two
+together and says why fixing either alone reaches the same wall.
+
+*And one thing to watch:* the soundness of the `?Sized` behaviour rests
+entirely on the list of use sites requiring a size being exhaustive —
+parameters, `let` bindings, fields, reads through a reference. That list is
+the kind that grows quietly. A new construct that needs a size must go
+through the same check rather than adding a fifth one.
 
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but

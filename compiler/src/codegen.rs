@@ -542,7 +542,7 @@ fn emit_term(g: &mut Gen, t: &Terminator, calls: bool) {
             g.line(format!("trap    {}", code.name()));
         }
 
-        // Reaching `unreachable` is UB (TIR §4.1). A trap is the most useful
+        // Reaching `unreachable` is UB (TIR §4 item 1). A trap is the most useful
         // thing an implementation can do with it.
         Terminator::Unreachable => {
             g.line(format!("trap    {}", FaultCode::Trap.name()));
