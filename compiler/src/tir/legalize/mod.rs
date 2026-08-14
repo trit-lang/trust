@@ -687,6 +687,48 @@ fn legalize_inst(e: &mut Emit, inst: &Inst) {
             let w = ty.width().expect("verified");
             let Ok(at) = width(e, w) else { return };
             let (a, b) = (e.coerce(a, Type::Int(at)), e.coerce(b, Type::Int(at)));
+
+            // `mulh` is the one operation promotion cannot carry through
+            // unchanged: at a wider type it is the high half of a *different*
+            // product. Recomputed instead, which is exact whenever the whole
+            // product fits — `mul` then `shr` by the narrow width, which is
+            // TIR §3.1's definition read literally.
+            if matches!(op, PlainOp::MulH) && at != w {
+                if 2 * w > at {
+                    e.errs.push(format!(
+                        "`mulh` at t{w} promoted to t{at} would need t{} to hold the \
+                         product it takes the high half of",
+                        2 * w
+                    ));
+                    return;
+                }
+                let p = e.emit(
+                    "m",
+                    Type::Int(at),
+                    InstKind::Flavored {
+                        op: FlavoredOp::Mul,
+                        flavor: Flavor::Wrap,
+                        ty: Type::Int(at),
+                        a,
+                        b,
+                    },
+                );
+                let k = konst(at, w as i128);
+                define(
+                    e,
+                    inst,
+                    0,
+                    Type::Int(at),
+                    InstKind::Plain {
+                        op: PlainOp::Shr,
+                        ty: Type::Int(at),
+                        a: p,
+                        b: k,
+                    },
+                );
+                return;
+            }
+
             if matches!(op, PlainOp::Shr) && at != w {
                 e.guard_shift(&b, w, at);
                 if e.halted.is_some() {
@@ -1055,6 +1097,29 @@ fn expand_inst(e: &mut Emit, inst: &Inst, wide: Wide) -> bool {
             ..
         } => {
             expand::add_sub(e, inst, *op, *flavor, wide, a, b);
+            true
+        }
+        InstKind::Flavored {
+            op: FlavoredOp::Mul,
+            flavor,
+            a,
+            b,
+            ..
+        } => {
+            expand::mul(e, inst, *flavor, wide, a, b);
+            true
+        }
+        InstKind::Plain {
+            op: PlainOp::MulH, ..
+        } => {
+            // The high half of a *wide* product is a 2k-part value the caller
+            // has nowhere to put; it is only ever needed as a step inside the
+            // expansion above.
+            e.errs.push(format!(
+                "`mulh` at t{} cannot be expanded: the high half of a wide product \
+                 is wider than any value TIR can name",
+                wide.logical()
+            ));
             true
         }
         InstKind::Neg { a, .. } => {

@@ -736,9 +736,10 @@ fn parse_inst(p: &mut Parser) -> PResult<Inst> {
                 b,
             }
         }
-        "div" | "rem" | "shr" | "tmin" | "tmax" | "tmul" => {
+        "mulh" | "div" | "rem" | "shr" | "tmin" | "tmax" | "tmul" => {
             reject_flavor(&stem, flavor, line)?;
             let op = match stem.as_str() {
+                "mulh" => PlainOp::MulH,
                 "div" => PlainOp::Div,
                 "rem" => PlainOp::Rem,
                 "shr" => PlainOp::Shr,

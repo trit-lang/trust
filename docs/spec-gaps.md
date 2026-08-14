@@ -969,23 +969,35 @@ results come back in `a0` then `a1`. So the machine can pass a `t54`. TIR
 cannot yet *express* it — `ret` carries one value and there is no `sret` form
 — so the remaining work is a TIR change, not a missing convention.
 
-**G6.6 — Expansion of `mul` needs a primitive TIR does not have.** Multiplying
-two `k`-part values by the schoolbook method needs the *full* product of two
-parts, which is `2L` trits wide — and `L` is already the widest legal width.
-Binary ISAs solve this with a widening multiply (`mulhi`/`umulh`); TIR §3.1
-has only `mul<fl>`, which returns a same-width result, and `.flag` reports
-only the *direction* of the overflow, not the high half.
+**G6.6 — Expansion of `mul` needed a primitive TIR did not have — RESOLVED.**
+Expanding a multiply means multiplying a part by a part, and that product is
+twice a part wide. No same-width instruction can deliver the top half, so a
+multi-part multiply had nowhere to put its partial products. TRISC-27 §4.1
+already provided `mulh` — the machine was ahead of the IR, which is the wrong
+way round for an IR that claims to be target-independent.
 
-*Decision:* reported, not approximated.
+*Resolution:* TIR §3.1 gains `mulh tN %a, %b`, the high tN of the exact
+2N-trit product, defined so that `mulh · 3ᴺ + mul.wrap` reconstructs it. It is
+the balanced split of §3.3's `shr`, so it needed no definition beyond "the
+other half", and it takes no flavor because the high half of a product of two
+N-trit values always fits in N trits — a property of the symmetric range, not
+an accident.
 
-*Half resolved.* TRISC-27 §4.1 now provides `mulh`, which yields the high 27
-trits of the 54-trit product — the machine has the primitive. TIR still does
-not: §3.1 has only same-width `mul`, and `.flag` reports the direction of an
-overflow rather than its high half. Adding a widening multiply to TIR §3.1 is
-the remaining change, and it is now a change with a known hardware
-counterpart rather than a speculative one.
+Promotion cannot carry `mulh` through unchanged: at a wider type it is the
+high half of a *different* product. It is recomputed instead, as `mul` then
+`shr` by the narrow width, which is the definition read literally and is exact
+whenever the whole product fits.
 
----
+The expansion is schoolbook, with one choice worth naming: the accumulator is
+**2k parts wide rather than k**. The extra half costs a little work and buys
+the overflow answer for nothing — the product fits exactly when every part
+above the result's width is zero, and the direction of an overflow is the sign
+of the most significant nonzero part, because that is what the sign of a
+balanced positional number *is*.
+
+192 cases across all three flavors, including MAX and MIN as operands, agree
+with the unlegalized module.
+
 
 **G6.7 — TIR could not hold a pointer in memory.** §3.4's `load`/`store` take
 an integer width, and §5 deliberately has no integer↔pointer conversion.

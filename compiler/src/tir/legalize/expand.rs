@@ -205,6 +205,137 @@ pub(super) fn add_sub(
     }
 }
 
+/// Multiply, part by part (TIR §6, and G6.6 for why this needed `mulh`).
+///
+/// Schoolbook: part *i* of `a` times part *j* of `b` lands at position
+/// *i + j*, and its top half at *i + j + 1*. `mul.wrap` gives the low half
+/// and `mulh` the high one, and TIR §3.1 defines them so that together they
+/// are the exact product — which is the whole reason `mulh` exists.
+///
+/// The accumulator is **2k parts wide**, not k. The extra half costs a little
+/// work and buys the overflow answer for nothing: the product fits exactly
+/// when every part above the result's width is zero, and the direction of an
+/// overflow is the sign of the most significant nonzero part, because that is
+/// what the sign of a balanced positional number is.
+pub(super) fn mul(e: &mut Emit, inst: &Inst, flavor: Flavor, wide: Wide, a: &Operand, b: &Operand) {
+    let a = parts_of(e, a, wide);
+    let b = parts_of(e, b, wide);
+    let k = wide.k as usize;
+    let ty = wide.ty();
+
+    // The full product, least significant part first. Two k-part values
+    // multiply into at most 2k parts.
+    let mut acc: Vec<Operand> = (0..2 * k).map(|_| konst(wide.part, 0)).collect();
+
+    // Add `v` into `acc[at]` and carry upwards for as long as it carries.
+    fn accumulate(e: &mut Emit, acc: &mut [Operand], at: usize, v: Operand, ty: Type) {
+        let mut i = at;
+        let mut addend = v;
+        while i < acc.len() {
+            let (sum, carry) = e.emit2(
+                "mp",
+                ty,
+                Type::Int(1),
+                InstKind::Flavored {
+                    op: FlavoredOp::Add,
+                    flavor: Flavor::Flag,
+                    ty,
+                    a: acc[i].clone(),
+                    b: addend,
+                },
+            );
+            acc[i] = sum;
+            i += 1;
+            if i == acc.len() {
+                break;
+            }
+            // The carry is a trit, and a trit added to the next part may
+            // itself carry, so this continues rather than stopping.
+            addend = e.coerce(&carry, ty);
+        }
+    }
+
+    for (i, ai) in a.iter().enumerate() {
+        for (j, bj) in b.iter().enumerate() {
+            let (lo, _) = e.emit2(
+                "ml",
+                ty,
+                Type::Int(1),
+                InstKind::Flavored {
+                    op: FlavoredOp::Mul,
+                    flavor: Flavor::Flag,
+                    ty,
+                    a: ai.clone(),
+                    b: bj.clone(),
+                },
+            );
+            let hi = e.emit(
+                "mh",
+                ty,
+                InstKind::Plain {
+                    op: PlainOp::MulH,
+                    ty,
+                    a: ai.clone(),
+                    b: bj.clone(),
+                },
+            );
+            accumulate(e, &mut acc, i + j, lo, ty);
+            if i + j + 1 < 2 * k {
+                accumulate(e, &mut acc, i + j + 1, hi, ty);
+            }
+        }
+    }
+
+    // Everything at or above the result's logical width is overflow: the
+    // parts past the last one, plus whatever spilled past the top part's own
+    // width when that is narrower than a part.
+    let mut spilled: Vec<Operand> = acc[k..].to_vec();
+    if wide.top != wide.part {
+        let hi = e.high_part(acc[k - 1].clone(), wide.top, wide.part);
+        spilled.push(hi);
+    }
+
+    // The sign of a balanced positional number is the sign of its most
+    // significant nonzero part, so folding the signs from the top down with
+    // "the first that is nonzero" gives the direction of the overflow.
+    let mut direction = konst(1, 0);
+    for part in spilled.iter() {
+        let s = e.sign_of(part.clone(), wide.part);
+        direction = e.emit(
+            "ov",
+            Type::Int(1),
+            InstKind::Select3 {
+                t: s.clone(),
+                ty: Type::Int(1),
+                neg: s.clone(),
+                zero: direction,
+                pos: s,
+            },
+        );
+    }
+
+    let mut parts: Vec<Operand> = acc[..k].to_vec();
+    match flavor {
+        Flavor::Wrap => {
+            parts[k - 1] = e.renormalize(parts[k - 1].clone(), wide.top, wide.part);
+            bind(e, inst, parts);
+        }
+        Flavor::Trap => {
+            e.trap_if(direction, [true, false, true], FaultCode::Overflow);
+            parts[k - 1] = e.renormalize(parts[k - 1].clone(), wide.top, wide.part);
+            bind(e, inst, parts);
+        }
+        Flavor::Flag => {
+            parts[k - 1] = e.renormalize(parts[k - 1].clone(), wide.top, wide.part);
+            bind(e, inst, parts);
+            if let Some(name) = inst.results.get(1) {
+                e.actual.insert(name.clone(), Type::Int(1));
+                e.subst.insert(name.clone(), direction);
+            }
+        }
+    }
+}
+
 /// The direction of an overflow out of the whole wide value: the carry out of
 /// the top part if there is one, otherwise whatever spilled past the top
 /// part's logical width.

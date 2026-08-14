@@ -102,6 +102,10 @@ impl FlavoredOp {
 /// no flavor.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PlainOp {
+    /// `mulh` — the high tN of the exact 2N-trit product, so that
+    /// `mulh · 3^N + mul.wrap` reconstructs it (TIR §3.1). It cannot
+    /// overflow, which is why it is here and not among the flavored ops.
+    MulH,
     /// `div` — round to nearest, ties away from zero. The only division.
     Div,
     /// `rem` — `|r| ≤ |b|/2`.
@@ -120,6 +124,7 @@ impl PlainOp {
     /// The mnemonic.
     pub fn name(self) -> &'static str {
         match self {
+            PlainOp::MulH => "mulh",
             PlainOp::Div => "div",
             PlainOp::Rem => "rem",
             PlainOp::Shr => "shr",

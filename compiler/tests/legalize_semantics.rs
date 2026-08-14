@@ -118,6 +118,7 @@ fn promotion_preserves_meaning() {
         "    %r = add.wrap t9 %a, %b\n    ret %r",
         "    %r = sub.trap t9 %a, %b\n    ret %r",
         "    %r = mul.wrap t9 %a, %b\n    ret %r",
+        "    %r = mulh t9 %a, %b\n    ret %r",
         "    %r = div t9 %a, %b\n    ret %r",
         "    %r = rem t9 %a, %b\n    ret %r",
         "    %r = neg t9 %a\n    ret %r",
@@ -165,6 +166,8 @@ fn expansion_preserves_meaning() {
         format!("    %r = add.wrap t27 %a, %b\n{narrow}"),
         format!("    %r = sub.wrap t27 %a, %b\n{narrow}"),
         format!("    %r = add.trap t27 %a, %b\n{narrow}"),
+        format!("    %r = mul.wrap t27 %a, %b\n{narrow}"),
+        format!("    %r = mul.trap t27 %a, %b\n{narrow}"),
         format!("    %r = neg t27 %a\n{narrow}"),
         format!("    %r = tmin t27 %a, %b\n{narrow}"),
         format!("    %r = tmax t27 %a, %b\n{narrow}"),
@@ -193,13 +196,10 @@ fn the_expansion_frontier_is_exactly_this() {
         )
     };
 
-    // G6.6: the product of two parts does not fit in a legal width, and TIR
-    // has no widening multiply to catch the high half — though TRISC-27 §4.1
-    // now provides `mulh`.
-    for op in ["%r = mul.wrap t27 %a, %b", "%r = shl.wrap t27 %a, %b"] {
-        let msg = refusal(&wide(op), &target);
-        assert!(msg.contains("widening multiply"), "{msg}");
-    }
+    // G6.6 is closed: `mulh` exists and `mul` expands. `shl` is next, and
+    // still says what it needs.
+    let msg = refusal(&wide("%r = shl.wrap t27 %a, %b"), &target);
+    assert!(msg.contains("widening multiply"), "{msg}");
     // Unwritten: multi-part division and shifts.
     for op in [
         "%r = div t27 %a, %b",
@@ -249,6 +249,52 @@ fn a_trust_program_legalizes_for_a_nine_trit_machine() {
         let reference = tir::legalize_module(&m, &TargetDesc::tritium()).expect("legalizes");
         for args in [&[7i128, 3][..], &[-7, 3]] {
             assert_eq!(interpret(&m, "f", args), interpret(&reference, "f", args));
+        }
+    }
+}
+
+#[test]
+fn a_multi_part_multiply_carries_and_overflows_correctly() {
+    // The probe that mattered: operands widened from `t9` never leave one
+    // part's worth of magnitude, so the carry chain is barely touched and an
+    // overflow never happens. These are whole-range constants — including
+    // MAX and MIN — against all three flavors.
+    let target = t9_target();
+    const VALS: [i128; 8] = [
+        1,
+        -1,
+        9841,
+        -9841,
+        1_000_003,
+        -1_000_003,
+        3_812_798_742_493,
+        -3_812_798_742_493,
+    ];
+    for flavor in ["wrap", "trap", "flag"] {
+        for x in VALS {
+            for y in VALS {
+                let src = if flavor == "flag" {
+                    // The flag is the answer: the direction of the overflow.
+                    format!(
+                        "tir 0.1 target \"tritium\"\n\nfn @f(%z: t9) -> t9 {{\n^entry:\n\
+                         \x20   %r, %o = mul.flag t27 const t27 {x}, const t27 {y}\n    ret %o\n}}\n"
+                    )
+                } else {
+                    format!(
+                        "tir 0.1 target \"tritium\"\n\nfn @f(%z: t9) -> t9 {{\n^entry:\n\
+                         \x20   %r = mul.{flavor} t27 const t27 {x}, const t27 {y}\n\
+                         \x20   %n = trunc t27 %r -> t9\n    ret %n\n}}\n"
+                    )
+                };
+                let m = tir::parse_module(&src).expect("parses");
+                let legalized = tir::legalize_module(&m, &target)
+                    .unwrap_or_else(|e| panic!("{flavor} {x} * {y}: {e:?}"));
+                assert_eq!(
+                    interpret(&m, "f", &[0]),
+                    interpret(&legalized, "f", &[0]),
+                    "mul.{flavor} of {x} and {y}"
+                );
+            }
         }
     }
 }

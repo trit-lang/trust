@@ -485,7 +485,12 @@ fn @f(%a: t54) -> t54 {
 }
 
 #[test]
-fn wide_multiplication_reports_the_missing_primitive() {
+fn wide_multiplication_expands_now_that_mulh_exists() {
+    // This test used to assert the refusal: G6.6 said `mul` could not be
+    // expanded because TIR had no widening multiply, while TRISC-27 §4.1
+    // already had `mulh`. TIR §3.1 now has it too, and the expansion is the
+    // schoolbook one — a part times a part, low half here and high half one
+    // position up.
     let src = r#"
 tir 0.1 target "tritium"
 fn @f(%a: t27) -> t27 {
@@ -496,11 +501,11 @@ fn @f(%a: t27) -> t27 {
     ret %r
 }
 "#;
-    let errs = legalize_module(&parse(src), &tritium()).unwrap_err();
-    assert!(
-        errs.iter().any(|e| e.message.contains("widening multiply")),
-        "{errs:?}"
-    );
+    let m = legalize_module(&parse(src), &tritium()).expect("expands");
+    let printed = tir::print_module(&m);
+    assert!(printed.contains("mulh"), "{printed}");
+    // And nothing wider than the word survives.
+    assert!(!printed.contains("t54"), "{printed}");
 }
 
 #[test]

@@ -118,7 +118,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | `trit-core` | complete: arbitrary-precision balanced ternary, width-typed `tN`, three overflow flavors, the AM's five fault codes, three-radix literals |
 | TIR data structures, text format, verifier | complete, round-trips |
 | TIR reference interpreter | complete, with provenance-tracking pointers and a function-address space |
-| TIR legalization | promotion complete; expansion complete for `add`, `sub`, `neg`, `cmp`, `tmin`/`tmax`/`tmul`, `select3` and **wide loads and stores** — a real Trust program legalizes for a nine-trit machine and computes the same answers (G6.11). `mul` and `shl` blocked on G6.6; `div`, `rem`, `shr` unwritten; a wide value cannot cross a function boundary (G6.5) |
+| TIR legalization | promotion complete; expansion complete for `add`, `sub`, `mul`, `neg`, `cmp`, `tmin`/`tmax`/`tmul`, `select3` and **wide loads and stores** — a real Trust program legalizes for a nine-trit machine and computes the same answers (G6.11). `mul` expands (G6.6 closed — TIR §3.1 gained `mulh`); `shl`, `div`, `rem`, `shr` still unwritten; a wide value cannot cross a function boundary (G6.5) |
 | Layout engine (Ch. 2) | complete: sizes, alignments, offsets, both `repr`s, discriminants, niche optimization |
 | Trust frontend | Ch. 0–3 complete; Ch. 4 complete except generic traits |
 | Backend (TIR → TRISC-27) | works; **no register allocator** — every value lives in a stack slot |
@@ -368,8 +368,8 @@ blind.
 **B. Backend quality.** A register allocator is the biggest single win —
 every value currently lives in a stack slot, so the generated code is
 correct and embarrassing. Then a peephole pass, a TIR canonicalizer, and
-expansion for `div`/`rem`/shifts. `mul` expansion is blocked on **G6.6**: TIR
-has no widening multiply, though TRISC-27 now provides `mulh`.
+expansion for `div`/`rem`/shifts. `mul` now expands; `shl` needs the same treatment, and `div`, `rem` and `shr`
+need multi-part algorithms.
 
 **C. Generic traits.** §6 above says what it needs. It closes Ch. 4 and
 unblocks `From`/`Into`.

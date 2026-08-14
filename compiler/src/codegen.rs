@@ -372,6 +372,7 @@ fn emit_inst(g: &mut Gen, inst: &Inst, _calls: bool) {
             g.read(a, "t0");
             g.read(b, "t1");
             let mnemonic = match op {
+                PlainOp::MulH => "mulh",
                 PlainOp::Div => "div",
                 PlainOp::Rem => "rem",
                 PlainOp::Shr => "shr",

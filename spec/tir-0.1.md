@@ -142,6 +142,7 @@ trit) for lowering `checked_*` / `overflowing_*`.
 
 ```
 %r = add<fl> tN %a, %b          ; also sub, mul
+%r = mulh tN %a, %b             ; the *high* tN of the exact 2N-trit product
 %r = neg tN %a                  ; total — no flavor
 %r = div tN %a, %b              ; round to nearest, ties away from zero (AM §3.2)
 %r = rem tN %a, %b              ; |r| <= |b|/2; traps F_DIVZERO on b = 0
@@ -152,6 +153,27 @@ trit) for lowering `checked_*` / `overflowing_*`.
 
 There is exactly one division. Frontends for languages wanting truncating
 division must synthesize it; Trust does not want it.
+
+**`mulh` is the widening multiply, in the only shape that does not need a
+wider type.** Let *P* be the exact product of `%a` and `%b`, which needs 2N
+trits. Then
+
+> `mul.wrap tN %a, %b` is `wrap(P, N)` and `mulh tN %a, %b` is `shr(P, N)`,
+
+and the two together reconstruct *P* exactly: `P = mulh · 3ᴺ + mul.wrap`. That
+is the balanced split of §3.3's `shr`, so `mulh` needs no definition of its own
+beyond "the other half".
+
+It takes no flavor and cannot overflow: the high half of a product of two
+N-trit values always fits in N trits, which is a property of the symmetric
+range and not an accident (AM §1.2).
+
+> **Why it exists (informative).** §6's expansion cannot multiply without it.
+> A part times a part is twice a part wide, and no same-width instruction can
+> deliver the top half, so a multi-part multiply has nowhere to put its partial
+> products. Every binary machine provides the same primitive for the same
+> reason. TRISC-27 §4.1 already had it — the machine was ahead of the IR — and
+> `docs/spec-gaps.md` G6.6 is the record of the gap this closes.
 
 ### 3.2 Trit-wise
 

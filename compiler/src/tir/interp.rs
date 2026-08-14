@@ -339,6 +339,13 @@ impl<'m> Interp<'m> {
                 let (a, b) = (self.operand(a, env)?, self.operand(b, env)?);
                 match (a, b) {
                     (Val::Int(a), Val::Int(b)) => vec![Val::Int(match op {
+                        // The exact product's high half: `P = mulh·3^N + wrap(P, N)`
+                        // (TIR §3.1). Computed on unbounded values, since the
+                        // whole point is that the product does not fit.
+                        PlainOp::MulH => {
+                            let p = a.value().mul(b.value());
+                            Tint::wrapping(a.width(), p.shr(a.width()))
+                        }
                         PlainOp::Div => a.div(&b)?,
                         PlainOp::Rem => a.rem(&b)?,
                         PlainOp::Shr => a.shr(shift_amount(&b)?)?,
