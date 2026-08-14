@@ -5001,7 +5001,9 @@ impl Fn<'_> {
                     },
                 });
 
-                let opt = self.types.instantiate("Option", std::slice::from_ref(&ty), line)?;
+                let opt = self
+                    .types
+                    .instantiate("Option", std::slice::from_ref(&ty), line)?;
                 let ename = nominal_name(&opt).expect("an instantiation is nominal");
                 let (some, none) = (
                     self.types

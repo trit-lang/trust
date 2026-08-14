@@ -788,12 +788,36 @@ fn every_fault_the_isa_promises_is_raised() {
             "ld.tryte t0, MEM_SIZE(zero)",
             FaultCode::Trap,
         ),
-        ("a load from IO_OUT (§2.2)", "ld.tryte t0, IO_OUT(zero)", FaultCode::Trap),
-        ("a store to IO_IN (§2.2)", "st.tryte zero, IO_IN(zero)", FaultCode::Trap),
-        ("a store to MEM_SIZE (§2.2)", "st.word zero, MEM_SIZE(zero)", FaultCode::Trap),
-        ("a store to CYCLES (§2.3)", "st.word zero, CYCLES(zero)", FaultCode::Trap),
-        ("a tryte load from CYCLES (§2.3)", "ld.tryte t0, CYCLES(zero)", FaultCode::Trap),
-        ("a reserved device address (§2.2)", "ld.tryte t0, -3(zero)", FaultCode::Trap),
+        (
+            "a load from IO_OUT (§2.2)",
+            "ld.tryte t0, IO_OUT(zero)",
+            FaultCode::Trap,
+        ),
+        (
+            "a store to IO_IN (§2.2)",
+            "st.tryte zero, IO_IN(zero)",
+            FaultCode::Trap,
+        ),
+        (
+            "a store to MEM_SIZE (§2.2)",
+            "st.word zero, MEM_SIZE(zero)",
+            FaultCode::Trap,
+        ),
+        (
+            "a store to CYCLES (§2.3)",
+            "st.word zero, CYCLES(zero)",
+            FaultCode::Trap,
+        ),
+        (
+            "a tryte load from CYCLES (§2.3)",
+            "ld.tryte t0, CYCLES(zero)",
+            FaultCode::Trap,
+        ),
+        (
+            "a reserved device address (§2.2)",
+            "ld.tryte t0, -3(zero)",
+            FaultCode::Trap,
+        ),
         (
             "a shift amount above 26 (§4.1)",
             "addi.wrap t1, zero, 27\n    shl.wrap t2, t1, t1",
