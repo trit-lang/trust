@@ -582,6 +582,62 @@ about the method and wrong about the state: two of the four real errors were
 found by executing the specification's own claims, which is exactly what it
 predicted, and the machine that did it already existed.*
 
+**G0.16 — three memory-safety bugs in drop glue, found by reviewing the
+handoff document rather than by running anything.** All three contradicted
+Ch. 3 Appendix B's "double free | a moved-out value is not dropped", and all
+three were invisible because Ch. 3 §1.5 gives draft 0.1 no resources: with no
+allocator, no file handle and no lock, dropping twice and not dropping at all
+release the same nothing.
+
+1. **A nested destructor ran twice.** `drop_at` called `drop.T` *and* then
+   emitted the field drops, while `drop.T` already dropped its own fields —
+   so any struct with a droppable field double-dropped it, no move required.
+   `drop.T` is now the complete glue for T and the call site only calls it,
+   which is also what Ch. 4 §3.3's vtable drop slot assumes: a caller holding
+   only a pointer and that slot must be able to drop the whole value.
+2. **Moving a non-copyable field out was not tracked.** `take(o.a); take(o.a);`
+   compiled, and one value was dropped three times. Reading a place of
+   non-copyable type moves it (Ch. 3 §1.2) and that is as true of a field as
+   of a whole local; ownership is still tracked per local, so a move out of
+   any part moves the whole — conservative where doing nothing was unsound.
+   This also fixes Ch. 3 §1.4 item 3: a field the destructor moved out of is
+   no longer dropped again.
+3. **An enum's payload was never dropped.** A leak for any droppable value
+   inside an `Option`. Dropping is now a dispatch on the discriminant, one
+   comparison per droppable variant, with the niche-encoded untagged variant
+   recognized by elimination — the same shape `match` already emits.
+
+None of the three could have been caught by the differential invariant, which
+takes the same TIR into both engines and therefore covers `TIR → machine`
+only. All three were on the lowering side. `docs/status.md` §8.1 now says so.
+
+**G6.10 — TIR §6's post-condition is now checked.** §6 says backends "may
+assume legalized input and are not required to handle any other", which makes
+an unlegalized module a licence for the backend to emit anything. Legalization
+is incomplete — G6.6 blocks `mul`, and `div`, `rem` and the shifts are
+unwritten — so that path is reachable rather than hypothetical.
+`verify_legalized(module, target)` checks that every width a backend must
+select a native operation for is in the target's legal set, and it runs at
+both seams that depend on it plus in every end-to-end test.
+
+`widen` and `trunc` are deliberately excluded: they are the bridge between a
+legal register width and a memory access width, and TIR §6.2 does not promote
+the latter because a `t9` in memory is one tryte whatever the registers are.
+The check caught this on its first run, which is a fair test of the check.
+
+**G4.4 — `Sized` and `?Sized` are not implemented.** Ch. 4 §2.5 gives every
+type parameter an implicit `Sized` bound and `?Sized` to remove it. The
+implementation has neither: a parameter behaves as `?Sized`, and the size
+requirement is enforced at each *use* — a parameter of unsized type, a `let`
+of one, a field of one, a read through a reference to one. `fn f<T: Shape>(x: &T)`
+therefore accepts `T = dyn Shape`, which Rust rejects without `?Sized`.
+
+*Decision:* sound but more permissive than the chapter, and the difference is
+where the error appears. Left as is, because implementing the bound properly
+interacts with G0.14's note on checking generic bodies once: a `Sized` bound
+is a bound, and bounds on an uninstantiated body are exactly what is not
+checked today.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

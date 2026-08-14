@@ -3272,8 +3272,15 @@ impl Fn<'_> {
         if !self.types.needs_drop(ty) {
             return Ok(());
         }
-        // The destructor runs first, then the fields it did not move out of
-        // (Ch. 3 §1.4).
+        // A type with a destructor is dropped by calling it, and by nothing
+        // else here: `drop.T` is the *complete* glue for T — its body runs,
+        // then its fields are dropped, both inside that function (Ch. 3
+        // §1.4). Emitting the field drops here as well would drop every
+        // nested destructor twice, which is what draft 0.1 did.
+        //
+        // Completeness is also what Ch. 4 §3.3's vtable drop slot assumes: a
+        // caller with only a pointer and that slot must be able to drop the
+        // whole value.
         if let Ty::Struct(n) | Ty::Enum(n) = ty
             && self.types.destructors.contains(n)
         {
@@ -3285,6 +3292,7 @@ impl Fn<'_> {
                     ret: None,
                 },
             });
+            return Ok(());
         }
         self.drop_fields(addr, ty, line, depth)
     }
@@ -3314,9 +3322,89 @@ impl Fn<'_> {
                     }
                 }
             }
-            // An enum's payload varies by variant, so dropping it needs a
-            // dispatch this milestone does not emit; its own destructor ran.
+            // An enum's payload varies by variant, so dropping it is a
+            // dispatch on the discriminant (Ch. 3 §1.4 item 2: "payload order
+            // for an enum variant").
+            Ty::Enum(name) => self.drop_enum_payload(addr, &name.clone(), line, depth)?,
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// Drop the payload of whichever variant an enum currently holds.
+    ///
+    /// The discriminant decides, so this is the same dispatch `match` emits,
+    /// with each arm dropping that variant's fields. Variants whose payload
+    /// needs no dropping are not tested at all, so the common case — one
+    /// droppable variant, as in `Option<Buffer>` — is one comparison.
+    fn drop_enum_payload(&mut self, addr: Operand, name: &str, line: Line, depth: u32) -> R<()> {
+        let ty = Ty::Enum(name.to_string());
+        let l = self.types.layout(&ty);
+        let e = l.enum_layout.clone().expect("an enum");
+        let variants = self.types.enums.borrow()[name].clone();
+
+        let droppable: Vec<usize> = (0..variants.len())
+            .filter(|i| {
+                variants[*i]
+                    .fields
+                    .iter()
+                    .any(|(_, t)| self.types.needs_drop(t))
+            })
+            .collect();
+        if droppable.is_empty() {
+            return Ok(());
+        }
+
+        let (tag, tag_ty) = self.read_tag(addr.clone(), &e);
+        let join = self.fresh("drop.join");
+
+        // A niche-encoded enum's untagged variant has no discriminant value
+        // to test, so it is recognized by elimination and handled last.
+        let mut untagged: Option<usize> = None;
+        for i in droppable {
+            let Some(value) = tag_value(&e, i) else {
+                untagged = Some(i);
+                continue;
+            };
+            let body = self.fresh("drop.arm");
+            let next = self.fresh("drop.next");
+            let c = self.emit(
+                "c",
+                Type::Int(1),
+                InstKind::Cmp {
+                    ty: tag_ty,
+                    a: tag.clone(),
+                    b: Operand::Const(tag_ty, Bt::from_i128(value)),
+                },
+            );
+            self.br3(c, &next, &body, &next);
+            self.start(body);
+            self.drop_variant_fields(addr.clone(), name, i, line, depth)?;
+            self.jump(&join);
+            self.start(next);
+        }
+        if let Some(i) = untagged {
+            self.drop_variant_fields(addr, name, i, line, depth)?;
+        }
+        self.jump(&join);
+        self.start(join);
+        Ok(())
+    }
+
+    /// Drop one variant's payload fields, in payload order (Ch. 3 §1.4).
+    fn drop_variant_fields(
+        &mut self,
+        addr: Operand,
+        name: &str,
+        variant: usize,
+        line: Line,
+        depth: u32,
+    ) -> R<()> {
+        for (_, ft, off) in self.types.variant_fields(name, variant) {
+            if self.types.needs_drop(&ft) {
+                let at = self.offset(addr.clone(), off);
+                self.drop_at(at, &ft, line, depth + 1)?;
+            }
         }
         Ok(())
     }
@@ -3670,10 +3758,24 @@ impl Fn<'_> {
 
             E::Field(..) | E::Index(..) => {
                 let line = e.line();
-                if let Some(path) = self.path_of(e) {
-                    self.check_access(&path, Access::Read, line)?;
-                }
+                let path = self.path_of(e);
                 let (addr, ty) = self.place(e, line)?;
+                // Reading a place of non-copyable type *moves* it (Ch. 3
+                // §1.2), and that is as true of a field as of a whole local.
+                // Draft 0.1 tracks ownership per local rather than per place,
+                // so a move out of any part moves the whole: conservative,
+                // where doing nothing — which is what it did — was unsound.
+                match (&path, self.types.is_copyable(&ty)) {
+                    (Some(p), true) => self.check_access(p, Access::Read, line)?,
+                    (Some(p), false) => {
+                        self.check_access(p, Access::Move, line)?;
+                        let root = p.root.clone();
+                        if self.lookup(&root).is_some() {
+                            self.mark_moved(&root);
+                        }
+                    }
+                    (None, _) => {}
+                }
                 Ok((self.load_from(addr, &ty), ty))
             }
         }
@@ -4877,7 +4979,20 @@ impl Fn<'_> {
                 Some(t) => self.peek_ty(t)?,
                 None => Some(Ty::Unit),
             },
-            E::Method(..) | E::Aggregate(..) => None,
+            // A literal of a concrete nominal type carries its type plainly;
+            // a generic one does not, since its arguments are what is being
+            // inferred.
+            E::Aggregate(path, _, _) => {
+                let head = &path.segments[0];
+                if self.types.structs.borrow().contains_key(head) {
+                    Some(Ty::Struct(head.clone()))
+                } else if self.types.enums.borrow().contains_key(head) {
+                    Some(Ty::Enum(head.clone()))
+                } else {
+                    None
+                }
+            }
+            E::Method(..) => None,
             _ => None,
         })
     }

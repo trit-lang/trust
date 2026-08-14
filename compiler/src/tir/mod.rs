@@ -16,4 +16,4 @@ pub use ir::*;
 pub use legalize::{LegalizeError, legalize_module};
 pub use target::TargetDesc;
 pub use text::{ParseError, parse_module, print_module};
-pub use verify::{VerifyError, verify};
+pub use verify::{VerifyError, verify, verify_legalized};

@@ -32,8 +32,12 @@ which forces every chapter to show what it earned rather than what it carried.
 
 ## 2. Repository map
 
+All counts below come from `scripts/stats.sh`. Run it rather than trusting
+them; a number nobody can reproduce quietly withdraws this document's opening
+claim.
+
 ```
-spec/                              5 932 lines of specification, 10 documents
+spec/                              4 781 lines of specification, 10 documents
 ├── 00-abstract-machine.md   304   the AM: trits, trytes, words, arithmetic, faults
 ├── 01-naming.md             191   names, radix notation, document conventions
 ├── 01-types.md              277   Ch. 1 — scalars, operators, overflow flavors
@@ -47,12 +51,13 @@ spec/                              5 932 lines of specification, 10 documents
     ├── trisc-27-0.1.md      713   the machine: registers, encoding, instructions
     └── assembly-0.1.md      513   the assembly language
 
-core/     2 082 lines   crate trit-core — Bt, Tint, flavors, faults, literals
-compiler/ 19 777 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
-vm/       4 148 lines   crate tritium  — machine, assembler, image format
+core/      2 082 lines  crate trit-core — Bt, Tint, flavors, faults, literals
+compiler/ 20 112 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
+vm/        4 148 lines  crate tritium  — machine, assembler, image format
 docs/
-├── spec-gaps.md         930   every place the spec was silent, and what was decided
+├── spec-gaps.md               50 entries: every place the spec was silent or wrong
 └── status.md                  this file
+scripts/stats.sh               produces every number in this document
 examples/{trust,tir,trisc}
 ```
 
@@ -118,9 +123,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region |
 
-**297 tests, zero clippy warnings.** By target: `trit-core` 14 + 22 + 14,
-`tritium` 3 + 25 + 21, `trustc` 7 + 15 + 90 + 28 + 13 + 11 + 32, plus 2
-doc-tests. 23 commits.
+**302 tests, zero clippy warnings, 24 commits.** `scripts/stats.sh`.
 
 ---
 
@@ -233,12 +236,35 @@ invariant hardware-checkable.
 
 ## 8. The disciplines that hold this together
 
-**1. The differential invariant.** Every end-to-end test runs the same program
-*two* ways — on the TIR interpreter and through the whole pipeline to the
-machine — and demands identical results, faults included. `compiler/tests/pipeline.rs`.
-This is the correctness criterion; do not add a feature that only one side can
-execute. It is why TIR was extended for `dyn` rather than emitting vtables
-behind TIR's back.
+**1. The differential invariant, and exactly what it covers.** Every
+end-to-end test runs the same program *two* ways — on the TIR interpreter and
+through the whole pipeline to the machine — and demands identical results,
+faults included. `compiler/tests/pipeline.rs`. Do not add a feature that only
+one side can execute: this is why TIR was extended for `dyn` (G0.10) rather
+than emitting vtables behind TIR's back.
+
+**Both sides take the same TIR as input.** So the invariant covers
+`TIR → machine` and says *nothing* about `.tr → TIR`. A lowering bug makes
+both oracles agree on the same wrong answer, and the differential test sees
+nothing. Every bug in §11 is on the lowering side — drop glue, move tracking,
+when a generic body is checked — and not one of them was ever going to be
+caught here.
+
+The front half has two other checks and needs both:
+
+- **`verify` runs at every seam**, so lowering cannot emit ill-formed TIR;
+  and after legalization it runs as `verify_legalized`, which additionally
+  enforces TIR §6's post-condition — every arithmetic width is one the target
+  has a native operation for. §6 says a backend "may assume legalized input
+  and is not required to handle any other", which without a check is a licence
+  to emit anything, and legalization is *incomplete* (G6.6 blocks `mul`;
+  `div`, `rem` and the shifts are unwritten), so that path is reachable.
+- **Output assertions and negative tests.** `run()` checks a program's exact
+  output, and `error()` checks that a program that must be rejected *is*, with
+  the reason. Discipline 3 below has teeth only through the second: of the 94
+  frontend tests, most assert both directions. When you fix a lowering bug,
+  the regression test is an output assertion or a rejection — never a
+  differential one.
 
 **2. `docs/spec-gaps.md` is not optional.** Every place the specification is
 silent gets an entry: what was ambiguous, what was decided, and why. 45
@@ -279,12 +305,29 @@ usable.
   `Ord::cmp` or an error, never a machine `cmp`.
 - The `.tr` compiler needs `examples/trisc/runtime.t27` appended for
   `putchar`; that file is the entire runtime.
+- **`while let Some(x) = cell.borrow_mut().pop()` holds the borrow for the
+  whole loop body**, and several of the loops here queue more work into the
+  same cell. This has caused one panic already. Bind and break instead. (Also
+  in §7; it is repeated here because §9 is the section someone opens while
+  debugging.)
+- There is no `Sized` bound. Ch. 4 §2.5 says every type parameter has an
+  implicit one and `?Sized` removes it; the implementation has neither, so a
+  parameter behaves as `?Sized` and the size requirement is checked at each
+  *use* instead. More permissive than Rust, equally sound, and the difference
+  shows only in where the error appears.
 
 ---
 
 ## 10. Where to go next
 
 Three coherent directions, in no forced order:
+
+> **Ordering constraint.** Before route A, re-read §11 and hunt for anything
+> of the shape it describes: a drop or move bug that no test can see because
+> the language owns no resources. Three were found and fixed after this
+> document's first draft; an allocator turns the next one into a real
+> double-free, found by a crash, in a session that is thinking about
+> allocation. The cheapest time to look is while nothing is at stake.
 
 **A. The library chapter (Ch. 5) as specification.** Strings and text
 encoding (AM §5's deferred question), `Box` and an allocator, `Iterator`
@@ -311,18 +354,69 @@ which **G0.2a** reports the AM as lacking.
 
 ## 11. Known-wrong or under-tested
 
-- Reading a non-copyable *field* moves the whole local, where Ch. 3 §1.3 says
-  only that place moves. Conservative.
-- An enum's payload is not dropped by variant; the enum's own destructor runs.
-- A destructor that moves a field out of `self` is not detected, so that field
-  is dropped anyway.
-- A generic body is checked at instantiation, not once against its bounds.
-  The *bound* half of Ch. 4 §2.2 holds — a failed bound is reported at the
-  call site — but a generic function never called is never checked. This is
-  the C++ failure mode Ch. 4's Appendix B claims is removed by construction,
-  and it is removed at the call site only.
-- Region inference does not exist. A returned borrow must be rooted
+Three entries that stood here in the first draft of this document were
+**memory-safety bugs**, not approximations, and one of them was described as
+conservative when it was the opposite. They contradicted Ch. 3 Appendix B's
+"double free | a moved-out value is not dropped" — the row the language is
+named for — and were unobservable only because Ch. 3 §1.5 has no resources to
+leak or free twice. They are fixed; they are kept here as the shape of what
+this section can hide.
+
+- ~~A nested destructor ran **twice**~~ — the field drops were emitted both
+  inside `drop.T` and again at the call site. No move was needed; any struct
+  with a droppable field did it. `drop.T` is now the complete glue and the
+  call site only calls it, which is also what Ch. 4 §3.3's vtable drop slot
+  assumes.
+- ~~Moving a non-copyable **field** out was not tracked at all~~ —
+  `take(o.a); take(o.a);` compiled and dropped one value three times. The
+  first draft of this section called this "conservative"; it was unsound.
+  Reading a place of non-copyable type now moves it, per Ch. 3 §1.2, with
+  ownership still tracked per local rather than per place — *that* is the
+  conservative part.
+- ~~An enum's payload was not dropped~~ — a leak, for any value inside an
+  `Option`. Dropping is now a dispatch on the discriminant, one comparison per
+  droppable variant.
+
+**The lesson worth carrying:** all three were on the `.tr → TIR` side, which
+§8.1 explains the differential invariant does not cover, and all three were
+invisible because the language has no resources yet. **Route A in §10 adds an
+allocator.** Anything of this shape still hiding here becomes a real
+double-free or leak on that day, in a session whose attention is on the
+allocator. Prefer finding it now.
+
+What remains, none of it unsound:
+
+- **A generic body is checked at instantiation, not once against its bounds.**
+  The bound half of Ch. 4 §2.2 holds — a failed bound is reported at the call
+  site — but a generic function that is never called is never checked at all.
+  This is the C++ failure mode Ch. 4's Appendix B claims is removed by
+  construction, and it is removed at the call site only.
+
+  **This follows from §7's first decision and cannot be fixed without
+  introducing `Ty::Param`.** Checking a body against its bounds means
+  representing "some type known only to implement `Shape`", and resolving
+  `s.area()` from the bound alone. There is deliberately no such type: §7
+  explains that its absence is what keeps the layout engine, the drop
+  machinery, the borrow checker and code generation ignorant of generics, and
+  a test asserts that no generic construct reaches TIR. Adding `Ty::Param` is
+  not adding an enum variant; it is four downstream components meeting a kind
+  of type they were designed never to see. Decide whether that is worth it
+  before starting, not after.
+
+- **There is no `Sized` bound.** Ch. 4 §2.5 gives every type parameter an
+  implicit one and `?Sized` to remove it; the implementation has neither, so
+  every parameter behaves as `?Sized` and the size requirement is enforced at
+  each use. `fn f<T: Shape>(x: &T)` therefore accepts `T = dyn Shape`, which
+  Rust would reject without `?Sized`. Sound — every use needing a size is
+  checked — but more permissive than the chapter says, and the error surfaces
+  in the body rather than at the call.
+
+- **Region inference does not exist.** A returned borrow must be rooted
   syntactically at a parameter. Every program accepted would be accepted by
   full region inference; some rejected ones would not be, and those are the
   ones needing written lifetimes.
-- Diagnostics print mangled names: `Pair.t27.t9`, not `Pair<t27, t9>`.
+
+- **Capture is by variable, not by place.** Ch. 4 §4.4 says a closure using
+  `p.x` borrows `p.x` and leaves `p.y` free; this one borrows `p`.
+
+- **Diagnostics print mangled names**: `Pair.t27.t9`, not `Pair<t27, t9>`.

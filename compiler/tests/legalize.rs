@@ -454,3 +454,35 @@ fn @f(%a: t18, %b: t18) -> t18 {
         "{errs:?}"
     );
 }
+
+#[test]
+fn the_post_condition_catches_an_unlegalized_module() {
+    // TIR §6: "backends may assume legalized input and are not required to
+    // handle any other." Without a check, an unlegalized module is a licence
+    // for the backend to emit anything — and legalization is incomplete
+    // today (G6.6 blocks `mul`; `div`, `rem` and the shifts are unwritten),
+    // so that path is reachable rather than hypothetical.
+    let m = tir::parse_module(
+        r#"tir 0.1 target "tritium"
+
+fn @f(%x: t9, %y: t9) -> t9 {
+^entry:
+    %r = add.wrap t9 %x, %y
+    ret %r
+}
+"#,
+    )
+    .expect("parses");
+    let target = tir::TargetDesc::tritium();
+
+    // Well-formed, so plain verification is happy.
+    assert!(tir::verify(&m).is_empty());
+    // But `tritium` has no native t9 add, so it is not legalized.
+    let errs = tir::verify_legalized(&m, &target);
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].message.contains("t9"), "{:?}", errs[0]);
+
+    // Legalizing it makes the post-condition hold.
+    let legalized = tir::legalize_module(&m, &target).expect("legalizes");
+    assert!(tir::verify_legalized(&legalized, &target).is_empty());
+}

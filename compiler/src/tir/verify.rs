@@ -31,7 +31,50 @@ impl std::fmt::Display for VerifyError {
 
 /// Verify a module. An empty result means it is well-formed.
 pub fn verify(m: &Module) -> Vec<VerifyError> {
+    verify_for(m, None)
+}
+
+/// Verify, and additionally check TIR §6's post-condition when a target is
+/// given: **every arithmetic width in the module is one the target has native
+/// operations for.**
+///
+/// §6 says "backends may assume legalized input and are not required to
+/// handle any other", which makes an unlegalized module a licence for the
+/// backend to emit anything at all. This turns that licence into a check.
+/// It matters while legalization is incomplete — `mul` is blocked on G6.6,
+/// and `div`, `rem` and the shifts are unwritten — because those are exactly
+/// the paths that reach code generation unlegalized today.
+pub fn verify_legalized(m: &Module, target: &crate::tir::TargetDesc) -> Vec<VerifyError> {
+    verify_for(m, Some(target))
+}
+
+fn verify_for(m: &Module, target: Option<&crate::tir::TargetDesc>) -> Vec<VerifyError> {
     let mut errs = Vec::new();
+
+    if let Some(t) = target {
+        for f in &m.funcs {
+            for b in &f.blocks {
+                for inst in &b.insts {
+                    if let Some(w) = arithmetic_width(&inst.kind)
+                        && w != 1
+                        && !t.legal.contains(&w)
+                    {
+                        errs.push(VerifyError {
+                            function: Some(f.sig.name.clone()),
+                            block: Some(b.label.clone()),
+                            message: format!(
+                                "`{}` operates at t{w}, which `{}` has no native operation \
+                                 for: this module is not legalized, and TIR §6 lets a \
+                                 backend do anything with it",
+                                inst_name(&inst.kind),
+                                t.name
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
 
     if m.version != TIR_VERSION {
         errs.push(VerifyError {
@@ -342,6 +385,39 @@ fn callee_signature<'a>(m: &'a Module, callee: &Callee) -> Option<&'a Signature>
     match callee {
         Callee::Direct(name) => m.signature(name),
         Callee::Indirect(_) => None,
+    }
+}
+
+/// The width an instruction *computes* at, for the legalization
+/// post-condition — the five kinds a backend must select a native machine
+/// operation for.
+///
+/// `widen` and `trunc` are excluded, and deliberately: they are the bridge
+/// between a legal register width and a memory access width, which TIR §6.2
+/// does not promote because a `t9` in memory is one tryte whatever the
+/// registers are. A `trunc` to `t9` feeding a `store t9` is legalized code,
+/// not unlegalized code.
+fn arithmetic_width(k: &InstKind) -> Option<u32> {
+    match k {
+        InstKind::Flavored { ty, .. }
+        | InstKind::Plain { ty, .. }
+        | InstKind::Neg { ty, .. }
+        | InstKind::Cmp { ty, .. }
+        | InstKind::Select3 { ty, .. } => ty.width(),
+        _ => None,
+    }
+}
+
+fn inst_name(k: &InstKind) -> &'static str {
+    match k {
+        InstKind::Flavored { op, .. } => op.name(),
+        InstKind::Plain { op, .. } => op.name(),
+        InstKind::Neg { .. } => "neg",
+        InstKind::Cmp { .. } => "cmp",
+        InstKind::Select3 { .. } => "select3",
+        InstKind::Widen { .. } => "widen",
+        InstKind::Trunc { .. } => "trunc",
+        _ => "instruction",
     }
 }
 

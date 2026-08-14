@@ -160,8 +160,10 @@ fn cmd_legalize(args: &[String]) -> Result<(), String> {
     })?;
 
     // A pass that emits ill-formed IR is worse than one that fails, so the
-    // output is re-verified before it is handed on.
-    let errs = tir::verify(&legalized);
+    // output is re-verified before it is handed on — and against TIR §6's
+    // post-condition, not merely well-formedness, since a backend is
+    // entitled to assume it.
+    let errs = tir::verify_legalized(&legalized, &target);
     if !errs.is_empty() {
         let mut msg = "legalization produced an ill-formed module:".to_string();
         for e in &errs {
@@ -222,6 +224,18 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
         }
         msg
     })?;
+
+    // TIR §6's post-condition, checked at the seam that depends on it: a
+    // backend "may assume legalized input and is not required to handle any
+    // other", which without this check is a licence to emit anything.
+    let errs = tir::verify_legalized(&legalized, &target);
+    if !errs.is_empty() {
+        let mut msg = "the module reaching code generation is not legalized:".to_string();
+        for e in &errs {
+            msg.push_str(&format!("\n  {e}"));
+        }
+        return Err(msg);
+    }
 
     let asm = trustc::codegen::compile(&legalized, &entry).map_err(|errs| {
         let mut msg = format!("{} code generation error(s):", errs.len());

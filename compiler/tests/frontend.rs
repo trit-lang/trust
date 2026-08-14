@@ -27,8 +27,13 @@ fn error(src: &str) -> String {
 /// in, returning its exit status and its output.
 fn run(src: &str) -> (i128, String) {
     let module = tir_of(src);
-    let legalized = tir::legalize_module(&module, &tir::TargetDesc::tritium())
+    let target = tir::TargetDesc::tritium();
+    let legalized = tir::legalize_module(&module, &target)
         .unwrap_or_else(|e| panic!("legalization failed: {e:?}"));
+    // TIR §6's post-condition: the backend is entitled to assume this, so
+    // every end-to-end test checks it rather than trusting the pass.
+    let errs = tir::verify_legalized(&legalized, &target);
+    assert!(errs.is_empty(), "not legalized: {errs:?}");
     let mut asm = trustc::codegen::compile(&legalized, "main")
         .unwrap_or_else(|e| panic!("code generation failed: {e:?}"));
     asm.push_str(include_str!("../../examples/trisc/runtime.t27"));
@@ -1721,4 +1726,87 @@ fn a_constant_is_evaluated_exactly_at_compile_time() {
     assert_eq!(run("const S: t27 = 100 >> 2; fn main() -> t27 { S }").0, 11);
     let e = error("const Z: t27 = 1 / 0; fn main() -> t27 { 0 }");
     assert!(e.contains("division by zero"), "{e}");
+}
+
+// ------------------------------------- Ch. 3 §1.4: dropping exactly once
+
+#[test]
+fn a_nested_destructor_runs_exactly_once() {
+    // `drop.T` is the *complete* glue for T: its body, then its fields, both
+    // inside that function. Draft 0.1 also dropped the fields at the call
+    // site, so every nested destructor ran twice — a double free in a
+    // language whose Ch. 3 Appendix B claims that class is removed by
+    // construction. It was unobservable only because §1.5 has no resources.
+    let (status, out) = run("fn putchar(c: t9); \
+         struct Inner { id: t9 } \
+         impl Drop for Inner { fn drop(self) { putchar(self.id); } } \
+         struct Outer { a: Inner } \
+         impl Drop for Outer { fn drop(self) { putchar(79); } } \
+         fn main() -> t27 { let o = Outer { a: Inner { id: 73 } }; 0 }");
+    assert_eq!(status, 0);
+    assert_eq!(out, "OI", "the outer body, then the field, once each");
+}
+
+#[test]
+fn a_field_the_destructor_moved_out_of_is_not_dropped_again() {
+    // Ch. 3 §1.4 item 3, and the second half of the same double free.
+    let (_, out) = run("fn putchar(c: t9); \
+         struct Inner { id: t9 } \
+         impl Drop for Inner { fn drop(self) { putchar(self.id); } } \
+         struct Outer { a: Inner } \
+         impl Drop for Outer { fn drop(self) { putchar(79); consume(self.a); } } \
+         fn consume(i: Inner) { putchar(67); } \
+         fn main() -> t27 { let o = Outer { a: Inner { id: 73 } }; 0 }");
+    assert_eq!(
+        out, "OCI",
+        "`I` once: consume's parameter, and nothing after"
+    );
+}
+
+#[test]
+fn moving_a_field_out_moves_the_value() {
+    // Reading a place of non-copyable type moves it (Ch. 3 §1.2), and that
+    // is as true of a field as of a whole local. Draft 0.1 tracked the
+    // second and not the first, so this compiled and dropped one value three
+    // times.
+    let e = error(
+        "struct B { id: t9 } impl Drop for B { fn drop(self) { } } \
+         struct O { a: B } fn take(b: B) { } \
+         fn main() -> t27 { let o = O { a: B { id: 1 } }; take(o.a); take(o.a); 0 }",
+    );
+    assert!(e.contains("moved out of"), "{e}");
+    // Moving it out once is fine, and the value is then dropped by `take`
+    // rather than by `o`.
+    let (_, out) = run("fn putchar(c: t9); \
+         struct B { id: t9 } impl Drop for B { fn drop(self) { putchar(self.id); } } \
+         struct O { a: B } fn take(b: B) { putchar(84); } \
+         fn main() -> t27 { let o = O { a: B { id: 66 } }; take(o.a); 0 }");
+    assert_eq!(out, "TB", "take prints, then drops its parameter — once");
+}
+
+#[test]
+fn an_enum_payload_is_dropped_by_variant() {
+    // Ch. 3 §1.4 item 2: an enum drops its variant's payload, which needs a
+    // dispatch on the discriminant. Draft 0.1 emitted none, so a value
+    // inside an enum leaked.
+    let (_, out) = run("fn putchar(c: t9); \
+         struct Port { id: t9 } \
+         impl Drop for Port { fn drop(self) { putchar(self.id); } } \
+         enum Slot { Empty, Held(Port) } \
+         fn main() -> t27 { \
+             { let a = Slot::Held(Port { id: 65 }); } \
+             { let b = Slot::Empty; } \
+             { let c = Slot::Held(Port { id: 66 }); } \
+             0 \
+         }");
+    assert_eq!(
+        out, "AB",
+        "each held port dropped once, the empty slot none"
+    );
+    // And through `Option`, which is the case that matters.
+    let (_, out) = run("fn putchar(c: t9); \
+         struct Port { id: t9 } \
+         impl Drop for Port { fn drop(self) { putchar(self.id); } } \
+         fn main() -> t27 { let o = Option::Some(Port { id: 90 }); 0 }");
+    assert_eq!(out, "Z");
 }
