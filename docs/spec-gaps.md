@@ -1367,6 +1367,47 @@ Since §5.6 closes `Into` to hand implementation, the only blanket impl will be
 the language's own — so no general overlap search is needed, and §1.8's
 coherence rule stays a comparison of names.
 
+**G0.14b — the blanket impl, and Ch. 4 is closed.** The other half of
+G0.14a. `impl<T, U: From<T>> Into<U> for T` is not an implementation for a
+type; it is a rule about all of them, and that is the whole of what makes it
+different: every other impl in the file is found by *name* — "does `Bar` have
+`area`?" is a lookup — and this one is found by *checking a condition*.
+
+**Nothing else had to change**, and the reason is architectural. A generic
+body here is lowered by reading the same source under an environment, so the
+rule's methods are ordinary generic functions with the impl's parameters, and
+applying the rule is binding `T` and `U` and instantiating. `c.into()` binds
+`T` from the receiver's type and `U` from the type the context wants, checks
+the rule's own bound — `U: From<T>` — and calls `Into.into.Celsius.t27`.
+
+Three things follow, and all three are conditions the language already
+states:
+
+- **A rule is the last thing tried**, so a type's own method of the same name
+  is what a call means.
+- **A trait a rule covers may not be implemented by hand.** The rule holds for
+  every type, so any hand-written impl overlaps it, and §1.8 makes
+  overlapping impls an error. Closing the trait says so where it is written
+  rather than leaving a collision to be discovered — which is what §5.6
+  already decided for `Into`, generalized to any trait with a blanket impl.
+- **A bound is satisfied by a rule too**, so `fn show<A, B: Into<A>>(x: B) -> A`
+  is writable. Checking it recurses into the rule's own bounds, with a depth
+  limit standing in for the termination argument a real coherence checker
+  would give.
+
+**No overlap search is needed.** Because a covered trait is closed, two impls
+can collide only by having the same name, which was already a duplicate
+definition. §1.8's coherence rule stays a comparison of names, exactly as the
+argument for scoping this way predicted.
+
+**What is still not there**: a bound on a trait's own parameter, a method
+with type parameters of its own inside a blanket impl, and a rule whose self
+type is anything but a bare parameter. Each is rejected with a diagnostic
+that says so.
+
+**Ch. 4 has no substantial hole left.** `docs/status.md` §6 said generic
+traits were the one, and it now lists neither half.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

@@ -1478,6 +1478,35 @@ struct Impls {
     /// methods of a parameterized trait are here; every other method is found
     /// under `Type.method` as it always was.
     by_method: HashMap<(String, String), Vec<String>>,
+    /// Impls that hold for every type satisfying a bound (Ch. 4 §5.6).
+    blankets: Vec<Blanket>,
+}
+
+/// An impl whose self type is one of its own parameters.
+///
+/// `impl<T, U: From<T>> Into<U> for T` is not an implementation for a type;
+/// it is a rule about all of them. Every other impl in the file is found by
+/// name — "does `Bar` have `area`?" is a lookup — and this one is found by
+/// checking a condition, which is the whole of what makes it different.
+///
+/// Nothing else has to change, because a generic body here is lowered by
+/// reading the same source under an environment: the rule's methods are
+/// ordinary generic functions, and applying the rule is binding `T` and `U`
+/// and instantiating.
+#[derive(Clone)]
+struct Blanket {
+    /// The impl's parameters, with the bounds applying the rule must check.
+    generics: Vec<ast::GenericParam>,
+    /// Which parameter is the self type.
+    self_param: String,
+    /// The trait it provides.
+    trait_name: String,
+    /// Its arguments, as written — parameters of the impl.
+    trait_args: Vec<ast::Ty>,
+    /// Method name to the generic function its body became.
+    methods: HashMap<String, String>,
+    /// Where it was written.
+    line: Line,
 }
 
 /// A method becomes a function named `Type.method`, `Self` substituted away
@@ -1512,6 +1541,21 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
         }
     }
 
+    // A rule that holds for every type overlaps every hand-written impl of
+    // the same trait, and §1.8 makes overlapping impls an error. Closing the
+    // trait is what keeps that from being a collision a reader discovers by
+    // hitting it (Ch. 4 §5.6, which closes `Into` for exactly this reason).
+    let covered: std::collections::HashSet<String> = file
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            ast::Item::Impl(imp) if imp.generics.iter().any(|g| g.name() == imp.self_ty) => {
+                imp.trait_name.clone()
+            }
+            _ => None,
+        })
+        .collect();
+
     // Which methods each type already has, so a collision is reported rather
     // than silently resolved (§1.3).
     let mut defined: HashMap<String, Line> = HashMap::new();
@@ -1519,6 +1563,33 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
     for item in &file.items {
         let ast::Item::Impl(imp) = item else { continue };
         let self_ty = &imp.self_ty;
+
+        if let Some(t) = &imp.trait_name
+            && covered.contains(t)
+            && !imp.generics.iter().any(|g| g.name() == *self_ty)
+        {
+            errs.push(SyntaxError {
+                line: imp.line,
+                message: format!(
+                    "`{t}` holds for every type by a blanket impl, so it may not be \
+                     implemented by hand: implementing it for `{self_ty}` would overlap, \
+                     and overlapping impls are an error (Ch. 4 §§1.8, 5.6)"
+                ),
+            });
+            continue;
+        }
+
+        // A rule over every type satisfying a bound, rather than an impl for
+        // one type (Ch. 4 §5.6). Its methods become generic functions keyed
+        // by the trait, and applying it is binding the parameters.
+        if imp.generics.iter().any(|g| g.name() == *self_ty) {
+            match blanket_impl(imp, &traits, &mut out) {
+                Ok(b) => table.blankets.push(b),
+                Err(e) => errs.push(e),
+            }
+            continue;
+        }
+
         if !types.structs.borrow().contains_key(self_ty)
             && !types.enums.borrow().contains_key(self_ty)
             && !types.generic_structs.contains_key(self_ty)
@@ -1697,6 +1768,106 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
     // impl, so a trait with no impl contributes nothing but is still checked
     // for a supertrait that does not exist, above.
     (out, errs, table)
+}
+
+/// Turn a blanket impl's methods into generic functions and record the rule.
+///
+/// The self type is a parameter, so `Self` is that parameter's name and the
+/// receiver is an ordinary leading argument of that type — which is what the
+/// rest of lowering already does for every other method.
+fn blanket_impl(
+    imp: &ast::ImplItem,
+    traits: &HashMap<String, &ast::TraitItem>,
+    out: &mut Vec<ast::FnItem>,
+) -> R<Blanket> {
+    let Some(trait_name) = imp.trait_name.clone() else {
+        return err(
+            imp.line,
+            format!(
+                "`{}` is a type parameter, so this impl gives methods to no type; \
+                 an inherent impl needs a type (Ch. 4 §1.2)",
+                imp.self_ty
+            ),
+        );
+    };
+    let Some(decl) = traits.get(&trait_name) else {
+        return err(imp.line, format!("`{trait_name}` is not a trait in scope"));
+    };
+    if decl.params.len() != imp.trait_args.len() {
+        return err(
+            imp.line,
+            format!(
+                "`{trait_name}` takes {} type argument(s), {} given",
+                decl.params.len(),
+                imp.trait_args.len()
+            ),
+        );
+    }
+
+    let self_repr = SelfTy {
+        ty: ast::Ty::Name(imp.self_ty.clone(), imp.line),
+        name: imp.self_ty.clone(),
+    };
+    let mut methods = HashMap::new();
+    for m in &imp.methods {
+        let Some(want) = decl.methods.iter().find(|d| d.name == m.name) else {
+            return err(
+                m.line,
+                format!(
+                    "`{trait_name}` has no method `{}`, and a trait impl may supply \
+                     nothing else",
+                    m.name
+                ),
+            );
+        };
+        let want = subst_trait_params_fn(want, &decl.params, &imp.trait_args);
+        let want = subst_self(&want, &self_repr);
+        let got = subst_self(m, &self_repr);
+        let same_ret = match (&want.ret, &got.ret) {
+            (None, None) => true,
+            (Some(a), Some(b)) => same_ast_ty(a, b),
+            _ => false,
+        };
+        if want.params.len() != got.params.len()
+            || !same_ret
+            || !want
+                .params
+                .iter()
+                .zip(&got.params)
+                .all(|((_, a), (_, b))| same_ast_ty(a, b))
+        {
+            return err(
+                m.line,
+                format!(
+                    "`{}` does not match the signature `{trait_name}` declares",
+                    m.name
+                ),
+            );
+        }
+        if !got.generics.is_empty() {
+            return err(
+                m.line,
+                "a method with type parameters of its own, inside a blanket impl, \
+                 is not implemented",
+            );
+        }
+        let key = format!("{trait_name}.{}", m.name);
+        methods.insert(m.name.clone(), key.clone());
+        out.push(ast::FnItem {
+            name: key,
+            generics: imp.generics.clone(),
+            ..got
+        });
+    }
+
+    Ok(Blanket {
+        generics: imp.generics.clone(),
+        self_param: imp.self_ty.clone(),
+        trait_name,
+        trait_args: imp.trait_args.clone(),
+        methods,
+        line: imp.line,
+    })
 }
 
 /// `impl Drop for T` must supply exactly `fn drop(self)` (Ch. 4 §5.2).
@@ -3810,7 +3981,7 @@ impl Fn<'_> {
             E::Assign(op, target, value, line) => self.assign(op, target, value, *line),
             E::Cast(inner, ty, line) => self.cast(inner, ty, *line),
             E::Call(name, targs, args, line) => self.call(name, targs, args, expected, *line),
-            E::Method(recv, name, args, line) => self.method(recv, name, args, *line),
+            E::Method(recv, name, args, line) => self.method(recv, name, args, expected, *line),
 
             E::Block(b) => self.block(b, expected),
             E::If(cond, then, els, line) => {
@@ -4782,7 +4953,61 @@ impl Fn<'_> {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+        // A rule that holds for every type satisfying a bound satisfies this
+        // one too, wherever its own conditions hold (Ch. 4 §5.6).
+        if self.by_rule(ty, &bound.name, &args, 0) {
+            return Ok(());
+        }
         self.check_bound_named(ty, &mangle(&bound.name, &args), &shown, callee, param, line)
+    }
+
+    /// Whether a blanket impl gives `ty` this trait with these arguments.
+    ///
+    /// The rule's parameters are bound from the type and the arguments asked
+    /// about, and the rule's own bounds are then the question again — so this
+    /// recurses, and a depth limit stands in for the termination argument a
+    /// coherence checker would give (Ch. 4 §5.6).
+    fn by_rule(&self, ty: &Ty, trait_name: &str, args: &[Ty], depth: u32) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        for rule in &self.impls.blankets {
+            if rule.trait_name != trait_name || rule.trait_args.len() != args.len() {
+                continue;
+            }
+            let mut env: HashMap<String, Ty> = HashMap::new();
+            env.insert(rule.self_param.clone(), ty.clone());
+            for (written, got) in rule.trait_args.iter().zip(args) {
+                unify(written, got, &rule.generics, &mut env);
+            }
+            if rule.generics.iter().any(|p| !env.contains_key(p.name())) {
+                continue;
+            }
+            let holds = rule.generics.iter().all(|p| {
+                let ast::GenericParam::Type { name, bounds } = p else {
+                    return true;
+                };
+                let ty = &env[name];
+                bounds.iter().all(|b| {
+                    let Ok(bargs) = b
+                        .args
+                        .iter()
+                        .map(|a| resolve_ty_env(a, self.types, &env))
+                        .collect::<R<Vec<Ty>>>()
+                    else {
+                        return false;
+                    };
+                    self.by_rule(ty, &b.name, &bargs, depth + 1)
+                        || self
+                            .check_bound_named(ty, &mangle(&b.name, &bargs), "", "", "", rule.line)
+                            .is_ok()
+                })
+            });
+            if holds {
+                return true;
+            }
+        }
+        false
     }
 
     fn check_bound(&self, ty: &Ty, bound: &str, callee: &str, param: &str, line: Line) -> R<()> {
@@ -4935,12 +5160,13 @@ impl Fn<'_> {
         recv: &ast::Expr,
         name: &str,
         args: &[ast::Expr],
+        expected: Option<&Ty>,
         line: Line,
     ) -> R<(Operand, Ty)> {
         // Ch. 1's own methods are the language's, and are not overridable;
         // everything else resolves through impl blocks (Ch. 4 §1.3).
         if !BUILTIN_METHODS.contains(&name) {
-            return self.user_method(recv, name, args, line);
+            return self.user_method(recv, name, args, expected, line);
         }
         let (v, ty) = self.expr(recv, None)?;
         let one_arg = |this: &mut Self, want: &Ty| -> R<Operand> {
@@ -5907,6 +6133,96 @@ impl Fn<'_> {
     /// generic function keyed by the base type, which is instantiated here
     /// with the arguments the receiver's own instantiation was made with —
     /// recovered from the table, since a mangled name cannot be read back.
+    /// Apply a blanket impl, if one provides this method for this type.
+    ///
+    /// The rule's parameters are bound the way any generic call binds them:
+    /// the receiver's type against the `self` parameter as written, and the
+    /// expected type against the result. So `c.into()` with `c: Celsius` and
+    /// a `t27` wanted binds `T` from the receiver and `U` from the context,
+    /// and the rule's own bound — `U: From<T>` — is then an ordinary check.
+    ///
+    /// The instantiated body is a generic function like any other, which is
+    /// why this needs no new machinery: a blanket impl differs from every
+    /// other impl only in being *found* by checking a condition rather than
+    /// by looking up a name.
+    fn blanket_method(
+        &mut self,
+        recv_ty: &Ty,
+        method: &str,
+        expected: Option<&Ty>,
+        line: Line,
+    ) -> R<Option<String>> {
+        let rules: Vec<Blanket> = self
+            .impls
+            .blankets
+            .iter()
+            .filter(|b| b.methods.contains_key(method))
+            .cloned()
+            .collect();
+        let mut found: Vec<String> = Vec::new();
+        let mut why: Vec<Error> = Vec::new();
+        for rule in &rules {
+            let key = rule.methods[method].clone();
+            let Some(def) = self.generic_fns.get(&key).cloned() else {
+                continue;
+            };
+            let mut env: HashMap<String, Ty> = HashMap::new();
+            env.insert(rule.self_param.clone(), recv_ty.clone());
+            if let (Some(written), Some(want)) = (&def.ret, expected) {
+                unify(written, want, &def.generics, &mut env);
+            }
+            // Every parameter has to come out bound, or the rule says
+            // nothing about this call.
+            if def.generics.iter().any(|p| !env.contains_key(p.name())) {
+                why.push(SyntaxError {
+                    line,
+                    message: format!(
+                        "`{}` applies to `{recv_ty}` only where the result type is \
+                         known; write it (Ch. 4 §5.6)",
+                        rule.trait_name
+                    ),
+                });
+                continue;
+            }
+            let mut ok = true;
+            for p in &def.generics {
+                let ast::GenericParam::Type {
+                    name: pname,
+                    bounds,
+                } = p
+                else {
+                    continue;
+                };
+                let ty = env[pname].clone();
+                for b in bounds {
+                    if let Err(e) = self.check_bound_in(&ty, b, &env, &rule.trait_name, pname, line)
+                    {
+                        why.push(e);
+                        ok = false;
+                        break;
+                    }
+                }
+                if !ok {
+                    break;
+                }
+            }
+            if ok {
+                found.push(self.instantiate_with(&key, env, line)?);
+            }
+        }
+        match found.len() {
+            0 => match why.pop() {
+                Some(e) => Err(e),
+                None => Ok(None),
+            },
+            1 => Ok(Some(found.remove(0))),
+            _ => err(
+                line,
+                format!("more than one rule gives `{recv_ty}` a `{method}` (Ch. 4 §1.8)"),
+            ),
+        }
+    }
+
     /// Which function a method of a *parameterized* trait means.
     ///
     /// One type may implement such a trait many times, so the name alone does
@@ -6016,6 +6332,7 @@ impl Fn<'_> {
         recv: &ast::Expr,
         name: &str,
         args: &[ast::Expr],
+        expected: Option<&Ty>,
         line: Line,
     ) -> R<(Operand, Ty)> {
         // A place receiver keeps its identity, so `&mut self` writes through
@@ -6047,7 +6364,14 @@ impl Fn<'_> {
         let Some(type_name) = nominal_name(&base) else {
             return err(line, format!("{base} has no methods"));
         };
-        let key = self.method_key(&type_name, name, line)?;
+        let mut key = self.method_key(&type_name, name, line)?;
+        // A rule that holds for every type satisfying a bound is the last
+        // thing tried, so a type's own method always wins (Ch. 4 §5.6).
+        if !self.sigs.borrow().contains_key(&key)
+            && let Some(k) = self.blanket_method(&base, name, expected, line)?
+        {
+            key = k;
+        }
         let Some((params, _)) = self.sigs.borrow().get(&key).cloned() else {
             return err(
                 line,

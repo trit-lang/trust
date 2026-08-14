@@ -52,7 +52,7 @@ spec/                              4 866 lines of specification, 10 documents
     └── assembly-0.1.md      513   the assembly language
 
 core/      2 082 lines  crate trit-core — Bt, Tint, flavors, faults, literals
-compiler/ 25 615 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
+compiler/ 26 006 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
 vm/        4 566 lines  crate tritium  — machine, assembler, image format, profiler
 docs/
 ├── spec-gaps.md               50 entries: every place the spec was silent or wrong
@@ -126,7 +126,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6) |
 
-**354 tests, zero clippy warnings, 52 commits.** `scripts/stats.sh`.
+**358 tests, zero clippy warnings, 53 commits.** `scripts/stats.sh`.
 
 ---
 
@@ -159,24 +159,28 @@ inference and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
 | `Box`, any heap allocation | no allocator; Ch. 3 §6 |
 | returning a closure | needs `impl Trait` in return position or `Box<dyn Fn>`; Ch. 4 §4.5 |
 | `FnOnce` | every capture is by reference; needs a move analysis of the closure body |
-| `IntoIterator`, so `for x in xs` over an array | the blanket impl and array iterators are the library's |
-| `From`/`Into`, so `x.into()` | a trait may take type parameters now (G0.14a), so `From` works and `t27::from(x)` resolves by argument; the blanket impl that gives `Into` for free is the other half |
+| `IntoIterator`, so `for x in xs` over an array | array iterators are the library's; the blanket impl it needs now works (G0.14b) |
 | modules, `use`, `pub`, multiple files | reserved in Ch. 0 §1.3 |
 | `unsafe`, raw pointers, `?` | reserved |
 | bounds checks a loop condition already implies | every array index still costs two comparisons and two branches; branches and comparisons are 36% of everything HPL executes (G8.13). Removing them needs range analysis, which nothing here does |
 
-**Generic traits** were the one substantial hole, and the first half is
-built (G0.14a): a trait may take type parameters, one type may implement it
-many times, and the arguments are part of the method's name — `t27.From.t9.from`
-against `t27.From.bool.from`. A bound carries the trait's arguments too, so
-`U: From<T>` is checked with them.
+**Generic traits were the one substantial hole, and it is closed**
+(G0.14a, G0.14b). A trait may take type parameters, one type may implement it
+many times, and the arguments are part of each method's name —
+`t27.From.t9.from` against `t27.From.bool.from`. A bound carries them too. And
+a **blanket impl** — `impl<T, U: From<T>> Into<U> for T` — holds for every
+type satisfying its bounds, so implementing `From` gives `Into` for free.
 
-What is left is the **blanket impl** `impl<T, U: From<T>> Into<U> for T`,
-which is quantified over the types satisfying a bound: deciding whether it
-applies is a search rather than a lookup, where every other impl here is found
-by name. It is what gives `x.into()`. Because Ch. 4 §5.6 closes `Into` to hand
-implementation, the only blanket impl will be the language's own, so §1.8's
-coherence rule can stay a comparison of names rather than an overlap search.
+A blanket impl is the one impl found by checking a condition rather than by
+looking up a name. It needed no new lowering machinery: a generic body is
+lowered by reading the same source under an environment, so the rule's methods
+are ordinary generic functions and applying the rule is binding its parameters.
+A trait a rule covers is closed to hand implementation, which is what keeps
+§1.8's coherence rule a comparison of names rather than an overlap search.
+
+What remains unbuilt is small and each part says so: a bound on a trait's own
+parameter, a method with type parameters of its own inside a blanket impl, and
+a rule whose self type is anything but a bare parameter.
 
 ---
 

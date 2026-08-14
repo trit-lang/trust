@@ -2431,3 +2431,91 @@ fn generic_arguments_nest() {
         7
     );
 }
+
+/// The two traits of Ch. 4 §5.6, and the rule that connects them.
+const CONVERSION: &str = "trait From<T> { fn from(x: T) -> Self; } \
+                          trait Into<T> { fn into(self) -> T; } \
+                          impl<T, U: From<T>> Into<U> for T { \
+                              fn into(self) -> U { U::from(self) } \
+                          } ";
+
+#[test]
+fn implementing_from_gives_into_for_free() {
+    // A blanket impl is a rule about every type rather than an
+    // implementation for one, so it is found by checking a condition where
+    // every other impl is found by name. Its parameters are bound the way any
+    // generic call binds them: `T` from the receiver, `U` from the type the
+    // context wants.
+    let src = format!(
+        "{CONVERSION} \
+         struct Celsius {{ deg: t27 }} \
+         impl From<Celsius> for t27 {{ fn from(c: Celsius) -> t27 {{ c.deg * 9 / 5 + 32 }} }} \
+         fn main() -> t27 {{ \
+             let c = Celsius {{ deg: 100 }}; \
+             let f: t27 = c.into(); \
+             f \
+         }}"
+    );
+    assert_eq!(run(&src).0, 212);
+
+    // And the rule satisfies a bound, so a generic function may ask for it.
+    let src = format!(
+        "{CONVERSION} \
+         struct Celsius {{ deg: t27 }} \
+         impl From<Celsius> for t27 {{ fn from(c: Celsius) -> t27 {{ c.deg * 9 / 5 + 32 }} }} \
+         fn show<A, B: Into<A>>(x: B) -> A {{ x.into() }} \
+         fn main() -> t27 {{ let f: t27 = show(Celsius {{ deg: 100 }}); f }}"
+    );
+    assert_eq!(run(&src).0, 212);
+}
+
+#[test]
+fn a_trait_a_rule_covers_may_not_be_implemented_by_hand() {
+    // The rule holds for every type, so any hand-written impl of the same
+    // trait overlaps it, and overlapping impls are an error. Closing the
+    // trait says so where it is written rather than leaving a collision to be
+    // discovered (Ch. 4 §§1.8, 5.6).
+    let e = error(&format!(
+        "{CONVERSION} \
+         struct Celsius {{ deg: t27 }} \
+         impl Into<t27> for Celsius {{ fn into(self) -> t27 {{ self.deg }} }} \
+         fn main() -> t27 {{ 0 }}"
+    ));
+    assert!(e.contains("may not be implemented by hand"), "{e}");
+}
+
+#[test]
+fn a_rule_whose_condition_fails_does_not_apply() {
+    // No `From<Celsius>` anywhere, so nothing gives `Celsius` an `into`.
+    let e = error(&format!(
+        "{CONVERSION} \
+         struct Celsius {{ deg: t27 }} \
+         fn main() -> t27 {{ let c = Celsius {{ deg: 1 }}; let f: t27 = c.into(); f }}"
+    ));
+    assert!(e.contains("does not implement `From<Celsius>`"), "{e}");
+
+    // And it applies only where the result type is known, since that is what
+    // binds the trait's argument. A tail expression takes it from the return
+    // type, so the case that has nothing is a `let` without one.
+    let e = error(&format!(
+        "{CONVERSION} \
+         struct Celsius {{ deg: t27 }} \
+         impl From<Celsius> for t27 {{ fn from(c: Celsius) -> t27 {{ c.deg }} }} \
+         fn main() -> t27 {{ let c = Celsius {{ deg: 1 }}; let f = c.into(); f }}"
+    ));
+    assert!(e.contains("result type is known"), "{e}");
+}
+
+#[test]
+fn a_types_own_method_wins_over_a_rule() {
+    // A rule is the last thing tried, so an inherent method of the same name
+    // is what a call means.
+    let src = format!(
+        "{CONVERSION} \
+         struct Celsius {{ deg: t27 }} \
+         impl From<Celsius> for t27 {{ fn from(c: Celsius) -> t27 {{ c.deg * 9 / 5 + 32 }} }} \
+         impl Celsius {{ fn into(self) -> t27 {{ 1 }} }} \
+         fn main() -> t27 {{ let c = Celsius {{ deg: 100 }}; let f: t27 = c.into(); f }}"
+    );
+    assert_eq!(run(&src).0, 1);
+}

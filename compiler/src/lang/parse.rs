@@ -569,11 +569,21 @@ impl Parser {
             (None, Vec::new(), first, first_args)
         };
         self.where_clause(&mut generics)?;
-        if generics.is_empty() != self_args.is_empty() {
+        // `impl<T, U: From<T>> Into<U> for T` — the self type is one of the
+        // impl's own parameters, so this impl is a *rule* over every type
+        // satisfying the bounds rather than one type's (Ch. 4 §5.6).
+        let blanket = generics.iter().any(|g| g.name() == self_ty);
+        if !blanket && generics.is_empty() != self_args.is_empty() {
             return self.err(
                 "an impl's type parameters and its self type's arguments must agree: \
                  `impl<T> Name<T>` (Ch. 4 §2.1)",
             );
+        }
+        if blanket && !self_args.is_empty() {
+            return self.err(format!(
+                "`{self_ty}` is a type parameter of this impl, so it takes no arguments \
+                 of its own"
+            ));
         }
         let (methods, assoc, consts) = self.method_block("impl")?;
         let mut chosen = Vec::new();
