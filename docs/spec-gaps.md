@@ -2193,6 +2193,53 @@ An argument that is a method call is lowered eagerly for the same reason:
 `sum(it.map(f).filter(p))` cannot be told its argument's type without
 resolving the chain, and resolving it is lowering it.
 
+**G9.20 — `collect`, and `Vec` becoming a type the library can implement.**
+Ch. 5 §3.3's `collect`, and `FromIterator` under it.
+
+*The decision, taken with the author.* The specification wrote
+`trait FromIterator<A>`, a trait with a type **parameter**. Implementing that
+turned out to need a gap of its own: a *generic* impl of a *parameterized*
+trait — `impl<T> Make<T> for Pair<T>` — does not register at all, because the
+trait's arguments are resolved to concrete types when impls are collected and
+`T` is not one. That is a general hole, not a `FromIterator` one.
+
+The element is an **associated type** now. A type is collected into from one
+element type and no other: there is no "collect a `Vec<T>` from an iterator of
+`&T`" here, because there is nothing to clone with, and `String` *is*
+`Vec<char>` rather than a second thing collecting characters. So the element
+is an output of the implementation, which is what an associated type is for.
+Ch. 5 §3.3 is corrected. The general hole stays open and is worth its own
+entry when something needs it.
+
+**`Vec` is a nominal type now, as well as a language item.** §3.3 says
+`Vec<T>` implements `FromIterator`, and an impl needs something to attach to:
+`Vec<T>` registers its instantiation and answers to the mangled name, so
+`impl<A> FromIterator for Vec<A>` is written in the library in Trust. `String`
+registers the same instantiation, which is what makes `Vec`'s impls findable
+for it — `String` is not a second type.
+
+Two things were broken and one was missing.
+
+**`copy_typed` had no case for a `Vec`.** One fell through to the scalar arm,
+so *one word was copied where three were meant* — and a `Vec` returned from a
+function arrived as the **address of the buffer it had been written into**.
+Nothing had caught it because a `Vec` had always been built where it stood;
+`from_iter` is the first function that returns one.
+
+**An associated function of a generic type could not be called by path.**
+`Pair::twin(5)` reported "`Pair.t27` is not an enum in scope": the head was
+already the instantiation's mangled name, and nothing looked for its methods
+under the base. This was never `Vec`-specific.
+
+**A method that still has parameters of its own** reached `call_key`, which
+wants a signature that exists. It goes through the generic path now, which is
+where the call's arguments settle them.
+
+*A note on the bisect.* `it.filter(|y| y % 2 == 1)` yielded nothing, and the
+compiler was right: `%` is the **symmetric** remainder, so `3 % 2` is −1 and
+`y % 2 == 1` is never true. Written `!= 0` it works. Ch. 1 §4's rounding, in
+the fourth different place this session.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

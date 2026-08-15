@@ -519,17 +519,23 @@ requirement where the language can say it.
 chosen by the context:
 
 ```
-trait FromIterator<A> {
-    fn from_iter<I: Iterator<Item = A>>(it: I) -> Self;
+trait FromIterator {
+    type Elem;
+    fn from_iter<J: Iterator<Item = Self::Elem>>(it: J) -> Self;
 }
 
-fn Iterator.collect<B: FromIterator<Self::Item>>(self) -> B;
+fn Iterator.collect<C: FromIterator<Elem = Self::Item>>(self) -> C;
 ```
 
-This is a trait with a type parameter, which is why it could not be written
-before Ch. 4 §1.7 existed. `Vec<T>` and `String` implement it; so does
-`Option<Vec<T>>`, which is how a sequence of fallible steps collects into one
-result.
+The element is an **associated type, not a parameter**. A type is collected
+into from one element type and no other: there is no "collect a `Vec<T>` from
+an iterator of `&T`" here, because there is nothing to clone with, and
+`String` *is* `Vec<char>` rather than a second thing collecting characters. So
+the element is an output of the implementation, which is what an associated
+type is for. This needed Ch. 4 §1.7 either way.
+
+`Vec<T>` implements it, and `String` therefore does. `Option<Vec<T>>` — how a
+sequence of fallible steps collects into one result — is **not** implemented.
 
 ---
 

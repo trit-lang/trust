@@ -119,6 +119,12 @@ trait Iterator {
         Zip { a: self, b: other }
     }
 
+    // `collect` is the one consuming method that needs a trait, because
+    // what it collects *into* is chosen by the context (Ch. 5 §3.3).
+    fn collect<C: FromIterator<Elem = Self::Item>>(self) -> C {
+        C::from_iter(self)
+    }
+
     // The consuming methods (Ch. 5 §3.3). Each is a `while let` over `next`
     // and nothing more, and each is a provided body, so an implementation
     // gets them by writing `next` alone (Ch. 4 §1.5).
@@ -288,6 +294,33 @@ fn fold<I: Iterator<Item = t27>>(it: I, init: t27, f: impl Fn(t27, t27) -> t27) 
         }
     }
     acc
+}
+
+// What a sequence of values can be gathered into (Ch. 5 §3.3).
+//
+// The element is an *associated* type rather than a parameter: a type is
+// collected into from one element type and no other — there is no "collect a
+// `Vec<T>` from an iterator of `&T`" here, because there is nothing to clone
+// with — so the element is an output of the implementation, which is what an
+// associated type is for.
+trait FromIterator {
+    type Elem;
+    fn from_iter<J: Iterator<Item = Self::Elem>>(it: J) -> Self;
+}
+
+impl<A> FromIterator for Vec<A> {
+    type Elem = A;
+    fn from_iter<J: Iterator<Item = A>>(it: J) -> Vec<A> {
+        let mut out: Vec<A> = Vec::new();
+        let mut j = it;
+        loop {
+            match j.next() {
+                Option::Some(v) => { out.push(v); },
+                Option::None => { break; },
+            }
+        }
+        out
+    }
 }
 
 // Each adaptor is a struct and an impl a reader could have written, which is

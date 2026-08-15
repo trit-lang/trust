@@ -1666,6 +1666,9 @@ fn nominal_name(ty: &Ty) -> Option<String> {
         // `str` is the name `[char]` goes by, and the name its methods are
         // keyed under (Ch. 5 §1.3).
         Ty::Slice(t) if **t == Ty::Char => "str".into(),
+        // A `Vec` is nominal under the name its instantiation was registered
+        // with, so an impl written for `Vec<A>` can be found for it.
+        Ty::VecOf(t) => mangle("Vec", std::slice::from_ref(&**t)),
         _ => return None,
     })
 }
@@ -1965,7 +1968,11 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
             && !types.generic_enums.contains_key(self_ty)
             && !matches!(
                 self_ty.as_str(),
-                "trit" | "bool" | "t9" | "t27" | "taddr" | "char" | "str"
+                // `Vec` is a language item and a nominal generic type both,
+                // so that the library can write `impl<A> FromIterator for
+                // Vec<A>` the way Ch. 5 §3.3 says it does. It has no
+                // declaration to read parameters from; `Vec<A>` names them.
+                "trit" | "bool" | "t9" | "t27" | "taddr" | "char" | "str" | "Vec"
             )
         {
             errs.push(SyntaxError {
@@ -1978,6 +1985,7 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
         if !imp.generics.is_empty()
             && !types.generic_structs.contains_key(self_ty)
             && !types.generic_enums.contains_key(self_ty)
+            && self_ty != "Vec"
         {
             errs.push(SyntaxError {
                 line: imp.line,
@@ -3311,6 +3319,16 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
                     return err(*line, "`Vec` takes one type argument");
                 };
                 check_sized(inner, *line, "a `Vec`'s elements")?;
+                // A `Vec` is a language item *and* a nominal type, so that
+                // the library can write `impl<A> FromIterator<A> for Vec<A>`
+                // the way Ch. 5 §3.3 says it does. Registering the
+                // instantiation is the whole of it: method resolution finds a
+                // generic impl by asking what a mangled name was made from.
+                types
+                    .instantiations
+                    .borrow_mut()
+                    .entry(mangle("Vec", &args))
+                    .or_insert_with(|| ("Vec".to_string(), args.clone()));
                 return Ok(Ty::VecOf(Box::new(inner.clone())));
             }
             types.instantiate(name, &args, *line)
@@ -3356,7 +3374,17 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
             // And `String` is `Vec<char>`, which is what Ch. 5 §2.6 says it
             // is — so `&String` becomes `&str` by the coercion above and
             // needs no rule of its own.
-            "String" => Ok(Ty::VecOf(Box::new(Ty::Char))),
+            "String" => {
+                // Registering the instantiation is what makes `Vec`'s impls
+                // findable for it: `String` is not a second type, it is this
+                // one under a shorter name (Ch. 5 §2.6).
+                types
+                    .instantiations
+                    .borrow_mut()
+                    .entry(mangle("Vec", &[Ty::Char]))
+                    .or_insert_with(|| ("Vec".to_string(), vec![Ty::Char]));
+                Ok(Ty::VecOf(Box::new(Ty::Char)))
+            }
             // Ch. 1 §8 claims these so no user identifier can take them.
             "t3" | "t81" | "f27" => err(
                 *line,
@@ -7298,6 +7326,19 @@ impl Fn<'_> {
             let ty = self.types.instantiate(&head, &args, line)?;
             return Ok(nominal_name(&ty).expect("an instantiation is nominal"));
         }
+        // `Vec` is a language item and has no declaration to read fields
+        // from, so its instantiation comes from the type the context expects
+        // — which is the only thing that could say what it holds.
+        if head == "Vec" || head == "String" {
+            if let Some(want) = expected
+                && matches!(want, Ty::VecOf(_))
+            {
+                return Ok(nominal_name(want).expect("a `Vec` is nominal"));
+            }
+            if head == "String" {
+                return Ok(mangle("Vec", &[Ty::Char]));
+            }
+        }
         let generic = self.types.generic_structs.get(&head).map(|s| {
             (
                 s.generics.clone(),
@@ -8751,6 +8792,24 @@ impl Fn<'_> {
                 Ok(())
             }
 
+            // A `Vec` is an allocation, a length and a capacity, and the
+            // first of those is a pointer — so it is copied as one, for the
+            // reason this function exists at all (Ch. 5 §2.6). Without this
+            // arm a `Vec` fell through to the scalar case and one word was
+            // copied where three were meant; a `Vec` returned from a function
+            // arrived as the *address* of the buffer it was written into.
+            Ty::VecOf(_) => {
+                let p = self.load_ptr(src.clone());
+                self.store_ptr(dst.clone(), p);
+                for off in [3, 6] {
+                    let from = self.offset(src.clone(), off);
+                    let to = self.offset(dst.clone(), off);
+                    let n = self.load_from(from, &Ty::TAddr);
+                    self.store_scalar(to, &Ty::TAddr, n);
+                }
+                Ok(())
+            }
+
             Ty::Tuple(_) | Ty::Struct(_) => {
                 for (_, ft, off) in self.types.fields(ty) {
                     let from = self.offset(src.clone(), off);
@@ -8873,7 +8932,7 @@ impl Fn<'_> {
         // pointer's zero is a value it takes rather than a niche it offers
         // (Ch. 5 §2.6).
         if path.segments.len() == 2
-            && (head == "Vec" || head == "String")
+            && (head == "Vec" || head == "String" || head.starts_with("Vec."))
             && path.segments[1] == "new"
         {
             if !fields.is_empty() {
@@ -8952,6 +9011,23 @@ impl Fn<'_> {
             let args: Vec<ast::Expr> = fields.iter().map(|(_, e)| e.clone()).collect();
             if let Some(key) = self.trait_method(&head, &path.segments[1], &args, line)? {
                 return self.call_key(&key, Vec::new(), &args, line);
+            }
+            // An associated function of a *generic* type. The head is already
+            // the instantiation's mangled name — the context said which one —
+            // and its methods live under the base name until one is asked
+            // for, which is what `method_key` asks (Ch. 4 §§1.4, 2.7).
+            if self.types.instantiations.borrow().contains_key(&head) {
+                let key = self.method_key(&head, &path.segments[1], line)?;
+                if self.sigs.borrow().contains_key(&key) {
+                    return self.call_key(&key, Vec::new(), &args, line);
+                }
+                // A method that still has parameters of its own goes through
+                // the ordinary generic path, which is where the call's
+                // arguments settle them (Ch. 4 §2.7).
+                if self.generic_fns.contains_key(&key) || self.specials.borrow().contains_key(&key)
+                {
+                    return self.call(&key, &[], &args, expected, line);
+                }
             }
         }
 

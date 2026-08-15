@@ -3912,3 +3912,76 @@ fn a_methods_type_parameter_may_not_shadow_its_impls() {
     );
     assert!(msg.contains("already has"), "{msg}");
 }
+
+#[test]
+fn a_chain_collects_into_a_vec() {
+    // Ch. 5 §3.3: `collect` is the one consuming method that needs a trait,
+    // because what it collects *into* is chosen by the context.
+    assert_eq!(
+        run(&format!(
+            "{UPTO} fn main() -> t27 {{ \
+                 let it = Upto {{ n: 6, at: 0 }}; \
+                 let v: Vec<t27> = it.map(|x: t27| x * x) \
+                                     .filter(|y: t27| y % 2 != 0) \
+                                     .collect(); \
+                 let mut s: t27 = 0; \
+                 let mut i: taddr = 0; \
+                 while i < v.len() {{ s += v[i]; i += 1; }} \
+                 s * 10 + (v.len() as t27) \
+             }}"
+        ))
+        .0,
+        // The odd squares of 1..=6, and how many there were.
+        (1 + 9 + 25) * 10 + 3
+    );
+}
+
+#[test]
+fn a_chain_collects_into_a_string() {
+    // `String` is `Vec<char>`, so it needs no `FromIterator` of its own —
+    // registering the instantiation is what makes `Vec`'s impl findable for
+    // it, because `String` is not a second type (Ch. 5 §2.6).
+    let (status, out) = run("fn main() -> t27 { \
+             let s: &str = \"hello\"; \
+             let up: String = s.chars().map(|c: char| c).collect(); \
+             print(&up); \
+             (up.len() as t27) \
+         }");
+    assert_eq!(out, "hello");
+    assert_eq!(status, 5);
+}
+
+#[test]
+fn a_vec_is_copied_as_three_words() {
+    // `copy_typed` had no case for a `Vec`, so one fell through to the
+    // scalar arm and one word was copied where three were meant — a `Vec`
+    // returned from a function arrived as the *address* of the buffer it had
+    // been written into. Nothing caught it because a `Vec` had always been
+    // built where it stood.
+    assert_eq!(
+        run("fn three() -> Vec<t27> { \
+                 let mut v: Vec<t27> = Vec::new(); \
+                 v.push(7); v.push(8); v.push(9); \
+                 v \
+             } \
+             fn main() -> t27 { \
+                 let v = three(); \
+                 v[0] * 100 + v[1] * 10 + v[2] \
+             }")
+        .0,
+        789
+    );
+}
+
+#[test]
+fn an_associated_function_of_a_generic_type_resolves() {
+    // `Pair::twin(5)` — the head is the instantiation the context asked for,
+    // and its methods live under the base name until one is asked for.
+    assert_eq!(
+        run("struct Pair<T> { a: T, b: T } \
+             impl<T> Pair<T> { fn twin(v: T) -> Pair<T> { Pair { a: v, b: v } } } \
+             fn main() -> t27 { let p: Pair<t27> = Pair::twin(5); p.a + p.b }")
+        .0,
+        10
+    );
+}

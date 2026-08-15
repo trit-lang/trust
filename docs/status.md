@@ -421,6 +421,15 @@ Every adaptor's `Item` follows the iterator underneath it rather than being a
 fixed `t27`, which it had been because `same_ast_ty` had no case for `I::Item`
 and so a generic impl could only choose an associated type it could name.
 
+`collect` is built (G9.20), which made `Vec` a nominal type the library can
+implement traits for — `impl<A> FromIterator for Vec<A>` is written in Trust
+in the prelude:
+
+```
+let v: Vec<t27> = it.map(|x| x * x).filter(|y| y % 2 != 0).collect();
+let s: String = text.chars().map(f).collect();
+```
+
 What is left of the chapter is `insert` and `remove` (both want the
 `copy_within` §7 reserves), `collect` and `FromIterator`, `push_str`, and
 `F: Fn(A) -> B` as a written bound, without which the adaptors need their
