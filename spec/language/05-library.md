@@ -669,13 +669,17 @@ and is derivable (Ch. 4 §6) field by field.
 - **`Try`.** §4.2, reserved rather than rejected.
 - **`expect`, and any panic message.** §4.3.
 - **Formatting.** There is no `Display`, no `format!`, and no `println!`. Each
-  needs either variadic arguments or a macro system, and the language has
-  neither — nor does any chapter reserve one, which is itself a hole: a future
-  revision that wants `format!` has to decide whether it wants macros at all
-  before it can want `format!`. A program prints with the functions of §1.5.
+  needs either variadic arguments or a macro system; Ch. 0 §7 reserves macros
+  and Ch. 0 §1.5 reserves the `name!(…)` position they would use, so the door
+  is held open and nothing walks through it here. A program prints with the
+  functions of §1.5, which is the same digit loop `examples/trust/HPL.tr`
+  writes today.
 - **Maps, sets, and any collection with a hash.** A hash function is a choice
-  with security consequences (Ch. 3 §6 style: the choice would be wrong for
-  someone), and nothing here needs one yet.
+  with security consequences, and nothing here needs one yet. One requirement
+  is fixed in advance, because it cannot be added afterwards: **a map's
+  iteration order is unspecified**, and a revision that adds one must say so
+  from its first sentence. Once programs exist that depend on an order, the
+  order is part of the interface whether or not it was meant to be.
 - **Sorting.** `[T]::sort` needs either an allocation for a merge sort or a
   statement about worst cases for a quicksort, and neither is decided.
 - **Time, files, processes, environment.** The AM is pure and I/O is per

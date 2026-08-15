@@ -116,6 +116,14 @@ Ch. 5 §1.5 is where text becomes one.
 or-patterns (§4). `^`, `~`, and the bitwise `&`/`|` operators are
 **reserved and rejected** — see §2.5.
 
+`!` is logical negation (§2.4) and the marker of a negative implementation
+(Ch. 4 §5.1). One further position is **reserved**: an identifier immediately
+followed by `!`, as in `name!(…)`, is the invocation form macros will take if
+they arrive (§7). It is a syntax error in draft 0.1, and nothing else may
+claim it. The reservation costs nothing now and is what keeps a formatting
+facility possible later, since every spelling of one needs either macros or
+variadic arguments and this language has no plan for the second.
+
 ---
 
 ## 2. Expressions

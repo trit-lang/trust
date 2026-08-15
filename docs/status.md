@@ -44,10 +44,10 @@ spec/                              5 660 lines of specification, 11 documents
 ├── 02-composites.md         235   Ch. 2 — tuples, arrays, structs, enums, layout
 ├── tir-0.1.md               376   the IR: SSA, block params, provenance, legalization
 ├── language/
-│   ├── 00-syntax.md         607   Ch. 0 — lexis, items, expressions, patterns, grammar
+│   ├── 00-syntax.md         615   Ch. 0 — lexis, items, expressions, patterns, grammar
 │   ├── 03-references.md     520   Ch. 3 — ownership, references, lifetimes, slices
 │   ├── 04-generics.md     1 048   Ch. 4 — traits, generics, dyn, closures, lang items
-│   └── 05-library.md        780   Ch. 5 — text, the heap, iterators, ?, interior mutability
+│   └── 05-library.md        784   Ch. 5 — text, the heap, iterators, ?, interior mutability
 └── isa/
     ├── trisc-27-0.1.md      713   the machine: registers, encoding, instructions
     └── assembly-0.1.md      518   the assembly language
@@ -56,7 +56,7 @@ core/      2 082 lines  crate trit-core — Bt, Tint, flavors, faults, literals
 compiler/ 26 037 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
 vm/        4 566 lines  crate tritium  — machine, assembler, image format, profiler
 docs/
-├── spec-gaps.md               73 entries: every place the spec was silent or wrong
+├── spec-gaps.md               74 entries: every place the spec was silent or wrong
 └── status.md                  this file
 scripts/
 ├── stats.sh                   produces every number in this document
@@ -127,7 +127,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6) |
 
-**358 tests, zero clippy warnings, 54 commits.** `scripts/stats.sh`.
+**358 tests, zero clippy warnings, 55 commits.** `scripts/stats.sh`.
 
 ---
 

@@ -1489,11 +1489,52 @@ It also confirms what the checker cannot do. Writing Ch. 5 produced five
 citations that name real sections saying something else — `Ch. 2 §7`
 (Unions) for the niche rule, `Ch. 0 §2.3` (Comparison) for a body-less
 declaration, `Ch. 2 §5` (Enums) for the bounds check, `Ch. 3 §1.1` (One
-owner) for the aliasing rule, and `Ch. 0 §5.5` for a reservation of macros
-that **does not exist anywhere** — the assembly language reserves macros, and
-Trust does not reserve them at all. All five passed the checker and were
-caught by reading. The §-level-anchor version of the check is still worth
-building.
+owner) for the aliasing rule, and Ch. 0's loop section for a reservation of
+macros that lives in that chapter's *closing* section instead. All five passed
+the checker and were caught by reading. The §-level-anchor version of the
+check is still worth building.
+
+A sixth error was found the same way and is worth recording because of how it
+was made: a case-sensitive search for `macro` in Ch. 0 reported nothing, so
+this entry first claimed Trust reserved macros nowhere. The chapter says
+"**Macros.** Reserved" — capital M. A grep is a claim about a document only as
+strong as its pattern, and the conclusion drawn from it here was written into
+the specification before anyone read the section.
+
+**G9.4 — what Ch. 5 decided that a later revision can still take back, and
+what it cannot.** Six of Ch. 5's decisions were made without asking, and the
+question worth answering about each is not "is it right" but "is it
+reversible". Four are, one is not, and one needed a reservation to stay that
+way.
+
+**Purely additive later**: `rev` and `DoubleEndedIterator` (a new trait
+existing iterators simply do not implement); `expect` (the API is an addition,
+and the hard part is the message mechanism, not the signature); sorting; `Rc`.
+
+**Specified rather than left open, deliberately**: `Vec` grows by *doubling*
+from four. Most languages leave the factor to an implementation. Relaxing
+"doubling" to "some constant factor greater than one" later costs nothing —
+the amortized bound holds for any of them, and only a program reading
+`capacity()` could tell. Tightening in the other direction is what would
+break something, so the direction chosen is the one that can be undone.
+
+**Not deferred but refused**: there is no `\x` escape. The argument is that
+this chapter's text contains no bytes, so `\x` names something that is not
+there — it is a wrong thing rather than a missing one, and adding it later
+would be overturning the reason rather than filling a hole.
+
+**Fixed in advance because it cannot be added afterwards**: a map's iteration
+order is unspecified. There is no map, and the requirement is written into
+§7 anyway, because once programs exist that depend on an order the order is
+part of the interface whether it was meant to be or not. Rust learned this and
+had to randomize.
+
+**Needed a reservation to stay reversible**: formatting. Every spelling of it
+needs macros or variadic arguments; Ch. 0 §7 reserves macros, but nothing
+reserved the *position* a macro invocation would occupy. Ch. 0 §1.5 now does:
+an identifier immediately followed by `!` is a syntax error and nothing else
+may claim it. That was the one decision where doing nothing today would have
+cost something later.
 
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
