@@ -1919,13 +1919,41 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
     // the same trait, and §1.8 makes overlapping impls an error. Closing the
     // trait is what keeps that from being a collision a reader discovers by
     // hitting it (Ch. 4 §5.6, which closes `Into` for exactly this reason).
-    let covered: std::collections::HashSet<String> = file
+    // A blanket impl covers every type satisfying its bounds — not every
+    // type. `impl<I: Iterator> IntoIterator for I` says nothing about `&str`,
+    // which is not an iterator, so `impl IntoIterator for &str` does not
+    // overlap it (Ch. 4 §§1.8, 5.6).
+    let covered: Vec<(String, Vec<String>)> = file
         .items
         .iter()
         .filter_map(|i| match i {
             ast::Item::Impl(imp) if imp.generics.iter().any(|g| g.name() == imp.self_ty) => {
-                imp.trait_name.clone()
+                let bounds = imp
+                    .generics
+                    .iter()
+                    .find(|g| g.name() == imp.self_ty)
+                    .and_then(|g| match g {
+                        ast::GenericParam::Type { bounds, .. } => {
+                            Some(bounds.iter().map(|b| b.name.clone()).collect())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                imp.trait_name.clone().map(|t| (t, bounds))
             }
+            _ => None,
+        })
+        .collect();
+    // Which (type, trait) pairs the file writes out, which is what decides
+    // whether a blanket's bounds are met.
+    let written: std::collections::HashSet<(String, bool, String)> = file
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            ast::Item::Impl(imp) => imp
+                .trait_name
+                .clone()
+                .map(|t| (imp.self_ty.clone(), imp.self_ref, t)),
             _ => None,
         })
         .collect();
@@ -1966,7 +1994,12 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
         };
 
         if let Some(t) = &imp.trait_name
-            && covered.contains(t)
+            && covered.iter().any(|(name, bounds)| {
+                name == t
+                    && bounds
+                        .iter()
+                        .all(|b| written.contains(&(imp.self_ty.clone(), imp.self_ref, b.clone())))
+            })
             && !imp.generics.iter().any(|g| g.name() == *self_ty)
         {
             errs.push(SyntaxError {
@@ -2077,14 +2110,21 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
         }
 
         // What `Self` means here: the concrete type, or the applied generic.
-        let self_repr = SelfTy {
+        let mut self_written = if imp.self_args.is_empty() || one_instantiation {
             // For one instantiation the name *is* the type; the arguments
             // are already in it.
-            ty: if imp.self_args.is_empty() || one_instantiation {
-                ast::Ty::Name(self_ty.clone(), imp.line)
-            } else {
-                ast::Ty::App(self_ty.clone(), imp.self_args.clone(), imp.line)
-            },
+            ast::Ty::Name(self_ty.clone(), imp.line)
+        } else {
+            ast::Ty::App(self_ty.clone(), imp.self_args.clone(), imp.line)
+        };
+        // `impl Trait for &T` — the methods are keyed under `T`, because a
+        // reference's methods have always been the referent's, and `Self` is
+        // the reference (Ch. 4 §2.1).
+        if imp.self_ref {
+            self_written = ast::Ty::Ref(Box::new(self_written), false, imp.line);
+        }
+        let self_repr = SelfTy {
+            ty: self_written,
             name: self_ty.clone(),
         };
 

@@ -620,7 +620,14 @@ impl Parser {
         // and only the `for` says which the name and arguments belonged to.
         let first = self.expect_ident()?;
         let first_args = self.generic_args()?;
+        let mut self_ref = false;
         let (trait_name, trait_args, self_ty, self_args) = if self.eat_kw("for") {
+            // `impl Trait for &Type` — the reference is the implementing
+            // type, so `Self` is `&Type` (Ch. 4 §2.1).
+            self_ref = self.eat_op("&");
+            if self_ref && self.eat_kw("mut") {
+                return self.err("`impl Trait for &mut T` is not implemented");
+            }
             let self_ty = self.expect_ident()?;
             let self_args = self.generic_args()?;
             (Some(first), first_args, self_ty, self_args)
@@ -687,6 +694,7 @@ impl Parser {
             assoc: chosen,
             self_args,
             self_ty,
+            self_ref,
             methods,
             line,
         })
@@ -1278,7 +1286,10 @@ impl Parser {
                     mutable: true,
                     name: it,
                     ty: None,
-                    value: iter,
+                    // Ch. 4 §5.7: the loop's expression is turned into an
+                    // iterator first, which is what lets `for c in s` walk a
+                    // string and not only something that is already one.
+                    value: Expr::Method(Box::new(iter), "into_iter".to_string(), Vec::new(), line),
                     line,
                 },
                 Stmt::Expr(Expr::Loop(

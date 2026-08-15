@@ -4076,3 +4076,64 @@ fn a_declaration_a_program_does_not_call_is_not_declared() {
     let names: Vec<&str> = m.decls.iter().map(|d| d.name.as_str()).collect();
     assert!(names.contains(&"alloc"), "{names:?}");
 }
+
+#[test]
+fn a_for_loop_walks_a_string() {
+    // Ch. 4 §5.7's desugaring turns the loop's expression into an iterator
+    // first, which is what lets `for c in s` walk a string and not only
+    // something that is already one. The string's side of that is
+    // `impl IntoIterator for &str` — an impl whose *self type is a
+    // reference*, because `str` is unsized and could not be passed by value
+    // to `into_iter` at all.
+    assert_eq!(
+        run("fn main() -> t27 { \
+                 let s: &str = \"abc\"; \
+                 let mut n: t27 = 0; \
+                 for c in s { n += c as t27; } \
+                 n \
+             }")
+        .0,
+        97 + 98 + 99
+    );
+}
+
+#[test]
+fn a_trait_may_be_implemented_for_a_reference() {
+    // The methods are keyed under the referent, because a reference's
+    // methods have always been the referent's; what changes is that `Self`
+    // is the reference, so a method may take `self` by value for a type that
+    // could not otherwise be passed at all (Ch. 4 §2.1).
+    assert_eq!(
+        run("trait Len { fn total(self) -> taddr; } \
+             impl Len for &str { fn total(self) -> taddr { self.len() } } \
+             fn main() -> t27 { let s: &str = \"hello\"; (s.total() as t27) }")
+        .0,
+        5
+    );
+}
+
+#[test]
+fn a_blanket_impl_covers_only_what_its_bounds_allow() {
+    // `impl<I: Iterator> IntoIterator for I` says nothing about a type that
+    // is not an iterator, so a hand impl for one does not overlap it. The
+    // rule used to reject every hand impl of a blanket-covered trait, which
+    // forbade `impl IntoIterator for &str` outright (Ch. 4 §§1.8, 5.6).
+    assert_eq!(
+        run("trait Src { fn get(&self) -> t27; } \
+             trait Tag { fn tag(&self) -> t27; } \
+             impl<S: Src> Tag for S { fn tag(&self) -> t27 { self.get() * 2 } } \
+             struct A { v: t27 } \
+             impl Src for A { fn get(&self) -> t27 { self.v } } \
+             struct B { w: t27 } \
+             impl Tag for B { fn tag(&self) -> t27 { self.w + 1 } } \
+             fn main() -> t27 { \
+                 let a = A { v: 5 }; \
+                 let b = B { w: 5 }; \
+                 a.tag() * 10 + b.tag() \
+             }")
+        .0,
+        // `A` gets the rule's body, `B` its own — and `B` is not an `Src`,
+        // so writing one was never an overlap.
+        10 * 10 + 6
+    );
+}

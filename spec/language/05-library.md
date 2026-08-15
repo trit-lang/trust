@@ -187,6 +187,7 @@ fn char.from_utf8(units: &[t9]) -> Option<(char, taddr)>;
 fn str.to_utf8(&self, out: &mut [t9]) -> Option<taddr>;
 fn str.from_utf8(units: &[t9]) -> Option<String>;
 fn str.chars(&self) -> Chars;                       // an Iterator<Item = char>
+                                                    // `for c in s` is this
 ```
 
 A `[t9]` here holds one UTF-8 code unit per element, values `0 ..= 255`. Every
@@ -202,7 +203,7 @@ on the way out** — `print` and `println` are in the library, written in Trust:
 fn putchar(c: t9);                  // no body: it reaches a device
 
 fn print(s: &str) {
-    for c in s.chars() {
+    for c in s {
         let (units, n) = c.to_utf8();
         let mut i: taddr = 0;
         while i < n { putchar(units[i]); i += 1; }
@@ -231,10 +232,6 @@ that fails.
 
 A program may declare `putchar` itself; its item shadows the prelude's, and
 both resolve to the target's one symbol.
-
-> `for c in s` is what this would like to say. It needs
-> `impl IntoIterator for &str` — an impl whose self type is a reference —
-> which draft 0.1 cannot write, so `chars()` spells the call out.
 
 The assembler's `.string` directive (assembly §9) emits the **native**
 encoding: one word per character, so that a `&'static str` built by the

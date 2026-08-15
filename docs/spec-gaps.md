@@ -2286,6 +2286,40 @@ rule as functions: what a program owes its target is what its *surviving* code
 calls. The test that says a declaration lowers to a declaration caught it,
 which is twice this session that a test written for something else has.
 
+**G9.23 — an impl whose self type is a reference, and `for c in s`.**
+Ch. 5 §1.5 wrote `for c in s` from the day it was written. It works now.
+
+`impl Trait for &T` is written. The methods are found under the **referent**,
+because a reference's methods have always been the referent's (Ch. 3 §2.3);
+what changes is that `Self` is the reference, so a method may take `self` **by
+value** for a type that could not otherwise be passed at all. That is exactly
+what `str` needs: it is unsized, and `IntoIterator::into_iter(self)` could
+never have taken it. `impl Trait for &mut T` is refused with a message.
+
+**A blanket impl covers what its bounds allow, and no further.** The rule had
+been that a trait with *any* blanket impl may not be implemented by hand at
+all, which forbade `impl IntoIterator for &str` outright — `&str` is not an
+iterator, so `impl<I: Iterator> IntoIterator for I` says nothing about it and
+there was never an overlap. Ch. 4 §5.6 is corrected, and the `Into` sentence
+that stated the old rule with it.
+
+*The debt, stated rather than papered over.* Ch. 4 §5.7 says an iterator is an
+`IntoIterator` **by blanket impl**. It is a provided method on `Iterator`
+here, because a blanket impl **does not carry an associated type**: the choice
+is recorded against the self type's instantiation, and a blanket's self type
+is a parameter with no instantiation to record it against. The minimal case —
+
+```
+trait Wrap { type Out; fn wrap(self) -> Self::Out; }
+impl<S: Src> Wrap for S { type Out = S; fn wrap(self) -> S { self } }
+```
+
+— compiles and then `a.wrap()` reports that `A` has no method `wrap`.
+
+`for` sees no difference between the two mechanisms. A **bound** does: `fn
+f<T: IntoIterator>(x: T)` does not accept an iterator. That is the whole of
+what is owed, and it is owed to blanket impls rather than to `IntoIterator`.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

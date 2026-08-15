@@ -258,6 +258,18 @@ the name that instantiation answers to everywhere else. This is how a method
 is written for `Vec<char>` and not for every `Vec` — which is what `String`
 having a method of its own means (Ch. 5 §2.6).
 
+The implemented type may also be a **reference**:
+
+```
+impl IntoIterator for &str { … }
+```
+
+The methods are found under the referent, because a reference's methods have
+always been the referent's (Ch. 3 §2.3). What changes is that `Self` is the
+reference, so a method may take `self` **by value** for a type that could not
+otherwise be passed at all — which is exactly what an unsized type needs.
+`impl Trait for &mut T` is not defined.
+
 ### 2.2 Bounds
 
 A bound restricts a parameter to types implementing a trait. It may be written
@@ -858,8 +870,13 @@ impl<T, U: From<T>> Into<U> for T {
 Implement `From`; get `Into`. This is Rust's arrangement, inherited whole.
 
 **`Into` may not be implemented by hand.** The blanket impl above covers every
-type, so any hand-written `impl Into<Foo> for Bar` overlaps it, and §1.8 makes
-overlapping impls an error. Rather than leave that as a collision a reader
+type *that implements `From`*, and a hand-written `impl Into<Foo> for Bar`
+where `Bar: From<Foo>` overlaps it, which §1.8 makes an error.
+
+A blanket impl covers what its **bounds** allow and nothing further:
+`impl<I: Iterator> IntoIterator for I` says nothing about a type that is not
+an iterator, so `impl IntoIterator for &str` does not overlap it and is
+written. Rather than leave that as a collision a reader
 discovers by hitting it, the trait is closed to hand implementation in the
 same way §4.3 closes the `Fn` family. `TryInto` does not exist for the same
 reason and would be added the same way.
@@ -886,7 +903,12 @@ trait IntoIterator {
 }
 ```
 
-`Iterator` implements `IntoIterator` for itself, by blanket impl.
+`Iterator` implements `IntoIterator` for itself.
+
+An implementing type may be a **reference**: `impl IntoIterator for &str` is
+what makes `for c in s` walk a string, and it has to be the reference, because
+`str` is unsized and could not be passed by value to `into_iter` at all
+(§2.1).
 
 Ch. 0 §5.5 reserved `for` with the words "iteration is a trait, and traits are
 Ch. 4". It is now defined, as sugar and nothing more:

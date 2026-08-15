@@ -119,6 +119,10 @@ trait Iterator {
         Zip { a: self, b: other }
     }
 
+    // An iterator is already what `for` wants; see the note above the
+    // `IntoIterator` declaration for why this is a method and not an impl.
+    fn into_iter(self) -> Self { self }
+
     // `collect` is the one consuming method that needs a trait, because
     // what it collects *into* is chosen by the context (Ch. 5 §3.3).
     fn collect<C: FromIterator<Elem = Self::Item>>(self) -> C {
@@ -294,6 +298,28 @@ fn fold<I: Iterator<Item = t27>>(it: I, init: t27, f: impl Fn(t27, t27) -> t27) 
         }
     }
     acc
+}
+
+// What a `for` loop takes (Ch. 4 §5.7). An iterator is one of these by the
+// blanket impl below, and so is anything that can produce one.
+trait IntoIterator {
+    type Item;
+    type IntoIter;
+    fn into_iter(self) -> Self::IntoIter;
+}
+
+// Ch. 4 §5.7 says an iterator is an `IntoIterator` *by blanket impl*. It is a
+// provided method here instead, because a blanket impl does not carry an
+// associated type yet (G9.23) — `for` sees no difference, and a bound
+// `T: IntoIterator` does: it does not accept an iterator.
+
+// A string yields its characters, which is what `for c in s` means. The
+// implementing type is the *reference*, because `str` is unsized and could
+// not be passed by value to `into_iter` at all (Ch. 5 §1.3).
+impl IntoIterator for &str {
+    type Item = char;
+    type IntoIter = Chars;
+    fn into_iter(self) -> Chars { self.chars() }
 }
 
 // What a sequence of values can be gathered into (Ch. 5 §3.3).

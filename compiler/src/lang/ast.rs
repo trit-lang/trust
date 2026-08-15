@@ -142,6 +142,12 @@ pub struct ImplItem {
     pub trait_args: Vec<Ty>,
     /// The type being implemented.
     pub self_ty: String,
+    /// Set for `impl Trait for &Type`. The methods are keyed under the same
+    /// name — a reference's methods have always been the referent's — but
+    /// `Self` is the reference, which is what lets a method take `self` by
+    /// value for a type that could not otherwise be passed at all
+    /// (Ch. 4 §2.1).
+    pub self_ref: bool,
     /// Its type arguments: `impl<T> Pair<T, T>` (Ch. 4 §2.1).
     pub self_args: Vec<Ty>,
     /// Its methods and associated functions.

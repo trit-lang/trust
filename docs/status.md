@@ -440,11 +440,16 @@ written in the library in Trust as `impl Vec<char>`, and declarations are
 pruned like functions — `alloc` and `free` had begun appearing in every
 program the moment the library gained a method that pushes.
 
+An impl's self type may be a reference now (G9.23), so `for c in s` walks a
+string and `for`'s desugaring turns its expression into an iterator the way
+Ch. 4 §5.7 says. A blanket impl covers what its bounds allow rather than every
+type, which is what made `impl IntoIterator for &str` writable.
+
 What is left of Ch. 5 is `Cell`/`RefCell` (§5), `expect`, formatting, maps and
 sets, sorting and `Rc` — all of §7, all reserved. The nearest thing merely
-unbuilt is an impl whose self type is a **reference**, which would give
-`for c in s`, the `IntoIterator` step in `for`'s desugaring, and binding by
-reference in a `match` — three recorded gaps, one fix.
+unbuilt is an **associated type on a blanket impl**: `Iterator` is an
+`IntoIterator` by a provided method rather than the blanket §5.7 specifies,
+which `for` cannot tell apart and a bound can.
 
 **B. Backend quality.** The instruction stream is a third of what it was
 (G8.6–G8.13, −66.6% on HPL), and memory is nearly out of the picture: frame
