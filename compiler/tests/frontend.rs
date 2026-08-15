@@ -3063,3 +3063,75 @@ fn unwrap_traps_and_is_written_in_the_language() {
         tritium::Stop::Fault(trit_core::FaultCode::Trap, _)
     ));
 }
+
+#[test]
+fn the_consuming_methods_are_provided_bodies_and_free_functions() {
+    // Ch. 5 §3.3. Each is a `while let` over `next` and nothing more. The
+    // ones that work for any `Item` are provided bodies on the trait, so an
+    // implementation gets them by writing `next` alone (Ch. 4 §1.5); the ones
+    // that need arithmetic or an order take the bound on the *iterator*,
+    // because a bound on an associated type is not written yet.
+    let src = "struct Count { at: t27, end: t27 } \
+               impl Iterator for Count { \
+                   type Item = t27; \
+                   fn next(&mut self) -> Option<t27> { \
+                       if self.at >= self.end { Option::None } else { \
+                           let v = self.at; self.at += 1; Option::Some(v) \
+                       } \
+                   } \
+               } \
+               fn c() -> Count { Count { at: 1, end: 6 } } ";
+    assert_eq!(
+        run(&format!(
+            "{src} fn main() -> t27 {{ \
+                 let n = c().count() as t27; \
+                 let s = sum(c()); \
+                 let m = max(c()).unwrap(); \
+                 let f = fold(c(), 0, |a, b| a * 2 + b); \
+                 let p = c().position(|x| x == 4).unwrap() as t27; \
+                 let a = if c().all(|x| x > 0) {{ 1 }} else {{ 0 }}; \
+                 n * 1000000 + s * 10000 + m * 1000 + f * 10 + p + a \
+             }}"
+        ))
+        .0,
+        // 5 items, sum 15, max 5, fold 57, `4` at index 3, all positive.
+        5 * 1000000 + 15 * 10000 + 5 * 1000 + 57 * 10 + 3 + 1
+    );
+}
+
+#[test]
+fn a_method_may_have_type_parameters_of_its_own() {
+    // A method taking `impl Fn(…)` is a generic function, and generic
+    // functions are instantiated at the call site rather than looked up —
+    // which method resolution did not do, so no such method could be called
+    // at all. Both receiver forms need it: a place, and a temporary.
+    let src = "struct S { a: t27 } \
+               impl S { fn pick(&self, p: impl Fn(t27) -> bool) -> bool { p(self.a) } } \
+               fn make() -> S { S { a: 5 } } ";
+    assert_eq!(
+        run(&format!(
+            "{src} fn main() -> t27 {{ \
+                 let s = S {{ a: 5 }}; \
+                 let here = if s.pick(|x| x > 3) {{ 10 }} else {{ 0 }}; \
+                 let temp = if make().pick(|x| x > 9) {{ 1 }} else {{ 0 }}; \
+                 here + temp \
+             }}"
+        ))
+        .0,
+        10
+    );
+}
+
+#[test]
+fn a_program_shadows_the_prelude() {
+    // There are no modules (Ch. 0 §1.3), so the prelude occupies the only
+    // namespace there is. A program that defines its own `sum` gets its own,
+    // and the prelude's — which takes an iterator — is not in the way.
+    assert_eq!(
+        run("struct P { x: t27, y: t27 } \
+             fn sum(p: P) -> t27 { p.x + p.y } \
+             fn main() -> t27 { sum(P { x: 7, y: 14 }) }")
+        .0,
+        21
+    );
+}

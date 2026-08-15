@@ -6988,7 +6988,20 @@ impl Fn<'_> {
         {
             key = k;
         }
-        let Some((params, _)) = self.sigs.borrow().get(&key).cloned() else {
+        // A method with type parameters of its own — one taking `impl Fn(…)`
+        // is the common case — is a generic function, and generic functions
+        // are instantiated at the call site rather than looked up.
+        let generic = self.generic_fns.get(&key).cloned();
+        let Some((params, _)) = self.sigs.borrow().get(&key).cloned().or_else(|| {
+            // Only the receiver's type is wanted here, to decide whether
+            // to borrow it. The rest may name the method's own
+            // parameters — `impl Fn(…)` becomes one — which nothing can
+            // resolve until the call site says what they are.
+            let def = generic.as_ref()?;
+            let (_, written) = def.params.first()?;
+            let recv = resolve_ty_env(written, self.types, &self.env).ok()?;
+            Some((vec![recv], Ty::Unit))
+        }) else {
             return err(
                 line,
                 format!("{base} has no method `{name}`, and neither does Ch. 1"),
@@ -7023,6 +7036,28 @@ impl Fn<'_> {
                 Ty::Ref(..) => (v, self_ty.clone()),
                 _ => (v, ty),
             };
+            // A generic method is instantiated from the *written* arguments,
+            // so a receiver that is already a value has to become a name the
+            // instantiation can read — the same binding a closure argument
+            // gets (Ch. 4 §2.3). It is bound at its own type and borrowed
+            // afterwards if the method wants a reference; binding it at the
+            // *reference's* type would say the slot holds an address when it
+            // holds the value.
+            if generic.is_some() {
+                let Operand::Value(slot) = arg.0 else {
+                    return err(line, "a receiver must have a slot");
+                };
+                let bound = self.bind_existing(slot, base.clone());
+                let named = ast::Expr::Path(bound, line);
+                let receiver = match &self_ty {
+                    Ty::Ref(_, mutable) => ast::Expr::Borrow(Box::new(named), *mutable, line),
+                    _ => named,
+                };
+                let mut full = vec![receiver];
+                full.extend(args.iter().cloned());
+                let (k, full) = self.instantiate_fn(&key, &[], &full, expected, line)?;
+                return self.call_key(&k, Vec::new(), &full, line);
+            }
             return self.call_key(&key, vec![arg], args, line);
         }
 
@@ -7037,6 +7072,10 @@ impl Fn<'_> {
         };
         let mut full = vec![receiver];
         full.extend(args.iter().cloned());
+        if generic.is_some() {
+            let (k, full) = self.instantiate_fn(&key, &[], &full, expected, line)?;
+            return self.call_key(&k, Vec::new(), &full, line);
+        }
         self.call_key(&key, Vec::new(), &full, line)
     }
 

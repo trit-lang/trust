@@ -437,6 +437,13 @@ last()   nth(n) collect()
 `sum` and `product` need `Add` and `Mul` (Ch. 4 §5.4); `min` and `max` need
 `Ord` (Ch. 4 §5.3). Each is a `while let` over `next` and nothing more.
 
+The ones that work for **any** item are provided bodies on the trait, so an
+implementation gets them by writing `next` alone (Ch. 4 §1.5). The ones that
+need arithmetic or an order are free functions taking the bound on the
+*iterator* — `fn sum<I: Iterator<Item = t27>>(it: I) -> t27` — because a bound
+on an associated type is not written in draft 0.1 and this says the same
+requirement where the language can say it.
+
 `collect` is the one that needs a trait, because what it collects *into* is
 chosen by the context:
 

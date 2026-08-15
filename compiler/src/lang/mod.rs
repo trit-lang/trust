@@ -87,6 +87,176 @@ fn floor_mod(a: t27, b: t27) -> t27 { a - floor_div(a, b) * b }
 trait Iterator {
     type Item;
     fn next(&mut self) -> Option<Self::Item>;
+
+    // The consuming methods (Ch. 5 §3.3). Each is a `while let` over `next`
+    // and nothing more, and each is a provided body, so an implementation
+    // gets them by writing `next` alone (Ch. 4 §1.5).
+    fn count(self) -> taddr {
+        let mut it = self;
+        let mut n: taddr = 0;
+        loop {
+            match it.next() {
+                Option::Some(v) => { n += 1; },
+                Option::None => { break; },
+            }
+        }
+        n
+    }
+
+    fn last(self) -> Option<Self::Item> {
+        let mut it = self;
+        let mut seen: Option<Self::Item> = Option::None;
+        loop {
+            match it.next() {
+                Option::Some(v) => { seen = Option::Some(v); },
+                Option::None => { break; },
+            }
+        }
+        seen
+    }
+
+    fn nth(self, n: taddr) -> Option<Self::Item> {
+        let mut it = self;
+        let mut left = n;
+        loop {
+            match it.next() {
+                Option::Some(v) => {
+                    if left == 0 { return Option::Some(v); }
+                    left -= 1;
+                },
+                Option::None => { return Option::None; },
+            }
+        }
+    }
+
+    fn find(self, p: impl Fn(Self::Item) -> bool) -> Option<Self::Item> {
+        let mut it = self;
+        loop {
+            match it.next() {
+                Option::Some(v) => { if p(v) { return Option::Some(v); } },
+                Option::None => { return Option::None; },
+            }
+        }
+    }
+
+    fn position(self, p: impl Fn(Self::Item) -> bool) -> Option<taddr> {
+        let mut it = self;
+        let mut at: taddr = 0;
+        loop {
+            match it.next() {
+                Option::Some(v) => {
+                    if p(v) { return Option::Some(at); }
+                    at += 1;
+                },
+                Option::None => { return Option::None; },
+            }
+        }
+    }
+
+    fn all(self, p: impl Fn(Self::Item) -> bool) -> bool {
+        let mut it = self;
+        loop {
+            match it.next() {
+                Option::Some(v) => { if !p(v) { return false; } },
+                Option::None => { return true; },
+            }
+        }
+    }
+
+    fn any(self, p: impl Fn(Self::Item) -> bool) -> bool {
+        let mut it = self;
+        loop {
+            match it.next() {
+                Option::Some(v) => { if p(v) { return true; } },
+                Option::None => { return false; },
+            }
+        }
+    }
+
+    fn for_each(self, f: impl Fn(Self::Item)) {
+        let mut it = self;
+        loop {
+            match it.next() {
+                Option::Some(v) => { f(v); },
+                Option::None => { break; },
+            }
+        }
+    }
+}
+
+// `sum`, `min`, `max` and `fold` need arithmetic or an order on the item, and
+// a bound on an associated type is not written yet — so they are free
+// functions with the bound on the *iterator*, which is the same requirement
+// spelled where the language can say it (Ch. 4 §1.7).
+
+fn sum<I: Iterator<Item = t27>>(it: I) -> t27 {
+    let mut it = it;
+    let mut total: t27 = 0;
+    loop {
+        match it.next() {
+            Option::Some(v) => { total += v; },
+            Option::None => { break; },
+        }
+    }
+    total
+}
+
+fn product<I: Iterator<Item = t27>>(it: I) -> t27 {
+    let mut it = it;
+    let mut total: t27 = 1;
+    loop {
+        match it.next() {
+            Option::Some(v) => { total *= v; },
+            Option::None => { break; },
+        }
+    }
+    total
+}
+
+fn min<I: Iterator<Item = t27>>(it: I) -> Option<t27> {
+    let mut it = it;
+    let mut best: Option<t27> = Option::None;
+    loop {
+        match it.next() {
+            Option::Some(v) => {
+                best = match best {
+                    Option::Some(b) => { if v < b { Option::Some(v) } else { Option::Some(b) } },
+                    Option::None => Option::Some(v),
+                };
+            },
+            Option::None => { break; },
+        }
+    }
+    best
+}
+
+fn max<I: Iterator<Item = t27>>(it: I) -> Option<t27> {
+    let mut it = it;
+    let mut best: Option<t27> = Option::None;
+    loop {
+        match it.next() {
+            Option::Some(v) => {
+                best = match best {
+                    Option::Some(b) => { if v > b { Option::Some(v) } else { Option::Some(b) } },
+                    Option::None => Option::Some(v),
+                };
+            },
+            Option::None => { break; },
+        }
+    }
+    best
+}
+
+fn fold<I: Iterator<Item = t27>>(it: I, init: t27, f: impl Fn(t27, t27) -> t27) -> t27 {
+    let mut it = it;
+    let mut acc = init;
+    loop {
+        match it.next() {
+            Option::Some(v) => { acc = f(acc, v); },
+            Option::None => { break; },
+        }
+    }
+    acc
 }
 
 // Each adaptor is a struct and an impl a reader could have written, which is
@@ -270,18 +440,25 @@ impl str {
 "#;
 
 /// Compile a source file to a TIR module.
+///
+/// The prelude is parsed separately from the program rather than pasted in
+/// front of it, for two reasons. A program's error lines are then its own,
+/// with nothing to subtract. And an item the program defines **shadows** the
+/// prelude's of the same name — which is what a prelude is, and which matters
+/// here more than elsewhere because there are no modules (Ch. 0 §1.3) and so
+/// the prelude occupies the only namespace there is. A program that defines
+/// its own `sum` gets its own `sum`.
 pub fn compile(src: &str) -> Result<crate::tir::Module, Vec<SyntaxError>> {
-    let prelude_lines = PRELUDE.lines().count() as u32;
-    let file = parse::parse(&format!("{PRELUDE}{src}")).map_err(|mut e| {
-        e.line = e.line.saturating_sub(prelude_lines);
-        vec![e]
-    })?;
-    let module = lower::lower(&file).map_err(|mut es| {
-        for e in &mut es {
-            e.line = e.line.saturating_sub(prelude_lines);
-        }
-        es
-    })?;
+    let mut file = parse::parse(PRELUDE).expect("the prelude parses");
+    let user = parse::parse(src).map_err(|e| vec![e])?;
+
+    let defined: std::collections::HashSet<&str> =
+        user.items.iter().filter_map(item_name).collect();
+    file.items
+        .retain(|i| item_name(i).is_none_or(|n| !defined.contains(n)));
+    file.items.extend(user.items.iter().cloned());
+
+    let module = lower::lower(&file)?;
 
     // Verified **before** pruning, and the order is the point. A function
     // nothing calls is still a function this compiler emitted, and if it is
@@ -306,6 +483,20 @@ pub fn compile(src: &str) -> Result<crate::tir::Module, Vec<SyntaxError>> {
     let mut module = module;
     keep_reachable(&mut module, &prelude_functions());
     Ok(module)
+}
+
+/// The name an item defines, for the shadowing rule. An `impl` block defines
+/// none: it adds methods to a type, and two impls of different traits for one
+/// type are not a collision.
+fn item_name(i: &ast::Item) -> Option<&str> {
+    match i {
+        ast::Item::Fn(f) => Some(&f.name),
+        ast::Item::Struct(s) => Some(&s.name),
+        ast::Item::Enum(e) => Some(&e.name),
+        ast::Item::Trait(t) => Some(&t.name),
+        ast::Item::Const(c) => Some(&c.name),
+        ast::Item::Impl(_) => None,
+    }
 }
 
 /// The functions the prelude defines, by the names they lower to.

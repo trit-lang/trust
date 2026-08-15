@@ -56,7 +56,7 @@ core/      2 082 lines  crate trit-core — Bt, Tint, flavors, faults, literals
 compiler/ 26 037 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
 vm/        4 566 lines  crate tritium  — machine, assembler, image format, profiler
 docs/
-├── spec-gaps.md               80 entries: every place the spec was silent or wrong
+├── spec-gaps.md               81 entries: every place the spec was silent or wrong
 └── status.md                  this file
 scripts/
 ├── stats.sh                   produces every number in this document
@@ -127,7 +127,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6) |
 
-**379 tests, zero clippy warnings, 62 commits.** `scripts/stats.sh`.
+**382 tests, zero clippy warnings, 63 commits.** `scripts/stats.sh`.
 
 ---
 
@@ -383,10 +383,10 @@ prelude, which a program pays nothing for unless it calls it.
 that is not Trust is `putchar`. §4's `?` is built too (G9.8), and §3's adaptors —
 `Map`, `Filter`, `Take`, `Skip`, `Enumerate`, `Zip` — are structs in the
 prelude (G9.9). §4.3's `unwrap` is written in the
-language too, on `!` and `trap()` (G9.10). What is left of §3 is the consuming
-methods and `collect`, which needs `Vec`; what is left of the chapter is the
-heap, which needs `_end` from the assembler (G9.2) and two functions from the
-runtime.
+language too, on `!` and `trap()` (G9.10). §3's consuming methods are built too
+(G9.11), so what is left of the chapter is the heap — `Box`, `Vec`, `String`
+and `collect` — which needs `_end` from the assembler (G9.2) and two functions
+from the runtime.
 
 **B. Backend quality.** The instruction stream is a third of what it was
 (G8.6–G8.13, −66.6% on HPL), and memory is nearly out of the picture: frame

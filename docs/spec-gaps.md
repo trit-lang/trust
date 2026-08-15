@@ -1779,6 +1779,33 @@ turn: three comments named a subsection of Ch. 1's type table, which has
 none. That is the third batch of citations it has caught and the second
 written by someone who had just read the section they were citing.
 
+**G9.11 — the consuming methods, a method resolution that never worked, and
+what a prelude is.** Ch. 5 §3.3 is built. `count`, `last`, `nth`, `find`,
+`position`, `all`, `any` and `for_each` are **provided bodies** on `Iterator`,
+so an implementation gets them by writing `next` alone. `sum`, `product`,
+`min`, `max` and `fold` are free functions taking the bound on the *iterator*
+— `fn sum<I: Iterator<Item = t27>>(it: I) -> t27` — because a bound on an
+associated type is not written yet, and this says the same requirement where
+the language can say it.
+
+**A method with type parameters of its own could never be called.** Method
+resolution looked the key up in `sigs`, and a generic function is not there:
+it is in `generic_fns`, to be instantiated at the call site. So *any* method
+taking `impl Fn(…)` was unreachable — not a limit anyone had recorded, just
+one nothing had tried. Both receiver forms needed it, and the second was
+wrong twice before it was right: a temporary receiver has to be bound at
+**its own** type and borrowed afterwards, because binding it at the
+reference's type says the slot holds an address when it holds the value, and
+the machine says `F_ALIGN` two instructions later.
+
+**The prelude occupied the only namespace there is.** Adding `sum`, `min` and
+`max` to it broke three tests, all of which defined their own. There are no
+modules (Ch. 0 §1.3), so the fix is the rule a prelude has everywhere: **a
+program's own item shadows the prelude's of the same name**. The prelude is
+now parsed separately from the program rather than pasted in front of it,
+which also removes the line-number arithmetic the paste needed — a program's
+error lines are its own, with nothing to subtract.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The
