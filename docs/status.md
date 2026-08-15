@@ -395,7 +395,10 @@ bug — an arm's pattern bindings were never dropped — and closing it needed t
 condition that they own only when the scrutinee was matched by value.
 
 §1.5's `print` and `println` are in the prelude now, so
-`examples/trust/hello.tr` is a `main` with one statement in it; `putchar` is
+`examples/trust/hello.tr` is a `main` with one statement in it and
+`examples/trust/HPL.tr` is 277 lines shorter — every line of its output was a
+hand-encoded ASCII array with the text in a comment above it, and all 53 are
+string literals now, for −0.2% instructions rather than a cost; `putchar` is
 declared there too, which makes it the third required target function after
 `alloc` and `free` (G9.17). `char::to_utf8` has the signature the
 specification always gave it, `let` binds a tuple, and `str::chars` iterates.

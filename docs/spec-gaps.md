@@ -2056,6 +2056,27 @@ mentioned text. Two tests that assert a `match` on a `trit` compiles to one
 `br3` and *no* comparison caught it, which is a use for an exact-output test
 nobody designed it for.
 
+*What it was worth.* `examples/trust/HPL.tr` printed through a `print_str`
+over `&[t9]`, and every line of its output was a hand-encoded array of ASCII
+decimal with the text in a comment above it. All 53 became string literals:
+**277 lines deleted, 63 added**, and the comment can no longer disagree with
+what is printed.
+
+It also got *cheaper*, which was not the expectation. Printing through the
+general encoder cost **+8.7%** of the whole program's instructions, so `print`
+takes the one-unit case directly — a character below 128 is one code unit and
+*is* that unit, which is the test `utf8_len` makes first anyway, and taking
+the branch there skips building a four-element buffer and returning it. With
+that, the total is **3 623 789 → 3 615 930, −0.2%** against the hand-rolled
+loop it replaced.
+
+The measurement is unchanged where it matters, and that was checked rather
+than assumed: the four solve intervals are bit-identical (542 928, 594 856,
+844 517, 916 216 instructions) and every Time and Gflops line is byte-for-byte
+what it was. What moved is the *absolute* cycle counters printed either side
+of each solve, because there is more printing before them — which is the
+reading ISA §2.3 warrants and the difference is what HPL uses.
+
 *Still open.* Ch. 5 §1.5 would rather write `for c in s`, and that needs
 `impl IntoIterator for &str` — an impl whose **self type is a reference**,
 which the parser rejects with "expected a name, found `&`". `chars()` spells

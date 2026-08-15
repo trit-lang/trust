@@ -467,11 +467,21 @@ fn putchar(c: t9);
 fn print(s: &str) {
     let mut i: taddr = 0;
     while i < s.len() {
-        let (units, n) = s[i].to_utf8();
-        let mut j: taddr = 0;
-        while j < n {
-            putchar(units[j]);
-            j += 1;
+        let c = s[i];
+        // A character below 128 is one code unit and is that unit. The test
+        // is the one `utf8_len` makes first anyway; taking the branch here
+        // saves building a four-element buffer and returning it, which is
+        // most of the cost of printing text that is all ASCII.
+        let v = c as t27;
+        if v < 128 {
+            putchar(v as t9);
+        } else {
+            let (units, n) = c.to_utf8();
+            let mut j: taddr = 0;
+            while j < n {
+                putchar(units[j]);
+                j += 1;
+            }
         }
         i += 1;
     }
