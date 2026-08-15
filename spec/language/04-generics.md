@@ -247,6 +247,16 @@ A parameter of an impl block must appear in the type being implemented or in
 the trait being implemented; an unconstrained parameter is an error, because
 nothing could ever determine it.
 
+A parameter may appear in **both**:
+
+```
+impl<T> From<T> for Wrapper<T> { … }
+```
+
+Such an impl gives `Wrapper<X>` the trait `From<X>` for every `X`, and there
+can be at most one of it for a (type, trait): the arguments are fixed by the
+self type, so a second would be the same impl.
+
 An impl may also name **one instantiation** and take no parameters at all:
 
 ```

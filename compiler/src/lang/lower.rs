@@ -383,6 +383,21 @@ struct ClosureInfo {
 /// as written.
 type AssocChoice = (Vec<String>, Vec<Extra>, ast::Ty);
 
+/// `impl<T> Make<T> for Pair<T>` — which trait arguments a generic impl gives
+/// depends on which instantiation is asking, so the answer is worked out then
+/// rather than recorded now (Ch. 4 §1.7).
+#[derive(Clone, Debug)]
+struct Parameterized {
+    /// The type being implemented, by base name.
+    base: String,
+    /// Its parameters, in the order the self type names them.
+    params: Vec<String>,
+    /// The trait.
+    trait_name: String,
+    /// Its arguments, as written — names of `params`.
+    args: Vec<ast::Ty>,
+}
+
 /// A generic impl's type parameter that the *self type* does not name, and
 /// where its value comes from: a closure argument's signature.
 ///
@@ -1854,6 +1869,9 @@ struct Impls {
     by_method: HashMap<(String, String), Vec<String>>,
     /// Impls that hold for every type satisfying a bound (Ch. 4 §5.6).
     blankets: Vec<Blanket>,
+    /// Generic impls of a parameterized trait, whose arguments are the
+    /// impl's own parameters — `impl<T> Make<T> for Pair<T>`.
+    parameterized: Vec<Parameterized>,
 }
 
 /// An impl whose self type is one of its own parameters.
@@ -2087,26 +2105,47 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
                 });
                 continue;
             }
-            let mut args = Vec::new();
-            let mut bad = false;
-            for a in &imp.trait_args {
-                match resolve_ty(a, types) {
-                    Ok(t) => args.push(t),
-                    Err(e) => {
-                        errs.push(e);
-                        bad = true;
+            // `impl<T> Make<T> for Pair<T>` — the trait's arguments are the
+            // impl's own parameters, so they have no concrete value here and
+            // one is determined by the self type. Such an impl can exist at
+            // most once for a (type, trait): two of them would be the same
+            // impl. So it needs no qualifier to tell it from another, and
+            // which arguments it means is worked out per instantiation, in
+            // `parameterized_rule` (Ch. 4 §§1.7, 2.1).
+            let from_params = !imp.trait_args.is_empty()
+                && imp.trait_args.iter().all(|a| {
+                    matches!(a, ast::Ty::Name(n, _) if imp.generics.iter().any(|g| g.name() == n))
+                });
+            if from_params {
+                table.parameterized.push(Parameterized {
+                    base: self_ty.clone(),
+                    params: impl_params(imp).0,
+                    trait_name: trait_name.clone(),
+                    args: imp.trait_args.clone(),
+                });
+                table.pairs.insert((self_ty.clone(), trait_name.clone()));
+            } else {
+                let mut args = Vec::new();
+                let mut bad = false;
+                for a in &imp.trait_args {
+                    match resolve_ty(a, types) {
+                        Ok(t) => args.push(t),
+                        Err(e) => {
+                            errs.push(e);
+                            bad = true;
+                        }
                     }
                 }
+                if bad {
+                    continue;
+                }
+                if !args.is_empty() {
+                    qualifier = format!("{}.", mangle(trait_name, &args));
+                }
+                table
+                    .pairs
+                    .insert((self_ty.clone(), mangle(trait_name, &args)));
             }
-            if bad {
-                continue;
-            }
-            if !args.is_empty() {
-                qualifier = format!("{}.", mangle(trait_name, &args));
-            }
-            table
-                .pairs
-                .insert((self_ty.clone(), mangle(trait_name, &args)));
         }
 
         // What `Self` means here: the concrete type, or the applied generic.
@@ -6191,6 +6230,9 @@ impl Fn<'_> {
                 None => false,
             },
         };
+        // `impl<T> Make<T> for Pair<T>` gives `Pair<X>` the trait `Make<X>`,
+        // and which arguments that is depends on the instantiation asking.
+        let ok = ok || self.parameterized_gives(ty, bound);
         // A blanket impl gives the trait to every type meeting its bounds
         // (Ch. 4 §5.6), and a bound is one of the places that has to know:
         // `fn f<T: IntoIterator>` accepts an iterator because a rule says so
@@ -6212,6 +6254,36 @@ impl Fn<'_> {
                  `{param}` (Ch. 4 §2.2)"
             ),
         )
+    }
+
+    /// Whether a generic impl of a parameterized trait gives `ty` this bound.
+    ///
+    /// The impl wrote its trait arguments as its own parameters, and those
+    /// are the self type's arguments — so the answer is "resolve them for
+    /// this instantiation and see" (Ch. 4 §1.7).
+    fn parameterized_gives(&self, ty: &Ty, bound: &str) -> bool {
+        let Some(name) = nominal_name(ty) else {
+            return false;
+        };
+        let Some((base, args)) = self.types.instantiations.borrow().get(&name).cloned() else {
+            return false;
+        };
+        self.impls.parameterized.iter().any(|p| {
+            if p.base != base || p.params.len() != args.len() {
+                return false;
+            }
+            let env: HashMap<String, Ty> =
+                p.params.iter().cloned().zip(args.iter().cloned()).collect();
+            let Ok(resolved) = p
+                .args
+                .iter()
+                .map(|a| resolve_ty_env(a, self.types, &env))
+                .collect::<R<Vec<_>>>()
+            else {
+                return false;
+            };
+            mangle(&p.trait_name, &resolved) == bound
+        })
     }
 
     /// Whether a blanket rule's own bounds hold for this type.

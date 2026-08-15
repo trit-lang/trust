@@ -4181,3 +4181,46 @@ fn a_bound_is_satisfied_by_a_blanket_impl() {
         405
     );
 }
+
+#[test]
+fn a_generic_impl_may_implement_a_parameterized_trait() {
+    // `impl<T> Make<T> for Pair<T>` — the trait's arguments are the impl's
+    // own parameters, so they have no concrete value at the impl and one is
+    // determined by the self type. Such an impl can exist at most once for a
+    // (type, trait): two of them would be the same impl (Ch. 4 §§1.7, 2.1).
+    //
+    // This is the hole that made `FromIterator`'s element an associated type
+    // rather than the parameter Ch. 5 §3.3 first wrote.
+    assert_eq!(
+        run("struct Pair<T> { a: T, b: T } \
+             trait Make<A> { fn make(v: A) -> Self; } \
+             impl<T> Make<T> for Pair<T> { \
+                 fn make(v: T) -> Pair<T> { Pair { a: v, b: v } } \
+             } \
+             fn build<P: Make<t27>>(v: t27) -> P { P::make(v) } \
+             fn main() -> t27 { let p: Pair<t27> = build(6); p.a + p.b }")
+        .0,
+        12
+    );
+}
+
+#[test]
+fn one_impl_serves_every_instantiation_of_the_trait() {
+    // Which arguments `impl<T> From<T> for Wrapper<T>` gives depends on the
+    // instantiation asking, so the answer is worked out then rather than
+    // recorded at the impl — two different `Wrapper`s, one impl.
+    assert_eq!(
+        run("trait From<T> { fn from(x: T) -> Self; } \
+             struct Wrapper<T> { v: T } \
+             impl<T> From<T> for Wrapper<T> { \
+                 fn from(v: T) -> Wrapper<T> { Wrapper { v: v } } \
+             } \
+             fn main() -> t27 { \
+                 let w: Wrapper<t27> = Wrapper::from(9); \
+                 let u: Wrapper<t9> = Wrapper::from(4 as t9); \
+                 w.v + (u.v as t27) \
+             }")
+        .0,
+        13
+    );
+}

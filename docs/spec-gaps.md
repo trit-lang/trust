@@ -2199,9 +2199,10 @@ Ch. 5 §3.3's `collect`, and `FromIterator` under it.
 *The decision, taken with the author.* The specification wrote
 `trait FromIterator<A>`, a trait with a type **parameter**. Implementing that
 turned out to need a gap of its own: a *generic* impl of a *parameterized*
-trait — `impl<T> Make<T> for Pair<T>` — does not register at all, because the
-trait's arguments are resolved to concrete types when impls are collected and
-`T` is not one. That is a general hole, not a `FromIterator` one.
+trait — `impl<T> Make<T> for Pair<T>` — did not register at all, because the
+trait's arguments were resolved to concrete types when impls are collected and
+`T` is not one. That hole is closed now; see G9.24. The decision below stands
+on its own merits and was not reversed.
 
 The element is an **associated type** now. A type is collected into from one
 element type and no other: there is no "collect a `Vec<T>` from an iterator of
@@ -2429,6 +2430,31 @@ and the frontend does not emit arithmetic on two literals.
 
 It stays because it is correct, costs nothing at run time, and closes a §8
 item — not because it was worth 62 instructions.
+
+**G9.24 — a generic impl may implement a parameterized trait.**
+`impl<T> Make<T> for Pair<T>`, and `impl<T> From<T> for Wrapper<T>` with it.
+
+The arguments a trait is given were resolved to concrete types when impls are
+collected, and an impl's own parameter is not one — so such an impl was
+dropped with an error about `T` not being a type, and every method on it was
+missing afterwards. This is what made Ch. 5 §3.3's `FromIterator` take an
+associated type instead of the parameter it was first written with (G9.20);
+that decision stands on its own merits and was not reversed.
+
+An impl whose trait arguments are **exactly its own parameters** needs no
+qualifier to tell it from another, because there cannot *be* another: the
+arguments are determined by the self type, so two such impls for one
+(type, trait) would be the same impl. Which arguments it means for a given
+instantiation is worked out then rather than recorded at the impl — the same
+shape as a blanket rule's bounds, and in the same place, so a bound like
+`P: Make<t27>` is satisfied by asking rather than by looking a pair up.
+
+*Not done, and it is the next thing in the way.* Ch. 4 §5.5's `From` and
+`Into` are **not in the prelude**, so a program that wants them declares them,
+which is what every test here does. Putting them in the prelude collides with
+exactly those programs: the shadowing rule is about *named* items, and an impl
+has no name. Extending shadowing to cover impls is what that needs, and it is
+a question about coherence rather than about conversion.
 
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
