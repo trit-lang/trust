@@ -430,10 +430,15 @@ let v: Vec<t27> = it.map(|x| x * x).filter(|y| y % 2 != 0).collect();
 let s: String = text.chars().map(f).collect();
 ```
 
-What is left of the chapter is `insert` and `remove` (both want the
-`copy_within` §7 reserves), `collect` and `FromIterator`, `push_str`, and
-`F: Fn(A) -> B` as a written bound, without which the adaptors need their
-closures annotated.
+`Vec` is finished: `insert`, `remove`, `with_capacity` and `push_str` are
+built (G9.21), and the claim that `insert` waited on a `copy_within` §7
+reserved was wrong — §7 reserved nothing of the kind, and now reserves it
+properly as the slice method it is.
+
+What is left of Ch. 5 is `Cell`/`RefCell` (§5), `expect`, formatting, maps and
+sets, sorting and `Rc` — all of §7, all reserved. The nearest thing that is
+merely unbuilt is an `impl` on a concrete instantiation (`impl Vec<char>`),
+which is what would let `String`'s methods be written in Trust.
 
 **B. Backend quality.** The instruction stream is a third of what it was
 (G8.6–G8.13, −66.6% on HPL), and memory is nearly out of the picture: frame

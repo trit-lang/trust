@@ -394,11 +394,19 @@ this language has no way to say that.
 | `pop() -> Option<T>` | moves the last element out; `None` when empty |
 | `len()`, `capacity()`, `is_empty()` | the second word, the third, and a test on the second |
 | `reserve(n)` | room for `n` **more** than there are |
+| `with_capacity(n)` | empty, with room for `n` |
 | `clear()` | drops every element; keeps the allocation |
+| `insert(i, x)`, `remove(i)` | move a run of elements by one place |
 | `v[i]` | bounds-checked against the **length** |
 
-`insert` and `remove` are **not built**: both shift a run of elements, and the
-shift is the same operation as `copy_within`, which §7 reserves.
+`insert` accepts `i == len`, which is `push`; `remove` returns the element,
+read before the shift so that the shift does not drop it. Both shifts are
+copies of storage and therefore moves of every element in them (Ch. 3 §1.2),
+and `insert`'s runs **downwards**, because a forward copy moving a block up
+overwrites what it has yet to read.
+
+A slice's own `copy_within` — the same operation where a program can call it —
+is §7's, and is not defined.
 
 Indexing is bounds-checked against the **length**, not the capacity — the room
 beyond it holds nothing a program may read. `capacity` is the only method that
@@ -422,10 +430,11 @@ This and `&Concrete` to `&dyn Trait` (Ch. 4 §3.2) are the only implicit
 conversions in the language, and both convert a *representation* rather than a
 value.
 
-`String` **is** `Vec<char>` — not a wrapper around one — so it needs no rules
-of its own: `String::new` and `push(char)` are `Vec`'s, `&String` becomes
-`&str` by the coercion above, and every method §1.3 gives a string applies to
-one the moment it does. `push_str(&str)` is not built.
+`String` **is** `Vec<char>` — not a wrapper around one — so it needs almost no
+rules of its own: `String::new`, `with_capacity` and `push(char)` are `Vec`'s,
+`&String` becomes `&str` by the coercion above, and every method §1.3 gives a
+string applies to one the moment it does. `push_str(&str)` is the one method
+that is a `String`'s alone, and it is a loop around `push`.
 
 ---
 
@@ -783,6 +792,11 @@ and is derivable (Ch. 4 §6) field by field.
   order is part of the interface whether or not it was meant to be.
 - **Sorting.** `[T]::sort` needs either an allocation for a merge sort or a
   statement about worst cases for a quicksort, and neither is decided.
+- **`[T]::copy_within`, and the slice-to-slice copies beside it.** `Vec`'s
+  `insert` and `remove` do this operation inside themselves, where it is the
+  compiler's and not a program's; offering it on a slice is a separate
+  question, because a program can then overlap two ranges of its own
+  choosing.
 - **Time, files, processes, environment.** The AM is pure and I/O is per
   target (AM §5). Anything beyond the character ports is a target's business.
 - **`Rc`, `Arc`, and any shared ownership.** `Rc` is writable once `Cell`

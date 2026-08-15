@@ -1525,6 +1525,9 @@ const BUILTIN_METHODS: &[&str] = &[
     "pop",
     "clear",
     "reserve",
+    "insert",
+    "remove",
+    "push_str",
     "capacity",
     "is_empty",
     "wrapping_add",
@@ -6422,6 +6425,43 @@ impl Fn<'_> {
             }
 
             // `v.reserve(n)` — room for `n` more.
+            // `v.insert(i, x)` and `v.remove(i)` — Ch. 5 §2.6.
+            "insert" if matches!(peel(&ty), Ty::VecOf(_)) => {
+                let elem = vec_elem(&ty, "insert", line)?;
+                let [at, x] = args else {
+                    return err(line, "`insert` takes an index and a value");
+                };
+                let (at, _) = self.expr(at, Some(&Ty::TAddr))?;
+                let (x, xt) = self.expr(x, Some(&elem))?;
+                self.check(&xt, &elem, line, "`insert`'s value")?;
+                self.vec_insert(v, &elem, at, x, line)?;
+                Ok((unit(), Ty::Unit))
+            }
+
+            "remove" if matches!(peel(&ty), Ty::VecOf(_)) => {
+                let elem = vec_elem(&ty, "remove", line)?;
+                let [at] = args else {
+                    return err(line, "`remove` takes an index");
+                };
+                let (at, _) = self.expr(at, Some(&Ty::TAddr))?;
+                self.vec_remove(v, &elem, at, line)
+            }
+
+            // `s.push_str(t)` — Ch. 5 §2.6, on a `String`.
+            "push_str" => {
+                let elem = vec_elem(&ty, "push_str", line)?;
+                if elem != Ty::Char {
+                    return err(
+                        line,
+                        format!("`push_str` applies to a `String`, not to a `Vec<{elem}>`"),
+                    );
+                }
+                let want = Ty::Ref(Box::new(Ty::Slice(Box::new(Ty::Char))), false);
+                let t = one_arg(self, &want)?;
+                self.vec_push_str(v, t, line)?;
+                Ok((unit(), Ty::Unit))
+            }
+
             "reserve" => {
                 let elem = vec_elem(&ty, "reserve", line)?;
                 let n = one_arg(self, &Ty::TAddr)?;
@@ -6919,6 +6959,247 @@ impl Fn<'_> {
         self.store_at(&i, 0, &Ty::TAddr, next, line)?;
         self.jump(&head);
         self.start(out);
+        Ok(())
+    }
+
+    /// Copy `n` trytes from `src` to `dst` **downwards**, so that the two may
+    /// overlap with `dst` above `src`.
+    ///
+    /// `copy_n_trytes` walks up and would overwrite what it has yet to read.
+    /// Which direction is safe is a property of which way the block moves,
+    /// and `Vec::insert` moves one up.
+    fn copy_n_trytes_back(&mut self, dst: Operand, src: Operand, n: Operand, line: Line) -> R<()> {
+        let i = self.temp_slot(&Ty::TAddr);
+        self.store_at(&i, 0, &Ty::TAddr, n, line)?;
+        let (head, body, done) = (
+            self.fresh("cpb.head"),
+            self.fresh("cpb.body"),
+            self.fresh("cpb.done"),
+        );
+        self.jump(&head);
+        self.start(head.clone());
+        let at = self.load_slot(&i, &Ty::TAddr);
+        let c = self.emit(
+            "c",
+            Type::Int(1),
+            InstKind::Cmp {
+                ty: Type::Int(27),
+                a: at.clone(),
+                b: konst_addr(0),
+            },
+        );
+        self.br3(c, &done, &done, &body);
+        self.start(body);
+        let at = self.apply_binary("-", at, konst_addr(1), &Ty::TAddr, line)?;
+        self.store_at(&i, 0, &Ty::TAddr, at.clone(), line)?;
+        let from = self.emit(
+            "e",
+            Type::Ptr,
+            InstKind::Offset {
+                p: src,
+                d: at.clone(),
+            },
+        );
+        let to = self.emit("e", Type::Ptr, InstKind::Offset { p: dst, d: at });
+        let v = self.load_from(from, &Ty::T9);
+        self.push(Inst {
+            results: Vec::new(),
+            kind: InstKind::Store {
+                ty: Type::Int(9),
+                v,
+                p: to,
+            },
+        });
+        self.jump(&head);
+        self.start(done);
+        Ok(())
+    }
+
+    /// The element count times the element size, as trytes.
+    fn elems_in_trytes(&mut self, n: Operand, size: i128, line: Line) -> R<Operand> {
+        self.apply_binary("*", n, konst_addr(size), &Ty::TAddr, line)
+    }
+
+    /// `v.insert(i, x)` and `v.remove(i)` — Ch. 5 §2.6.
+    ///
+    /// Both move a run of elements by one place, which is a copy of storage
+    /// and therefore a move of every element in it (Ch. 3 §1.2). The shift is
+    /// tryte-wise, so an element holding a reference loses its provenance in
+    /// the interpreter for the reason an enum's payload does — G6.7.
+    fn vec_insert(&mut self, at: Operand, elem: &Ty, i: Operand, x: Operand, line: Line) -> R<()> {
+        let size = self.types.layout(elem).size as i128;
+        let len_at = self.offset(at.clone(), 3);
+        let len = self.load_from(len_at.clone(), &Ty::TAddr);
+        // `i == len` is `push`, and is the one index past the end that is
+        // not an error.
+        self.bounds_check(i.clone(), len.clone(), true, line)?;
+
+        // Make room, which may move the allocation — so the base is read
+        // after, not before.
+        self.vec_reserve(at.clone(), elem, konst_addr(1), line)?;
+        let len = self.load_from(len_at.clone(), &Ty::TAddr);
+        let base = self.load_ptr(at.clone());
+        let moved = self.apply_binary("-", len.clone(), i.clone(), &Ty::TAddr, line)?;
+        let bytes = self.elems_in_trytes(moved, size, line)?;
+        let from_off = self.elems_in_trytes(i.clone(), size, line)?;
+        let src = self.emit(
+            "e",
+            Type::Ptr,
+            InstKind::Offset {
+                p: base.clone(),
+                d: from_off,
+            },
+        );
+        let to_off = self.apply_binary("+", i.clone(), konst_addr(1), &Ty::TAddr, line)?;
+        let to_off = self.elems_in_trytes(to_off, size, line)?;
+        let dst = self.emit("e", Type::Ptr, InstKind::Offset { p: base, d: to_off });
+        self.copy_n_trytes_back(dst, src, bytes, line)?;
+
+        let slot = self.vec_elem_addr(at.clone(), i, size, line)?;
+        if elem.is_aggregate() {
+            self.copy_typed(slot, x, elem, line)?;
+        } else {
+            self.push(Inst {
+                results: Vec::new(),
+                kind: InstKind::Store {
+                    ty: elem.tir(),
+                    v: x,
+                    p: slot,
+                },
+            });
+        }
+        let next = self.apply_binary("+", len, konst_addr(1), &Ty::TAddr, line)?;
+        self.store_at_operand(len_at, &Ty::TAddr, next, line)
+    }
+
+    fn vec_remove(&mut self, at: Operand, elem: &Ty, i: Operand, line: Line) -> R<(Operand, Ty)> {
+        let size = self.types.layout(elem).size as i128;
+        let len_at = self.offset(at.clone(), 3);
+        let len = self.load_from(len_at.clone(), &Ty::TAddr);
+        self.bounds_check(i.clone(), len.clone(), false, line)?;
+
+        // The element leaves the `Vec`, so it is read before the shift and
+        // is not dropped by it.
+        let e = self.vec_elem_addr(at.clone(), i.clone(), size, line)?;
+        let out = if elem.is_aggregate() {
+            let tmp = self.temp_slot(elem);
+            self.copy_typed(Operand::Value(tmp.clone()), e, elem, line)?;
+            Operand::Value(tmp)
+        } else {
+            self.load_from(e, elem)
+        };
+
+        let base = self.load_ptr(at.clone());
+        let after = self.apply_binary("-", len.clone(), i.clone(), &Ty::TAddr, line)?;
+        let after = self.apply_binary("-", after, konst_addr(1), &Ty::TAddr, line)?;
+        let bytes = self.elems_in_trytes(after, size, line)?;
+        let from_off = self.apply_binary("+", i.clone(), konst_addr(1), &Ty::TAddr, line)?;
+        let from_off = self.elems_in_trytes(from_off, size, line)?;
+        let src = self.emit(
+            "e",
+            Type::Ptr,
+            InstKind::Offset {
+                p: base.clone(),
+                d: from_off,
+            },
+        );
+        let to_off = self.elems_in_trytes(i, size, line)?;
+        let dst = self.emit("e", Type::Ptr, InstKind::Offset { p: base, d: to_off });
+        self.copy_n_trytes(dst, src, bytes, line)?;
+
+        let next = self.apply_binary("-", len, konst_addr(1), &Ty::TAddr, line)?;
+        self.store_at_operand(len_at, &Ty::TAddr, next, line)?;
+        Ok((out, elem.clone()))
+    }
+
+    /// Trap unless `0 <= i < limit`, or `<=` when the end is allowed.
+    fn bounds_check(&mut self, i: Operand, limit: Operand, inclusive: bool, _line: Line) -> R<()> {
+        let (bad, lo, ok) = (
+            self.fresh("ins.fault"),
+            self.fresh("ins.lo"),
+            self.fresh("ins.ok"),
+        );
+        let c = self.emit(
+            "c",
+            Type::Int(1),
+            InstKind::Cmp {
+                ty: Type::Int(27),
+                a: i.clone(),
+                b: limit,
+            },
+        );
+        if inclusive {
+            self.br3(c, &lo, &lo, &bad);
+        } else {
+            self.br3(c, &lo, &bad, &bad);
+        }
+        self.start(bad);
+        self.finish(Terminator::Trap(FaultCode::Trap));
+        self.start(lo);
+        let c = self.emit(
+            "c",
+            Type::Int(1),
+            InstKind::Cmp {
+                ty: Type::Int(27),
+                a: i,
+                b: konst_addr(0),
+            },
+        );
+        let bad2 = self.fresh("ins.neg");
+        self.br3(c, &bad2, &ok, &ok);
+        self.start(bad2);
+        self.finish(Terminator::Trap(FaultCode::Trap));
+        self.start(ok);
+        Ok(())
+    }
+
+    /// `s.push_str(t)` — Ch. 5 §2.6, on a `String`.
+    ///
+    /// A loop around `push`, which is what it would be if it were written in
+    /// the library. It is not, because an `impl` on a *concrete*
+    /// instantiation — `impl Vec<char>` — is not written yet (G9.21).
+    fn vec_push_str(&mut self, at: Operand, s: Operand, line: Line) -> R<()> {
+        let n = {
+            let a = self.offset(s.clone(), 3);
+            self.load_from(a, &Ty::TAddr)
+        };
+        let base = self.load_ptr(s);
+        let i = self.temp_slot(&Ty::TAddr);
+        self.store_at(&i, 0, &Ty::TAddr, konst_addr(0), line)?;
+        let (head, body, done) = (
+            self.fresh("pstr.head"),
+            self.fresh("pstr.body"),
+            self.fresh("pstr.done"),
+        );
+        self.jump(&head);
+        self.start(head.clone());
+        let at_i = self.load_slot(&i, &Ty::TAddr);
+        let c = self.emit(
+            "c",
+            Type::Int(1),
+            InstKind::Cmp {
+                ty: Type::Int(27),
+                a: at_i.clone(),
+                b: n,
+            },
+        );
+        self.br3(c, &body, &done, &done);
+        self.start(body);
+        let off = self.apply_binary("*", at_i.clone(), konst_addr(3), &Ty::TAddr, line)?;
+        let p = self.emit(
+            "e",
+            Type::Ptr,
+            InstKind::Offset {
+                p: base.clone(),
+                d: off,
+            },
+        );
+        let ch = self.load_from(p, &Ty::Char);
+        self.vec_push(at, &Ty::Char, ch, line)?;
+        let next = self.apply_binary("+", at_i, konst_addr(1), &Ty::TAddr, line)?;
+        self.store_at(&i, 0, &Ty::TAddr, next, line)?;
+        self.jump(&head);
+        self.start(done);
         Ok(())
     }
 
@@ -8931,6 +9212,43 @@ impl Fn<'_> {
         // no room. An empty `Vec` allocates nothing, which is why the
         // pointer's zero is a value it takes rather than a niche it offers
         // (Ch. 5 §2.6).
+        // `Vec::with_capacity(n)` — an empty `Vec` with room for `n`, which
+        // is `new` and then `reserve` and is spelled once because that is
+        // what a program means by it (Ch. 5 §2.6).
+        if path.segments.len() == 2
+            && (head == "Vec" || head == "String" || head.starts_with("Vec."))
+            && path.segments[1] == "with_capacity"
+        {
+            let [(_, arg)] = fields else {
+                return err(line, "`with_capacity` takes one argument");
+            };
+            let elem = match expected {
+                Some(Ty::VecOf(e)) => (**e).clone(),
+                _ if head == "String" => Ty::Char,
+                _ => {
+                    return err(
+                        line,
+                        "cannot tell what `Vec::with_capacity` holds; write the type of \
+                         this value (Ch. 4 §2.3)",
+                    );
+                }
+            };
+            let ty = Ty::VecOf(Box::new(elem.clone()));
+            let slot = self.temp_slot(&ty);
+            for off in [0, 3, 6] {
+                self.store_at(
+                    &slot,
+                    off,
+                    &Ty::TAddr,
+                    Operand::Const(Type::Int(27), Bt::ZERO),
+                    line,
+                )?;
+            }
+            let (n, _) = self.expr(arg, Some(&Ty::TAddr))?;
+            self.vec_reserve(Operand::Value(slot.clone()), &elem, n, line)?;
+            return Ok((Operand::Value(slot), ty));
+        }
+
         if path.segments.len() == 2
             && (head == "Vec" || head == "String" || head.starts_with("Vec."))
             && path.segments[1] == "new"

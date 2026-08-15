@@ -2240,6 +2240,32 @@ compiler was right: `%` is the **symmetric** remainder, so `3 % 2` is −1 and
 `y % 2 == 1` is never true. Written `!= 0` it works. Ch. 1 §4's rounding, in
 the fourth different place this session.
 
+**G9.21 — the rest of `Vec`, and a reservation that was not there.**
+`insert`, `remove`, `with_capacity` and `push_str`.
+
+*A correction.* G9.14 said `insert` and `remove` stayed unbuilt because the
+shift "is `copy_within`, which §7 reserves". §7 reserved no such thing — that
+sentence pointed at a reservation that did not exist, and I wrote both it and
+the §2.6 prose citing it. The reasoning was wrong twice over: `push` already
+copies memory inside itself, so a shift inside `Vec` decides nothing about
+what a *program* may call on a slice. §7 now reserves `copy_within` properly,
+as the slice method it is, and says why that is a separate question: a program
+can overlap two ranges of its own choosing.
+
+`insert` accepts `i == len`, which is `push`. `remove` reads the element
+**before** the shift, so the shift does not drop it and the caller owns it
+exactly once — checked with the ledger, which is still the only thing that can
+say so. `insert`'s shift runs **downwards**: a forward copy moving a block up
+overwrites what it has yet to read, and which direction is safe is a property
+of which way the block moves.
+
+`push_str` is a loop around `push` and is in the compiler rather than the
+library for one reason: an `impl` on a **concrete instantiation** —
+`impl Vec<char>` — is rejected with "an impl's type parameters and its self
+type's arguments must agree". That is the next thing in the way of writing
+`String`'s methods in Trust, and it is not `Vec`-specific: `impl Pair<t27>`
+fails the same way.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

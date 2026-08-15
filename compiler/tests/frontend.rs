@@ -3985,3 +3985,64 @@ fn an_associated_function_of_a_generic_type_resolves() {
         10
     );
 }
+
+#[test]
+fn a_vec_inserts_and_removes() {
+    // Both move a run of elements by one place. `insert` moves *up*, which
+    // the forward copy cannot do — it would overwrite what it has yet to
+    // read — so there is a second loop that walks down (Ch. 5 §2.6).
+    assert_eq!(
+        run("fn main() -> t27 { \
+                 let mut v: Vec<t27> = Vec::new(); \
+                 v.push(1); v.push(2); v.push(4); \
+                 v.insert(2, 3); \
+                 v.insert(0, 0); \
+                 v.insert(5, 5); \
+                 let r: t27 = v.remove(0); \
+                 let q: t27 = v.remove(2); \
+                 let mut s: t27 = 0; \
+                 let mut i: taddr = 0; \
+                 while i < v.len() { s = s * 10 + v[i]; i += 1; } \
+                 s * 100 + r * 10 + q \
+             }")
+        .0,
+        // 1 2 4 5 remain; 0 came off the front and 3 out of the middle.
+        1245 * 100 + 3
+    );
+}
+
+#[test]
+fn a_removed_element_leaves_the_vec() {
+    // It is read *before* the shift, so the shift does not drop it and the
+    // caller owns it exactly once — which the ledger is the only thing that
+    // can say.
+    let (_, out) = run("struct Port { id: t27 } \
+         impl Drop for Port { \
+             fn drop(self) { print_char(char::try_from(48 + self.id).unwrap()); } \
+         } \
+         fn main() -> t27 { \
+             let mut v: Vec<Port> = Vec::new(); \
+             v.push(Port { id: 1 }); \
+             v.push(Port { id: 3 }); \
+             v.insert(1, Port { id: 2 }); \
+             print_char('['); \
+             { let taken: Port = v.remove(1); print_char('|'); } \
+             print_char(']'); \
+             0 \
+         }");
+    assert_eq!(out, "[|2]13");
+}
+
+#[test]
+fn a_string_appends_a_string() {
+    let (status, out) = run("fn main() -> t27 { \
+             let mut s: String = String::with_capacity(4); \
+             s.push_str(\"ab\"); \
+             s.push_str(\"cd\"); \
+             print(&s); \
+             (s.capacity() as t27) * 10 + (s.len() as t27) \
+         }");
+    assert_eq!(out, "abcd");
+    // The room asked for was enough, so nothing grew.
+    assert_eq!(status, 44);
+}
