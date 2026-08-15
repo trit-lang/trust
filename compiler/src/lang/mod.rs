@@ -271,9 +271,12 @@ struct Skip<I> { inner: I, left: taddr }
 struct Enumerate<I> { inner: I, at: taddr }
 struct Zip<A, B> { a: A, b: B }
 
-impl<I, F> Iterator for Map<I, F> {
-    type Item = t27;
-    fn next(&mut self) -> Option<t27> {
+// `Item` is the closure's result, not a fixed type: `B` is named by no
+// argument of `Map` and is settled by `F`'s bound, because a closure has one
+// signature and it is recorded (Ch. 4 §4.3, Ch. 5 §3.1).
+impl<I: Iterator, B, F: Fn(I::Item) -> B> Iterator for Map<I, F> {
+    type Item = B;
+    fn next(&mut self) -> Option<B> {
         match self.inner.next() {
             Option::Some(x) => Option::Some((self.f)(x)),
             Option::None => Option::None,

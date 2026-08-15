@@ -527,6 +527,50 @@ Which one a closure implements follows from how it uses its captures:
 A plain function's name coerces to all three, so `apply(xs, double)` and
 `apply(xs, |x| x * 2)` both work.
 
+The bound is written in either of two places, and they mean the same thing:
+
+```
+fn twice(f: impl Fn(t27) -> t27, x: t27) -> t27 { f(f(x)) }   // §2.2
+fn twice<F: Fn(t27) -> t27>(f: F, x: t27) -> t27 { f(f(x)) }  // the same
+```
+
+`impl Fn(…)` invents a name for the parameter and gives it this bound, so the
+second form is the first with the name written down. Nothing after the
+grammar can tell them apart.
+
+**A `Fn` bound settles the parameters its signature names.** A closure has one
+signature, so given the closure, the bound says what everything in it is:
+
+```
+impl<I: Iterator, B, F: Fn(I::Item) -> B> Iterator for Map<I, F> {
+    type Item = B;
+    …
+}
+```
+
+`Map` takes two arguments and the impl has three parameters. `B` appears in no
+argument of the self type; it is determined by `F`, and `F` is the closure
+that was passed. This is the rule that lets an adaptor's `Item` be the
+closure's result rather than a fixed type — without it, §5.7's `Map` can only
+be written for one output type, which is not `Map`.
+
+The same applies where a *method* names the parameter:
+
+```
+fn map<B, F: Fn(Self::Item) -> B>(self, f: F) -> Map<Self, F>
+```
+
+`Self` is substituted in a method's bounds as it is in its types, and the
+bound is checked under the environment of the call that instantiated it,
+because `B` belongs to that call.
+
+> **Not implemented.** A method with type parameters of its own, inside a
+> *generic* impl. `map` above is fine on `impl Iterator for Upto` and not on
+> `impl<I, B, F> Iterator for Map<I, F>`, so a chain of one adaptor works and
+> a chain of two does not: settling the impl's parameters and the method's
+> needs one instantiation to happen in two stages, and instantiation is a
+> single step today.
+
 ### 4.4 Capture
 
 A closure captures each place it mentions, by the weakest form that suffices:

@@ -408,6 +408,12 @@ through a reference may be read and borrowed but not moved out of (Ch. 3
 §1.3), and a block-shaped expression in statement position ends its statement
 (Ch. 0 §5.2).
 
+`F: Fn(A) -> B` is a bound a program can write now (G9.18), so `Map`'s `Item`
+is the closure's result rather than a fixed `t27` — it had been silently wrong
+for every closure returning anything else. What still stands between §3.1's
+table and being methods is a method with type parameters of its own inside a
+*generic* impl: a chain of one adaptor works, a chain of two does not.
+
 What is left of the chapter is `insert` and `remove` (both want the
 `copy_within` §7 reserves), `collect` and `FromIterator`, `push_str`, and
 `F: Fn(A) -> B` as a written bound, without which the adaptors need their

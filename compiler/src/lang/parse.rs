@@ -409,6 +409,19 @@ impl Parser {
     /// which is the whole reason a trait may carry parameters.
     fn bound(&mut self) -> R<Bound> {
         let name = self.expect_ident()?;
+        // `Fn(A) -> B` is the same bound `impl Fn(A) -> B` gives an anonymous
+        // parameter, written where the parameter has a name (Ch. 4 §4.3).
+        // It is stored as arguments and an `Output` binding — which is what
+        // the bound would be if `Fn` were an ordinary trait — so the bound
+        // machinery needs no case of its own until the desugaring.
+        if matches!(name.as_str(), "Fn" | "FnMut" | "FnOnce") && self.at_op("(") {
+            let args = self.type_list("(", ")")?;
+            let mut assoc = Vec::new();
+            if self.eat_op("->") {
+                assoc.push(("Output".to_string(), self.ty()?));
+            }
+            return Ok(Bound { name, args, assoc });
+        }
         let (args, assoc) = self.bound_args()?;
         Ok(Bound { name, args, assoc })
     }

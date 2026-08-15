@@ -2111,6 +2111,56 @@ calls `.next()` on the loop's expression directly, where Ch. 4 §5.7 says it
 calls `IntoIterator::into_iter` first. The two are the same fix — the trait
 and the blanket impl are writable today, and the impl on `&str` is not.
 
+**G9.18 — `F: Fn(A) -> B` as a written bound, and what it was hiding.**
+Ch. 5 §3's adaptors were built and could not be used. Checking why turned up
+worse than the recorded "closures need annotations":
+
+- `it.map(f)` did not resolve at all — `map` was not a method on `Iterator`,
+  and nothing handed a program a `Map` except writing the struct literal out.
+- `Map`'s `Item` was a **fixed `t27`**, because there was no way to name the
+  closure's result. Silently wrong for every closure returning anything else,
+  and nothing tested it.
+
+Both are the same missing thing. `impl Fn(A) -> B` in argument position had
+existed since Ch. 4 §2.2 as an anonymous type parameter with a bound; what was
+missing was writing that bound where the parameter has a **name**. It is now
+the same desugaring from both spellings, and nothing after the grammar can
+tell them apart.
+
+Four things had to follow.
+
+**A `Fn` bound settles the parameters its signature names.** `impl<I, B, F:
+Fn(I::Item) -> B> Iterator for Map<I, F>` has three parameters where `Map`
+takes two, and an impl's parameters were matched to the self type's arguments
+by *position*. They are matched by name now, and a parameter the self type
+does not name is settled from a closure's recorded signature — which is
+possible because a closure has exactly one. `Map`'s `Item` is `B`.
+
+**The associated type needed the same.** `type Item = B` is resolved when the
+instantiation exists, from a table that had the same positional zip, and it
+reported `Map<Count, closure2>` "chooses no type for `Item`". The existing
+test caught this, which is the second time an exact-output test has caught a
+change nobody wrote it for.
+
+**`Self` is substituted in bounds.** `fn map<B, F: Fn(Self::Item) -> B>`
+writes `Self` where a method's *constraints* are, and substitution walked its
+types only. A `Self` surviving to lowering is one written where there is no
+impl, so it was reported as exactly that — truthfully and unhelpfully.
+
+**A bound is checked under the call's environment.** `B` belongs to the call
+that instantiated the method, not to the function being lowered, and the
+check used the latter.
+
+*Not implemented, and the boundary is exact:* a method with type parameters
+of its own **inside a generic impl**. `map` works on `impl Iterator for Upto`
+and not on `impl<I, B, F> Iterator for Map<I, F>`, so **a chain of one adaptor
+works and a chain of two does not**. Settling the impl's parameters and the
+method's needs one instantiation in two stages, and instantiation is a single
+step: `instantiate_with` wants a complete environment, and `generic_fns` is
+borrowed immutably, so a partially-specialized method has nowhere to live.
+That is the next piece, and it is what stands between here and §3.1's table
+being methods rather than struct literals.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

@@ -362,7 +362,7 @@ pub struct Types {
     /// the impl's parameter names. `impl<I> Iterator for Map<I>` may choose
     /// `I::Item`, and what that is depends on the instantiation, so the
     /// choice cannot be resolved until there is one (Ch. 4 §1.7).
-    generic_assoc: HashMap<(String, String), (Vec<String>, ast::Ty)>,
+    generic_assoc: HashMap<(String, String), AssocChoice>,
 }
 
 /// What a closure's anonymous type stands for (Ch. 4 §4.2).
@@ -376,6 +376,92 @@ struct ClosureInfo {
     ret: Ty,
     /// Which of §4.3's traits it implements.
     kind: ast::FnKind,
+}
+
+/// What a generic impl chose for one associated type: its parameters in the
+/// self type's order, the ones the self type does not name, and the choice
+/// as written.
+type AssocChoice = (Vec<String>, Vec<Extra>, ast::Ty);
+
+/// A generic impl's type parameter that the *self type* does not name, and
+/// where its value comes from: a closure argument's signature.
+///
+/// `impl<I, B, F: Fn(I::Item) -> B> Iterator for Map<I, F>` has three
+/// parameters and `Map` takes two. `B` is settled by `F`, which is the
+/// closure — and a closure has one signature, recorded when it was lowered
+/// (Ch. 4 §4.3).
+#[derive(Clone, Debug)]
+struct Extra {
+    /// The parameter being settled.
+    param: String,
+    /// Which of the self type's arguments holds the closure.
+    from: usize,
+    /// Its result (`None`) or the parameter at this position.
+    part: Option<usize>,
+}
+
+/// The impl's parameters in the order its self type names them, and the ones
+/// it does not name at all.
+fn impl_params(imp: &ast::ImplItem) -> (Vec<String>, Vec<Extra>) {
+    let mut named: Vec<String> = Vec::new();
+    for a in &imp.self_args {
+        if let ast::Ty::Name(n, _) = a
+            && imp.generics.iter().any(|g| g.name() == n)
+            && !named.contains(n)
+        {
+            named.push(n.clone());
+        }
+    }
+    let mut extras = Vec::new();
+    for g in &imp.generics {
+        let name = g.name().to_string();
+        if named.contains(&name) {
+            continue;
+        }
+        let ast::GenericParam::Type { bounds, .. } = g else {
+            continue;
+        };
+        // Which other parameter's `Fn` bound mentions this one, and where.
+        'search: for other in &imp.generics {
+            let ast::GenericParam::Type {
+                name: on,
+                bounds: ob,
+            } = other
+            else {
+                continue;
+            };
+            let Some(from) = named.iter().position(|n| n == on) else {
+                continue;
+            };
+            for b in ob {
+                if fn_kind(&b.name).is_none() {
+                    continue;
+                }
+                if let Some((_, t)) = b.assoc.iter().find(|(n, _)| n == "Output")
+                    && matches!(t, ast::Ty::Name(n, _) if *n == name)
+                {
+                    extras.push(Extra {
+                        param: name.clone(),
+                        from,
+                        part: None,
+                    });
+                    break 'search;
+                }
+                for (i, a) in b.args.iter().enumerate() {
+                    if matches!(a, ast::Ty::Name(n, _) if *n == name) {
+                        extras.push(Extra {
+                            param: name.clone(),
+                            from,
+                            part: Some(i),
+                        });
+                        break 'search;
+                    }
+                }
+            }
+        }
+        let _ = bounds;
+    }
+    (named, extras)
 }
 
 /// One enum variant, resolved.
@@ -400,7 +486,8 @@ impl Types {
         let Some((base, args)) = self.instantiations.borrow().get(&mangled).cloned() else {
             return Ok(None);
         };
-        let Some((params, written)) = self.generic_assoc.get(&(base, name.to_string())).cloned()
+        let Some((params, extras, written)) =
+            self.generic_assoc.get(&(base, name.to_string())).cloned()
         else {
             return Ok(None);
         };
@@ -410,7 +497,37 @@ impl Types {
                 format!("`{mangled}` chooses no type for `{name}` (Ch. 4 §1.7)"),
             );
         }
-        let env: HashMap<String, Ty> = params.into_iter().zip(args).collect();
+        let mut env: HashMap<String, Ty> = params.into_iter().zip(args.iter().cloned()).collect();
+        // The parameters the self type does not name, each settled by a
+        // closure's recorded signature (Ch. 4 §4.3). This is what lets
+        // `Map`'s `Item` be `B` rather than a fixed type.
+        for e in &extras {
+            let Some(cname) = args.get(e.from).and_then(nominal_name) else {
+                return err(
+                    line,
+                    format!("`{mangled}` chooses no type for `{name}` (Ch. 4 §1.7)"),
+                );
+            };
+            let Some(info) = self.closures.borrow().get(&cname).cloned() else {
+                return err(
+                    line,
+                    format!("`{mangled}` chooses no type for `{name}` (Ch. 4 §1.7)"),
+                );
+            };
+            let t = match e.part {
+                None => info.ret.clone(),
+                Some(i) => match info.params.get(i) {
+                    Some(t) => t.clone(),
+                    None => {
+                        return err(
+                            line,
+                            format!("`{mangled}` chooses no type for `{name}` (Ch. 4 §1.7)"),
+                        );
+                    }
+                },
+            };
+            env.insert(e.param.clone(), t);
+        }
         let resolved = resolve_ty_env(&written, self, &env)?;
         self.assoc
             .borrow_mut()
@@ -732,6 +849,28 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
                     name: pname,
                     bounds: vec![ast::Bound::plain(format!("Fn@{key}"))],
                 });
+            }
+            // The same bound written on a parameter that already has a name.
+            // `impl Fn(…)` invents the name and then does exactly this, so
+            // the two forms meet here and nothing below can tell them apart
+            // (Ch. 4 §4.3).
+            for g in &mut f.generics {
+                let ast::GenericParam::Type { name, bounds } = g else {
+                    continue;
+                };
+                for b in bounds {
+                    let Some(kind) = fn_kind(&b.name) else {
+                        continue;
+                    };
+                    let key = format!("{}{name}", f.name);
+                    let ret = b
+                        .assoc
+                        .iter()
+                        .find(|(n, _)| n == "Output")
+                        .map(|(_, t)| t.clone());
+                    fn_bounds.insert(key.clone(), (kind, b.args.clone(), ret));
+                    *b = ast::Bound::plain(format!("Fn@{key}"));
+                }
             }
             f
         })
@@ -1417,6 +1556,16 @@ fn vec_elem(ty: &Ty, method: &str, line: Line) -> R<Ty> {
     }
 }
 
+/// The `Fn` family, by name, or `None` for any other trait.
+fn fn_kind(name: &str) -> Option<ast::FnKind> {
+    match name {
+        "Fn" => Some(ast::FnKind::Fn),
+        "FnMut" => Some(ast::FnKind::FnMut),
+        "FnOnce" => Some(ast::FnKind::FnOnce),
+        _ => None,
+    }
+}
+
 /// A `taddr` constant, which is what every size and index here is.
 fn konst_addr(v: i128) -> Operand {
     Operand::Const(Type::Int(27), Bt::from_i128(v))
@@ -1522,6 +1671,18 @@ fn subst_self(f: &ast::FnItem, self_ty: &SelfTy) -> ast::FnItem {
     let mut f = f.clone();
     for (_, t) in &mut f.params {
         subst_ty(t, self_ty);
+    }
+    // Bounds too. `fn map<B, F: Fn(Self::Item) -> B>` writes `Self` where the
+    // method's *constraints* are, not where its types are, and a `Self` that
+    // survives to lowering is one written where there is no impl.
+    for g in &mut f.generics {
+        let ast::GenericParam::Type { bounds, .. } = g else {
+            continue;
+        };
+        for b in bounds {
+            b.args.iter_mut().for_each(|t| subst_ty(t, self_ty));
+            b.assoc.iter_mut().for_each(|(_, t)| subst_ty(t, self_ty));
+        }
     }
     if let Some(t) = &mut f.ret {
         subst_ty(t, self_ty);
@@ -1926,7 +2087,27 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
                     });
                     continue;
                 }
-                f.generics.clone_from(&imp.generics);
+                // An impl's parameters are matched to the self type's
+                // arguments by *position*, so the ones the self type names
+                // are put first, in its order, and any left over follow.
+                //
+                // `impl<I: Iterator, B, F: Fn(I::Item) -> B> Iterator for
+                // Map<I, F>` has three parameters and `Map` takes two; `B`
+                // is not written in the self type and is determined by `F`'s
+                // bound instead (Ch. 4 §§2.1, 4.3).
+                let (named, _) = impl_params(imp);
+                let mut ordered: Vec<ast::GenericParam> = Vec::new();
+                for n in &named {
+                    if let Some(g) = imp.generics.iter().find(|g| g.name() == n) {
+                        ordered.push(g.clone());
+                    }
+                }
+                for g in &imp.generics {
+                    if !ordered.iter().any(|o| o.name() == g.name()) {
+                        ordered.push(g.clone());
+                    }
+                }
+                f.generics = ordered;
             }
             // A destructor keeps its own name so that `fn_key` gives it the
             // `drop.Type` key the drop machinery already uses (Ch. 3 §1.4).
@@ -2989,12 +3170,10 @@ fn build_types(file: &ast::File) -> R<Types> {
         // `assoc` being a cell was always for.
         if !imp.generics.is_empty() {
             for (name, t) in &imp.assoc {
+                let (named, extras) = impl_params(imp);
                 types.generic_assoc.insert(
                     (imp.self_ty.clone(), name.clone()),
-                    (
-                        imp.generics.iter().map(|g| g.name().to_string()).collect(),
-                        t.clone(),
-                    ),
+                    (named, extras, t.clone()),
                 );
             }
             continue;
@@ -5524,6 +5703,14 @@ impl Fn<'_> {
                      Ch. 4 §2.3, not implemented yet",
                 );
             };
+            // A parameter no argument's type mentions may still be settled
+            // by another's `Fn` bound: `map<B, F: Fn(A) -> B>` learns `B`
+            // from the closure it was handed (Ch. 4 §4.3).
+            if !env.contains_key(pname)
+                && let Some(t) = self.solve_from_fn_bounds(pname, &def.generics, &env)
+            {
+                env.insert(pname.clone(), t);
+            }
             let Some(ty) = env.get(pname) else {
                 return err(
                     line,
@@ -5611,7 +5798,7 @@ impl Fn<'_> {
         line: Line,
     ) -> R<()> {
         if bound.args.is_empty() {
-            self.check_bound(ty, &bound.name, callee, param, line)?;
+            self.check_bound(ty, &bound.name, env, callee, param, line)?;
             return self.check_assoc_bindings(ty, bound, env, param, line);
         }
         let args: Vec<Ty> = bound
@@ -5630,7 +5817,15 @@ impl Fn<'_> {
         // A rule that holds for every type satisfying a bound satisfies this
         // one too, wherever its own conditions hold (Ch. 4 §5.6).
         if !self.by_rule(ty, &bound.name, &args, 0) {
-            self.check_bound_named(ty, &mangle(&bound.name, &args), &shown, callee, param, line)?;
+            self.check_bound_named(
+                ty,
+                &mangle(&bound.name, &args),
+                &shown,
+                env,
+                callee,
+                param,
+                line,
+            )?;
         }
         self.check_assoc_bindings(ty, bound, env, param, line)
     }
@@ -5673,7 +5868,15 @@ impl Fn<'_> {
                     };
                     self.by_rule(ty, &b.name, &bargs, depth + 1)
                         || self
-                            .check_bound_named(ty, &mangle(&b.name, &bargs), "", "", "", rule.line)
+                            .check_bound_named(
+                                ty,
+                                &mangle(&b.name, &bargs),
+                                "",
+                                &HashMap::new(),
+                                "",
+                                "",
+                                rule.line,
+                            )
                             .is_ok()
                 })
             });
@@ -5684,8 +5887,16 @@ impl Fn<'_> {
         false
     }
 
-    fn check_bound(&self, ty: &Ty, bound: &str, callee: &str, param: &str, line: Line) -> R<()> {
-        self.check_bound_named(ty, bound, bound, callee, param, line)
+    fn check_bound(
+        &self,
+        ty: &Ty,
+        bound: &str,
+        env: &HashMap<String, Ty>,
+        callee: &str,
+        param: &str,
+        line: Line,
+    ) -> R<()> {
+        self.check_bound_named(ty, bound, bound, env, callee, param, line)
     }
 
     /// `Iterator<Item = t27>`: the implementation exists *and* chose this.
@@ -5734,11 +5945,13 @@ impl Fn<'_> {
 
     /// The same, with the requirement spelled for a reader rather than for
     /// the lookup: `From<t27>` names what `From.t27` finds.
+    #[allow(clippy::too_many_arguments)]
     fn check_bound_named(
         &self,
         ty: &Ty,
         bound: &str,
         shown: &str,
+        env: &HashMap<String, Ty>,
         callee: &str,
         param: &str,
         line: Line,
@@ -5748,7 +5961,7 @@ impl Fn<'_> {
         // `Fn@…` is the bound an `impl Fn(…)` parameter was given: satisfied
         // by a closure whose signature is the written one (Ch. 4 §§2.2, 4.3).
         if let Some(key) = bound.strip_prefix("Fn@") {
-            return self.check_fn_bound(ty, key, callee, param, line);
+            return self.check_fn_bound(ty, key, env, callee, param, line);
         }
         // A trait object implements its own trait, and its supertraits
         // (Ch. 4 §3.1): dispatch through it is what the vtable is for.
@@ -7244,7 +7457,15 @@ impl Fn<'_> {
 
     /// A closure satisfies `impl Fn(A) -> R` when its signature is that one
     /// and it captures no more strongly than the bound allows (Ch. 4 §4.3).
-    fn check_fn_bound(&self, ty: &Ty, key: &str, callee: &str, param: &str, line: Line) -> R<()> {
+    fn check_fn_bound(
+        &self,
+        ty: &Ty,
+        key: &str,
+        env: &HashMap<String, Ty>,
+        callee: &str,
+        param: &str,
+        line: Line,
+    ) -> R<()> {
         let (kind, want_params, want_ret) = self.fn_bounds[key].clone();
         let Some(name) = nominal_name(ty) else {
             return err(line, format!("`{ty}` is not a closure"));
@@ -7277,13 +7498,17 @@ impl Fn<'_> {
                 ),
             );
         }
+        // Under the *call's* environment: a bound may name the call's own
+        // type parameters, and `B` in `Fn(A) -> B` is exactly one of those.
+        let mut scope = self.env.clone();
+        scope.extend(env.iter().map(|(k, v)| (k.clone(), v.clone())));
         let want_params: Vec<Ty> = want_params
             .iter()
-            .map(|t| self.resolve(t))
+            .map(|t| resolve_ty_env(t, self.types, &scope))
             .collect::<R<_>>()?;
         let want_ret = match &want_ret {
             None => Ty::Unit,
-            Some(t) => self.resolve(t)?,
+            Some(t) => resolve_ty_env(t, self.types, &scope)?,
         };
         if info.params != want_params || info.ret != want_ret {
             return err(
@@ -7305,7 +7530,7 @@ impl Fn<'_> {
     /// visible to a program, and everything downstream sees a struct and a
     /// call.
     /// The signature a parameter's `Fn@…` bound asks for, if it has one.
-    fn fn_hint(&self, def: &ast::FnItem, want: &ast::Ty) -> R<Option<(Vec<Ty>, Ty)>> {
+    fn fn_hint(&self, def: &ast::FnItem, want: &ast::Ty) -> R<Option<(Vec<Ty>, Option<Ty>)>> {
         let ast::Ty::Name(pname, _) = want else {
             return Ok(None);
         };
@@ -7319,9 +7544,14 @@ impl Fn<'_> {
         };
         let (_, ps, r) = self.fn_bounds[key].clone();
         let ps: Vec<Ty> = ps.iter().map(|t| self.resolve(t)).collect::<R<_>>()?;
+        // The bound may leave the result a type parameter of its own —
+        // `fn map<B, F: Fn(A) -> B>` says nothing about `B` except that it is
+        // whatever the closure returns. So the hint carries no result there,
+        // and the closure's body decides (Ch. 4 §4.1).
         let r = match &r {
-            None => Ty::Unit,
-            Some(t) => self.resolve(t)?,
+            None => Some(Ty::Unit),
+            Some(ast::Ty::Name(n, _)) if def.generics.iter().any(|g| g.name() == n) => None,
+            Some(t) => Some(self.resolve(t)?),
         };
         Ok(Some((ps, r)))
     }
@@ -7331,7 +7561,7 @@ impl Fn<'_> {
         params: &[(String, Option<ast::Ty>)],
         ret: &Option<ast::Ty>,
         body: &ast::Expr,
-        hint: Option<(Vec<Ty>, Ty)>,
+        hint: Option<(Vec<Ty>, Option<Ty>)>,
         line: Line,
     ) -> R<(Operand, Ty)> {
         // The free names that are locals here are the captures (§4.4).
@@ -7377,10 +7607,12 @@ impl Fn<'_> {
         }
         let ret_ty = match (ret, hint.as_ref()) {
             (Some(t), _) => self.resolve(t)?,
-            (None, Some((_, r))) => r.clone(),
+            (None, Some((_, Some(r)))) => r.clone(),
             // Nothing in the context says, so read it off the body — which
-            // works for the forms that carry their type plainly.
-            (None, None) => {
+            // works for the forms that carry their type plainly. A hint whose
+            // result is a type parameter says nothing either, so it lands
+            // here too.
+            (None, Some((_, None)) | None) => {
                 let saved = self.scopes.len();
                 self.scopes.push(HashMap::new());
                 for ((n, _), t) in params.iter().zip(&param_tys) {
@@ -7909,19 +8141,90 @@ impl Fn<'_> {
         let Some(def) = self.generic_fns.get(&generic).cloned() else {
             return Ok(concrete);
         };
-        if def.generics.len() != args.len() {
+        if def.generics.len() < args.len() {
             return err(
                 line,
                 format!("`{base}::{name}` does not apply to `{type_name}`"),
             );
         }
-        let env: HashMap<String, Ty> = def
+        let mut env: HashMap<String, Ty> = def
             .generics
             .iter()
             .map(|p| p.name().to_string())
             .zip(args.iter().cloned())
             .collect();
+        // The parameters the self type did not name. Each has to be settled
+        // by a bound, and the only bound that settles one is `Fn`: given the
+        // closure that was passed, its result type *is* the parameter its
+        // signature named (Ch. 4 §4.3). This is what lets `Map`'s `Item` be
+        // the closure's result instead of a fixed type.
+        for p in def.generics.iter().skip(args.len()) {
+            let want = p.name().to_string();
+            if env.contains_key(&want) {
+                continue;
+            }
+            match self.solve_from_fn_bounds(&want, &def.generics, &env) {
+                Some(t) => {
+                    env.insert(want, t);
+                }
+                None => {
+                    return err(
+                        line,
+                        format!(
+                            "`{base}::{name}` has a type parameter `{want}` that \
+                             `{type_name}` does not determine, and no `Fn` bound \
+                             settles it (Ch. 4 §2.1)"
+                        ),
+                    );
+                }
+            }
+        }
         self.instantiate_with(&generic, env, line)
+    }
+
+    /// Settle a type parameter from another parameter's `Fn` bound.
+    ///
+    /// `F: Fn(A) -> B` with a known `F` says what `B` is, because a closure
+    /// has one signature and it is recorded (Ch. 4 §4.3).
+    fn solve_from_fn_bounds(
+        &self,
+        want: &str,
+        generics: &[ast::GenericParam],
+        env: &HashMap<String, Ty>,
+    ) -> Option<Ty> {
+        for g in generics {
+            let ast::GenericParam::Type { name, bounds } = g else {
+                continue;
+            };
+            let Some(cname) = env.get(name).and_then(nominal_name) else {
+                continue;
+            };
+            let Some(info) = self.types.closures.borrow().get(&cname).cloned() else {
+                continue;
+            };
+            for b in bounds {
+                let Some(key) = b.name.strip_prefix("Fn@") else {
+                    continue;
+                };
+                let Some((_, params, ret)) = self.fn_bounds.get(key).cloned() else {
+                    continue;
+                };
+                if let Some(ast::Ty::Name(n, _)) = &ret
+                    && n == want
+                {
+                    return Some(info.ret.clone());
+                }
+                for (i, pt) in params.iter().enumerate() {
+                    if let ast::Ty::Name(n, _) = pt
+                        && n == want
+                        && let Some(t) = info.params.get(i)
+                    {
+                        return Some(t.clone());
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// A method call that resolves to an impl block (Ch. 4 §1.3).

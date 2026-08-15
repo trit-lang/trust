@@ -3714,3 +3714,99 @@ fn the_library_prints_one_character_too() {
          fn main() -> t27 { rule('=', 3); print_char('世'); print_char('\\n'); 0 }");
     assert_eq!(out, "===世\n");
 }
+
+#[test]
+fn a_closure_bound_can_be_written_on_a_named_parameter() {
+    // `impl Fn(A) -> B` in argument position was already an anonymous type
+    // parameter with this bound (Ch. 4 §2.2); `F: Fn(A) -> B` is the same
+    // bound where the parameter has a name, and the two meet in the same
+    // desugaring — nothing below can tell them apart (§4.3).
+    assert_eq!(
+        run(
+            "fn twice<F: Fn(t27) -> t27>(f: F, x: t27) -> t27 { f(f(x)) } \
+             fn main() -> t27 { twice(|v| v * 3, 2) }"
+        )
+        .0,
+        18
+    );
+}
+
+#[test]
+fn a_closure_bound_settles_a_parameter_the_self_type_does_not_name() {
+    // Ch. 5 §3.1 writes `Map`'s impl with three parameters where `Map` takes
+    // two: `B` is named by no argument and is settled by `F`'s bound, because
+    // a closure has one signature and it is recorded (Ch. 4 §4.3).
+    //
+    // Before this, `Map`'s `Item` was a fixed `t27` — silently wrong for
+    // every closure returning anything else, which is what this checks.
+    assert_eq!(
+        run("struct Upto { n: t27, at: t27 } \
+             impl Iterator for Upto { \
+                 type Item = t27; \
+                 fn next(&mut self) -> Option<t27> { \
+                     if self.at < self.n { self.at += 1; Option::Some(self.at) } \
+                     else { Option::None } \
+                 } \
+             } \
+             fn main() -> t27 { \
+                 let mut m = Map { inner: Upto { n: 4, at: 0 }, f: |x: t27| x % 2 == 0 }; \
+                 let mut s: t27 = 0; \
+                 loop { \
+                     match m.next() { \
+                         Option::Some(b) => { if b { s += 1; } }, \
+                         Option::None => { break; }, \
+                     } \
+                 } \
+                 s \
+             }")
+        .0,
+        2
+    );
+}
+
+#[test]
+fn a_provided_method_may_have_type_parameters_of_its_own() {
+    // `Self` is substituted in a method's *bounds* as well as its types —
+    // `fn map<B, F: Fn(Self::Item) -> B>` writes it where the constraints
+    // are — and the bound is resolved under the call's environment, since
+    // `B` is one of the call's own parameters (Ch. 4 §§1.5, 4.3).
+    assert_eq!(
+        run("struct Wrap<I, F> { inner: I, f: F } \
+             trait It { \
+                 type Item; \
+                 fn next(&mut self) -> Option<Self::Item>; \
+                 fn wrap<B, F: Fn(Self::Item) -> B>(self, f: F) -> Wrap<Self, F> { \
+                     Wrap { inner: self, f: f } \
+                 } \
+             } \
+             struct Upto { n: t27, at: t27 } \
+             impl It for Upto { \
+                 type Item = t27; \
+                 fn next(&mut self) -> Option<t27> { \
+                     if self.at < self.n { self.at += 1; Option::Some(self.at) } \
+                     else { Option::None } \
+                 } \
+             } \
+             impl<I: It, B, F: Fn(I::Item) -> B> Wrap<I, F> { \
+                 fn next(&mut self) -> Option<B> { \
+                     match self.inner.next() { \
+                         Option::Some(x) => Option::Some((self.f)(x)), \
+                         Option::None => Option::None, \
+                     } \
+                 } \
+             } \
+             fn main() -> t27 { \
+                 let mut m = Upto { n: 4, at: 0 }.wrap(|x: t27| x * 10); \
+                 let mut s: t27 = 0; \
+                 loop { \
+                     match m.next() { \
+                         Option::Some(v) => { s += v; }, \
+                         Option::None => { break; }, \
+                     } \
+                 } \
+                 s \
+             }")
+        .0,
+        100
+    );
+}
