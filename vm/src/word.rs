@@ -87,8 +87,13 @@ pub fn shl3(v: i128, k: u32) -> i128 {
 /// and the `wrap` instruction (AM §3.1).
 pub fn wrap_to(v: i128, n: u32) -> i128 {
     let m = pow3(n);
+    let half = (m - 1) / 2;
+    // Same reason as `overflowing`: in range is already the answer.
+    if -half <= v && v <= half {
+        return v;
+    }
     let r = v.rem_euclid(m);
-    if r > (m - 1) / 2 { r - m } else { r }
+    if r > half { r - m } else { r }
 }
 
 /// The trit at position `i`.
@@ -207,13 +212,19 @@ pub struct Overflowing {
 
 /// Wrap an exact result into the word range, reporting the direction.
 pub fn overflowing(exact: i128) -> Overflowing {
+    // A value that fits is its own residue, so the common case — every
+    // arithmetic instruction that does not overflow — needs no division at
+    // all. `wrap_to` costs an `i128` remainder, and this is on the path of
+    // every `add`, `sub` and `mul` the machine executes.
+    if fits(exact, WORD_TRITS) {
+        return Overflowing {
+            wrapped: exact,
+            overflow: 0,
+        };
+    }
     Overflowing {
         wrapped: wrap_to(exact, WORD_TRITS),
-        overflow: if fits(exact, WORD_TRITS) {
-            0
-        } else {
-            sign(exact)
-        },
+        overflow: sign(exact),
     }
 }
 

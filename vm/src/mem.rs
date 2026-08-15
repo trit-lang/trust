@@ -62,14 +62,40 @@ impl Memory {
     /// The word at `addr`: three trytes, least significant at the lowest
     /// address (AM §2.2).
     pub fn word(&self, addr: i128) -> i128 {
+        // The three trytes are consecutive and almost always in one page, so
+        // the page is found once rather than three times — and the scale
+        // factors come from a table, where `3i128.pow` was a loop. This is
+        // the path every `ld.word` takes, which is an eighth of what a
+        // program executes.
+        let (page, off) = split(addr);
+        if off + 2 < PAGE as usize {
+            let Some(p) = self.pages.get(&page) else {
+                return 0;
+            };
+            return p[off] as i128
+                + p[off + 1] as i128 * crate::word::pow3(9)
+                + p[off + 2] as i128 * crate::word::pow3(18);
+        }
         (0..WORD_TRYTES)
-            .map(|i| self.tryte(addr + i) * 3i128.pow(9 * i as u32))
+            .map(|i| self.tryte(addr + i) * crate::word::pow3(9 * i as u32))
             .sum()
     }
 
     /// Write the word at `addr`, little-trytean.
     pub fn set_word(&mut self, addr: i128, v: i128) {
-        for (i, t) in crate::word::word_trytes(v).into_iter().enumerate() {
+        let ts = crate::word::word_trytes(v);
+        let (page, off) = split(addr);
+        if off + 2 < PAGE as usize {
+            let p = self
+                .pages
+                .entry(page)
+                .or_insert_with(|| vec![0i16; PAGE as usize].into_boxed_slice());
+            for (i, t) in ts.into_iter().enumerate() {
+                p[off + i] = t;
+            }
+            return;
+        }
+        for (i, t) in ts.into_iter().enumerate() {
             self.set_tryte(addr + i as i128, t as i128);
         }
     }
@@ -83,5 +109,9 @@ impl Memory {
 }
 
 fn split(addr: i128) -> (i128, usize) {
-    (addr.div_euclid(PAGE), addr.rem_euclid(PAGE) as usize)
+    // Every caller has already established that the address is in memory,
+    // and memory starts at zero — so the sign-correcting forms are paying
+    // for a case that cannot arise.
+    debug_assert!(addr >= 0, "address {addr} is not in memory");
+    (addr / PAGE, (addr % PAGE) as usize)
 }

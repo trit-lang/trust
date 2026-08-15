@@ -456,9 +456,12 @@ sets, sorting and `Rc` — all of §7, all reserved. Ch. 4's own list is down to
 (`impl<T> Make<T> for Pair<T>`, G9.20), and binding by reference in a `match`
 (G9.15).
 
-**B00. Interpreter speed.** 2.57 → **61.3 M instructions/second** on HPL, 24×
+**B00. Interpreter speed.** 2.57 → **83.2 M instructions/second** on HPL, 32×
 (G8.15): `shr3` was a loop where its own comment already gave the closed
-form, and then a direct-mapped decode cache with invalidation on store. Every
+form; a direct-mapped decode cache with invalidation on store; and then three
+more of the same mistake — a division on every `add` that a test already
+performed had ruled out, a page looked up three times per word read, and
+sign-correcting remainders on addresses known to be non-negative. Every
 earlier measurement moved instructions *retired*; this is the first to move
 instructions per *second*, which with no hardware is the other factor of the
 same product.

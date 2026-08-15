@@ -226,7 +226,7 @@ impl Vm {
     /// cache is invalidated by every store — which is one array write, and
     /// cheaper than decoding.
     fn decode_at(&mut self, pc: i128) -> Result<Inst, Stop> {
-        let slot = ((pc / WORD_TRYTES).rem_euclid(ICACHE as i128)) as usize;
+        let slot = ((pc / WORD_TRYTES) as usize) & (ICACHE - 1);
         if let Some((at, inst)) = &self.icache[slot]
             && *at == pc
         {
@@ -243,9 +243,12 @@ impl Vm {
     /// store overlapping it could have changed.
     fn forget(&mut self, addr: i128) {
         for a in [addr - 2, addr - 1, addr] {
-            let slot = ((a.div_euclid(WORD_TRYTES)).rem_euclid(ICACHE as i128)) as usize;
+            if a < 0 {
+                continue;
+            }
+            let slot = ((a / WORD_TRYTES) as usize) & (ICACHE - 1);
             if let Some((at, _)) = &self.icache[slot]
-                && *at == a.div_euclid(WORD_TRYTES) * WORD_TRYTES
+                && *at == (a / WORD_TRYTES) * WORD_TRYTES
             {
                 self.icache[slot] = None;
             }
@@ -458,7 +461,9 @@ impl Vm {
     }
 
     fn check_access(&self, addr: i128, width: Width) -> Result<(), Stop> {
-        if width == Width::Word && addr.rem_euclid(WORD_TRYTES) != 0 {
+        // `addr` is non-negative here — a negative one is a device and was
+        // handled before this — so `%` is the cheaper remainder.
+        if width == Width::Word && addr % WORD_TRYTES != 0 {
             return Err(fault(
                 FaultCode::Align,
                 format!("word access at {addr} is not 3-tryte aligned"),

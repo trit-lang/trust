@@ -2357,8 +2357,8 @@ why Ch. 5 §1.5's `print` still repeats `print_char`'s body: `print_char` is
 over the budget, and raising the budget until it fits is 3 315 827 against
 3 247 122. The repetition is now a measurement rather than a guess.
 
-**G8.15 — the interpreter is 24× faster, and neither change was clever.**
-2.57 → **61.3 M instructions/second** on HPL; 1.26 s becomes 53 ms.
+**G8.15 — the interpreter is 32× faster, and nothing in it was clever.**
+2.57 → **83.2 M instructions/second** on HPL; 1.26 s becomes 39 ms.
 
 `word::shr3` was a **loop**: `k` iterations of subtract-the-low-trit and
 divide by three. Every field the decoder extracts goes through it, and the
@@ -2378,11 +2378,35 @@ is a test that overwrites an instruction *after* executing it once — the loop
 is what makes the first pass populate the cache — and it halts with 2 instead
 of 1 if the invalidation is removed.
 
+Then the arithmetic and memory paths, which were three more of the same
+mistake:
+
+- **`overflowing` divided on every `add`.** It computed `wrap_to(exact, 27)`
+  — an `i128` remainder — and then asked `fits(exact, 27)` to decide whether
+  anything had overflowed. A value that fits *is* its own residue, so the
+  common case needs no division at all, and it was already computing the test
+  that says so. `wrap_to` gained the same early return.
+- **`Memory::word` looked its page up three times** and scaled each tryte by
+  `3i128.pow(9i)` — another loop, on the path of every `ld.word`, which is an
+  eighth of what HPL executes. One lookup and the `POW3` table. `set_word`
+  the same.
+- **`split` used the sign-correcting `div_euclid`/`rem_euclid`** on addresses
+  every caller had already established were in memory, and memory starts at
+  zero.
+
+**61.3 → 83.2 M/s**, and **2.57 → 83.2 overall: 32×.**
+
 *Why this matters here more than it would elsewhere.* There is no ternary
 hardware and there is not going to be. Instructions retired and instructions
 per second are two factors of one product, and every measurement in this log
 until now moved only the first: −66.6% from the backend, −11.3% from
 inlining. This is the first time the second has moved at all.
+
+Every one of these was the same shape: a definition written out as a loop, or
+a general form used where a cheap test had already ruled out the general
+case. None of them needed a new idea, and all of them had been there since the
+interpreter was written — which is what a profile is for, and why there was
+not one until this session.
 
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
