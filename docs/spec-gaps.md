@@ -2151,15 +2151,47 @@ impl, so it was reported as exactly that — truthfully and unhelpfully.
 that instantiated the method, not to the function being lowered, and the
 check used the latter.
 
-*Not implemented, and the boundary is exact:* a method with type parameters
-of its own **inside a generic impl**. `map` works on `impl Iterator for Upto`
-and not on `impl<I, B, F> Iterator for Map<I, F>`, so **a chain of one adaptor
-works and a chain of two does not**. Settling the impl's parameters and the
-method's needs one instantiation in two stages, and instantiation is a single
-step: `instantiate_with` wants a complete environment, and `generic_fns` is
-borrowed immutably, so a partially-specialized method has nowhere to live.
-That is the next piece, and it is what stands between here and §3.1's table
-being methods rather than struct literals.
+**G9.19 — instantiation in two stages, and §3.1's table becomes methods.**
+A method with type parameters of its own inside a *generic* impl now works, so
+`it.map(f).filter(p)` does, so Ch. 5 §3.1's adaptors are the provided methods
+that section always described.
+
+Such a method has two sets of parameters settled at different moments: the
+impl's as soon as the receiver's type is known, the method's only from the
+call's arguments. `instantiate_with` wants an environment naming every
+parameter, so the impl's half is settled at method resolution and the method
+is put back into the queue as an ordinary generic function of what is left —
+a `Special`, living beside `generic_fns` in a cell for the same reason
+`extra_fns` does.
+
+Four things had to follow, and three were pre-existing:
+
+**`same_ast_ty` had no case for an associated type.** `I::Item` did not equal
+`I::Item`, so a generic impl's `next` never matched the signature `Iterator`
+declares — which is the real reason **every adaptor's `Item` was a fixed
+`t27`**. A generic impl could only choose an associated type it could *name*.
+They follow their inner iterator now, and a `Map` whose closure returns a
+`bool` no longer claims to yield `t27`.
+
+**A method's own parameters may not reuse the impl's.** Both live in one
+environment; a shadow makes `Self` mean two things at once, and the second
+`map` of a chain looks for a receiver the first never produced. Rust refuses
+this too. It is an error with a message rather than a wrong program.
+
+**`fn_hint` resolved the wanted closure signature under the *caller's*
+environment.** A specialized method's bound is written in the impl's
+parameters, which live in what the specialization settled, so `Map<I, F>::Item`
+came out as "`I` is not a type in scope".
+
+**A receiver that is not a place was lowered twice** — once to be typed, once
+to be passed. Harmless until it *contained* a closure: `c.map(f).count()` made
+two closure types and then reported that the receiver was neither. It is
+lowered once and bound, which is what the argument path already did for a
+closure and for a literal holding one.
+
+An argument that is a method call is lowered eagerly for the same reason:
+`sum(it.map(f).filter(p))` cannot be told its argument's type without
+resolving the chain, and resolving it is lowering it.
 
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but

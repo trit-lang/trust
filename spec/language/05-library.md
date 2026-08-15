@@ -453,12 +453,21 @@ asked for a value.
 | `chain(other)` | one after the other; both `Item`s must agree |
 | `peekable()` | adds `peek(&mut self) -> Option<&Item>` |
 
+Each is a **provided method** on `Iterator`, so an implementation gets all of
+them by writing `next` alone (Ch. 4 §1.5), and each returns a struct whose
+`Item` follows the iterator underneath it:
+
+```
+let it = Upto { n: 10, at: 0 };
+sum(it.map(|x| x * x).filter(|v| v % 2 == 0))
+```
+
 `map`'s struct is the shape all of them have:
 
 ```
 struct Map<I, F> { inner: I, f: F }
 
-impl<I: Iterator, F: Fn(I::Item) -> B, B> Iterator for Map<I, F> {
+impl<I: Iterator, B, F: Fn(I::Item) -> B> Iterator for Map<I, F> {
     type Item = B;
     fn next(&mut self) -> Option<B> {
         match self.inner.next() {

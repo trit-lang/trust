@@ -3810,3 +3810,105 @@ fn a_provided_method_may_have_type_parameters_of_its_own() {
         100
     );
 }
+
+/// An iterator to hang the adaptor tests on.
+const UPTO: &str = "struct Upto { n: t27, at: t27 } \
+     impl Iterator for Upto { \
+         type Item = t27; \
+         fn next(&mut self) -> Option<t27> { \
+             if self.at < self.n { self.at += 1; Option::Some(self.at) } \
+             else { Option::None } \
+         } \
+     } ";
+
+#[test]
+fn the_adaptors_are_methods_and_they_chain() {
+    // Ch. 5 §3.1's table, as the table says it: `map` and the rest are
+    // provided methods on `Iterator`, so an implementation gets all of them
+    // by writing `next` alone (Ch. 4 §1.5).
+    //
+    // A chain of two is the thing that did not work: the provided method has
+    // type parameters of its own and the adaptor's impl is generic, so
+    // settling one call's types needs the impl's half and the method's half,
+    // and instantiation was a single step.
+    assert_eq!(
+        run(&format!(
+            "{UPTO} fn main() -> t27 {{ \
+                 let it = Upto {{ n: 10, at: 0 }}; \
+                 sum(it.map(|x: t27| x * x).filter(|v: t27| v % 2 == 0)) \
+             }}"
+        ))
+        .0,
+        4 + 16 + 36 + 64 + 100
+    );
+}
+
+#[test]
+fn an_adaptors_item_is_the_one_underneath_it() {
+    // Every adaptor's `Item` was a fixed `t27`, because a generic impl could
+    // only choose an associated type it could *name* — `same_ast_ty` had no
+    // case for `I::Item`, so `I::Item` did not equal `I::Item` and the
+    // signature check refused it. They follow their inner iterator now.
+    assert_eq!(
+        run(&format!(
+            "{UPTO} fn main() -> t27 {{ \
+                 let a = Upto {{ n: 100, at: 0 }}; \
+                 let mut s: t27 = 0; \
+                 for v in a.skip(2).take(3) {{ s += v; }} \
+                 let b = Upto {{ n: 3, at: 0 }}; \
+                 let mut t: t27 = 0; \
+                 for p in b.enumerate() {{ t += (p.0 as t27) * 10 + p.1; }} \
+                 let c = Upto {{ n: 9, at: 0 }}; \
+                 let n = c.map(|x: t27| x * 2).count(); \
+                 s * 10000 + t * 100 + (n as t27) \
+             }}"
+        ))
+        .0,
+        // 3+4+5, then (0,1) (1,2) (2,3) as 1+12+23, then nine mapped items.
+        12 * 10000 + 36 * 100 + 9
+    );
+}
+
+#[test]
+fn a_map_of_something_that_is_not_a_number() {
+    // The point of `Item = B`: before, a `Map` whose closure returned a
+    // `bool` claimed to yield `t27` and nothing objected.
+    assert_eq!(
+        run(&format!(
+            "{UPTO} fn main() -> t27 {{ \
+                 let it = Upto {{ n: 4, at: 0 }}; \
+                 let mut m = it.map(|x: t27| x % 2 == 0); \
+                 let mut s: t27 = 0; \
+                 loop {{ \
+                     match m.next() {{ \
+                         Option::Some(b) => {{ if b {{ s += 1; }} }}, \
+                         Option::None => {{ break; }}, \
+                     }} \
+                 }} \
+                 s \
+             }}"
+        ))
+        .0,
+        2
+    );
+}
+
+#[test]
+fn a_methods_type_parameter_may_not_shadow_its_impls() {
+    // Both live in one environment — the receiver's type is written in the
+    // impl's parameters and the method's body in its own — so a shadow would
+    // make `Self` mean two things at once, and the second call of a chain
+    // would look for a receiver the first never produced. Rust refuses this
+    // too, and for the same reason.
+    let msg = error(
+        "struct W<I, F> { inner: I, f: F } \
+         trait T { \
+             fn go<F>(self, f: F) -> W<Self, F>; \
+         } \
+         impl<I, F> T for W<I, F> { \
+             fn go<F>(self, f: F) -> W<Self, F> { W { inner: self, f: f } } \
+         } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(msg.contains("already has"), "{msg}");
+}

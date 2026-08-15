@@ -408,11 +408,18 @@ through a reference may be read and borrowed but not moved out of (Ch. 3
 §1.3), and a block-shaped expression in statement position ends its statement
 (Ch. 0 §5.2).
 
-`F: Fn(A) -> B` is a bound a program can write now (G9.18), so `Map`'s `Item`
-is the closure's result rather than a fixed `t27` — it had been silently wrong
-for every closure returning anything else. What still stands between §3.1's
-table and being methods is a method with type parameters of its own inside a
-*generic* impl: a chain of one adaptor works, a chain of two does not.
+`F: Fn(A) -> B` is a bound a program can write now (G9.18), and instantiation
+happens in two stages where a method has type parameters of its own inside a
+generic impl (G9.19) — so §3.1's adaptors are the provided methods that
+section always described, and they chain:
+
+```
+sum(it.map(|x| x * x).filter(|v| v % 2 == 0))
+```
+
+Every adaptor's `Item` follows the iterator underneath it rather than being a
+fixed `t27`, which it had been because `same_ast_ty` had no case for `I::Item`
+and so a generic impl could only choose an associated type it could name.
 
 What is left of the chapter is `insert` and `remove` (both want the
 `copy_within` §7 reserves), `collect` and `FromIterator`, `push_str`, and

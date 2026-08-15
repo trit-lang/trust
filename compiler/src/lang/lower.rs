@@ -1015,6 +1015,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
     let needs_heap = std::cell::Cell::new(false);
     let strings: RefCell<HashMap<Vec<i128>, String>> = RefCell::new(HashMap::new());
     let extra_fns: RefCell<Vec<ast::FnItem>> = RefCell::new(Vec::new());
+    let specials: RefCell<HashMap<String, Special>> = RefCell::new(HashMap::new());
     let world = World {
         traits: &types.traits.clone(),
         vtables: &vtables,
@@ -1025,6 +1026,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
         fn_bounds: &fn_bounds,
         sigs: &sigs,
         generic_fns: &generic_fns,
+        specials: &specials,
         impls: &table,
         pending: &pending,
         globals: &globals,
@@ -1070,7 +1072,10 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
         let Some(job) = pending.borrow_mut().pop() else {
             break;
         };
-        let def = generic_fns[&job.from].clone();
+        let def = match generic_fns.get(&job.from) {
+            Some(d) => d.clone(),
+            None => specials.borrow()[&job.from].def.clone(),
+        };
         let body = def.body.clone().expect("a generic function has a body");
         let signature = signature_of(&def, &job.key, &sigs);
         match function(&def, signature, &body, &job.key, job.env, &world) {
@@ -2078,15 +2083,6 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
             // An impl's type parameters become the method's, so a generic
             // method is an ordinary generic function keyed by the base type.
             if !imp.generics.is_empty() {
-                if !f.generics.is_empty() {
-                    errs.push(SyntaxError {
-                        line: f.line,
-                        message: "a method with type parameters of its own, inside a \
-                                  generic impl, is not implemented"
-                            .into(),
-                    });
-                    continue;
-                }
                 // An impl's parameters are matched to the self type's
                 // arguments by *position*, so the ones the self type names
                 // are put first, in its order, and any left over follow.
@@ -2107,6 +2103,33 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
                         ordered.push(g.clone());
                     }
                 }
+                // The method's own parameters follow the impl's, which is
+                // also the order they are settled in: the impl's from the
+                // receiver, the method's from the call.
+                //
+                // A method may not reuse one of the impl's names. Both live
+                // in one environment — the receiver's type is written in the
+                // impl's parameters and the method's body in its own — so a
+                // shadow would make `Self` mean two things at once, and the
+                // second `.map()` of a chain would look for a receiver the
+                // first never produced.
+                if let Some(clash) = f
+                    .generics
+                    .iter()
+                    .find(|g| ordered.iter().any(|o| o.name() == g.name()))
+                {
+                    errs.push(SyntaxError {
+                        line: f.line,
+                        message: format!(
+                            "`{}` names a type parameter this `impl` already has; \
+                             a method's own parameters must be named differently \
+                             (Ch. 4 §2.1)",
+                            clash.name()
+                        ),
+                    });
+                    continue;
+                }
+                ordered.extend(f.generics.iter().cloned());
                 f.generics = ordered;
             }
             // A destructor keeps its own name so that `fn_key` gives it the
@@ -2534,6 +2557,13 @@ fn same_ast_ty(a: &ast::Ty, b: &ast::Ty) -> bool {
         (Tuple(x, _), Tuple(y, _)) => {
             x.len() == y.len() && x.iter().zip(y).all(|(x, y)| same_ast_ty(x, y))
         }
+        // An associated type is written and compared like any other. Without
+        // this arm `I::Item` did not equal `I::Item`, and a generic impl
+        // could only choose an associated type it could *name* — which is
+        // why every adaptor's `Item` was a fixed `t27`.
+        (Assoc(x, n, _), Assoc(y, m, _)) => n == m && same_ast_ty(x, y),
+        (Dyn(x, _), Dyn(y, _)) => x == y,
+        (Never(_), Never(_)) => true,
         _ => false,
     }
 }
@@ -3507,6 +3537,9 @@ struct Fn<'a> {
     name: String,
     /// Generic function definitions, un-instantiated.
     generic_fns: &'a HashMap<String, ast::FnItem>,
+    /// Methods of a generic impl that have type parameters of their own,
+    /// with the impl's half of the environment already settled (Ch. 4 §4.3).
+    specials: &'a RefCell<HashMap<String, Special>>,
     /// What the file's impls say: which (type, trait-with-arguments) pairs
     /// exist, and which functions a parameterized trait's methods became.
     impls: &'a Impls,
@@ -3618,10 +3651,25 @@ struct World<'a> {
     fn_bounds: &'a HashMap<String, (ast::FnKind, Vec<ast::Ty>, Option<ast::Ty>)>,
     sigs: &'a RefCell<HashMap<String, (Vec<Ty>, Ty)>>,
     generic_fns: &'a HashMap<String, ast::FnItem>,
+    specials: &'a RefCell<HashMap<String, Special>>,
     impls: &'a Impls,
     pending: &'a RefCell<Vec<Job>>,
     globals: &'a HashMap<String, Global>,
     types: &'a Types,
+}
+
+/// A method of a generic impl that has type parameters of its own.
+///
+/// Instantiation is one step: `instantiate_with` wants an environment that
+/// names every parameter. Such a method has two sets — the impl's, known as
+/// soon as the receiver's type is, and its own, known only from the call's
+/// arguments — so the impl's half is settled here and the method is put back
+/// into the queue as an ordinary generic function of what is left
+/// (Ch. 4 §§2.7, 4.3).
+#[derive(Clone)]
+struct Special {
+    def: ast::FnItem,
+    env: HashMap<String, Ty>,
 }
 
 fn function(
@@ -3642,6 +3690,7 @@ fn function(
         fn_bounds,
         sigs,
         generic_fns,
+        specials,
         impls,
         pending,
         globals,
@@ -3660,6 +3709,7 @@ fn function(
         name: key.to_string(),
         sigs,
         generic_fns,
+        specials,
         impls,
         pending,
         env,
@@ -5597,7 +5647,7 @@ impl Fn<'_> {
 
         // A generic callee is instantiated here, at the call site, which is
         // also where its bounds are checked (Ch. 4 §2.2).
-        if self.generic_fns.contains_key(name) {
+        if self.generic_fns.contains_key(name) || self.specials.borrow().contains_key(name) {
             let (key, args) = self.instantiate_fn(name, targs, args, expected, line)?;
             return self.call_key(&key, Vec::new(), &args, line);
         }
@@ -5618,7 +5668,7 @@ impl Fn<'_> {
         expected: Option<&Ty>,
         line: Line,
     ) -> R<(String, Vec<ast::Expr>)> {
-        let def = self.generic_fns[name].clone();
+        let def = self.generic_def(name).expect("a generic function");
         if def.params.len() != args.len() {
             return err(
                 line,
@@ -5635,7 +5685,8 @@ impl Fn<'_> {
         // tell `id(2)` bound to a `t9` from the same call bound to a `t27`.
         // `f::<T>(…)` gives the arguments outright, in declaration order,
         // and any it omits are inferred (Ch. 4 §2.3).
-        let mut env: HashMap<String, Ty> = HashMap::new();
+        // A specialized method arrives with the impl's half already settled.
+        let mut env: HashMap<String, Ty> = self.special_env(name);
         if targs.len() > def.generics.len() {
             return err(
                 line,
@@ -5664,7 +5715,7 @@ impl Fn<'_> {
                 ast::Expr::Closure(cps, cret, body, cline) => {
                     // The bound says what signature is wanted, so a closure
                     // need not write its own types (Ch. 4 §4.1).
-                    let hint = self.fn_hint(&def, want)?;
+                    let hint = self.fn_hint(&def, want, &env)?;
                     let (v, got) = self.closure(&cps, &cret, &body, hint, cline)?;
                     let Operand::Value(slot) = v else {
                         return err(line, "a closure must have a slot");
@@ -5681,6 +5732,20 @@ impl Fn<'_> {
                     let (v, got) = self.expr(arg, None)?;
                     let Operand::Value(slot) = v else {
                         return err(line, "a literal must have a slot");
+                    };
+                    let bound = self.bind_existing(slot, got.clone());
+                    *arg = ast::Expr::Path(bound, line);
+                    unify(want, &got, &def.generics, &mut env);
+                }
+                // And a method call, for the same reason two levels up:
+                // `sum(it.map(f).filter(p))` cannot be told the type of its
+                // argument without resolving the chain, and resolving it is
+                // lowering it. The arguments are lowered left to right here
+                // as they would be anyway, so nothing moves.
+                ast::Expr::Method(..) => {
+                    let (v, got) = self.expr(arg, None)?;
+                    let Operand::Value(slot) = v else {
+                        return err(line, "a method's result must have a slot");
                     };
                     let bound = self.bind_existing(slot, got.clone());
                     *arg = ast::Expr::Path(bound, line);
@@ -5736,7 +5801,7 @@ impl Fn<'_> {
     /// Instantiate a generic function with an environment already worked out,
     /// queueing its body if this is the first time (Ch. 4 §2.7).
     fn instantiate_with(&mut self, name: &str, env: HashMap<String, Ty>, line: Line) -> R<String> {
-        let def = self.generic_fns[name].clone();
+        let def = self.generic_def(name).expect("a generic function");
         let targs: Vec<Ty> = def.generics.iter().map(|p| env[p.name()].clone()).collect();
         let key = mangle(name, &targs);
         if self.sigs.borrow().contains_key(&key) {
@@ -7530,7 +7595,12 @@ impl Fn<'_> {
     /// visible to a program, and everything downstream sees a struct and a
     /// call.
     /// The signature a parameter's `Fn@…` bound asks for, if it has one.
-    fn fn_hint(&self, def: &ast::FnItem, want: &ast::Ty) -> R<Option<(Vec<Ty>, Option<Ty>)>> {
+    fn fn_hint(
+        &self,
+        def: &ast::FnItem,
+        want: &ast::Ty,
+        env: &HashMap<String, Ty>,
+    ) -> R<Option<(Vec<Ty>, Option<Ty>)>> {
         let ast::Ty::Name(pname, _) = want else {
             return Ok(None);
         };
@@ -7543,7 +7613,15 @@ impl Fn<'_> {
             return Ok(None);
         };
         let (_, ps, r) = self.fn_bounds[key].clone();
-        let ps: Vec<Ty> = ps.iter().map(|t| self.resolve(t)).collect::<R<_>>()?;
+        // Under the call's environment, not the caller's: a specialized
+        // method's bound is written in the impl's parameters, and those live
+        // in what the specialization settled (Ch. 4 §4.3).
+        let mut scope = self.env.clone();
+        scope.extend(env.iter().map(|(k, v)| (k.clone(), v.clone())));
+        let ps: Vec<Ty> = ps
+            .iter()
+            .map(|t| resolve_ty_env(t, self.types, &scope))
+            .collect::<R<_>>()?;
         // The bound may leave the result a type parameter of its own —
         // `fn map<B, F: Fn(A) -> B>` says nothing about `B` except that it is
         // whatever the closure returns. So the hint carries no result there,
@@ -7551,7 +7629,7 @@ impl Fn<'_> {
         let r = match &r {
             None => Some(Ty::Unit),
             Some(ast::Ty::Name(n, _)) if def.generics.iter().any(|g| g.name() == n) => None,
-            Some(t) => Some(self.resolve(t)?),
+            Some(t) => Some(resolve_ty_env(t, self.types, &scope)?),
         };
         Ok(Some((ps, r)))
     }
@@ -8158,28 +8236,57 @@ impl Fn<'_> {
         // closure that was passed, its result type *is* the parameter its
         // signature named (Ch. 4 §4.3). This is what lets `Map`'s `Item` be
         // the closure's result instead of a fixed type.
+        // The parameters after the self type's arguments come in two kinds.
+        // A `Fn` bound over the impl's own settles the first kind — `B` in
+        // `impl<I, B, F: Fn(I::Item) -> B>`. What is left belongs to the
+        // *method*, and only the call's arguments can settle that.
+        let mut own: Vec<ast::GenericParam> = Vec::new();
         for p in def.generics.iter().skip(args.len()) {
             let want = p.name().to_string();
             if env.contains_key(&want) {
                 continue;
             }
-            match self.solve_from_fn_bounds(&want, &def.generics, &env) {
-                Some(t) => {
-                    env.insert(want, t);
-                }
-                None => {
-                    return err(
-                        line,
-                        format!(
-                            "`{base}::{name}` has a type parameter `{want}` that \
-                             `{type_name}` does not determine, and no `Fn` bound \
-                             settles it (Ch. 4 §2.1)"
-                        ),
-                    );
-                }
+            if own.is_empty()
+                && let Some(t) = self.solve_from_fn_bounds(&want, &def.generics, &env)
+            {
+                env.insert(want, t);
+                continue;
             }
+            own.push(p.clone());
         }
-        self.instantiate_with(&generic, env, line)
+        if own.is_empty() {
+            return self.instantiate_with(&generic, env, line);
+        }
+        // Two stages, because instantiation is one step and this needs two:
+        // the impl's half is settled here and the method goes back into the
+        // queue as an ordinary generic function of what is left.
+        let spec = mangle(&generic, &args);
+        if !self.specials.borrow().contains_key(&spec) {
+            let mut d = def.clone();
+            d.generics = own;
+            d.name = spec.clone();
+            self.specials
+                .borrow_mut()
+                .insert(spec.clone(), Special { def: d, env });
+        }
+        Ok(spec)
+    }
+
+    /// A generic function's definition, whether written or specialized.
+    fn generic_def(&self, name: &str) -> Option<ast::FnItem> {
+        self.generic_fns
+            .get(name)
+            .cloned()
+            .or_else(|| self.specials.borrow().get(name).map(|s| s.def.clone()))
+    }
+
+    /// What a specialized method's impl already settled, or nothing.
+    fn special_env(&self, name: &str) -> HashMap<String, Ty> {
+        self.specials
+            .borrow()
+            .get(name)
+            .map(|s| s.env.clone())
+            .unwrap_or_default()
     }
 
     /// Settle a type parameter from another parameter's `Fn` bound.
@@ -8244,10 +8351,25 @@ impl Fn<'_> {
     ) -> R<(Operand, Ty)> {
         // A place receiver keeps its identity, so `&mut self` writes through
         // to the caller's value rather than to a copy.
-        let (recv_ty, place) = match self.type_of_place(recv)? {
+        // A receiver that is not a place has to be lowered to be typed, and
+        // it is lowered again below to be passed. That is one evaluation too
+        // many the moment it *contains* a closure — `c.map(f).count()` would
+        // make two closure types and then complain that the receiver is
+        // neither — so a lowered non-place receiver is bound to a name and
+        // the rest of this refers to that.
+        let mut recv = recv.clone();
+        let (recv_ty, place) = match self.type_of_place(&recv)? {
             Some(t) => (t, true),
-            None => (self.expr(recv, None)?.1, false),
+            None => {
+                let (v, ty) = self.expr(&recv, None)?;
+                if let Operand::Value(slot) = v {
+                    let bound = self.bind_existing(slot, ty.clone());
+                    recv = ast::Expr::Path(bound, line);
+                }
+                (ty, false)
+            }
         };
+        let recv = &recv;
 
         // A call on a trait object is one indirect call through its vtable
         // (Ch. 4 §3.1). Nothing else about the receiver is known.
@@ -8289,7 +8411,11 @@ impl Fn<'_> {
         // A method with type parameters of its own — one taking `impl Fn(…)`
         // is the common case — is a generic function, and generic functions
         // are instantiated at the call site rather than looked up.
-        let generic = self.generic_fns.get(&key).cloned();
+        let generic = self.generic_def(&key);
+        // A specialized method's receiver is written in the *impl's*
+        // parameters, which the specialization already settled.
+        let mut scope = self.env.clone();
+        scope.extend(self.special_env(&key));
         let Some((params, _)) = self.sigs.borrow().get(&key).cloned().or_else(|| {
             // Only the receiver's type is wanted here, to decide whether
             // to borrow it. The rest may name the method's own
@@ -8297,7 +8423,7 @@ impl Fn<'_> {
             // resolve until the call site says what they are.
             let def = generic.as_ref()?;
             let (_, written) = def.params.first()?;
-            let recv = resolve_ty_env(written, self.types, &self.env).ok()?;
+            let recv = resolve_ty_env(written, self.types, &scope).ok()?;
             Some((vec![recv], Ty::Unit))
         }) else {
             return err(

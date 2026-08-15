@@ -564,12 +564,16 @@ fn map<B, F: Fn(Self::Item) -> B>(self, f: F) -> Map<Self, F>
 bound is checked under the environment of the call that instantiated it,
 because `B` belongs to that call.
 
-> **Not implemented.** A method with type parameters of its own, inside a
-> *generic* impl. `map` above is fine on `impl Iterator for Upto` and not on
-> `impl<I, B, F> Iterator for Map<I, F>`, so a chain of one adaptor works and
-> a chain of two does not: settling the impl's parameters and the method's
-> needs one instantiation to happen in two stages, and instantiation is a
-> single step today.
+Such a method has **two** sets of parameters and they are settled at
+different moments: the impl's as soon as the receiver's type is known, the
+method's only from the call's arguments. So instantiation happens in two
+stages — the impl's half is settled first and the method goes back into the
+queue as an ordinary generic function of what is left.
+
+**A method's own parameters may not reuse the impl's.** Both sets live in one
+environment, and a shadow would make `Self` mean two things at once: the
+second `map` of a chain would look for a receiver the first never produced.
+The names differ or it is an error.
 
 ### 4.4 Capture
 

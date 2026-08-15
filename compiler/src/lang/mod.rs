@@ -88,6 +88,37 @@ trait Iterator {
     type Item;
     fn next(&mut self) -> Option<Self::Item>;
 
+    // The lazy adaptors (Ch. 5 §3.1). Each returns a struct that does
+    // nothing until it is asked for a value, and each is a provided body —
+    // so an implementation gets all of them by writing `next` alone.
+    //
+    // A method's own type parameters may not reuse the impl's, which is why
+    // these are `R`, `G`, `Q`, `J` rather than the `B`, `F`, `P` the structs
+    // below use: `Map`'s impl and `Map`'s `map` live in one environment.
+    fn map<R, G: Fn(Self::Item) -> R>(self, g: G) -> Map<Self, G> {
+        Map { inner: self, f: g }
+    }
+
+    fn filter<Q: Fn(Self::Item) -> bool>(self, q: Q) -> Filter<Self, Q> {
+        Filter { inner: self, p: q }
+    }
+
+    fn take(self, n: taddr) -> Take<Self> {
+        Take { inner: self, left: n }
+    }
+
+    fn skip(self, n: taddr) -> Skip<Self> {
+        Skip { inner: self, left: n }
+    }
+
+    fn enumerate(self) -> Enumerate<Self> {
+        Enumerate { inner: self, at: 0 }
+    }
+
+    fn zip<J>(self, other: J) -> Zip<Self, J> {
+        Zip { a: self, b: other }
+    }
+
     // The consuming methods (Ch. 5 §3.3). Each is a `while let` over `next`
     // and nothing more, and each is a provided body, so an implementation
     // gets them by writing `next` alone (Ch. 4 §1.5).
@@ -284,9 +315,9 @@ impl<I: Iterator, B, F: Fn(I::Item) -> B> Iterator for Map<I, F> {
     }
 }
 
-impl<I, P> Iterator for Filter<I, P> {
-    type Item = t27;
-    fn next(&mut self) -> Option<t27> {
+impl<I: Iterator, P: Fn(I::Item) -> bool> Iterator for Filter<I, P> {
+    type Item = I::Item;
+    fn next(&mut self) -> Option<I::Item> {
         loop {
             match self.inner.next() {
                 Option::Some(x) => { if (self.p)(x) { return Option::Some(x); } },
@@ -296,9 +327,9 @@ impl<I, P> Iterator for Filter<I, P> {
     }
 }
 
-impl<I> Iterator for Take<I> {
-    type Item = t27;
-    fn next(&mut self) -> Option<t27> {
+impl<I: Iterator> Iterator for Take<I> {
+    type Item = I::Item;
+    fn next(&mut self) -> Option<I::Item> {
         if self.left == 0 { Option::None } else {
             self.left -= 1;
             self.inner.next()
@@ -306,9 +337,9 @@ impl<I> Iterator for Take<I> {
     }
 }
 
-impl<I> Iterator for Skip<I> {
-    type Item = t27;
-    fn next(&mut self) -> Option<t27> {
+impl<I: Iterator> Iterator for Skip<I> {
+    type Item = I::Item;
+    fn next(&mut self) -> Option<I::Item> {
         while self.left > 0 {
             self.left -= 1;
             self.inner.next();
@@ -317,9 +348,9 @@ impl<I> Iterator for Skip<I> {
     }
 }
 
-impl<I> Iterator for Enumerate<I> {
-    type Item = (taddr, t27);
-    fn next(&mut self) -> Option<(taddr, t27)> {
+impl<I: Iterator> Iterator for Enumerate<I> {
+    type Item = (taddr, I::Item);
+    fn next(&mut self) -> Option<(taddr, I::Item)> {
         match self.inner.next() {
             Option::Some(x) => {
                 let at = self.at;
@@ -331,9 +362,9 @@ impl<I> Iterator for Enumerate<I> {
     }
 }
 
-impl<A, B> Iterator for Zip<A, B> {
-    type Item = (t27, t27);
-    fn next(&mut self) -> Option<(t27, t27)> {
+impl<A: Iterator, B: Iterator> Iterator for Zip<A, B> {
+    type Item = (A::Item, B::Item);
+    fn next(&mut self) -> Option<(A::Item, B::Item)> {
         match self.a.next() {
             Option::Some(x) => match self.b.next() {
                 Option::Some(y) => Option::Some((x, y)),
