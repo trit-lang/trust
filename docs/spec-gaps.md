@@ -2303,22 +2303,27 @@ iterator, so `impl<I: Iterator> IntoIterator for I` says nothing about it and
 there was never an overlap. Ch. 4 §5.6 is corrected, and the `Into` sentence
 that stated the old rule with it.
 
-*The debt, stated rather than papered over.* Ch. 4 §5.7 says an iterator is an
-`IntoIterator` **by blanket impl**. It is a provided method on `Iterator`
-here, because a blanket impl **does not carry an associated type**: the choice
-is recorded against the self type's instantiation, and a blanket's self type
-is a parameter with no instantiation to record it against. The minimal case —
+*The debt, and paying it.* Ch. 4 §5.7 says an iterator is an `IntoIterator`
+**by blanket impl**, and the first attempt made it a provided method instead,
+because a blanket impl appeared not to carry an associated type. It was one
+line: `blanket_impl` never applied `subst_assoc_fn`, so `Self::Out` in a
+declaration was never replaced by what the rule chose for it, and a blanket
+impl that declared an associated type **never matched the signature it was
+implementing**. The error said so and the next error — "`A` has no method
+`wrap`" — was the one anybody would read.
 
-```
-trait Wrap { type Out; fn wrap(self) -> Self::Out; }
-impl<S: Src> Wrap for S { type Out = S; fn wrap(self) -> S { self } }
-```
+With that, the blanket impl §5.7 specifies is written, and two more places
+had to learn about rules:
 
-— compiles and then `a.wrap()` reports that `A` has no method `wrap`.
+- **A bound is satisfied by a blanket impl.** `fn f<T: IntoIterator>(x: T)`
+  now accepts an iterator, because a rule says so rather than because a pair
+  was written out. Only the *self* parameter's bounds are checked, since the
+  rule's other parameters are settled by a call and this question is asked
+  before there is one.
+- **A reference's impls are looked for under its referent**, which is where
+  `impl Trait for &T` puts them.
 
-`for` sees no difference between the two mechanisms. A **bound** does: `fn
-f<T: IntoIterator>(x: T)` does not accept an iterator. That is the whole of
-what is owed, and it is owed to blanket impls rather than to `IntoIterator`.
+Nothing is owed here now.
 
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but

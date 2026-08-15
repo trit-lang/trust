@@ -4137,3 +4137,44 @@ fn a_blanket_impl_covers_only_what_its_bounds_allow() {
         10 * 10 + 6
     );
 }
+
+#[test]
+fn a_blanket_impl_carries_an_associated_type() {
+    // `Self::Out` in the declaration is whatever the rule chose for it,
+    // exactly as in an ordinary impl (Ch. 4 §1.7). The substitution was
+    // missing here, so a blanket impl that declared an associated type never
+    // matched the signature it was implementing — and `Iterator` could not be
+    // an `IntoIterator` the way §5.7 says it is.
+    assert_eq!(
+        run("trait Src { fn get(self) -> t27; } \
+             trait Wrap { type Out; fn wrap(self) -> Self::Out; } \
+             impl<S: Src> Wrap for S { type Out = S; fn wrap(self) -> S { self } } \
+             struct A { v: t27 } \
+             impl Src for A { fn get(self) -> t27 { self.v } } \
+             fn main() -> t27 { let a = A { v: 7 }; a.wrap().get() }")
+        .0,
+        7
+    );
+}
+
+#[test]
+fn a_bound_is_satisfied_by_a_blanket_impl() {
+    // A rule gives the trait to every type meeting its bounds, and a bound is
+    // one of the places that has to know: `fn f<T: IntoIterator>` accepts an
+    // iterator because a rule says so and not because a pair was written out.
+    // A reference's impls are looked for under its referent, which is where
+    // `impl IntoIterator for &str` puts them (Ch. 4 §§2.2, 5.6).
+    assert_eq!(
+        run(&format!(
+            "{UPTO} \
+             fn count_all<T: IntoIterator>(x: T) -> taddr {{ x.into_iter().count() }} \
+             fn main() -> t27 {{ \
+                 let a = Upto {{ n: 4, at: 0 }}; \
+                 let s: &str = \"hello\"; \
+                 (count_all(a) as t27) * 100 + (count_all(s) as t27) \
+             }}"
+        ))
+        .0,
+        405
+    );
+}

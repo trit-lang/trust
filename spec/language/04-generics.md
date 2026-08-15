@@ -903,7 +903,7 @@ trait IntoIterator {
 }
 ```
 
-`Iterator` implements `IntoIterator` for itself.
+`Iterator` implements `IntoIterator` for itself, by blanket impl.
 
 An implementing type may be a **reference**: `impl IntoIterator for &str` is
 what makes `for c in s` walk a string, and it has to be the reference, because

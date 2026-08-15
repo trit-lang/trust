@@ -2313,6 +2313,11 @@ fn blanket_impl(
             );
         };
         let want = subst_trait_params_fn(want, &decl.params, &imp.trait_args);
+        // `Self::Out` in the declaration is whatever this rule chose for it,
+        // exactly as in an ordinary impl (Ch. 4 §1.7) — and it was not
+        // substituted here, so a blanket impl that declared an associated
+        // type never matched the signature it was implementing.
+        let want = subst_assoc_fn(&want, &imp.assoc);
         let want = subst_self(&want, &self_repr);
         let got = subst_self(m, &self_repr);
         let same_ret = match (&want.ret, &got.ret) {
@@ -6167,7 +6172,12 @@ impl Fn<'_> {
         let ok = match bound {
             "Copy" => self.types.is_copyable(ty),
             "Sized" => !ty.is_unsized(),
-            _ => match nominal_name(ty) {
+            // A reference's impls are keyed under its referent, which is
+            // where `impl Trait for &T` puts them too (Ch. 4 §2.1).
+            _ => match nominal_name(ty).or_else(|| match ty {
+                Ty::Ref(inner, _) => nominal_name(inner),
+                _ => None,
+            }) {
                 Some(n) => {
                     let base = self
                         .types
@@ -6181,6 +6191,17 @@ impl Fn<'_> {
                 None => false,
             },
         };
+        // A blanket impl gives the trait to every type meeting its bounds
+        // (Ch. 4 §5.6), and a bound is one of the places that has to know:
+        // `fn f<T: IntoIterator>` accepts an iterator because a rule says so
+        // and not because a pair was written out.
+        let ok = ok
+            || self
+                .impls
+                .blankets
+                .iter()
+                .filter(|r| r.trait_name == bound)
+                .any(|r| self.rule_applies(r, ty));
         if ok {
             return Ok(());
         }
@@ -6191,6 +6212,26 @@ impl Fn<'_> {
                  `{param}` (Ch. 4 §2.2)"
             ),
         )
+    }
+
+    /// Whether a blanket rule's own bounds hold for this type.
+    ///
+    /// Only the self parameter's bounds are checked: the rule's other
+    /// parameters are settled by the call, and this question is asked before
+    /// there is a call (Ch. 4 §5.6).
+    fn rule_applies(&self, rule: &Blanket, ty: &Ty) -> bool {
+        rule.generics.iter().all(|g| {
+            let ast::GenericParam::Type { name, bounds } = g else {
+                return true;
+            };
+            if *name != rule.self_param {
+                return true;
+            }
+            bounds.iter().all(|b| {
+                self.check_bound_named(ty, &b.name, &b.name, &HashMap::new(), "", "", rule.line)
+                    .is_ok()
+            })
+        })
     }
 
     /// A call to a known key, with any number of already-evaluated leading

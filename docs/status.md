@@ -445,11 +445,16 @@ string and `for`'s desugaring turns its expression into an iterator the way
 Ch. 4 §5.7 says. A blanket impl covers what its bounds allow rather than every
 type, which is what made `impl IntoIterator for &str` writable.
 
+A blanket impl carries an associated type, a bound is satisfied by one, and a
+reference's impls are found under its referent — so `Iterator` is an
+`IntoIterator` by the blanket impl §5.7 specifies, and `fn f<T: IntoIterator>`
+accepts both an iterator and a `&str`.
+
 What is left of Ch. 5 is `Cell`/`RefCell` (§5), `expect`, formatting, maps and
-sets, sorting and `Rc` — all of §7, all reserved. The nearest thing merely
-unbuilt is an **associated type on a blanket impl**: `Iterator` is an
-`IntoIterator` by a provided method rather than the blanket §5.7 specifies,
-which `for` cannot tell apart and a bound can.
+sets, sorting and `Rc` — all of §7, all reserved. Ch. 4's own list is down to
+`impl Trait for &mut T`, a generic impl of a *parameterized* trait
+(`impl<T> Make<T> for Pair<T>`, G9.20), and binding by reference in a `match`
+(G9.15).
 
 **B. Backend quality.** The instruction stream is a third of what it was
 (G8.6–G8.13, −66.6% on HPL), and memory is nearly out of the picture: frame
