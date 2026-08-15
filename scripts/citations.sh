@@ -1,6 +1,11 @@
 #!/bin/sh
-# Every `Ch. N §M` / `AM §M` / `TIR §M` / `ISA §M` citation in the source,
-# checked against the document it names.
+# Every `Ch. N §M` / `AM §M` / `TIR §M` / `ISA §M` citation in the source *and
+# in the specification itself*, checked against the document it names.
+#
+# The specification cites itself far more than the code does, and for a long
+# time nothing checked those: this script read `core/src compiler/src vm/src`
+# only. A chapter that cites a section of another chapter is exactly where a
+# renumbering goes wrong.
 #
 # It cannot tell whether a citation is *apt* — only whether the section it
 # points at exists. That is a low bar, and it is still the bar the drop-glue
@@ -21,13 +26,14 @@ doc_for() {
     "Ch. 2") echo spec/02-composites.md ;;
     "Ch. 3") echo spec/language/03-references.md ;;
     "Ch. 4") echo spec/language/04-generics.md ;;
+    "Ch. 5") echo spec/language/05-library.md ;;
     *)     echo "" ;;
   esac
 }
 
 out=$(mktemp)
 grep -rhoE '(AM|TIR|ISA|Ch\. [0-9]) §[0-9]+(\.[0-9]+)*' \
-  core/src compiler/src vm/src 2>/dev/null | sort -u |
+  core/src compiler/src vm/src spec docs README.md 2>/dev/null | sort -u |
 while IFS= read -r cite; do
   doc=$(doc_for "${cite% §*}")
   sec="${cite##* §}"
@@ -47,5 +53,5 @@ if [ -s "$out" ]; then
 fi
 rm -f "$out"
 n=$(grep -rhoE '(AM|TIR|ISA|Ch\. [0-9]) §[0-9]+(\.[0-9]+)*' \
-  core/src compiler/src vm/src 2>/dev/null | sort -u | wc -l)
+  core/src compiler/src vm/src spec docs README.md 2>/dev/null | sort -u | wc -l)
 printf 'citations: %d distinct, every section named exists\n' "$n"

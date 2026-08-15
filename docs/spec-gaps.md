@@ -437,7 +437,7 @@ Two limits worth naming:
   and are caught — so §1.8's overlap rule has nothing to check yet.
 
 **G6.9 — narrowing a runtime value did not legalize, and now does.** A `t9`
-is not a legal register width on `tritium`, so TIR §6.2 promotes it to a word;
+is not a legal register width on `tritium`, so TIR §6 promotes it to a word;
 but a *memory access type* is not promoted, because a `t9` in memory occupies
 one tryte whatever the registers are. The legalizer's `coerce` could only
 widen, so storing a promoted value back into a `t9` failed outright with
@@ -621,7 +621,7 @@ select a native operation for is in the target's legal set, and it runs at
 both seams that depend on it plus in every end-to-end test.
 
 `widen` and `trunc` are deliberately excluded: they are the bridge between a
-legal register width and a memory access width, and TIR §6.2 does not promote
+legal register width and a memory access width, and TIR §6 does not promote
 the latter because a `t9` in memory is one tryte whatever the registers are.
 The check caught this on its first run, which is a fair test of the check.
 
@@ -1408,6 +1408,93 @@ that says so.
 **Ch. 4 has no substantial hole left.** `docs/status.md` §6 said generic
 traits were the one, and it now lists neither half.
 
+**G9.1 — Ch. 5, and the three things it had to decide.** The library chapter
+exists (`spec/language/05-library.md`, 700 lines). Its job was to discharge
+what nine other sections had deferred to it, and three of those needed a
+decision rather than a write-up.
+
+**Text is fixed width, one character per word — and AM §5 said the
+opposite.** AM §5 promised "a tryte-based UTF-8 carrier format as the interop
+default; a native ternary text encoding is a reserved appendix". The measured
+comparison says otherwise:
+
+| Code points | UTF-8 in trytes | one word each | |
+|---|---|---|---|
+| ASCII | 1 tryte | 3 | 3× |
+| Greek, Cyrillic | 2 | 3 | 1.5× |
+| **CJK** | 3 | 3 | **1×** |
+| astral planes | 4 | 3 | **0.75×** |
+
+Fixed width costs 3× only for the range UTF-8 was designed to optimize, and
+nothing at all for the range this project's author writes in. What it buys is
+that `s[i]` is a character and `s.len()` is a count of them, both O(1) — the
+two things Rust cannot offer and the reason is UTF-8. AM §5 is corrected, and
+the *denser* native encoding is what is now reserved: a variable-width scheme
+using a tryte's **sign trit** as the continuation marker, which is
+self-synchronizing for the same reason UTF-8 is and more ternary than UTF-8 is
+binary (Ch. 5 Appendix A).
+
+A `char` is a **word** and not two trytes, which would have been enough and
+denser: the machine has exactly two access widths, and 18 trits is neither.
+
+**`Box` is a language item, and there is one allocator.** An allocator turns a
+size into an address, which is precisely the operation TIR §5 does not have
+and Ch. 3 §6 reserves. So draft 0.1 says the smallest true thing: `Box`,
+`Cell` and `RefCell` are language items; the allocator is two functions the
+*target* supplies, like `putchar`; and `trait Allocator` is reserved to the
+`unsafe` chapter. Pretending an allocator could be written in this language
+would have been the alternative.
+
+**`?` is two rules and no trait.** Rust's `Try`/`FromResidual` exists to make
+`?` extensible to user types. The extension has almost no users, and the trait
+is one most readers cannot recite — which is a bad property for the definition
+of a control-flow operator in a language whose argument is that a reader can
+tell what code does. Reserved rather than rejected.
+
+Two smaller ones. **`expect` does not exist**: its whole value is the message,
+and AM §4 gives a fault a code and nothing else, so a target that could print
+would be printing from inside a failure on a port the failing program may have
+been using. **`RefCell`'s borrow state is one word whose sign is the
+three-valued part** — 0 unborrowed, *n* shared, −1 exclusive — which is the
+neatness Ch. 3 §6 was reaching for when it said the state "is one trit, though
+a shared borrow count needs more than a trit". It is not in a trit; it is in a
+sign, and `cmp` against zero answers it in one instruction.
+
+**Nothing here is implemented.** Ch. 5 is specification ahead of code, which
+is the order that has repeatedly reduced the number of decisions made blind.
+
+**G9.2 — `_end`, which the assembler does not define.** Ch. 5 §2.2 places the
+heap between the end of the loaded image and the stack, and names the end of
+the image `_end`. The assembler publishes no such symbol, and a program has no
+other way to learn where its own image stops. Nothing in draft 0.1 needs it
+until an allocator exists, and it is recorded here so that the allocator does
+not discover it.
+
+**G9.3 — the citation checker read a third of the citations.** `scripts/citations.sh`
+checked `core/src compiler/src vm/src` and nothing else, so the specification's
+citations of *itself* — far more numerous than the code's — were never
+checked. Extending it to `spec/`, `docs/` and the README raised the count from
+102 to 140 and immediately caught three stale ones in this document: two
+naming a subsection of TIR's undefined-behavior inventory, which is a numbered
+list, and one naming a subsection of its legalization contract, which is a
+bulleted one. Those exact citations had already been fixed **in the source**
+by the checker's first run; the document describing that fix was not swept.
+Naming §6, failing in the direction it always fails.
+
+The checker cannot tell a citation from the *quotation* of a broken one, so
+neither this entry nor `docs/status.md` can name the two it caught. That is a
+small price and it is the shape of the tool: it reads text, not intent.
+
+It also confirms what the checker cannot do. Writing Ch. 5 produced five
+citations that name real sections saying something else — `Ch. 2 §7`
+(Unions) for the niche rule, `Ch. 0 §2.3` (Comparison) for a body-less
+declaration, `Ch. 2 §5` (Enums) for the bounds check, `Ch. 3 §1.1` (One
+owner) for the aliasing rule, and `Ch. 0 §5.5` for a reservation of macros
+that **does not exist anywhere** — the assembly language reserves macros, and
+Trust does not reserve them at all. All five passed the checker and were
+caught by reading. The §-level-anchor version of the check is still worth
+building.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The
@@ -1508,14 +1595,14 @@ note that a `t18` occupies two trytes but still aligns to three, because the
 table is stated per *width*, not per size — keeps alignment a power of three
 (Composites Ch. 2 §1), and extends past the word without a special case.
 
-**G4.2 — Uninitialized global storage.** TIR §4.4 makes reading uninitialized
+**G4.2 — Uninitialized global storage.** TIR §4 item 4 makes reading uninitialized
 `slot` storage yield poison but says nothing about a `global` with no
 initializer.
 
 *Decision:* the same — `= zeroinit` zero-fills, an omitted initializer leaves
 the storage uninitialized and reading it yields poison.
 
-**G4.3 — Poison propagation.** TIR §4.4 adopts "the standard modern" poison
+**G4.3 — Poison propagation.** TIR §4 item 4 adopts "the standard modern" poison
 model by reference without restating it. Implemented as: poison propagates
 through every value-producing instruction; branching on poison is UB; loading
 or storing *through* a poison address is UB; `select3` on a poison selector

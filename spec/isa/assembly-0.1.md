@@ -134,13 +134,17 @@ Language Ch. 1 §4 left open whether `& | ^` should be repurposed as
 its own would prejudge the language's syntax. The named forms of §4.3 are the
 only spelling in draft 0.1.
 
-### 2.5 Character and string literals — reserved
+### 2.5 Character and string literals
 
-Text literals (`'a'`, `"hello"` as *text*) are **reserved**. AM §5 defers text
-encoding to the language specification's library chapter, and until a carrier
-format is fixed there is no defensible meaning for the trytes such a literal
-would emit. The quoted form is used by §2.3 for trit strings, which are not
-text.
+Text literals (`'a'`, `"hello"` as *text*) were reserved while no encoding
+existed. Language Ch. 5 §1 fixes one, so their meaning is now settled: a
+character literal is one Unicode scalar value in one word, and a string
+literal is a sequence of them, which is what `.string` emits (Ch. 5 §1.5).
+`.utf8` emits interchange code units instead, one per tryte.
+
+Neither directive is implemented in draft 0.1, and the quoted form continues
+to be used by §2.3 for trit strings, which are not text — a reader tells them
+apart by which directive consumes them.
 
 ---
 
@@ -443,8 +447,11 @@ inventing a container.
 ## 9. What this document deliberately does not define
 
 - **The instruction set.** §6.
-- **Text encoding.** Reserved with AM §5; `.string` and friends wait on the
-  library chapter.
+- **Text encoding.** Language Ch. 5 §1 fixes it, and Ch. 5 §1.5 says what
+  `.string` emits: the native encoding, one word per character, so that a
+  string the assembler builds and one the compiler builds are the same thing.
+  `.utf8` emits interchange code units, one per tryte. Neither directive is
+  implemented.
 - **Macros and conditional assembly.** §5.5.
 - **Linking and relocation.** §3.4, §8.
 - **Debug information and listing output.** Neither has a consumer yet.

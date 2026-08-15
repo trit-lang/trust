@@ -268,9 +268,13 @@ mechanism maps onto faults is a language-spec concern.
 
 ## 5. What this document deliberately does not define
 
-- **Text encoding.** Interchange encoding of text is specified in the
-  language spec's library chapter (a tryte-based UTF-8 carrier format as the
-  interop default; a native ternary text encoding is a reserved appendix).
+- **Text encoding.** Specified in the language spec's library chapter
+  (Ch. 5 §1), which chooses a **native fixed-width encoding** — one character
+  per word — and makes UTF-8 a conversion performed at an interchange
+  boundary. Earlier drafts of this section had it the other way round, with a
+  tryte-based UTF-8 carrier as the storage format and the native encoding
+  reserved; Ch. 5 §1.1 records the erratum and the measurements behind it. A
+  *denser* native encoding remains reserved (Ch. 5 Appendix A).
 - **Floating point.** No ternary floating-point format is defined in 0.1.
   Fixed-point conventions are a language/library concern built on the integer
   semantics above.

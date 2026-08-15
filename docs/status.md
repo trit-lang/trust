@@ -37,25 +37,26 @@ them; a number nobody can reproduce quietly withdraws this document's opening
 claim.
 
 ```
-spec/                              4 866 lines of specification, 10 documents
-├── 00-abstract-machine.md   304   the AM: trits, trytes, words, arithmetic, faults
+spec/                              5 660 lines of specification, 11 documents
+├── 00-abstract-machine.md   308   the AM: trits, trytes, words, arithmetic, faults
 ├── 01-naming.md             191   names, radix notation, document conventions
 ├── 01-types.md              277   Ch. 1 — scalars, operators, overflow flavors
 ├── 02-composites.md         235   Ch. 2 — tuples, arrays, structs, enums, layout
 ├── tir-0.1.md               376   the IR: SSA, block params, provenance, legalization
 ├── language/
-│   ├── 00-syntax.md         604   Ch. 0 — lexis, items, expressions, patterns, grammar
+│   ├── 00-syntax.md         607   Ch. 0 — lexis, items, expressions, patterns, grammar
 │   ├── 03-references.md     520   Ch. 3 — ownership, references, lifetimes, slices
-│   └── 04-generics.md     1 048   Ch. 4 — traits, generics, dyn, closures, lang items
+│   ├── 04-generics.md     1 048   Ch. 4 — traits, generics, dyn, closures, lang items
+│   └── 05-library.md        780   Ch. 5 — text, the heap, iterators, ?, interior mutability
 └── isa/
     ├── trisc-27-0.1.md      713   the machine: registers, encoding, instructions
-    └── assembly-0.1.md      513   the assembly language
+    └── assembly-0.1.md      518   the assembly language
 
 core/      2 082 lines  crate trit-core — Bt, Tint, flavors, faults, literals
-compiler/ 26 006 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
+compiler/ 26 037 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
 vm/        4 566 lines  crate tritium  — machine, assembler, image format, profiler
 docs/
-├── spec-gaps.md               50 entries: every place the spec was silent or wrong
+├── spec-gaps.md               73 entries: every place the spec was silent or wrong
 └── status.md                  this file
 scripts/
 ├── stats.sh                   produces every number in this document
@@ -126,7 +127,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6) |
 
-**358 tests, zero clippy warnings, 53 commits.** `scripts/stats.sh`.
+**358 tests, zero clippy warnings, 54 commits.** `scripts/stats.sh`.
 
 ---
 
@@ -153,10 +154,10 @@ inference and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
 
 | Missing | Why |
 |---|---|
-| strings and characters | AM §5 defers text encoding to the library chapter; write `[t9; N]` of code units |
+| strings and characters | Ch. 5 §1 specifies them — one character per word, fixed width — and nothing implements them yet; write `[t9; N]` of code units |
 | ranges, so `for i in 0..10` | Ch. 0 §4 reserves range expressions |
 | a type parameterized by a `const` | `const N` works as an array *length* (G8.2); `struct Grid<const N: taddr>` is Ch. 4 §2.4 and unimplemented |
-| `Box`, any heap allocation | no allocator; Ch. 3 §6 |
+| `Box`, any heap allocation | Ch. 5 §2 specifies it; the allocator is two functions a target supplies, and no target supplies them |
 | returning a closure | needs `impl Trait` in return position or `Box<dyn Fn>`; Ch. 4 §4.5 |
 | `FnOnce` | every capture is by reference; needs a move analysis of the closure body |
 | `IntoIterator`, so `for x in xs` over an array | array iterators are the library's; the blanket impl it needs now works (G0.14b) |
@@ -316,12 +317,18 @@ code comments both cite the section they implement (`Ch. 3 §2.2`, `AM §3.4`,
 missing, it says it is missing and what it is waiting for. Match this; it is
 most of what makes the documents usable.
 
-`scripts/citations.sh` checks all 102 distinct citations in the source
-against the documents they name. It cannot tell whether a citation is *apt* —
-only whether its section exists — and that low bar still caught five on its
-first run: `TIR §4.1`–`§4.4` and `TIR §6.2` name subsections that do not
-exist, because §4's UB sources are a numbered *list* and §6's contract is a
-bulleted one. They are now `TIR §4 item N` and `TIR §6`.
+`scripts/citations.sh` checks every citation in the source **and in the
+specification itself** against the document it names. It cannot tell whether a
+citation is *apt* — only whether its section exists — and that low bar has
+caught two batches. On its first run, five citations in the source named
+subsections of TIR's undefined-behavior inventory and its legalization
+contract; neither has subsections, because both are lists. They became
+"item N" and a bare section reference.
+
+Extending it to the specification and to these documents caught three more of
+exactly the same kind, in `docs/spec-gaps.md` — the fix had been applied to the
+code and not to the document describing it, which is Naming §6's sweep rule
+failing in the direction it always fails.
 
 The stronger version of this check is worth building. The drop-glue
 double-free would have failed it: `drop_at` cited Ch. 3 §1.4, whose item 3
@@ -369,12 +376,11 @@ Three coherent directions, in no forced order:
 > double-free, found by a crash, in a session that is thinking about
 > allocation. The cheapest time to look is while nothing is at stake.
 
-**A. The library chapter (Ch. 5) as specification.** Strings and text
-encoding (AM §5's deferred question), `Box` and an allocator, `Iterator`
-adaptors, `checked_*`, the `?` operator and the trait describing what it
-propagates. Everything it rests on is now defined, and writing the spec ahead
-of the implementation has repeatedly reduced the number of decisions made
-blind.
+**A. Ch. 5 as implementation.** The chapter is written (G9.1) and none of it
+is built. In dependency order: text (`char`, `str`, the literals, the UTF-8
+conversion), then `?` — which needs nothing new — then the iterator adaptors,
+then the heap, which needs `_end` from the assembler (G9.2) and two functions
+from the runtime.
 
 **B. Backend quality.** The instruction stream is a third of what it was
 (G8.6–G8.13, −66.6% on HPL), and memory is nearly out of the picture: frame

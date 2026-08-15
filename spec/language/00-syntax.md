@@ -91,11 +91,14 @@ ternary and `0h` for heptavintimal, with `_` permitted as a separator in all
 three. `trit` literals carry the `t` suffix — `-1t`, `0t`, `1t` — and `bool`
 literals are `true` and `false`.
 
-There are **no character or string literals** in draft 0.1. They are
-reserved. AM §5 defers text encoding to the library chapter, and until a
-carrier format is fixed a string literal has no defensible meaning; a program
-that needs bytes today writes them as what they are, which is an array of
-`t9`. This is inconvenient exactly where the inconvenience is honest.
+Character and string literals were reserved until a text encoding existed,
+and Ch. 5 §1 now fixes one: a `char` is a Unicode scalar value in one word,
+and a string is a sequence of them. `'a'` is a `char` and `"hello"` a
+`&'static str`; Ch. 5 §1.4 gives the escapes and says why there is no `\x`.
+
+A program that wants *bytes* rather than text still writes them as what they
+are, which is an array of `t9` — that is what an interchange buffer is, and
+Ch. 5 §1.5 is where text becomes one.
 
 ### 1.5 Punctuation and operators
 
@@ -546,7 +549,7 @@ path        := ident ( '::' ( ident | '<' type,* '>' ) )*    -- Ch. 4 §2.3
 
 ## 7. What this chapter deliberately does not define
 
-- **Strings and characters.** §1.4; they wait on the library chapter.
+- **Strings and characters.** §1.4; defined by Ch. 5 §1.
 - **Generics, traits, `impl`.** Their meaning is Chapter 4's; their syntax is
   in §6, because a reader asking "can I write this?" should not have to read
   four chapters to find out.
