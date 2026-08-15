@@ -1064,3 +1064,41 @@ fn the_allocator_rounds_up_and_refuses_what_it_cannot_fit() {
     );
     assert_eq!(stop, Stop::Halted(0));
 }
+
+#[test]
+fn a_program_may_overwrite_its_own_code() {
+    // The decoder caches by address, so a decoding is only good until
+    // something writes over the word it came from. An image is ordinary
+    // memory and nothing stops a program from doing that, so every store
+    // forgets what it may have changed.
+    //
+    // The loop matters: the first pass executes `a0 = 2` *and caches it*,
+    // and only then is it replaced. Without invalidation this halts with 2.
+    let src = "\
+_start:
+    addi.wrap s0, zero, 0
+loop:
+victim:
+    addi.wrap a0, zero, 2
+    cmp     t3, s0, zero
+    br3     t3, done, patch, done
+patch:
+    addi.wrap s0, zero, 1
+    la      t0, source
+    ld.word t1, 0(t0)
+    la      t2, victim
+    st.word t1, 0(t2)
+    j       loop
+done:
+    halt    a0
+source:
+    addi.wrap a0, zero, 1
+";
+    let image = tritium::assemble(src).expect("assembles");
+    let mut vm = tritium::Vm::with_default_memory();
+    vm.load_image(&image);
+    match vm.run(1000) {
+        tritium::Stop::Halted(v) => assert_eq!(v, 1),
+        other => panic!("{other}"),
+    }
+}

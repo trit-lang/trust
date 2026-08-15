@@ -456,6 +456,13 @@ sets, sorting and `Rc` — all of §7, all reserved. Ch. 4's own list is down to
 (`impl<T> Make<T> for Pair<T>`, G9.20), and binding by reference in a `match`
 (G9.15).
 
+**B00. Interpreter speed.** 2.57 → **61.3 M instructions/second** on HPL, 24×
+(G8.15): `shr3` was a loop where its own comment already gave the closed
+form, and then a direct-mapped decode cache with invalidation on store. Every
+earlier measurement moved instructions *retired*; this is the first to move
+instructions per *second*, which with no hardware is the other factor of the
+same product.
+
 **B0. Inlining.** A call to a small non-recursive function becomes its body
 (G8.14): HPL 3 661 618 → 3 247 122, −11.3%, with the four solve intervals down
 about 12% each. The budget is 24 instructions and larger is measurably worse —

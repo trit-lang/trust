@@ -2357,6 +2357,33 @@ why Ch. 5 §1.5's `print` still repeats `print_char`'s body: `print_char` is
 over the budget, and raising the budget until it fits is 3 315 827 against
 3 247 122. The repetition is now a measurement rather than a guess.
 
+**G8.15 — the interpreter is 24× faster, and neither change was clever.**
+2.57 → **61.3 M instructions/second** on HPL; 1.26 s becomes 53 ms.
+
+`word::shr3` was a **loop**: `k` iterations of subtract-the-low-trit and
+divide by three. Every field the decoder extracts goes through it, and the
+decoder runs once per instruction. Its own doc comment already stated the
+closed form — "discarding low trits *is* round-to-nearest division by 3^k,
+and since 3^k is odd no tie can arise" — so the loop was the definition
+written out rather than an implementation of it. `floor((2v + p) / 2p)` is
+that sentence as arithmetic: round-half-up, and no tie can arise because a
+tie needs `2v = (2m+1)p`, whose right side is odd. `pow3` is a table now for
+the same reason — `3i128.pow(n)` is also a loop. **2.57 → 21.7 M/s.**
+
+Then a **decode cache**, direct-mapped, 2^16 entries, keyed by address.
+**21.7 → 61.3 M/s.** It is the only change here with a soundness condition:
+an image is ordinary memory and nothing stops a program from writing over its
+own code, so every store forgets the decodings it may have invalidated. There
+is a test that overwrites an instruction *after* executing it once — the loop
+is what makes the first pass populate the cache — and it halts with 2 instead
+of 1 if the invalidation is removed.
+
+*Why this matters here more than it would elsewhere.* There is no ternary
+hardware and there is not going to be. Instructions retired and instructions
+per second are two factors of one product, and every measurement in this log
+until now moved only the first: −66.6% from the backend, −11.3% from
+inlining. This is the first time the second has moved at all.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

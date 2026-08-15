@@ -31,9 +31,24 @@ pub const MIN_WORD: i128 = -MAX_WORD;
 /// The largest tryte value.
 pub const MAX_TRYTE: i128 = 9841;
 
+/// 3^`n` for every `n` this machine can ask for, computed once.
+///
+/// `3i128.pow(n)` is a loop, and every field extraction in the decoder went
+/// through one. 81 entries is the widest thing here — a 54-trit product needs
+/// 3^54, and the shifts reach further.
+static POW3: [i128; 81] = {
+    let mut t = [1i128; 81];
+    let mut i = 1;
+    while i < 81 {
+        t[i] = t[i - 1] * 3;
+        i += 1;
+    }
+    t
+};
+
 /// 3^`n`, for `n` up to 80.
 pub fn pow3(n: u32) -> i128 {
-    3i128.pow(n)
+    POW3[n as usize]
 }
 
 /// The balanced ternary digit of `v`: the unique trit congruent to `v` mod 3.
@@ -52,11 +67,15 @@ pub fn low_trit(v: i128) -> i8 {
 /// Discarding low trits *is* round-to-nearest division by 3^k, and since 3^k
 /// is odd no tie can arise (AM §3.3).
 pub fn shr3(v: i128, k: u32) -> i128 {
-    let mut v = v;
-    for _ in 0..k {
-        v = (v - low_trit(v) as i128) / 3;
-    }
-    v
+    // The sentence above, written as arithmetic instead of as a loop.
+    // `floor((2v + p) / 2p)` is `round(v/p)` with ties going up, and no tie
+    // can arise: a tie needs `2v = (2m+1)p`, whose right side is odd.
+    //
+    // This was a loop of `k` subtract-and-divides, and every field the
+    // decoder extracts went through one — which is most of where the
+    // interpreter's time went.
+    let p = POW3[k as usize];
+    (2 * v + p).div_euclid(2 * p)
 }
 
 /// `v · 3^k`.
@@ -195,5 +214,43 @@ pub fn overflowing(exact: i128) -> Overflowing {
         } else {
             sign(exact)
         },
+    }
+}
+
+#[cfg(test)]
+mod shift_tests {
+    use super::*;
+
+    /// The loop `shr3` used to be, kept as the thing to be right against.
+    fn by_hand(v: i128, k: u32) -> i128 {
+        let mut v = v;
+        for _ in 0..k {
+            v = (v - low_trit(v) as i128) / 3;
+        }
+        v
+    }
+
+    #[test]
+    fn shifting_right_agrees_with_dropping_trits_one_at_a_time() {
+        // Every shift width the machine can ask for, against a spread of
+        // values that includes both ends of the word range and the awkward
+        // neighbourhood of zero.
+        let mut vs: Vec<i128> = (-400..=400).collect();
+        vs.extend([MIN_WORD, MAX_WORD, MIN_WORD + 1, MAX_WORD - 1]);
+        for k in 0..=WORD_TRITS + 3 {
+            for &v in &vs {
+                assert_eq!(shr3(v, k), by_hand(v, k), "shr3({v}, {k})");
+            }
+        }
+        // And a wide sample across the whole range, since the loop and the
+        // closed form could agree near zero and part company far from it.
+        let mut x: i128 = 1;
+        for _ in 0..2000 {
+            x = (x * 1_103_515_245 + 12_345).rem_euclid(2 * MAX_WORD + 1);
+            let v = x - MAX_WORD;
+            for k in 0..=WORD_TRITS {
+                assert_eq!(shr3(v, k), by_hand(v, k), "shr3({v}, {k})");
+            }
+        }
     }
 }

@@ -120,7 +120,13 @@ pub struct Vm {
     pub io: Io,
     /// Instructions retired since reset, which `CYCLES` reports (ISA §2.3).
     steps: u64,
+    /// Decoded instructions, by address — see `decode_at`.
+    icache: Vec<Option<(i128, Inst)>>,
 }
+
+/// Entries in the decode cache. Direct-mapped, so a lookup is one index and
+/// one comparison; 2^16 covers any image this machine runs.
+const ICACHE: usize = 1 << 16;
 
 impl Vm {
     /// A machine with the given address-space size, at reset (§1.3).
@@ -131,6 +137,7 @@ impl Vm {
             mem: Memory::new(mem_size),
             io: Io::default(),
             steps: 0,
+            icache: vec![None; ICACHE],
         }
     }
 
@@ -148,6 +155,7 @@ impl Vm {
     pub fn load_words(&mut self, words: &[i128]) {
         for (i, &w) in words.iter().enumerate() {
             self.mem.set_word(i as i128 * WORD_TRYTES, w);
+            self.forget(i as i128 * WORD_TRYTES);
         }
     }
 
@@ -198,9 +206,7 @@ impl Vm {
                 format!("instruction fetch at {pc} is outside memory"),
             ));
         }
-        let word = self.mem.word(pc);
-        let inst =
-            Inst::decode(word).map_err(|e| fault(FaultCode::Trap, format!("at {pc}: {e}")))?;
+        let inst = self.decode_at(pc)?;
 
         // The default is to fall through to the next word; control transfers
         // overwrite this.
@@ -212,6 +218,38 @@ impl Vm {
             self.steps = self.steps.wrapping_add(1);
         }
         outcome
+    }
+
+    /// The instruction at `pc`, decoded once per address.
+    ///
+    /// An image is ordinary memory and a program may write to it, so the
+    /// cache is invalidated by every store — which is one array write, and
+    /// cheaper than decoding.
+    fn decode_at(&mut self, pc: i128) -> Result<Inst, Stop> {
+        let slot = ((pc / WORD_TRYTES).rem_euclid(ICACHE as i128)) as usize;
+        if let Some((at, inst)) = &self.icache[slot]
+            && *at == pc
+        {
+            return Ok(*inst);
+        }
+        let word = self.mem.word(pc);
+        let inst =
+            Inst::decode(word).map_err(|e| fault(FaultCode::Trap, format!("at {pc}: {e}")))?;
+        self.icache[slot] = Some((pc, inst));
+        Ok(inst)
+    }
+
+    /// Forget any decoding of the word covering `addr`, and of the words a
+    /// store overlapping it could have changed.
+    fn forget(&mut self, addr: i128) {
+        for a in [addr - 2, addr - 1, addr] {
+            let slot = ((a.div_euclid(WORD_TRYTES)).rem_euclid(ICACHE as i128)) as usize;
+            if let Some((at, _)) = &self.icache[slot]
+                && *at == a.div_euclid(WORD_TRYTES) * WORD_TRYTES
+            {
+                self.icache[slot] = None;
+            }
+        }
     }
 
     fn exec(&mut self, inst: Inst, pc: i128) -> Result<(), Stop> {
@@ -413,6 +451,9 @@ impl Vm {
             Width::Word => self.mem.set_word(addr, v),
             Width::Tryte => self.mem.set_tryte(addr, word::wrap_to(v, 9)),
         }
+        // An image is ordinary memory: nothing stops a program from writing
+        // over its own code, so a decoding is only good until something does.
+        self.forget(addr);
         Ok(())
     }
 
