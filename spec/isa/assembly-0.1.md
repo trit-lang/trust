@@ -187,7 +187,26 @@ expressions are. The asymmetry is deliberate: it keeps constant definitions
 free of ordering surprises while leaving forward branches, the case that
 actually matters, unrestricted.
 
-### 3.4 Visibility
+### 3.4 `_end`, the one symbol the assembler defines
+
+```
+_end
+```
+
+is the first address past everything the file emits, rounded up to a word. It
+is defined by the assembler, not by the program, and a label or `.equ` of that
+name is an error.
+
+A program has no other way to learn where its own image stops, and language
+Ch. 5 §2.2 puts the heap there: the image ends, `_end` begins, and the heap
+grows up from it while the stack grows down from the top of memory.
+
+It is defined after the first pass, because that is when the answer is known,
+and it is therefore a forward reference for every statement — which is exactly
+the case §3.3 already allows, and which makes `li rd, _end` take its two-word
+form (§5.4).
+
+### 3.5 Visibility
 
 ```
 .global name
@@ -331,7 +350,7 @@ one yet (§8).
 | Directive | Meaning |
 |---|---|
 | `.equ name, e` | define a constant (§3.2) |
-| `.global name` | export a defined symbol (§3.4) |
+| `.global name` | export a defined symbol (§3.5) |
 
 ### 5.5 Reserved directives
 
@@ -453,7 +472,7 @@ inventing a container.
   `.utf8` emits interchange code units, one per tryte. Neither directive is
   implemented.
 - **Macros and conditional assembly.** §5.5.
-- **Linking and relocation.** §3.4, §8.
+- **Linking and relocation.** §3.5, §8.
 - **Debug information and listing output.** Neither has a consumer yet.
 - **A name for the assembler binary.** Naming §2's rule against squatting a
   name for a tool that does not exist applies to this one too.

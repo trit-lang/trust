@@ -961,3 +961,106 @@ fn a_profile_of_a_program_that_faults_reports_the_fault() {
     assert!(matches!(p.stop, Some(Stop::Fault(FaultCode::DivZero, _))));
     assert_eq!(p.by_kind.get("alu.div"), Some(&1));
 }
+
+/// Assemble a program with the runtime appended and run it, returning how it
+/// stopped. "Linking" is concatenation (TRISC-27 §8).
+fn with_runtime(program: &str) -> Stop {
+    let mut src = program.to_string();
+    src.push_str(include_str!("../../examples/trisc/runtime.t27"));
+    let image = tritium::assemble(&src).unwrap_or_else(|e| panic!("assembly failed: {e:?}\n{src}"));
+    let mut vm = Vm::with_default_memory();
+    vm.load_image(&image);
+    vm.run(1_000_000)
+}
+
+#[test]
+fn the_assembler_says_where_the_image_ends() {
+    // `_end` is the first address past everything the file emits, rounded up
+    // to a word. A program has no other way to learn where its own image
+    // stops, and an allocator needs to (language Ch. 5 §2.2).
+    //
+    // It is a forward reference in pass one, so `li` takes its two-word form:
+    // the reserved word, two for the `li`, one for the `halt` — twelve.
+    // The runtime is appended, so `_end` is past all of it; what this pins
+    // is that the symbol exists, is positive, and is a whole number of words.
+    let Stop::Halted(end) = with_runtime("start:\n    li a0, _end\n    halt a0\n") else {
+        panic!("did not halt");
+    };
+    assert!(end > 0 && end % 3 == 0, "_end = {end}");
+
+    // Without the runtime it is exactly the image: the reserved word, two for
+    // a `li` whose forward reference makes it take its long form, one for the
+    // `halt`.
+    let image = tritium::assemble("start:\n    li a0, _end\n    halt a0\n").unwrap();
+    let mut vm = Vm::with_default_memory();
+    vm.load_image(&image);
+    assert_eq!(vm.run(100), Stop::Halted(12));
+}
+
+#[test]
+fn the_allocator_hands_out_blocks_and_takes_them_back() {
+    // Language Ch. 5 §2: the target supplies `alloc` and `free`, because
+    // turning a size into an address is the operation TIR §5 does not have.
+    //
+    // Two blocks of twelve trytes are twelve apart; freeing the first and
+    // asking for twelve again returns it, because a freed block is reused for
+    // a request of exactly its size.
+    let stop = with_runtime(
+        ".equ MEM_SIZE, -6\n\
+         start:\n\
+         \x20   ld.word sp, MEM_SIZE(zero)\n\
+         \x20   li      a0, 12\n\
+         \x20   li      a1, 3\n\
+         \x20   call    f.alloc\n\
+         \x20   add.wrap s0, a0, zero\n\
+         \x20   li      a0, 12\n\
+         \x20   li      a1, 3\n\
+         \x20   call    f.alloc\n\
+         \x20   sub     s2, a0, s0\n\
+         \x20   add.wrap a0, s0, zero\n\
+         \x20   li      a1, 12\n\
+         \x20   li      a2, 3\n\
+         \x20   call    f.free\n\
+         \x20   li      a0, 12\n\
+         \x20   li      a1, 3\n\
+         \x20   call    f.alloc\n\
+         \x20   sub     s3, a0, s0\n\
+         \x20   add.trap a0, s2, s3\n\
+         \x20   halt    a0\n",
+    );
+    assert_eq!(stop, Stop::Halted(12));
+}
+
+#[test]
+fn the_allocator_rounds_up_and_refuses_what_it_cannot_fit() {
+    // A size of one tryte becomes two words, the smallest a freed block can
+    // be: it has to hold its own size and the next link.
+    let stop = with_runtime(
+        ".equ MEM_SIZE, -6\n\
+         start:\n\
+         \x20   ld.word sp, MEM_SIZE(zero)\n\
+         \x20   li      a0, 1\n\
+         \x20   li      a1, 1\n\
+         \x20   call    f.alloc\n\
+         \x20   add.wrap s0, a0, zero\n\
+         \x20   li      a0, 1\n\
+         \x20   li      a1, 1\n\
+         \x20   call    f.alloc\n\
+         \x20   sub     a0, a0, s0\n\
+         \x20   halt    a0\n",
+    );
+    assert_eq!(stop, Stop::Halted(6));
+
+    // And a request larger than memory is refused rather than handed an
+    // address past the end of it.
+    let stop = with_runtime(
+        ".equ MEM_SIZE, -6\n\
+         start:\n\
+         \x20   ld.word sp, MEM_SIZE(zero)\n\
+         \x20   ld.word a0, MEM_TOP(zero)\n\
+         \x20   li      a1, 3\n\
+         \x20   call    f.alloc\n\
+         \x20   halt    a0\n",
+    );
+    assert_eq!(stop, Stop::Halted(0));
+}

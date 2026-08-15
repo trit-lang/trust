@@ -127,7 +127,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6) |
 
-**382 tests, zero clippy warnings, 63 commits.** `scripts/stats.sh`.
+**385 tests, zero clippy warnings, 64 commits.** `scripts/stats.sh`.
 
 ---
 
@@ -157,7 +157,7 @@ inference and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
 | `String`, and growable text | `str` and string literals are built (G9.6) and are `&'static`; a growable one needs the heap |
 | ranges, so `for i in 0..10` | Ch. 0 §4 reserves range expressions |
 | a type parameterized by a `const` | `const N` works as an array *length* (G8.2); `struct Grid<const N: taddr>` is Ch. 4 §2.4 and unimplemented |
-| `Box`, any heap allocation | Ch. 5 §2 specifies it; the allocator is two functions a target supplies, and no target supplies them |
+| `Box`, any heap allocation | the allocator exists (G9.2); `Box` as a language item does not |
 | returning a closure | needs `impl Trait` in return position or `Box<dyn Fn>`; Ch. 4 §4.5 |
 | `FnOnce` | every capture is by reference; needs a move analysis of the closure body |
 | `IntoIterator`, so `for x in xs` over an array | array iterators are the library's; the blanket impl it needs now works (G0.14b) |
@@ -384,9 +384,10 @@ that is not Trust is `putchar`. §4's `?` is built too (G9.8), and §3's adaptor
 `Map`, `Filter`, `Take`, `Skip`, `Enumerate`, `Zip` — are structs in the
 prelude (G9.9). §4.3's `unwrap` is written in the
 language too, on `!` and `trap()` (G9.10). §3's consuming methods are built too
-(G9.11), so what is left of the chapter is the heap — `Box`, `Vec`, `String`
-and `collect` — which needs `_end` from the assembler (G9.2) and two functions
-from the runtime.
+(G9.11), and the heap's two halves below the language
+are built: the assembler defines `_end` and the runtime supplies `alloc` and
+`free` (G9.2). What is left is `Box` as a language item, and `Vec`, `String`
+and `collect` on top of it.
 
 **B. Backend quality.** The instruction stream is a third of what it was
 (G8.6–G8.13, −66.6% on HPL), and memory is nearly out of the picture: frame

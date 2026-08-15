@@ -279,7 +279,8 @@ heap, and the second of those is not diagnosed. That is the same situation
 every machine without a memory management unit is in, and draft 0.1 does not
 pretend otherwise.
 
-> `_end` does not exist in the assembler today. See `docs/spec-gaps.md`.
+`_end` is defined by the assembler, which is the only thing that knows where
+the image stops (assembly §3.4).
 
 ### 2.3 `Box<T>`
 

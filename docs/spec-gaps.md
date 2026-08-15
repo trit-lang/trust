@@ -1463,12 +1463,34 @@ sign, and `cmp` against zero answers it in one instruction.
 **Nothing here is implemented.** Ch. 5 is specification ahead of code, which
 is the order that has repeatedly reduced the number of decisions made blind.
 
-**G9.2 — `_end`, which the assembler does not define.** Ch. 5 §2.2 places the
+**G9.2 — `_end`, and the allocator that needed it.** Ch. 5 §2.2 places the
 heap between the end of the loaded image and the stack, and names the end of
-the image `_end`. The assembler publishes no such symbol, and a program has no
-other way to learn where its own image stops. Nothing in draft 0.1 needs it
-until an allocator exists, and it is recorded here so that the allocator does
-not discover it.
+the image `_end`. The assembler published no such symbol, and a program had no
+other way to learn where its own image stops.
+
+*Closed.* The assembler defines `_end` — the first address past everything the
+file emits, rounded up to a word — after pass one, which is when the answer is
+known. It is a forward reference for every statement, which §3.3 already
+allowed, so `li rd, _end` takes its two-word form and nothing else changes.
+Assembly §3.4 specifies it.
+
+`examples/trisc/runtime.t27` gains `alloc` and `free`, which Ch. 5 §2.1 makes
+the target's business because turning a size into an address is the operation
+TIR §5 does not have. First fit over a free list, by **exact** size — a block
+is reused only for a request the size of the one that freed it, which is
+predictable and never leaves a fragment nothing can name.
+
+Two things fell out rather than needing decisions. **`align` is ignored**,
+because AM §2.3 caps alignment at a word and every block is word-aligned, so
+every alignment a type can ask for is already met. And rounding a size up to a
+whole number of words hits the same trap the UTF-8 encoder did: `rem` is
+symmetric, so `n - rem(n,3)` is the *nearest* multiple of three and may be
+below `n`.
+
+The runtime used `MEM_SIZE`, which is defined by the *compiler's* output and
+not by the runtime — so the allocator worked only in a program that had been
+compiled. It defines `MEM_TOP` for the same device address now, since a symbol
+defined twice is an error and the two files are concatenated.
 
 **G9.3 — the citation checker read a third of the citations.** `scripts/citations.sh`
 checked `core/src compiler/src vm/src` and nothing else, so the specification's

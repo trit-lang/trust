@@ -454,6 +454,23 @@ fn assemble_inner(src: &str) -> R<Vec<i16>> {
         stmts.push(stmt);
     }
 
+    // `_end` — the first address past everything this file emits, rounded up
+    // to a word. A program has no other way to learn where its own image
+    // stops, and an allocator needs to (language Ch. 5 §2.2). It is defined
+    // after pass one because that is when the answer is known, and before
+    // pass two because that is when it is read.
+    let end = (loc + 2) / 3 * 3;
+    if syms
+        .values
+        .insert("_end".into(), Bt::from_i128(end))
+        .is_some()
+    {
+        return err(
+            0,
+            "`_end` is defined by the assembler and may not be a label",
+        );
+    }
+
     // ---- pass two: evaluate operands and emit.
     // The reserved first word, all zeros — a `nop` (ISA §2.2, §3.4).
     let mut image: Vec<i16> = vec![0; RESERVED as usize];

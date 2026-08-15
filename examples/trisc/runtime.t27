@@ -13,6 +13,11 @@
 .equ IO_OUT, -2
 .equ CYCLES, -9
 
+; The same device address the compiler's output calls MEM_SIZE (ISA §2.2),
+; under a name of this file's own: the two are concatenated, and a symbol
+; defined twice is an error.
+.equ MEM_TOP, -6
+
 ; Instructions are word-aligned (TRISC-27 §3.1), and this file is appended
 ; after whatever the compiler emitted — which may end in data.
 .align 3
@@ -36,4 +41,113 @@ f.getchar:
 ; instructions to both readings, so they cancel.
 f.elapsed:
     ld.word a0, CYCLES(zero)
+    ret
+
+; --------------------------------------------------------------- the heap
+;
+; Language Ch. 5 §2.1 says an allocator's job is to turn a size into an
+; address, which is exactly the operation TIR §5 does not have — so the
+; allocator is the target's, declared in Trust and defined here, the same
+; arrangement `putchar` has.
+;
+; The heap begins at `_end`, the first address past this image, and grows up;
+; the stack begins at MEM_SIZE and grows down (ISA §6.2). Nothing detects them
+; meeting, which is the situation every machine without a memory management
+; unit is in — `alloc` checks only that it has not run past the end of memory.
+;
+; `align` is ignored, and that is a consequence rather than an oversight: AM
+; §2.3 caps alignment at a word, every block here is word-aligned, and so
+; every alignment a type can ask for is already met.
+
+.align 3
+h.brk:
+    .zero 3             ; next unallocated address; 0 until the first call
+h.free:
+    .zero 3             ; head of the free list; 0 when empty
+
+; alloc(size: taddr, align: taddr) -> taddr, or 0
+f.alloc:
+    ; Round the size up to a whole number of words. `rem` is symmetric
+    ; (AM §3.2), so `n - rem(n,3)` is the *nearest* multiple of three and may
+    ; be below n — which is the same rounding trap the UTF-8 encoder hit.
+    remi    t0, a0, 3
+    sub     t1, a0, t0
+    cmp     t2, t1, a0
+    br3     t2, alloc.up, alloc.sized, alloc.sized
+alloc.up:
+    addi.trap t1, t1, 3
+alloc.sized:
+    ; A freed block holds its size and the next link, so nothing smaller than
+    ; two words can be handed out.
+    cmpi    t2, t1, 6
+    br3     t2, alloc.min, alloc.scan, alloc.scan
+alloc.min:
+    li      t1, 6
+alloc.scan:
+    ; First fit by *exact* size: a block is reused only for a request the
+    ; same size as the one that freed it. Predictable, and it never leaves a
+    ; fragment nothing can name. Splitting is Ch. 5 §7's reserved `realloc`
+    ; territory.
+    la      t2, h.free
+    ld.word t3, 0(t2)
+    li      t4, 0
+alloc.step:
+    br3     t3, alloc.bump, alloc.bump, alloc.look
+alloc.look:
+    ld.word t5, 0(t3)
+    cmp     t6, t5, t1
+    br3     t6, alloc.next, alloc.take, alloc.next
+alloc.next:
+    add.wrap t4, t3, zero
+    ld.word t3, 3(t3)
+    j       alloc.step
+alloc.take:
+    ld.word t5, 3(t3)
+    br3     t4, alloc.head, alloc.head, alloc.mid
+alloc.head:
+    st.word t5, 0(t2)
+    j       alloc.give
+alloc.mid:
+    st.word t5, 3(t4)
+alloc.give:
+    add.wrap a0, t3, zero
+    ret
+alloc.bump:
+    la      t2, h.brk
+    ld.word t3, 0(t2)
+    br3     t3, alloc.first, alloc.first, alloc.grow
+alloc.first:
+    la      t3, _end
+alloc.grow:
+    add.trap t4, t3, t1
+    ld.word t5, MEM_TOP(zero)
+    cmp     t6, t4, t5
+    br3     t6, alloc.ok, alloc.full, alloc.full
+alloc.full:
+    li      a0, 0
+    ret
+alloc.ok:
+    st.word t4, 0(t2)
+    add.wrap a0, t3, zero
+    ret
+
+; free(at: taddr, size: taddr, align: taddr)
+f.free:
+    remi    t0, a1, 3
+    sub     t1, a1, t0
+    cmp     t2, t1, a1
+    br3     t2, free.up, free.sized, free.sized
+free.up:
+    addi.trap t1, t1, 3
+free.sized:
+    cmpi    t2, t1, 6
+    br3     t2, free.min, free.push, free.push
+free.min:
+    li      t1, 6
+free.push:
+    st.word t1, 0(a0)
+    la      t2, h.free
+    ld.word t3, 0(t2)
+    st.word t3, 3(a0)
+    st.word a0, 0(t2)
     ret
