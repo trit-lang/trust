@@ -497,7 +497,7 @@ assoc_item  := fn | 'type' ident bounds? ( '=' type )? ';'
              | 'const' ident ':' type ( '=' expr )? ';'      -- Ch. 4 §1.7
 
 targs       := ( '<' ( type | lifetime ),* '>' )?
-type        := 'trit' | 'bool' | 't9' | 't27' | 'taddr' | 'Self'
+type        := 'trit' | 'bool' | 't9' | 't27' | 'taddr' | 'char' | 'Self'
              | '(' type,* ')' | '[' type ( ';' expr )? ']'
              | '&' lifetime? 'mut'? type                     -- Ch. 3 §2.1
              | 'dyn' ident                                   -- Ch. 4 §3.1
@@ -528,6 +528,11 @@ primary     := literal | path | '(' expr,* ')' | array | struct_lit
 for         := 'for' ident 'in' expr block                   -- Ch. 4 §5.7
 closure     := ( '||' | '|' ( ident ( ':' type )? ),* '|' )
                ( '->' type block | expr )                    -- Ch. 4 §4.1
+
+literal     := int | trit | 'true' | 'false' | char_lit    -- §1.4, Ch. 5 §1.4
+char_lit    := "'" ( char | escape ) "'"
+escape      := '\\' ( 'n' | 'r' | 't' | '\\' | "'" | '"' | '0'
+                    | 'u' '{' hex{1,6} '}' )
 
 array       := '[' expr,* ']' | '[' expr ';' expr ']'
 struct_lit  := path '{' ( ident ( ':' expr )? ),* '}'

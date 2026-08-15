@@ -62,6 +62,10 @@ pub enum Ty {
     Bool,
     /// `t9`, `t27`, `taddr`.
     Int(IntTy),
+    /// `char` — a Unicode scalar value in one word (Ch. 5 §1.2). Almost every
+    /// word is *not* a character, so this is the scalar with the largest
+    /// niche in the language by a wide margin.
+    Char,
     /// `&T` — excludes the null address, so it always has a niche (§6).
     Ref(Box<Ty>),
     /// `Box<T>` — same layout facts as a reference for this chapter's
@@ -425,7 +429,7 @@ fn check_names(db: &TypeDb, ty: &Ty) -> Result<(), LayoutError> {
             .ok_or_else(|| LayoutError::Unknown(n.clone())),
         Ty::Ref(t) | Ty::Box(t) | Ty::Array(t, _) | Ty::Option(t) => check_names(db, t),
         Ty::Tuple(ts) => ts.iter().try_for_each(|t| check_names(db, t)),
-        Ty::Unit | Ty::Trit | Ty::Bool | Ty::Int(_) => Ok(()),
+        Ty::Unit | Ty::Trit | Ty::Bool | Ty::Int(_) | Ty::Char => Ok(()),
     }
 }
 
@@ -468,6 +472,12 @@ fn compute(db: &TypeDb, ty: &Ty, visiting: &mut BTreeSet<String>) -> Result<Layo
             // Every pattern is a valid integer, so no niches.
             scalar(trytes, trytes, capacity(trytes))
         }
+
+        // The valid range is stated as `0 ..= 0x10FFFF` rather than that
+        // range minus the surrogates, because a niche needs one contiguous
+        // range and treating the surrogates as valid only *under*-counts what
+        // is available. There is no shortage.
+        Ty::Char => ranged(3, 0, 0x10FFFF),
 
         // References exclude the null address → at least one niche (§6).
         Ty::Ref(inner) | Ty::Box(inner) => {

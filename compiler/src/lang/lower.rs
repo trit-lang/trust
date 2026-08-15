@@ -52,6 +52,10 @@ pub enum Ty {
     /// `taddr` — distinct from `t27` even where it is the same width, so that
     /// mixing them needs an explicit `as` (Ch. 1, P2).
     TAddr,
+    /// `char` — a Unicode scalar value, one word (Ch. 5 §1.2). A scalar like
+    /// the integers, and not one of them: it is not arithmetic, and the only
+    /// conversion is the explicit one to `t27`.
+    Char,
     /// `()`.
     Unit,
     /// `[T; N]`.
@@ -83,6 +87,7 @@ impl std::fmt::Display for Ty {
             Ty::T9 => f.write_str("t9"),
             Ty::T27 => f.write_str("t27"),
             Ty::TAddr => f.write_str("taddr"),
+            Ty::Char => f.write_str("char"),
             Ty::Unit => f.write_str("()"),
             Ty::Dyn(t) => write!(f, "dyn {t}"),
             Ty::Array(t, n) => write!(f, "[{t}; {n}]"),
@@ -105,7 +110,7 @@ impl Ty {
         match self {
             Ty::Trit | Ty::Bool => Type::Int(1),
             Ty::T9 => Type::Int(9),
-            Ty::T27 | Ty::TAddr | Ty::Never | Ty::Unit => Type::Int(27),
+            Ty::T27 | Ty::TAddr | Ty::Char | Ty::Never | Ty::Unit => Type::Int(27),
             // Unsized on its own; only a reference to one is a value.
             Ty::Dyn(_) => Type::Ptr,
             // A thin reference is an address — a word-sized value.
@@ -127,7 +132,7 @@ impl Ty {
         match self {
             Ty::Trit | Ty::Bool => Some(1),
             Ty::T9 => Some(9),
-            Ty::T27 | Ty::TAddr => Some(27),
+            Ty::T27 | Ty::TAddr | Ty::Char => Some(27),
             _ => None,
         }
     }
@@ -178,6 +183,7 @@ impl Ty {
             Ty::T9 => layout::Ty::Int(layout::IntTy::T9),
             Ty::T27 => layout::Ty::Int(layout::IntTy::T27),
             Ty::TAddr => layout::Ty::Int(layout::IntTy::TAddr),
+            Ty::Char => layout::Ty::Char,
             Ty::Unit | Ty::Never => layout::Ty::Unit,
             Ty::Array(t, n) => layout::Ty::array(t.layout_ty(), *n),
             Ty::Tuple(ts) => layout::Ty::Tuple(ts.iter().map(Ty::layout_ty).collect()),
@@ -877,6 +883,7 @@ fn free_names(e: &ast::Expr, bound: &mut Vec<String>, out: &mut Vec<String>) {
         }
     };
     match e {
+        Char(..) => {}
         Path(n, _) => see(n, bound, out),
         Aggregate(_, fields, _) => {
             for (_, v) in fields {
@@ -1003,6 +1010,7 @@ fn writes_name(e: &ast::Expr, name: &str) -> bool {
 fn for_each_child(e: &ast::Expr, f: &mut impl FnMut(&ast::Expr)) {
     use ast::Expr::*;
     match e {
+        Char(..) => {}
         Cast(a, _, _)
         | Unary(_, a, _)
         | Deref(a, _)
@@ -1084,6 +1092,7 @@ fn rewrite_captures(e: &mut ast::Expr, captures: &[String]) {
 fn for_each_child_mut(e: &mut ast::Expr, f: &mut impl FnMut(&mut ast::Expr)) {
     use ast::Expr::*;
     match e {
+        Char(..) => {}
         Cast(a, _, _)
         | Unary(_, a, _)
         | Deref(a, _)
@@ -1318,6 +1327,7 @@ fn nominal_name(ty: &Ty) -> Option<String> {
         Ty::T9 => "t9".into(),
         Ty::T27 => "t27".into(),
         Ty::TAddr => "taddr".into(),
+        Ty::Char => "char".into(),
         _ => return None,
     })
 }
@@ -1386,6 +1396,7 @@ fn subst_expr(e: &mut ast::Expr, self_ty: &SelfTy) {
     use ast::Expr::*;
     let mut kids: Vec<&mut ast::Expr> = Vec::new();
     match e {
+        Char(..) => {}
         Aggregate(path, fields, _) => {
             for seg in &mut path.segments {
                 if seg == "Self" {
@@ -2855,6 +2866,7 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
             "t9" => Ok(Ty::T9),
             "t27" => Ok(Ty::T27),
             "taddr" => Ok(Ty::TAddr),
+            "char" => Ok(Ty::Char),
             // Ch. 1 §8 claims these so no user identifier can take them.
             "t3" | "t81" | "f27" => err(
                 *line,
@@ -3896,6 +3908,11 @@ impl Fn<'_> {
         match e {
             // An unconstrained integer literal is `t27` (Ch. 1 §3), and one
             // that does not fit its type is an error, never a wrap.
+            // A character literal is a `char` and nothing else: unlike an
+            // integer literal it takes no type from context, because there
+            // is only one type it could have (Ch. 5 §1.2).
+            E::Char(v, _) => Ok((Operand::Const(Type::Int(27), Bt::from_i128(*v)), Ty::Char)),
+
             E::Int(v, line) => {
                 let ty = match expected {
                     Some(t) if t.is_arithmetic() => t.clone(),
@@ -4648,6 +4665,34 @@ impl Fn<'_> {
                 _ => tag,
             };
             return Ok((value, to));
+        }
+
+        // `char` converts one way and to one type. Downward there is nothing
+        // to check — a scalar value always fits a word — and upward there is:
+        // most words are not characters, and Ch. 1 P2 does not let a
+        // conversion that can be wrong be silent (Ch. 5 §1.2).
+        if from == Ty::Char {
+            if to != Ty::T27 {
+                return err(
+                    line,
+                    format!(
+                        "a `char` converts only to `t27`, not to {to}: the scalar value is \
+                         a word, and narrowing it would be a conversion that can be wrong \
+                         (Ch. 5 §1.2)"
+                    ),
+                );
+            }
+            return Ok((v, Ty::T27));
+        }
+        if to == Ty::Char {
+            return err(
+                line,
+                format!(
+                    "there is no `as` from {from} to `char`: most words are not scalar \
+                     values, so the conversion can fail. `char::try_from` is the checked \
+                     form (Ch. 5 §1.2)"
+                ),
+            );
         }
 
         // `trit` ↔ `bool` has no `as` path by design: both mappings are
@@ -7587,6 +7632,7 @@ fn walk_expr(e: &ast::Expr, index: &mut u32, out: &mut HashMap<String, u32>) {
     use ast::Expr as E;
     let go = |x: &ast::Expr, i: &mut u32, o: &mut HashMap<String, u32>| walk_expr(x, i, o);
     match e {
+        E::Char(..) => {}
         // A closure's body is walked in place: its uses of a capture count
         // as uses at the point the closure is written, and the closure's own
         // binding extends them to its last use.
@@ -7690,6 +7736,12 @@ fn pattern_value(p: &ast::Pattern, ty: &Ty, line: Line) -> R<Bt> {
                 return err(*l, format!("a bool pattern does not match {ty}"));
             }
             Ok(Bt::from_i128(i128::from(*b)))
+        }
+        ast::Pattern::Char(v, l) => {
+            if *ty != Ty::Char {
+                return err(*l, format!("a character pattern does not match {ty}"));
+            }
+            Ok(Bt::from_i128(*v))
         }
         _ => err(line, "unsupported pattern"),
     }

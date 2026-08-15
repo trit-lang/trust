@@ -14,6 +14,8 @@ pub enum Tok {
     Int(Bt),
     /// A `trit` literal: `-1t`, `0t`, `1t`.
     TritLit(Trit),
+    /// A character literal, as its Unicode scalar value (Ch. 5 §1.4).
+    CharLit(i128),
     /// A keyword (§1.3), interned.
     Kw(&'static str),
     /// A lifetime, `'a` (Ch. 3 §3.2), without its quote.
@@ -30,6 +32,10 @@ impl std::fmt::Display for Tok {
             Tok::Ident(n) => write!(f, "`{n}`"),
             Tok::Int(v) => write!(f, "`{v}`"),
             Tok::TritLit(t) => write!(f, "`{}t`", t.to_i8()),
+            Tok::CharLit(v) => match char::from_u32(*v as u32) {
+                Some(c) => write!(f, "`'{c}'`"),
+                None => write!(f, "`'\\u{{{v:X}}}'`"),
+            },
             Tok::Kw(k) => write!(f, "`{k}`"),
             Tok::Lifetime(l) => write!(f, "`'{l}`"),
             Tok::Op(o) => write!(f, "`{o}`"),
@@ -135,13 +141,14 @@ pub fn lex(src: &str) -> Result<Vec<(Tok, Line)>, SyntaxError> {
             continue;
         }
 
-        // A lifetime: `'` followed by a name (Ch. 3 §3.2). A `'` followed by
-        // anything else would be a character literal, which §1.4 does not
-        // have.
+        // A lifetime: `'` followed by a name (Ch. 3 §3.2) — but `'a'` is a
+        // character literal, and the two are told apart by what follows the
+        // name. A lifetime is never closed by a quote.
         if c == '\''
             && chars
                 .get(i + 1)
                 .is_some_and(|c| c.is_ascii_alphabetic() || *c == '_')
+            && !closes_a_char(&chars, i)
         {
             let start = i + 1;
             let mut j = start;
@@ -153,13 +160,20 @@ pub fn lex(src: &str) -> Result<Vec<(Tok, Line)>, SyntaxError> {
             continue;
         }
 
-        // §1.4 has no string or character literals, and says why.
-        if c == '"' || c == '\'' {
+        // A character literal (Ch. 5 §1.4): one scalar value, in one word.
+        if c == '\'' {
+            let (v, next) = char_literal(&chars, i, line)?;
+            out.push((Tok::CharLit(v), line));
+            i = next;
+            continue;
+        }
+
+        // String literals wait on the storage they need (Ch. 5 §1.3).
+        if c == '"' {
             return Err(err(
                 line,
-                "there are no string or character literals in draft 0.1: text encoding is \
-                 deferred to the library chapter (Ch. 0 §1.4). Write the code units as an \
-                 array of t9"
+                "string literals are not implemented yet; a `&str` needs static storage \
+                 this compiler does not emit (Ch. 5 §1.4)"
                     .into(),
             ));
         }
@@ -236,6 +250,87 @@ pub fn lex(src: &str) -> Result<Vec<(Tok, Line)>, SyntaxError> {
     Ok(out)
 }
 
+/// Whether the `'` at `i` opens a character literal rather than a lifetime.
+///
+/// A lifetime is `'` and a name; a character literal is `'` and one character
+/// and `'`. They overlap on the first two characters and are told apart by the
+/// third — `'a'` closes and `'a` does not — which is the same rule Rust uses
+/// and for the same reason.
+fn closes_a_char(chars: &[char], i: usize) -> bool {
+    chars.get(i + 2) == Some(&'\'')
+}
+
+/// One character literal, returning its scalar value and where it ends.
+fn char_literal(chars: &[char], at: usize, line: Line) -> Result<(i128, usize), SyntaxError> {
+    let mut i = at + 1;
+    let bad = |m: &str| SyntaxError {
+        line,
+        message: format!("in a character literal: {m}"),
+    };
+    let Some(&c) = chars.get(i) else {
+        return Err(bad("the file ends"));
+    };
+    let value: i128 = if c == '\\' {
+        i += 1;
+        let Some(&e) = chars.get(i) else {
+            return Err(bad("the file ends after `\\`"));
+        };
+        i += 1;
+        match e {
+            'n' => 10,
+            'r' => 13,
+            't' => 9,
+            '\\' => 92,
+            '\'' => 39,
+            '"' => 34,
+            '0' => 0,
+            'u' => {
+                // `\u{…}`, hexadecimal — it names a code point in an external
+                // standard, which writes them one way (Ch. 5 §1.4).
+                if chars.get(i) != Some(&'{') {
+                    return Err(bad("`\\u` is written `\\u{…}`"));
+                }
+                i += 1;
+                let start = i;
+                while chars.get(i).is_some_and(|c| c.is_ascii_hexdigit()) {
+                    i += 1;
+                }
+                if i == start || i - start > 6 {
+                    return Err(bad("`\\u{…}` takes one to six hexadecimal digits"));
+                }
+                if chars.get(i) != Some(&'}') {
+                    return Err(bad("`\\u{…}` is not closed"));
+                }
+                i += 1;
+                let text: String = chars[start..i - 1].iter().collect();
+                i128::from_str_radix(&text, 16).map_err(|_| bad("that is not a number"))?
+            }
+            'x' => {
+                return Err(bad(
+                    "there is no `\\x` escape: it names a byte, and text here is characters. \
+                     Write `\\u{…}` for a scalar value, or a `[t9]` for bytes (Ch. 5 §1.4)",
+                ));
+            }
+            other => return Err(bad(&format!("`\\{other}` is not an escape"))),
+        }
+    } else if c == '\'' {
+        return Err(bad("it is empty"));
+    } else {
+        i += 1;
+        c as i128
+    };
+    if chars.get(i) != Some(&'\'') {
+        return Err(bad("it holds more than one character, or is not closed"));
+    }
+    // Ch. 5 §1.2: a scalar value, which excludes the surrogates.
+    if !(0..=0x10FFFF).contains(&value) || (0xD800..=0xDFFF).contains(&value) {
+        return Err(bad(&format!(
+            "U+{value:04X} is not a Unicode scalar value (Ch. 5 §1.2)"
+        )));
+    }
+    Ok((value, i + 1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,14 +386,18 @@ mod tests {
 
     #[test]
     fn the_deferred_and_reserved_are_diagnosed_by_name() {
+        // A string literal waits on the storage a `&str` needs (Ch. 5 §1.3);
+        // a character literal does not, and lexes.
         assert!(
             lex("\"hi\"")
                 .unwrap_err()
                 .message
-                .contains("library chapter")
+                .contains("static storage")
         );
+        assert_eq!(lex("'a'").unwrap()[0].0, Tok::CharLit(97));
 
         assert!(lex("mod").unwrap_err().message.contains("reserved"));
         assert!(lex("a ^ b").unwrap_err().message.contains("tmul"));
     }
 }
+

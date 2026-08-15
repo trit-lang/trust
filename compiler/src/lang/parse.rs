@@ -1290,6 +1290,10 @@ impl Parser {
                 self.bump();
                 Ok(Expr::Trit(t, line))
             }
+            Tok::CharLit(v) => {
+                self.bump();
+                Ok(Expr::Char(v, line))
+            }
             Tok::Kw("self") => {
                 self.bump();
                 Ok(Expr::Path("self".to_string(), line))
@@ -1552,6 +1556,10 @@ impl Parser {
             Tok::TritLit(t) => {
                 self.bump();
                 Ok(Pattern::Trit(t, line))
+            }
+            Tok::CharLit(v) => {
+                self.bump();
+                Ok(Pattern::Char(v, line))
             }
             Tok::Op("-") => {
                 self.bump();

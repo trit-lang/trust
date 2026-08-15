@@ -1536,6 +1536,44 @@ an identifier immediately followed by `!` is a syntax error and nothing else
 may claim it. That was the one decision where doing nothing today would have
 cost something later.
 
+**G9.5 — `char`, the first of Ch. 5 to be built.** A Unicode scalar value in
+one word (Ch. 5 §1.2): a scalar like the integers and not one of them. It
+compares, it matches, it sits in aggregates and arrays, and `Option<char>` is
+one word because a word holds 7 625 597 484 987 values and 1 112 064 of them
+are characters — the largest niche in the language by a wide margin.
+
+Three decisions the chapter forced, and all three are refusals:
+
+- **`char as t27` and nothing else.** Not `as t9`: narrowing a scalar value is
+  a conversion that can be wrong, and Ch. 1 P2 does not let one be silent.
+- **No `t27 as char`.** Most words are not scalar values. `char::try_from` is
+  the checked form and is **not built yet**, so the diagnostic names Ch. 5
+  §1.2 rather than a function that does not exist.
+- **No `\x` escape**, with the reason in the diagnostic: it names a byte, and
+  text here is characters.
+
+**The lexer had to learn a lifetime from a character.** `'a'` and `'a` share
+their first two characters and differ in the third — the same rule Rust uses,
+and for the same reason. `'ab'` is diagnosed as more than one character rather
+than mis-lexed as a lifetime.
+
+**A pre-existing hole in the grammar summary**: Ch. 0 §6 used `literal` as a
+terminal and never defined it. It does now, with the character form and its
+escapes.
+
+**`\u{…}` takes hexadecimal digits**, in a language whose own numeric
+literals are decimal, `0t` and `0h`. Ch. 5 §1.4 first said "heptavintimal or
+hexadecimal", which is ambiguous — the same digits read two ways — and is
+corrected. The escape does not name a number this language owns; it names a
+code point in an external standard that writes them one way, and an escape
+that had to be transcribed before it could be checked against the table it
+came from would be unreadable against the thing it names.
+
+What is not built: `str`, string literals, `char::try_from`, `to_digit`,
+`from_digit`, and the UTF-8 conversion. A string literal is diagnosed as
+needing static storage this compiler does not emit, which is the honest
+reason.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

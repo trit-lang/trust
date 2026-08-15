@@ -156,7 +156,16 @@ literal** is a `&str` between double quotes, whose characters live in static
 storage for the whole program and are therefore `&'static str`.
 
 The escapes are `\n`, `\r`, `\t`, `\\`, `\'`, `\"`, `\0`, and `\u{…}` with
-one to six heptavintimal or hexadecimal digits naming a scalar value.
+one to six **hexadecimal** digits naming a scalar value.
+
+Hexadecimal, in a language whose own numeric literals are decimal, `0t` and
+`0h`, and the exception is deliberate. `\u{…}` does not name a number in this
+language: it names a code point in an external standard, and that standard,
+every character table, and every editor's "insert character" dialog write it
+one way. An escape that had to be transcribed into heptavintimal before it
+could be checked against the reference it came from would be unreadable
+against the thing it names. `0h` remains the spelling for numbers this
+language owns.
 
 **There is no `\x` escape.** `\xNN` names a byte, and this chapter's text has
 no bytes in it. A program that wants a particular scalar value writes

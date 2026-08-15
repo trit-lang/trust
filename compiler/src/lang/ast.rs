@@ -327,6 +327,8 @@ pub enum Expr {
     Int(Bt, Line),
     /// A `trit` literal.
     Trit(Trit, Line),
+    /// A character literal, as its Unicode scalar value (Ch. 5 §1.4).
+    Char(i128, Line),
     /// `true` or `false`.
     Bool(bool, Line),
     /// `()`.
@@ -389,6 +391,7 @@ impl Expr {
         match self {
             Int(_, l)
             | Trit(_, l)
+            | Char(_, l)
             | Bool(_, l)
             | Unit(l)
             | Path(_, l)
@@ -461,6 +464,8 @@ pub enum Pattern {
     Int(Bt, Line),
     /// A `trit` literal.
     Trit(Trit, Line),
+    /// A character literal, as its Unicode scalar value (Ch. 5 §1.4).
+    Char(i128, Line),
     /// `true` or `false`.
     Bool(bool, Line),
     /// A struct or variant pattern: `Sign::Neg`, `Shape::Line(n)`,
@@ -478,6 +483,7 @@ impl Pattern {
             | Pattern::Bind(_, l)
             | Pattern::Int(_, l)
             | Pattern::Trit(_, l)
+            | Pattern::Char(_, l)
             | Pattern::Bool(_, l)
             | Pattern::Aggregate(_, _, l)
             | Pattern::Tuple(_, l) => *l,

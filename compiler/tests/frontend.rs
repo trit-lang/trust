@@ -319,7 +319,7 @@ fn immutable_bindings_cannot_be_assigned() {
 
 #[test]
 fn the_deferred_features_say_what_they_are_waiting_for() {
-    assert!(error("fn main() -> t27 { let s = \"hi\"; 0 }").contains("library chapter"));
+    assert!(error("fn main() -> t27 { let s = \"hi\"; 0 }").contains("static storage"));
     assert!(error("fn main() -> t27 { 1 ^ 2 }").contains("tmul"));
     // Reserved for a chapter nobody has written…
     assert!(error("fn main() -> t27 { mod m; 0 }").contains("not written yet"));
@@ -2518,4 +2518,122 @@ fn a_types_own_method_wins_over_a_rule() {
          fn main() -> t27 {{ let c = Celsius {{ deg: 100 }}; let f: t27 = c.into(); f }}"
     );
     assert_eq!(run(&src).0, 1);
+}
+
+#[test]
+fn a_character_is_a_scalar_value_in_one_word() {
+    // Ch. 5 §1.2. A `char` is a Unicode scalar value, one word wide, and
+    // fixed width is the whole reason: `'一'` costs what `'A'` costs.
+    assert_eq!(
+        run("fn main() -> t27 { \
+                 let a: char = 'A'; \
+                 let z = '一'; \
+                 let n = '\\n'; \
+                 let e = '\\u{1F600}'; \
+                 (a as t27) + (z as t27) + (n as t27) + (e as t27) \
+             }")
+        .0,
+        65 + 19968 + 10 + 0x1F600
+    );
+
+    // It compares, it matches, and it sits in aggregates like any scalar.
+    assert_eq!(
+        run("struct Pair { a: char, b: char } \
+             fn main() -> t27 { \
+                 let p = Pair { a: 'x', b: 'y' }; \
+                 let arr: [char; 3] = ['a', 'b', 'c']; \
+                 let mut n: t27 = 0; \
+                 if p.a == 'x' { n += 1; } \
+                 if p.a < 'y' { n += 10; } \
+                 match arr[2] { 'a' => n += 100, 'c' => n += 1000, _ => n += 10000 } \
+                 n \
+             }")
+        .0,
+        1011
+    );
+}
+
+#[test]
+fn a_character_converts_one_way_and_to_one_type() {
+    // Downward there is nothing to check; upward there is, and Ch. 1 P2 does
+    // not let a conversion that can be wrong be silent (Ch. 5 §1.2).
+    let e = error("fn main() -> t27 { let c = 65 as char; c as t27 }");
+    assert!(e.contains("no `as` from t27 to `char`"), "{e}");
+
+    let e = error("fn main() -> t9 { 'A' as t9 }");
+    assert!(e.contains("converts only to `t27`"), "{e}");
+}
+
+#[test]
+fn option_of_a_character_costs_nothing_over_the_character() {
+    // Ch. 2 §6's niche rule, on the scalar with the largest niche in the
+    // language: a word holds 7 625 597 484 987 values and 1 112 064 of them
+    // are characters.
+    assert_eq!(
+        run("fn main() -> t27 { \
+                 let o: Option<char> = Option::Some('z'); \
+                 let p: Option<Option<char>> = Option::Some(Option::None); \
+                 let a = match o { Option::Some(c) => c as t27, Option::None => 0 }; \
+                 let b = match p { \
+                     Option::Some(inner) => match inner { \
+                         Option::Some(c) => c as t27, \
+                         Option::None => 1, \
+                     }, \
+                     Option::None => 2, \
+                 }; \
+                 a + b \
+             }")
+        .0,
+        122 + 1
+    );
+    // One word each, the same as a bare `char`: the slot sizes say so.
+    let printed = tir::print_module(&tir_of(
+        "fn main() -> t27 { \
+             let a: char = 'a'; \
+             let b: Option<char> = Option::None; \
+             let c: Option<Option<char>> = Option::None; \
+             0 \
+         }",
+    ));
+    // Every slot in that function is one word. A tag beside the payload
+    // would have made one of them two.
+    assert!(printed.contains("slot tryte[3]"), "{printed}");
+    assert!(
+        !printed.contains("slot tryte[6]"),
+        "a niche was not used:\n{printed}"
+    );
+}
+
+#[test]
+fn a_character_literal_is_told_from_a_lifetime_by_what_closes_it() {
+    // `'a'` and `'a` differ in their third character, which is the same rule
+    // Rust uses and for the same reason.
+    assert_eq!(
+        run("fn first<'a>(xs: &'a [char]) -> char { xs[0] } \
+             fn main() -> t27 { let a: [char; 2] = ['q', 'r']; first(&a) as t27 }")
+        .0,
+        113
+    );
+
+    // And what a character literal may not be.
+    for (src, want) in [
+        ("fn main() -> t27 { let c = ''; 0 }", "it is empty"),
+        (
+            "fn main() -> t27 { let c = 'ab'; 0 }",
+            "more than one character",
+        ),
+        ("fn main() -> t27 { let c = '\\q'; 0 }", "is not an escape"),
+        ("fn main() -> t27 { let c = '\\x41'; 0 }", "no `\\x` escape"),
+        (
+            "fn main() -> t27 { let c = '\\u{D800}'; 0 }",
+            "not a Unicode scalar value",
+        ),
+        (
+            "fn main() -> t27 { let c = '\\u{110000}'; 0 }",
+            "not a Unicode scalar value",
+        ),
+    ] {
+        let e = error(src);
+        assert!(e.contains(want), "{src}\n  gave: {e}");
+    }
 }
