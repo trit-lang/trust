@@ -3310,3 +3310,60 @@ fn a_generic_recursive_type_compiles_too() {
         3
     );
 }
+
+#[test]
+fn a_vec_grows_and_gives_its_allocation_back() {
+    // Ch. 5 §2.6: three words — the allocation, the length, the capacity.
+    // Ten pushes from an empty `Vec` cross two growths (4, 8, 16), and the
+    // elements survive both copies.
+    assert_eq!(
+        run("fn main() -> t27 { \
+                 let mut v: Vec<t27> = Vec::new(); \
+                 let mut i: t27 = 0; \
+                 while i < 10 { v.push(i * i); i += 1; } \
+                 let mut sum: t27 = 0; \
+                 let mut j: taddr = 0; \
+                 while j < v.len() { sum += v[j]; j += 1; } \
+                 sum \
+             }")
+        .0,
+        (0..10).map(|i| i * i).sum::<i128>()
+    );
+
+    // Dropping a `Vec` drops each element it holds and then frees, in that
+    // order — the ledger shows all three, in the order they went in.
+    let (_, out) = run("fn putchar(c: t9); \
+         struct Port { id: t27 } \
+         impl Drop for Port { fn drop(self) { putchar((48 + self.id) as t9); } } \
+         fn main() -> t27 { \
+             { \
+                 let mut v: Vec<Port> = Vec::new(); \
+                 v.push(Port { id: 1 }); \
+                 v.push(Port { id: 2 }); \
+                 v.push(Port { id: 3 }); \
+             } \
+             putchar(45); \
+             0 \
+         }");
+    assert_eq!(out, "123-");
+
+    // A `Vec` owns, so it is not `Copy`.
+    let e = error(
+        "fn take(v: Vec<t27>) -> taddr { v.len() } \
+         fn main() -> t27 { let v: Vec<t27> = Vec::new(); (take(v) + take(v)) as t27 }",
+    );
+    assert!(e.contains("moved out of"), "{e}");
+
+    // And indexing is bounds-checked against the *length*, not the capacity.
+    let m = tir_of(
+        "fn main() -> t27 { \
+             let mut v: Vec<t27> = Vec::new(); \
+             v.push(7); \
+             v[0] \
+         }",
+    );
+    assert!(
+        tir::print_module(&m).contains("trap F_TRAP"),
+        "no bounds check"
+    );
+}

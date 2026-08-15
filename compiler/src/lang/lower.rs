@@ -72,6 +72,12 @@ pub enum Ty {
     /// `Box<T>` — one `T` on the heap, owned (Ch. 5 §2.3). One word, never
     /// null, and dropped by dropping the `T` and then freeing.
     Boxed(Box<Ty>),
+    /// `Vec<T>` — a growable array (Ch. 5 §2.6). Three words: the
+    /// allocation, the number of elements in it, and how many it has room
+    /// for. A language item for the same reason `Box` is, and one more: the
+    /// room beyond the length is memory that is *not yet a `T`*, and this
+    /// language has no way to say that.
+    VecOf(Box<Ty>),
     /// `[T]` — dynamically sized, and never the type of a place.
     Slice(Box<Ty>),
     /// `dyn Trait` — dynamically sized, and never the type of a place
@@ -92,6 +98,7 @@ impl std::fmt::Display for Ty {
             Ty::TAddr => f.write_str("taddr"),
             Ty::Char => f.write_str("char"),
             Ty::Boxed(t) => write!(f, "Box<{t}>"),
+            Ty::VecOf(t) => write!(f, "Vec<{t}>"),
             Ty::Unit => f.write_str("()"),
             Ty::Dyn(t) => write!(f, "dyn {t}"),
             Ty::Array(t, n) => write!(f, "[{t}; {n}]"),
@@ -133,6 +140,7 @@ impl Ty {
             | Ty::Struct(_)
             | Ty::Enum(_)
             | Ty::Ref(..)
+            | Ty::VecOf(_)
             | Ty::Slice(_) => Type::Ptr,
         }
     }
@@ -162,6 +170,7 @@ impl Ty {
             | Ty::Enum(_)
             | Ty::Unit
             | Ty::Never
+            | Ty::VecOf(_)
             | Ty::Slice(_) => false,
             _ => true,
         }
@@ -180,7 +189,7 @@ impl Ty {
             // A fat reference is two words and travels like an aggregate:
             // by address, and copied field by field (Ch. 3 §5.2).
             Ty::Ref(t, _) => t.is_unsized(),
-            Ty::Array(..) | Ty::Tuple(_) | Ty::Struct(_) | Ty::Enum(_) => true,
+            Ty::Array(..) | Ty::Tuple(_) | Ty::Struct(_) | Ty::Enum(_) | Ty::VecOf(_) => true,
             _ => false,
         }
     }
@@ -201,6 +210,15 @@ impl Ty {
             // A `Box` is pointer-sized and never null, which is the layout
             // engine's `Box` and the source of `Option<Box<T>>`'s niche.
             Ty::Boxed(_) => layout::Ty::boxed(layout::Ty::Unit),
+            // A `Vec` is the allocation, the length, and the capacity —
+            // three words, in that order (Ch. 5 §2.6). The pointer is *not* a
+            // `Box` here: an empty `Vec` has no allocation, so 0 is a value
+            // it takes and not a niche it offers.
+            Ty::VecOf(_) => layout::Ty::Tuple(vec![
+                layout::Ty::Int(layout::IntTy::TAddr),
+                layout::Ty::Int(layout::IntTy::TAddr),
+                layout::Ty::Int(layout::IntTy::TAddr),
+            ]),
             // A thin reference has the layout of a reference; a fat one is a
             // pointer and a length (Ch. 3 §5.2).
             Ty::Ref(t, _) if !t.is_unsized() => layout::Ty::reference(layout::Ty::Unit),
@@ -446,8 +464,8 @@ impl Types {
             // A `Box` owns what it points at, so it is never `Copy` and it
             // always has something to do when it dies — even for a `T` that
             // does not, because the allocation is itself a resource
-            // (Ch. 5 §2.3).
-            Ty::Boxed(_) => true,
+            // (Ch. 5 §2.3). A `Vec` owns its allocation the same way.
+            Ty::Boxed(_) | Ty::VecOf(_) => true,
             _ => false,
         }
     }
@@ -1350,6 +1368,7 @@ const BUILTIN_METHODS: &[&str] = &[
     "is_neg",
     "to_trit",
     "len",
+    "push",
     "wrapping_add",
     "wrapping_sub",
     "wrapping_mul",
@@ -1366,6 +1385,11 @@ const BUILTIN_METHODS: &[&str] = &[
 
 /// The name of the hidden out-pointer for an aggregate return.
 const SRET: &str = "sret";
+
+/// A `taddr` constant, which is what every size and index here is.
+fn konst_addr(v: i128) -> Operand {
+    Operand::Const(Type::Int(27), Bt::from_i128(v))
+}
 
 /// The target's allocator (Ch. 5 §2.1). Declared in TIR rather than in Trust
 /// because it returns a *pointer*, and Trust has no way to name one — which
@@ -3042,6 +3066,13 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
                 check_sized(inner, *line, "a `Box`'s contents")?;
                 return Ok(Ty::Boxed(Box::new(inner.clone())));
             }
+            if name == "Vec" {
+                let [inner] = &args[..] else {
+                    return err(*line, "`Vec` takes one type argument");
+                };
+                check_sized(inner, *line, "a `Vec`'s elements")?;
+                return Ok(Ty::VecOf(Box::new(inner.clone())));
+            }
             types.instantiate(name, &args, *line)
         }
         // §3.4: a trait may be used as an object only if every method is
@@ -3960,6 +3991,70 @@ impl Fn<'_> {
         if !self.types.needs_drop(ty) {
             return Ok(());
         }
+        // A `Vec` drops each element it holds and then frees the allocation
+        // — the elements first, for the reason a `Box` gives.
+        if let Ty::VecOf(elem) = ty {
+            let elem = (**elem).clone();
+            let l = self.types.layout(&elem);
+            let len = {
+                let at = self.offset(addr.clone(), 3);
+                self.load_from(at, &Ty::TAddr)
+            };
+            if self.types.needs_drop(&elem) {
+                let base = self.load_ptr(addr.clone());
+                let i = self.temp_slot(&Ty::TAddr);
+                self.store_at(&i, 0, &Ty::TAddr, konst_addr(0), line)?;
+                let (head, body, out) = (
+                    self.fresh("vdrop.head"),
+                    self.fresh("vdrop.body"),
+                    self.fresh("vdrop.done"),
+                );
+                self.jump(&head);
+                self.start(head.clone());
+                let at = self.load_slot(&i, &Ty::TAddr);
+                let c = self.emit(
+                    "c",
+                    Type::Int(1),
+                    InstKind::Cmp {
+                        ty: Type::Int(27),
+                        a: at.clone(),
+                        b: len.clone(),
+                    },
+                );
+                self.br3(c, &body, &out, &out);
+                self.start(body);
+                let off = self.apply_binary(
+                    "*",
+                    at.clone(),
+                    konst_addr(l.size as i128),
+                    &Ty::TAddr,
+                    line,
+                )?;
+                let e = self.emit(
+                    "e",
+                    Type::Ptr,
+                    InstKind::Offset {
+                        p: base.clone(),
+                        d: off,
+                    },
+                );
+                self.drop_at(e, &elem, line, depth + 1)?;
+                let next = self.apply_binary("+", at, konst_addr(1), &Ty::TAddr, line)?;
+                self.store_at(&i, 0, &Ty::TAddr, next, line)?;
+                self.jump(&head);
+                self.start(out);
+            }
+            let cap = {
+                let at = self.offset(addr.clone(), 6);
+                self.load_from(at, &Ty::TAddr)
+            };
+            let bytes =
+                self.apply_binary("*", cap, konst_addr(l.size as i128), &Ty::TAddr, line)?;
+            let p = self.load_ptr(addr);
+            self.free_if_any(p, bytes, l.align as i128);
+            return Ok(());
+        }
+
         // A `Box` is dropped by dropping the `T` and *then* freeing, in that
         // order: the destructor needs the storage it is about to give back
         // (Ch. 5 §2.3).
@@ -5707,7 +5802,13 @@ impl Fn<'_> {
         if !BUILTIN_METHODS.contains(&name) {
             return self.user_method(recv, name, args, expected, line);
         }
-        let (v, ty) = self.expr(recv, None)?;
+        // A `Vec` is mutated in place and never read as a value here, so its
+        // receiver is a *place*: reading it would move it, and `v.push(x)` in
+        // a loop would then move the same `v` twice (Ch. 3 §1.2).
+        let (v, ty) = match self.type_of_place(recv)? {
+            Some(Ty::VecOf(_)) => self.place(recv, line)?,
+            _ => self.expr(recv, None)?,
+        };
         let one_arg = |this: &mut Self, want: &Ty| -> R<Operand> {
             if args.len() != 1 {
                 return err(line, format!("`{name}` takes one argument"));
@@ -5900,6 +6001,24 @@ impl Fn<'_> {
                 Ok((Operand::Value(slot), result))
             }
 
+            // `v.push(x)` — Ch. 5 §2.6. Growth **doubles** from four, and
+            // the factor is specified rather than left open because a program
+            // that pushes n elements is entitled to know it did O(n) work in
+            // total, and the amortized argument is a property of the factor.
+            "push" => {
+                let elem = match &ty {
+                    Ty::VecOf(e) => (**e).clone(),
+                    Ty::Ref(inner, _) => match &**inner {
+                        Ty::VecOf(e) => (**e).clone(),
+                        _ => return err(line, format!("`push` applies to a `Vec`, not {ty}")),
+                    },
+                    _ => return err(line, format!("`push` applies to a `Vec`, not {ty}")),
+                };
+                let x = one_arg(self, &elem)?;
+                self.vec_push(v, &elem, x, line)?;
+                Ok((unit(), Ty::Unit))
+            }
+
             // Ch. 3 §5.4: a slice's length is the second word of its fat
             // reference; an array's is in its type.
             "len" => {
@@ -5909,6 +6028,15 @@ impl Fn<'_> {
                 match &ty {
                     Ty::Array(_, n) => {
                         Ok((Operand::Const(Type::Int(27), Bt::from_i128(*n)), Ty::TAddr))
+                    }
+                    // A `Vec`'s length is its second word (Ch. 5 §2.6).
+                    Ty::VecOf(_) => {
+                        let at = self.offset(v, 3);
+                        Ok((self.load_from(at, &Ty::TAddr), Ty::TAddr))
+                    }
+                    Ty::Ref(inner, _) if matches!(**inner, Ty::VecOf(_)) => {
+                        let at = self.offset(v, 3);
+                        Ok((self.load_from(at, &Ty::TAddr), Ty::TAddr))
                     }
                     Ty::Ref(inner, _) if matches!(**inner, Ty::Slice(_)) => {
                         let at = self.offset(v, 3);
@@ -6138,6 +6266,209 @@ impl Fn<'_> {
             "Result" => Some(("Result", args)),
             _ => None,
         }
+    }
+
+    /// `v.push(x)` — grow if the room has run out, then store and count.
+    ///
+    /// Growth **doubles**, from a first allocation of four. The factor is
+    /// specified rather than left to the implementation because a program
+    /// that pushes *n* elements is entitled to know it did O(*n*) work in
+    /// total, and the amortized argument is a property of the factor
+    /// (Ch. 5 §2.6). Relaxing it later costs nothing; tightening it would
+    /// break something, so the reversible direction is the one taken.
+    ///
+    /// There is no `realloc`: growth allocates, copies and frees, which is
+    /// what Ch. 5 §7 reserves the third target function for.
+    fn vec_push(&mut self, at: Operand, elem: &Ty, x: Operand, line: Line) -> R<()> {
+        let l = self.types.layout(elem);
+        let (size, align) = (l.size as i128, l.align as i128);
+        self.needs_heap.set(true);
+
+        let ptr_at = at.clone();
+        let len_at = self.offset(at.clone(), 3);
+        let cap_at = self.offset(at.clone(), 6);
+        let len = self.load_from(len_at.clone(), &Ty::TAddr);
+        let cap = self.load_from(cap_at.clone(), &Ty::TAddr);
+
+        let (grow, ready) = (self.fresh("vec.grow"), self.fresh("vec.ready"));
+        let c = self.emit(
+            "c",
+            Type::Int(1),
+            InstKind::Cmp {
+                ty: Type::Int(27),
+                a: len.clone(),
+                b: cap.clone(),
+            },
+        );
+        // `len < cap` means there is room; anything else means there is not.
+        self.br3(c, &ready, &grow, &grow);
+
+        self.start(grow);
+        // Four, or twice what there was.
+        let doubled = self.apply_binary("*", cap.clone(), konst_addr(2), &Ty::TAddr, line)?;
+        let want = self.emit(
+            "n",
+            Type::Int(27),
+            InstKind::Plain {
+                op: PlainOp::TMax,
+                ty: Type::Int(27),
+                a: doubled,
+                b: konst_addr(4),
+            },
+        );
+        let bytes = self.apply_binary("*", want.clone(), konst_addr(size), &Ty::TAddr, line)?;
+        let fresh = self.emit(
+            "p",
+            Type::Ptr,
+            InstKind::Call {
+                callee: Callee::Direct(ALLOC.to_string()),
+                args: vec![bytes, konst_addr(align)],
+                ret: Some(Type::Ptr),
+            },
+        );
+        // The elements move to the new allocation as trytes: a move is a
+        // copy of the storage, and nothing here owns anything twice
+        // (Ch. 3 §1.2).
+        // The pointer word is read and written *as a pointer*, whatever the
+        // layout calls it: TIR has no int-to-pointer cast, so an address that
+        // is going to be offset has to have been a `ptr` all along (TIR §5).
+        let old = self.load_ptr(ptr_at.clone());
+        let copied = self.apply_binary("*", len.clone(), konst_addr(size), &Ty::TAddr, line)?;
+        self.copy_n_trytes(fresh.clone(), old.clone(), copied, line)?;
+        let oldcap = self.apply_binary("*", cap, konst_addr(size), &Ty::TAddr, line)?;
+        self.free_if_any(old, oldcap, align);
+        self.store_ptr(ptr_at.clone(), fresh);
+        self.store_at_operand(cap_at, &Ty::TAddr, want, line)?;
+        self.jump(&ready);
+
+        self.start(ready);
+        let base = self.load_ptr(ptr_at);
+        let off = self.apply_binary("*", len.clone(), konst_addr(size), &Ty::TAddr, line)?;
+        let slot = self.emit("e", Type::Ptr, InstKind::Offset { p: base, d: off });
+        if elem.is_aggregate() {
+            self.copy_typed(slot, x, elem, line)?;
+        } else {
+            self.push(Inst {
+                results: Vec::new(),
+                kind: InstKind::Store {
+                    ty: elem.tir(),
+                    v: x,
+                    p: slot,
+                },
+            });
+        }
+        let next = self.apply_binary("+", len, konst_addr(1), &Ty::TAddr, line)?;
+        self.store_at_operand(len_at, &Ty::TAddr, next, line)?;
+        Ok(())
+    }
+
+    /// Store a scalar at an address that is already an operand.
+    fn store_at_operand(&mut self, at: Operand, ty: &Ty, v: Operand, _line: Line) -> R<()> {
+        self.push(Inst {
+            results: Vec::new(),
+            kind: InstKind::Store {
+                ty: ty.tir(),
+                v,
+                p: at,
+            },
+        });
+        Ok(())
+    }
+
+    /// Copy a *runtime* number of trytes from `src` to `dst`, in a loop.
+    ///
+    /// The other `copy_trytes` unrolls a size known at compile time; a
+    /// `Vec`'s growth does not know one.
+    fn copy_n_trytes(&mut self, dst: Operand, src: Operand, n: Operand, line: Line) -> R<()> {
+        let i = self.temp_slot(&Ty::TAddr);
+        self.store_at(
+            &i,
+            0,
+            &Ty::TAddr,
+            Operand::Const(Type::Int(27), Bt::ZERO),
+            line,
+        )?;
+        let (head, body, done) = (
+            self.fresh("cp.head"),
+            self.fresh("cp.body"),
+            self.fresh("cp.done"),
+        );
+        self.jump(&head);
+        self.start(head.clone());
+        let at = self.load_slot(&i, &Ty::TAddr);
+        let c = self.emit(
+            "c",
+            Type::Int(1),
+            InstKind::Cmp {
+                ty: Type::Int(27),
+                a: at.clone(),
+                b: n.clone(),
+            },
+        );
+        self.br3(c, &body, &done, &done);
+        self.start(body);
+        let from = self.emit(
+            "s",
+            Type::Ptr,
+            InstKind::Offset {
+                p: src.clone(),
+                d: at.clone(),
+            },
+        );
+        let to = self.emit(
+            "d",
+            Type::Ptr,
+            InstKind::Offset {
+                p: dst.clone(),
+                d: at.clone(),
+            },
+        );
+        let v = self.load_from(from, &Ty::T9);
+        self.push(Inst {
+            results: Vec::new(),
+            kind: InstKind::Store {
+                ty: Type::Int(9),
+                v,
+                p: to,
+            },
+        });
+        let next = self.apply_binary("+", at, konst_addr(1), &Ty::TAddr, line)?;
+        self.store_at(&i, 0, &Ty::TAddr, next, line)?;
+        self.jump(&head);
+        self.start(done);
+        Ok(())
+    }
+
+    /// Free an allocation, unless there was never one.
+    fn free_if_any(&mut self, at: Operand, size: Operand, align: i128) {
+        let (yes, no) = (self.fresh("free.yes"), self.fresh("free.no"));
+        // Testing an address goes through a slot, because TIR's `cmp` takes
+        // integers and there is no int-to-pointer cast either way (TIR §5).
+        let cell = self.temp_slot(&Ty::TAddr);
+        self.store_ptr(Operand::Value(cell.clone()), at.clone());
+        let n = self.load_slot(&cell, &Ty::TAddr);
+        let c = self.emit(
+            "c",
+            Type::Int(1),
+            InstKind::Cmp {
+                ty: Type::Int(27),
+                a: n,
+                b: Operand::Const(Type::Int(27), Bt::ZERO),
+            },
+        );
+        self.br3(c, &no, &no, &yes);
+        self.start(yes);
+        self.needs_heap.set(true);
+        self.push(Inst {
+            results: Vec::new(),
+            kind: InstKind::Call {
+                callee: Callee::Direct(FREE.to_string()),
+                args: vec![at, size, konst_addr(align)],
+                ret: None,
+            },
+        });
+        self.jump(&no);
+        self.start(no);
     }
 
     /// `Box::new(v)`: one `T` on the heap.
@@ -7410,6 +7741,16 @@ impl Fn<'_> {
                         };
                         ((**elem).clone(), Length::Dynamic)
                     }
+                    // A `Vec` is a pointer and a length like a fat reference,
+                    // with a capacity after them that indexing never sees
+                    // (Ch. 5 §2.6).
+                    Ty::VecOf(elem) => ((**elem).clone(), Length::Dynamic),
+                    Ty::Ref(inner, _) if matches!(**inner, Ty::VecOf(_)) => {
+                        let Ty::VecOf(elem) = &**inner else {
+                            unreachable!()
+                        };
+                        ((**elem).clone(), Length::Dynamic)
+                    }
                     other => return err(*l, format!("{other} cannot be indexed")),
                 };
                 let (base_addr, len_value) = match len {
@@ -7730,6 +8071,35 @@ impl Fn<'_> {
             if self.globals.contains_key(&key) {
                 return self.expr(&ast::Expr::Path(key, line), None);
             }
+        }
+
+        // `Vec::new()` — three words, all zero: no allocation, no elements,
+        // no room. An empty `Vec` allocates nothing, which is why the
+        // pointer's zero is a value it takes rather than a niche it offers
+        // (Ch. 5 §2.6).
+        if path.segments.len() == 2 && head == "Vec" && path.segments[1] == "new" {
+            if !fields.is_empty() {
+                return err(line, "`Vec::new` takes no arguments");
+            }
+            let Some(Ty::VecOf(elem)) = expected.cloned() else {
+                return err(
+                    line,
+                    "cannot tell what `Vec::new` holds; write the type of this value \
+                     (Ch. 4 §2.3)",
+                );
+            };
+            let ty = Ty::VecOf(elem);
+            let slot = self.temp_slot(&ty);
+            for off in [0, 3, 6] {
+                self.store_at(
+                    &slot,
+                    off,
+                    &Ty::TAddr,
+                    Operand::Const(Type::Int(27), Bt::ZERO),
+                    line,
+                )?;
+            }
+            return Ok((Operand::Value(slot), ty));
         }
 
         // `Box::new(v)` and `Box::try_new(v)` — the language item's two

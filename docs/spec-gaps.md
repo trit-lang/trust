@@ -1903,6 +1903,37 @@ The third is the interesting one, because it is a bug the niche optimization
 *created*: without niche encoding every variant has a discriminant, and the
 elimination case does not exist. Ch. 2 §6 buys a word and costs this.
 
+**G9.14 — `Vec`, and the third reason something is a language item.** Ch. 5
+§2.6 in part: `Vec::new`, `push`, `len`, indexing and dropping. Three words —
+the allocation, the length, the capacity.
+
+`Box` is the compiler's because `alloc` returns a pointer and Trust cannot
+name one. `Vec` inherits that and adds a second reason: **the room beyond the
+length is memory that is not yet a `T`**, and this language has no way to say
+so. A `Vec` written in Trust would have to store `Option<T>` in every slot to
+have a spelling for "not yet", which costs a word per element for any `T`
+without a niche. So the choice was forced rather than made.
+
+**Growth doubles from four**, and the factor is in the specification rather
+than left to the implementation because a program that pushes *n* elements is
+entitled to know it did O(*n*) work in total, and the amortized argument is a
+property of the factor (G9.4 records why that direction is the reversible
+one). There is no `realloc`: growth allocates, copies and frees, which is what
+§7 reserves a third target function for.
+
+Two things the implementation had to be told twice. The pointer word is read
+and written **as a pointer** whatever the layout calls it, because TIR has no
+int-to-pointer cast and an address that is going to be offset must have been a
+`ptr` all along. And a `Vec` receiver is a **place**: reading it would move it,
+and `v.push(x)` in a loop would then move the same `v` on every iteration —
+the borrow checker said so, which is the second time this session that
+"a method on an owning receiver" needed the place and not the value.
+
+Not built: `pop`, `insert`, `remove`, `clear`, `with_capacity`, `reserve`, and
+the coercion of `&Vec<T>` to `&[T]` — without which a `Vec` cannot be handed
+to anything that takes a slice. `String` and `collect` wait on that coercion
+and on `FromIterator`.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

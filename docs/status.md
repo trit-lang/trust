@@ -56,7 +56,7 @@ core/      2 082 lines  crate trit-core — Bt, Tint, flavors, faults, literals
 compiler/ 26 037 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
 vm/        4 566 lines  crate tritium  — machine, assembler, image format, profiler
 docs/
-├── spec-gaps.md               83 entries: every place the spec was silent or wrong
+├── spec-gaps.md               84 entries: every place the spec was silent or wrong
 └── status.md                  this file
 scripts/
 ├── stats.sh                   produces every number in this document
@@ -127,7 +127,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6) |
 
-**392 tests, zero clippy warnings, 67 commits.** `scripts/stats.sh`.
+**393 tests, zero clippy warnings, 68 commits.** `scripts/stats.sh`.
 
 ---
 
@@ -386,8 +386,10 @@ prelude (G9.9). §4.3's `unwrap` is written in the
 language too, on `!` and `trap()` (G9.10). §3's consuming methods are built too
 (G9.11), and the heap's two halves below the language
 are built: the assembler defines `_end` and the runtime supplies `alloc` and
-`free` (G9.2). `Box` is built (G9.12) and Ch. 2 §8's binary tree
-runs (G9.13). What is left is `Vec`, `String` and `collect`.
+`free` (G9.2). `Box` is built (G9.12), Ch. 2 §8's binary tree runs
+(G9.13), and `Vec` has `new`, `push`, `len`, indexing and dropping (G9.14).
+What is left of the chapter is the rest of `Vec`'s methods, the coercion of
+`&Vec<T>` to `&[T]`, and then `String` and `collect`.
 
 **B. Backend quality.** The instruction stream is a third of what it was
 (G8.6–G8.13, −66.6% on HPL), and memory is nearly out of the picture: frame

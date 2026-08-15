@@ -353,10 +353,14 @@ struct Vec<T>;      // pointer, length, capacity — three words
 struct String;      // Vec<char>, with the methods of §1.3
 ```
 
-`Vec<T>` is a growable array. `&Vec<T>` coerces to `&[T]` and `&mut Vec<T>` to
-`&mut [T]`, so every slice method applies and `Vec` adds only what growth
-needs: `push`, `pop`, `insert`, `remove`, `clear`, `with_capacity`,
-`reserve`.
+`Vec<T>` is a growable array, and a **language item** for `Box`'s reason and
+one more: the room beyond the length is memory that is *not yet a `T`*, and
+this language has no way to say that. `Vec::new`, `push`, `len` and indexing
+are built; `pop`, `insert`, `remove`, `clear`, `with_capacity` and `reserve`
+are not, and neither is the coercion of `&Vec<T>` to `&[T]`.
+
+Indexing is bounds-checked against the **length**, not the capacity — the room
+beyond it holds nothing a program may read.
 
 Growth **doubles** the capacity, from a first allocation of 4 elements. The
 factor is specified rather than left open because a program that pushes *n*
