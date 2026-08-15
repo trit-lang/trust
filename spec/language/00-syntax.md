@@ -385,9 +385,17 @@ let y = {
 let x: t27 = 0;        // binding, with a type
 let x = 0;             // binding, type inferred
 let mut i: taddr = 0;  // mutable binding
+let (a, mut b) = p;    // binding a tuple, element by element
 expr;                  // expression statement
 item                   // items may appear in blocks
 ```
+
+The tuple form is **sugar**: it binds the whole tuple to a name no program can
+write and then binds each element to a field of it, so nothing below the
+grammar learns a new shape and the ownership rules need no case of their own —
+moving out of one element leaves the others usable, which Ch. 3 §1.3 already
+says. `mut` is per element. It is the only pattern a `let` takes; anything
+richer is a `match`.
 
 A binding is immutable unless it says `mut`. Ch. 1's numeric types are all
 `Copy`-shaped scalars, so nothing about ownership is visible here yet; Ch. 3

@@ -6,30 +6,13 @@
 // is one — both O(1), and neither is available in a language whose strings
 // are UTF-8.
 //
-// The price is paid at the boundary instead, and `to_utf8` is where: the
-// machine's character port takes UTF-8 code units (ISA §2.2), so the string
-// is encoded on its way out and nowhere else. Everything below except
-// `putchar` is ordinary Trust, in the prelude.
-
-fn putchar(c: t9);          // declared here, defined outside the language
-
-fn print(s: &str) {
-    // `utf8_len` is the one place a program sees the interchange format's
-    // variable width: it is what a buffer is sized by.
-    let mut buf: [t9; 64] = [0; 64];
-    match s.to_utf8(&mut buf) {
-        Option::Some(n) => {
-            let mut i: taddr = 0;
-            while i < n {
-                putchar(buf[i]);
-                i += 1;
-            }
-        },
-        Option::None => {},   // the string did not fit; print nothing
-    }
-}
+// The price is paid at the boundary instead. The machine's character port
+// takes UTF-8 code units (ISA §2.2), so `print` encodes on the way out — and
+// that is the only place a program's text meets the interchange format. It is
+// in the prelude, written in Trust, and so is everything it calls except
+// `putchar`, which reaches a device and therefore cannot be (Ch. 5 §1.5).
 
 fn main() -> t27 {
-    print("Hello, 世界! 🙂\n");
+    println("Hello, 世界! 🙂");
     0
 }

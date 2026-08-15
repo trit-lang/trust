@@ -2014,6 +2014,56 @@ where the statement *ends*. Tail position is untouched, so
 like, and the cost is that a method call on a `match` in statement position
 needs parentheses — paid where it is visible.
 
+**G9.17 — `print` moved into the library, and three things had to move with
+it.** Ch. 5 §1.5 wrote `print` as library code from the day it was written;
+`examples/trust/hello.tr` defined it anyway, in fifteen lines, because the
+pieces it needs were not all there. They are now, and `hello.tr` is a `main`
+with one statement in it.
+
+`putchar` is declared in the prelude, which makes it a **required target
+function**, the third after `alloc` and `free`. That qualifies AM §5's "I/O is
+per target", and the qualification is narrow enough to state exactly: the
+*character ports* are part of what a target must offer and nothing else about
+I/O is. A target with no console supplies a `putchar` that discards, the way a
+target with no heap supplies an `alloc` that fails. A program may still
+declare `putchar` itself — its item shadows the prelude's, and both resolve to
+the target's one symbol.
+
+Three things moved with it.
+
+**`char::to_utf8` now has the signature §1.5 always gave it**:
+`(self) -> ([t9; 4], taddr)`, no buffer and no `Option`. The implementation
+had diverged into `(self, out: &mut [t9]) -> Option<taddr>`, which made every
+caller handle a case that cannot happen — a `char` is always encodable and
+four units is always enough for one. The specification was right and the
+implementation was wrong, which is the direction this log usually does not go.
+
+**`let` binds a tuple.** §1.5's `print` is written `let (units, n) =
+c.to_utf8();` and `let` took a single identifier. It is sugar, expanded in the
+parser into a hidden binding for the whole tuple and one `let` per element, so
+nothing below the grammar learns a new shape and the ownership rules need no
+case of their own: moving out of one element leaves the others usable, which
+Ch. 3 §1.3 already says. Ch. 0 §5.2 states it. `mut` is per element, and it is
+the only pattern a `let` takes — anything richer is a `match`.
+
+**`prelude_functions` was missing the provided methods.** A trait's provided
+body is synthesized per implementing type (Ch. 4 §1.5), so `impl Iterator for
+Chars` produces `Chars.count`, `Chars.nth` and five more that appear in no
+impl block. That set decides which names `keep_reachable` may treat as
+prunable, and a name it misses is treated as a **root** — so the prelude's own
+iterator, and everything it called, was emitted into every program that never
+mentioned text. Two tests that assert a `match` on a `trit` compiles to one
+`br3` and *no* comparison caught it, which is a use for an exact-output test
+nobody designed it for.
+
+*Still open.* Ch. 5 §1.5 would rather write `for c in s`, and that needs
+`impl IntoIterator for &str` — an impl whose **self type is a reference**,
+which the parser rejects with "expected a name, found `&`". `chars()` spells
+the call out in the meantime. Related and also open: the `for` desugaring
+calls `.next()` on the loop's expression directly, where Ch. 4 §5.7 says it
+calls `IntoIterator::into_iter` first. The two are the same fix — the trait
+and the blanket impl are writable today, and the impl on `&str` is not.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

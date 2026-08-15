@@ -369,13 +369,13 @@ impl char {
         }
     }
 
-    // Write this character's UTF-8 code units into `out`, returning how many.
-    // `None` if `out` is too short: the length is knowable in advance with
-    // `utf8_len`, so a caller that does not want the check can avoid it.
-    fn to_utf8(self, out: &mut [t9]) -> Option<taddr> {
+    // This character's UTF-8 code units, and how many of them there are
+    // (Ch. 5 §1.5). It returns no `Option` because it cannot fail: a `char`
+    // is always encodable, and four units is always enough for one.
+    fn to_utf8(self) -> ([t9; 4], taddr) {
         let n = self.utf8_len();
-        if out.len() < n { return Option::None; }
         let c = self as t27;
+        let mut out: [t9; 4] = [0; 4];
         if n == 1 {
             out[0] = c as t9;
         } else {
@@ -395,7 +395,7 @@ impl char {
                 }
             }
         }
-        Option::Some(n)
+        (out, n)
     }
 }
 
@@ -417,25 +417,69 @@ impl str {
         let mut at: taddr = 0;
         let mut i: taddr = 0;
         while i < self.len() {
-            let c = self[i];
-            let n = c.utf8_len();
+            let (unit, n) = self[i].to_utf8();
             if at + n > out.len() { return Option::None; }
             let mut j: taddr = 0;
-            let mut unit: [t9; 4] = [0; 4];
-            match c.to_utf8(&mut unit) {
-                Option::Some(k) => {
-                    while j < k {
-                        out[at + j] = unit[j];
-                        j += 1;
-                    }
-                    at += k;
-                },
-                Option::None => { return Option::None; },
+            while j < n {
+                out[at + j] = unit[j];
+                j += 1;
             }
+            at += n;
             i += 1;
         }
         Option::Some(at)
     }
+
+    // The characters, one at a time. `for c in s` would be this without the
+    // call, and needs `impl IntoIterator for &str` — an impl whose self type
+    // is a reference, which draft 0.1 cannot write (G9.17).
+    fn chars(&self) -> Chars {
+        Chars { s: self, at: 0 }
+    }
+}
+
+struct Chars { s: &str, at: taddr }
+
+impl Iterator for Chars {
+    type Item = char;
+    fn next(&mut self) -> Option<char> {
+        if self.at < self.s.len() {
+            let c = self.s[self.at];
+            self.at += 1;
+            Option::Some(c)
+        } else {
+            Option::None
+        }
+    }
+}
+
+// ------------------------------------------------------------------ output
+//
+// The character ports are the reference target's (ISA §2.2) and they take
+// UTF-8 code units, so the encoding happens here and nowhere else: a program
+// that prints never sees the interchange format (Ch. 5 §1.5).
+//
+// `putchar` has no body for the reason `alloc` has none — it reaches a
+// memory-mapped device, and TIR has no way to name one (§2.1).
+
+fn putchar(c: t9);
+
+fn print(s: &str) {
+    let mut i: taddr = 0;
+    while i < s.len() {
+        let (units, n) = s[i].to_utf8();
+        let mut j: taddr = 0;
+        while j < n {
+            putchar(units[j]);
+            j += 1;
+        }
+        i += 1;
+    }
+}
+
+fn println(s: &str) {
+    print(s);
+    putchar(10);
 }
 "#;
 
@@ -503,6 +547,22 @@ fn item_name(i: &ast::Item) -> Option<&str> {
 fn prelude_functions() -> std::collections::HashSet<String> {
     let file = parse::parse(PRELUDE).expect("the prelude parses");
     let mut names = std::collections::HashSet::new();
+    // A trait's methods, so that an impl can be credited with the ones it did
+    // not write. A *provided* body is synthesized for each implementing type
+    // (Ch. 4 §1.5), so `impl Iterator for Chars` produces `Chars.count` and
+    // six more that appear in no impl block — and a name this set misses is
+    // treated as a root, which is how the prelude's own iterator ended up in
+    // the output of every program that never mentioned text.
+    let mut trait_methods: std::collections::HashMap<&str, Vec<&str>> =
+        std::collections::HashMap::new();
+    for item in &file.items {
+        if let ast::Item::Trait(t) = item {
+            trait_methods.insert(
+                t.name.as_str(),
+                t.methods.iter().map(|m| m.name.as_str()).collect(),
+            );
+        }
+    }
     for item in &file.items {
         match item {
             ast::Item::Fn(f) => {
@@ -512,6 +572,13 @@ fn prelude_functions() -> std::collections::HashSet<String> {
             ast::Item::Impl(i) => {
                 for m in &i.methods {
                     names.insert(format!("{}.{}", i.self_ty, m.name));
+                }
+                if let Some(t) = &i.trait_name
+                    && let Some(ms) = trait_methods.get(t.as_str())
+                {
+                    for m in ms {
+                        names.insert(format!("{}.{}", i.self_ty, m));
+                    }
                 }
             }
             _ => {}

@@ -186,6 +186,7 @@ fn char.to_utf8(self) -> ([t9; 4], taddr);          // units, and how many
 fn char.from_utf8(units: &[t9]) -> Option<(char, taddr)>;
 fn str.to_utf8(&self, out: &mut [t9]) -> Option<taddr>;
 fn str.from_utf8(units: &[t9]) -> Option<String>;
+fn str.chars(&self) -> Chars;                       // an Iterator<Item = char>
 ```
 
 A `[t9]` here holds one UTF-8 code unit per element, values `0 ..= 255`. Every
@@ -194,18 +195,40 @@ fallible where it cannot: `to_utf8` on a `char` always succeeds, because a
 `char` is always encodable.
 
 The reference target's character ports (ISA §2.2) are UTF-8 code-unit ports
-and stay that way. That is a property of the device, and the library encodes
-on the way out:
+and stay that way. That is a property of the device, and **the library encodes
+on the way out** — `print` and `println` are in the library, written in Trust:
 
 ```
+fn putchar(c: t9);                  // no body: it reaches a device
+
 fn print(s: &str) {
-    for c in s {
+    for c in s.chars() {
         let (units, n) = c.to_utf8();
         let mut i: taddr = 0;
         while i < n { putchar(units[i]); i += 1; }
     }
 }
+
+fn println(s: &str) { print(s); putchar(10); }
 ```
+
+So `putchar` is a **required target function**, the third after `alloc` and
+`free` (§2.1) and there for the same reason: it reaches a memory-mapped device
+and TIR has no way to name one. Everything above it is ordinary Trust, and a
+program that never prints emits none of it.
+
+This is the one place the "I/O is per target" rule of AM §5 is qualified, and
+the qualification is narrow: the *character ports* are part of what a target
+must offer, and nothing else about I/O is. A target with no console supplies a
+`putchar` that discards, the way a target with no heap supplies an `alloc`
+that fails.
+
+A program may declare `putchar` itself; its item shadows the prelude's, and
+both resolve to the target's one symbol.
+
+> `for c in s` is what this would like to say. It needs
+> `impl IntoIterator for &str` — an impl whose self type is a reference —
+> which draft 0.1 cannot write, so `chars()` spells the call out.
 
 The assembler's `.string` directive (assembly §9) emits the **native**
 encoding: one word per character, so that a `&'static str` built by the
@@ -248,7 +271,8 @@ Draft 0.1 therefore says the smallest true thing:
   and its inside is not Trust.
 - **There is one allocator, and the target supplies it.** Its interface to a
   program is two declared functions with no body, exactly as `putchar` is
-  today (Ch. 0 §3.1).
+  (Ch. 0 §3.1) — and `putchar` is declared in the library alongside them
+  (§1.5), so a target owes exactly three functions and no more.
 - **`trait Allocator`, and a `Box` parameterized by one, are reserved** to the
   `unsafe` chapter. Writing them is the operation this language does not have.
 
@@ -727,9 +751,9 @@ and is derivable (Ch. 4 §6) field by field.
 - **Formatting.** There is no `Display`, no `format!`, and no `println!`. Each
   needs either variadic arguments or a macro system; Ch. 0 §7 reserves macros
   and Ch. 0 §1.5 reserves the `name!(…)` position they would use, so the door
-  is held open and nothing walks through it here. A program prints with the
-  functions of §1.5, which is the same digit loop `examples/trust/HPL.tr`
-  writes today.
+  is held open and nothing walks through it here. A program prints a string
+  with §1.5's `print` and a number with the same digit loop
+  `examples/trust/HPL.tr` writes today.
 - **Maps, sets, and any collection with a hash.** A hash function is a choice
   with security consequences, and nothing here needs one yet. One requirement
   is fixed in advance, because it cannot be added afterwards: **a map's

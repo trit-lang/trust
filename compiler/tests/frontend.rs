@@ -3621,3 +3621,81 @@ fn a_block_shaped_expression_ends_its_statement() {
         1024
     );
 }
+
+#[test]
+fn the_library_prints_and_the_program_does_not_have_to() {
+    // Ch. 5 §1.5: `print` and `println` are in the prelude, written in Trust,
+    // and the only thing under them that is not is `putchar` — which reaches
+    // a memory-mapped device, so it cannot be, for the reason `alloc` cannot.
+    // The encoding happens on the way out and nowhere else.
+    let (status, out) = run("fn main() -> t27 { println(\"世界\"); print(\"ok\"); 0 }");
+    assert_eq!(out, "世界\nok");
+    assert_eq!(status, 0);
+}
+
+#[test]
+fn a_program_may_still_declare_putchar_itself() {
+    // The prelude declares `putchar`, and a program's item of the same name
+    // shadows the prelude's — the rule that keeps the library from taking
+    // names away from programs. Both resolve to the target's one symbol, so
+    // a program that declares it and one that does not can be linked the
+    // same way.
+    let (_, out) = run("fn putchar(c: t9); \
+         fn main() -> t27 { putchar(65); print(\"!\"); 0 }");
+    assert_eq!(out, "A!");
+}
+
+#[test]
+fn let_binds_a_tuple() {
+    // Sugar, expanded in the parser into a hidden binding for the whole
+    // tuple and one `let` per element. Nothing below the parser learns a new
+    // shape, and the ownership rules need no case of their own: moving out
+    // of `#t.0` leaves `#t.1` usable, which Ch. 3 §1.3 already says.
+    assert_eq!(
+        run("fn parts() -> (t27, t27, t27) { (1, 20, 300) } \
+             fn main() -> t27 { \
+                 let (a, b, c) = parts(); \
+                 let (mut d, e) = (5, 6); \
+                 d += 1; \
+                 a + b + c + d * 1000 + e * 10000 \
+             }")
+        .0,
+        1 + 20 + 300 + 6000 + 60000
+    );
+}
+
+#[test]
+fn a_string_iterates_its_characters() {
+    // `for c in s` is what Ch. 5 §1.5 would like to write, and it needs
+    // `impl IntoIterator for &str` — an impl whose self type is a reference,
+    // which draft 0.1 cannot write (G9.17). `s.chars()` is the same loop with
+    // the call spelled out.
+    assert_eq!(
+        run("fn main() -> t27 { \
+                 let s: &str = \"abc\"; \
+                 let mut n: t27 = 0; \
+                 for c in s.chars() { n += c as t27; } \
+                 n \
+             }")
+        .0,
+        97 + 98 + 99
+    );
+}
+
+#[test]
+fn a_character_encodes_without_a_buffer() {
+    // Ch. 5 §1.5's signature: `char::to_utf8` returns the units and how many,
+    // and no `Option`, because it cannot fail — a `char` is always encodable
+    // and four units is always enough for one. The buffer-and-`Option` form
+    // it used to have made every caller handle a case that cannot happen.
+    assert_eq!(
+        run("fn main() -> t27 { \
+                 let (u, n) = '\\u{4e16}'.to_utf8(); \
+                 (n as t27) * 1000000 + (u[0] as t27) * 10000 \
+                     + (u[1] as t27) * 100 + (u[2] as t27) \
+             }")
+        .0,
+        // 世 is E4 B8 96 — 228, 184, 150 — in three units.
+        3 * 1_000_000 + 228 * 10_000 + 184 * 100 + 150
+    );
+}

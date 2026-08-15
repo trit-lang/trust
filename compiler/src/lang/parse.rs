@@ -973,7 +973,7 @@ impl Parser {
                 return self.err("unterminated block");
             }
             if self.at_kw("let") {
-                stmts.push(self.let_stmt()?);
+                stmts.extend(self.let_stmt()?);
                 continue;
             }
             if self.eat_op(";") {
@@ -1019,9 +1019,19 @@ impl Parser {
         ) || self.at_op("{")
     }
 
-    fn let_stmt(&mut self) -> R<Stmt> {
+    /// `let`, which binds either one name or a tuple of them.
+    ///
+    /// The tuple form is sugar and is expanded here: it becomes a hidden
+    /// binding for the whole tuple and one `let` per element reading a field
+    /// of it. Nothing below the parser learns a new shape, and the ownership
+    /// rules need no case of their own — moving out of `#t.0` leaves `#t.1`
+    /// usable, which Ch. 3 §1.3 already says.
+    fn let_stmt(&mut self) -> R<Vec<Stmt>> {
         let line = self.line();
         self.bump(); // let
+        if self.at_op("(") {
+            return self.let_tuple(line);
+        }
         let mutable = self.eat_kw("mut");
         let name = self.expect_ident()?;
         let ty = if self.eat_op(":") {
@@ -1032,13 +1042,62 @@ impl Parser {
         self.expect_op("=")?;
         let value = self.expr()?;
         self.expect_op(";")?;
-        Ok(Stmt::Let {
+        Ok(vec![Stmt::Let {
             mutable,
             name,
             ty,
             value,
             line,
-        })
+        }])
+    }
+
+    fn let_tuple(&mut self, line: Line) -> R<Vec<Stmt>> {
+        self.expect_op("(")?;
+        let mut names = Vec::new();
+        while !self.eat_op(")") {
+            let mutable = self.eat_kw("mut");
+            names.push((mutable, self.expect_ident()?));
+            if !self.eat_op(",") && !self.at_op(")") {
+                return self.err("expected `,` or `)` in a tuple binding");
+            }
+        }
+        if names.is_empty() {
+            return self.err("a tuple binding names nothing");
+        }
+        let ty = if self.eat_op(":") {
+            Some(self.ty()?)
+        } else {
+            None
+        };
+        self.expect_op("=")?;
+        let value = self.expr()?;
+        self.expect_op(";")?;
+
+        // `#` is not an identifier character, so the whole-tuple binding
+        // cannot collide with anything a program can write.
+        self.counter += 1;
+        let whole = format!("#t{}", self.counter);
+        let mut out = vec![Stmt::Let {
+            mutable: false,
+            name: whole.clone(),
+            ty,
+            value,
+            line,
+        }];
+        for (i, (mutable, name)) in names.into_iter().enumerate() {
+            out.push(Stmt::Let {
+                mutable,
+                name,
+                ty: None,
+                value: Expr::Field(
+                    Box::new(Expr::Path(whole.clone(), line)),
+                    i.to_string(),
+                    line,
+                ),
+                line,
+            });
+        }
+        Ok(out)
     }
 
     // ------------------------------------------------------- expressions

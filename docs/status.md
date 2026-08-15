@@ -394,6 +394,12 @@ rules of its own. Building the last of those uncovered the drop ledger's fifth
 bug — an arm's pattern bindings were never dropped — and closing it needed the
 condition that they own only when the scrutinee was matched by value.
 
+§1.5's `print` and `println` are in the prelude now, so
+`examples/trust/hello.tr` is a `main` with one statement in it; `putchar` is
+declared there too, which makes it the third required target function after
+`alloc` and `free` (G9.17). `char::to_utf8` has the signature the
+specification always gave it, `let` binds a tuple, and `str::chars` iterates.
+
 Both gaps that opened underneath it are closed: a `match` binding taken
 through a reference may be read and borrowed but not moved out of (Ch. 3
 §1.3), and a block-shaped expression in statement position ends its statement
