@@ -3176,8 +3176,7 @@ fn dropping_a_box_frees_after_the_value_is_dropped() {
     // order is the `T` and then the allocation (Ch. 5 §2.3). The ledger
     // shows the destructor ran; the allocator shows the block came back,
     // because the next request of the same size gets the same address.
-    let (status, out) = run(
-        "fn putchar(c: t9); \
+    let (status, out) = run("fn putchar(c: t9); \
          struct Port { id: t27 } \
          impl Drop for Port { fn drop(self) { putchar((48 + self.id) as t9); } } \
          fn main() -> t27 { \
@@ -3185,8 +3184,7 @@ fn dropping_a_box_frees_after_the_value_is_dropped() {
              putchar(45); \
              { let c = Box::new(Port { id: 2 }); } \
              0 \
-         }",
-    );
+         }");
     assert_eq!(status, 0);
     assert_eq!(out, "1-2");
 }
@@ -3208,4 +3206,83 @@ fn assigning_to_a_moved_local_gives_it_back() {
         .0,
         3
     );
+}
+
+#[test]
+fn a_recursive_type_compiles_and_runs() {
+    // Ch. 2 §8's example, written against `Box` and unrunnable until now.
+    // The tree is dropped by dropping its `Box`es, which drop their `Tree`s,
+    // which drop theirs — the recursion the destructor mechanism has had
+    // since Ch. 3 §1.4 and had nothing recursive to apply itself to.
+    assert_eq!(
+        run("enum Tree { Leaf, Node(Box<Tree>, t27, Box<Tree>) } \
+             fn insert(t: Tree, v: t27) -> Tree { \
+                 match t { \
+                     Tree::Leaf => \
+                         Tree::Node(Box::new(Tree::Leaf), v, Box::new(Tree::Leaf)), \
+                     Tree::Node(l, x, r) => match v <=> x { \
+                         -1t => Tree::Node(Box::new(insert(*l, v)), x, r), \
+                          1t => Tree::Node(l, x, Box::new(insert(*r, v))), \
+                          0t => Tree::Node(l, x, r), \
+                     }, \
+                 } \
+             } \
+             fn total(t: &Tree) -> t27 { \
+                 match t { \
+                     Tree::Leaf => 0, \
+                     Tree::Node(l, x, r) => total(&*l) + x + total(&*r), \
+                 } \
+             } \
+             fn main() -> t27 { \
+                 let mut t = Tree::Leaf; \
+                 t = insert(t, 5); \
+                 t = insert(t, 3); \
+                 t = insert(t, 8); \
+                 t = insert(t, 1); \
+                 total(&t) \
+             }")
+        .0,
+        5 + 3 + 8 + 1
+    );
+}
+
+#[test]
+fn a_move_in_one_match_arm_is_not_a_move_in_the_next() {
+    // Arms are alternatives, not a sequence. `if`/`else` joined ownership
+    // from the start and `match` did not, so a move in the first arm made
+    // every arm after it complain (Ch. 3 §1.2).
+    assert_eq!(
+        run("struct S { a: t27 } \
+             impl Drop for S { fn drop(self) { } } \
+             fn take(s: S) -> t27 { s.a } \
+             fn main() -> t27 { \
+                 let s = S { a: 4 }; \
+                 match 1t { -1t => take(s), 0t => take(s), 1t => take(s), } \
+             }")
+        .0,
+        4
+    );
+}
+
+#[test]
+fn a_variant_with_nothing_to_drop_is_still_told_apart() {
+    // A niche-encoded enum's untagged variant is recognized by elimination,
+    // which needs something to eliminate: every variant with a discriminant
+    // is tested, droppable or not. Without that, an enum whose only
+    // droppable variant is the untagged one dropped it unconditionally —
+    // and `Leaf`, which lives in the `Box`'s niche, freed whatever its
+    // storage happened to hold.
+    let (_, out) = run(
+        "fn putchar(c: t9); \
+         struct Port { id: t27 } \
+         impl Drop for Port { fn drop(self) { putchar((48 + self.id) as t9); } } \
+         enum Maybe { Nothing, Held(Box<Port>) } \
+         fn main() -> t27 { \
+             { let a: Maybe = Maybe::Nothing; } \
+             putchar(45); \
+             { let b = Maybe::Held(Box::new(Port { id: 2 })); } \
+             0 \
+         }",
+    );
+    assert_eq!(out, "-2");
 }

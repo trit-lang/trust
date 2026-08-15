@@ -1858,13 +1858,43 @@ because that re-initializes part of it.
 `*r` never moved `r` because a reference is `Copy`. `Box` is the first thing
 that is a pointer and is not.
 
-**What is not built: a recursive type.** `enum Tree { Node(Box<Tree>, …) }`
-compiles until its drop glue, which is generated *inline* field by field for
-a type with no destructor of its own — and inlining recursion does not
-terminate. It stops at the depth limit with "drop glue nested too deeply".
-The fix is out-of-line drop glue: a `drop.T` function for every nominal type
-that needs dropping, which is what the destructor case already has. Ch. 2 §8's
-example still does not run, and this is now the only reason.
+**A recursive type**, `enum Tree { Node(Box<Tree>, …) }`, is G9.13.
+
+**G9.13 — Ch. 2 §8's example runs, and the three bugs between it and here.**
+The binary tree that chapter wrote against `Box` compiles and runs. Getting
+there needed one design change and turned up two bugs, and neither bug was
+about `Box`.
+
+**Drop glue moved out of line.** It was generated *inline*, field by field, at
+each place a value died — and inlining recursion does not terminate, so a
+recursive type stopped at the depth limit. Now every concrete nominal type
+that needs dropping and has no destructor of its own gets a synthesized
+`drop.T`.
+
+The synthesis adds no mechanism. `drop.T` takes `self` by value and has an
+**empty body**, and the fields are dropped when its frame ends — which is what
+`fn drop(self) {}` already meant (Ch. 4 §5.2). The glue is a destructor that
+does nothing, and that was already the definition.
+
+**A move in one `match` arm was a move in the next.** Arms are alternatives,
+not a sequence, and `if`/`else` had joined ownership from the start; `match`
+had not, so the first arm's move made every arm after it complain. Three arm
+loops needed the same snapshot-restore-join `if_expr` already had.
+
+**A niche-encoded enum dropped its untagged variant unconditionally.** The
+untagged variant is recognized *by elimination* — everything else was tested
+and did not match — and that needs something to eliminate. Only *droppable*
+variants were tested, so an enum whose one droppable variant is the untagged
+one had no tests at all, and dropped it whatever the discriminant said.
+`enum Tree { Leaf, Node(Box<Tree>, …) }` is exactly that shape: `Leaf` lives
+in the `Box`'s niche and has nothing to drop, so dropping a `Leaf` freed
+whatever its storage happened to hold. Every variant with a discriminant is
+tested now, droppable or not; one with nothing to drop jumps to the join, and
+that jump is the elimination.
+
+The third is the interesting one, because it is a bug the niche optimization
+*created*: without niche encoding every variant has a discriminant, and the
+elimination case does not exist. Ch. 2 §6 buys a word and costs this.
 
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but

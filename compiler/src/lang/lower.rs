@@ -634,7 +634,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
     // Nominal types first: signatures and constants may mention them, and
     // every item in the file is visible to every other whatever the order
     // (Ch. 0 §3).
-    let types = match build_types(file) {
+    let mut types = match build_types(file) {
         Ok(t) => t,
         Err(e) => {
             errs.push(e);
@@ -682,6 +682,46 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
         })
         .chain(expanded)
         .collect();
+
+    // Drop glue, out of line, for every concrete type that needs dropping and
+    // has no destructor of its own.
+    //
+    // Glue used to be generated *inline*, field by field, at each place a
+    // value died — and inlining recursion does not terminate: `enum Tree {
+    // Node(Box<Tree>, …) }` ran into the depth limit rather than compiling.
+    //
+    // A synthesized destructor with an **empty body** is exactly the glue:
+    // `drop.T` takes `self` by value, does nothing, and the fields are
+    // dropped when its frame ends — which is what `fn drop(self) {}` already
+    // meant (Ch. 4 §5.2). So the fix adds no mechanism, it uses the one that
+    // was there.
+    let mut fns = fns;
+    let glued: Vec<String> = {
+        let structs = types.structs.borrow();
+        let enums = types.enums.borrow();
+        structs
+            .keys()
+            .map(|n| (n.clone(), Ty::Struct(n.clone())))
+            .chain(enums.keys().map(|n| (n.clone(), Ty::Enum(n.clone()))))
+            .filter(|(n, t)| types.needs_drop(t) && !types.destructors.contains(n))
+            .map(|(n, _)| n)
+            .collect()
+    };
+    for name in glued {
+        fns.push(ast::FnItem {
+            name: format!("drop.{name}"),
+            generics: Vec::new(),
+            params: vec![("self".into(), ast::Ty::Name(name.clone(), 0))],
+            ret: None,
+            body: Some(ast::Block {
+                stmts: Vec::new(),
+                tail: None,
+                line: 0,
+            }),
+            line: 0,
+        });
+        types.destructors.insert(name);
+    }
 
     // `impl Fn(…)` in argument position is an anonymous type parameter
     // (Ch. 4 §2.2). Naming it here is the whole of the desugaring, and it is
@@ -4069,13 +4109,43 @@ impl Fn<'_> {
         let join = self.fresh("drop.join");
 
         // A niche-encoded enum's untagged variant has no discriminant value
-        // to test, so it is recognized by elimination and handled last.
+        // to test, so it is recognized by elimination and handled last —
+        // which needs something to eliminate. Every variant that *has* a
+        // discriminant is tested, droppable or not: one with nothing to drop
+        // jumps straight to the join, and that jump is the elimination.
+        //
+        // Without it, an enum whose only droppable variant is the untagged
+        // one dropped it unconditionally. `enum Tree { Leaf, Node(Box<Tree>,
+        // …) }` is exactly that shape — `Leaf` lives in the `Box`'s niche and
+        // has nothing to drop — so dropping a `Leaf` freed whatever its
+        // storage happened to hold.
+        let droppable: std::collections::BTreeSet<usize> = droppable.into_iter().collect();
         let mut untagged: Option<usize> = None;
-        for i in droppable {
+        for i in 0..variants.len() {
             let Some(value) = tag_value(&e, i) else {
-                untagged = Some(i);
+                if droppable.contains(&i) {
+                    untagged = Some(i);
+                }
                 continue;
             };
+            if !droppable.contains(&i) {
+                let body = self.fresh("drop.none");
+                let next = self.fresh("drop.next");
+                let c = self.emit(
+                    "c",
+                    Type::Int(1),
+                    InstKind::Cmp {
+                        ty: tag_ty,
+                        a: tag.clone(),
+                        b: Operand::Const(tag_ty, Bt::from_i128(value)),
+                    },
+                );
+                self.br3(c, &next, &body, &next);
+                self.start(body);
+                self.jump(&join);
+                self.start(next);
+                continue;
+            }
             let body = self.fresh("drop.arm");
             let next = self.fresh("drop.next");
             let c = self.emit(
@@ -8162,9 +8232,16 @@ impl Fn<'_> {
                 None => join.clone(),
             };
             self.br3(v, &pick(order[0]), &pick(order[1]), &pick(order[2]));
+            let before = self.owned_snapshot();
+            let mut merged: Option<Vec<Owned>> = None;
             for (arm, label) in arms.iter().zip(&labels) {
+                self.owned = before.clone();
                 self.start(label.clone());
                 self.arm_body(arm, expected, &mut result, &join, line)?;
+                merged = Some(self.join_arm(merged));
+            }
+            if let Some(m) = merged {
+                self.owned = m;
             }
             self.start(join);
             return Ok(self.match_result(result));
@@ -8172,12 +8249,16 @@ impl Fn<'_> {
 
         // Otherwise: test the arms in order.
         let mut fell_through = true;
+        let before = self.owned_snapshot();
+        let mut merged: Option<Vec<Owned>> = None;
         for arm in arms {
             let next = self.fresh("arm.next");
             let body = self.fresh("arm");
+            self.owned = before.clone();
             let unconditional = self.arm_test(arm, &v, &ty, &body, &next, line)?;
             self.start(body);
             self.arm_body(arm, expected, &mut result, &join, line)?;
+            merged = Some(self.join_arm(merged));
             if unconditional {
                 // A wildcard or binding matches everything, so no later arm
                 // and no fallthrough block is reachable — and an unreachable
@@ -8276,7 +8357,10 @@ impl Fn<'_> {
             let labels: Vec<String> = (0..arms.len()).map(|_| self.fresh("arm")).collect();
             let pick = |i: usize| labels[i].clone();
             self.br3(tag, &pick(order[0]), &pick(order[1]), &pick(order[2]));
+            let before = self.owned_snapshot();
+            let mut merged: Option<Vec<Owned>> = None;
             for (i, arm) in arms.iter().enumerate() {
+                self.owned = before.clone();
                 self.start(labels[i].clone());
                 self.enum_arm(
                     arm,
@@ -8288,6 +8372,10 @@ impl Fn<'_> {
                     &join,
                     line,
                 )?;
+                merged = Some(self.join_arm(merged));
+            }
+            if let Some(m) = merged {
+                self.owned = m;
             }
             self.start(join);
             return Ok(self.match_result(result));
@@ -8298,6 +8386,8 @@ impl Fn<'_> {
         // ordinary payload and which is therefore recognized by elimination.
         // Those, and a wildcard, are emitted last, since the variant patterns
         // are disjoint and only order relative to the catch-all matters.
+        let before = self.owned_snapshot();
+        let mut merged: Option<Vec<Owned>> = None;
         let mut tested: Vec<(usize, usize, i128)> = Vec::new();
         let mut default: Option<usize> = None;
         for (i, select) in selects.iter().enumerate() {
@@ -8329,6 +8419,7 @@ impl Fn<'_> {
                 },
             );
             self.br3(c, &next, &body, &next);
+            self.owned = before.clone();
             self.start(body);
             self.enum_arm(
                 &arms[arm_index],
@@ -8340,12 +8431,15 @@ impl Fn<'_> {
                 &join,
                 line,
             )?;
+            merged = Some(self.join_arm(merged));
+            self.owned = before.clone();
             self.start(next);
         }
 
         match default {
             Some(i) => {
                 let variant = selects[i];
+                self.owned = before.clone();
                 self.enum_arm(
                     &arms[i],
                     name,
@@ -8356,8 +8450,12 @@ impl Fn<'_> {
                     &join,
                     line,
                 )?;
+                merged = Some(self.join_arm(merged));
             }
             None => self.finish(Terminator::Trap(FaultCode::Trap)),
+        }
+        if let Some(m) = merged {
+            self.owned = m;
         }
         self.start(join);
         Ok(self.match_result(result))
@@ -8417,6 +8515,24 @@ impl Fn<'_> {
         let r = self.arm_body(arm, expected, result, join, line);
         self.scopes.pop();
         r
+    }
+
+    /// Fold one arm's ownership state into what the arms before it left.
+    ///
+    /// Arms are alternatives, not a sequence: a value moved in one is not
+    /// moved in the next, and a value moved in *some* of them is only
+    /// maybe-owned afterwards, which is what the drop flag is for (Ch. 3
+    /// §1.2). `if`/`else` did this from the start and `match` did not, so a
+    /// move in the first arm made every arm after it complain.
+    fn join_arm(&mut self, merged: Option<Vec<Owned>>) -> Vec<Owned> {
+        let here = self.owned_snapshot();
+        match merged {
+            None => here,
+            Some(prev) => {
+                self.owned_join(prev, here);
+                self.owned_snapshot()
+            }
+        }
     }
 
     fn match_result(&mut self, result: Option<(String, Ty)>) -> (Operand, Ty) {

@@ -56,7 +56,7 @@ core/      2 082 lines  crate trit-core — Bt, Tint, flavors, faults, literals
 compiler/ 26 037 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
 vm/        4 566 lines  crate tritium  — machine, assembler, image format, profiler
 docs/
-├── spec-gaps.md               82 entries: every place the spec was silent or wrong
+├── spec-gaps.md               83 entries: every place the spec was silent or wrong
 └── status.md                  this file
 scripts/
 ├── stats.sh                   produces every number in this document
@@ -127,7 +127,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6) |
 
-**388 tests, zero clippy warnings, 65 commits.** `scripts/stats.sh`.
+**391 tests, zero clippy warnings, 66 commits.** `scripts/stats.sh`.
 
 ---
 
@@ -157,7 +157,7 @@ inference and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
 | `String`, and growable text | `str` and string literals are built (G9.6) and are `&'static`; a growable one needs the heap |
 | ranges, so `for i in 0..10` | Ch. 0 §4 reserves range expressions |
 | a type parameterized by a `const` | `const N` works as an array *length* (G8.2); `struct Grid<const N: taddr>` is Ch. 4 §2.4 and unimplemented |
-| a recursive type, so `enum Tree { Node(Box<Tree>, …) }` | `Box` works (G9.12), but drop glue is generated inline field by field, and inlining recursion does not terminate. Out-of-line `drop.T` for every type that needs dropping is the fix |
+
 | returning a closure | needs `impl Trait` in return position or `Box<dyn Fn>`; Ch. 4 §4.5 |
 | `FnOnce` | every capture is by reference; needs a move analysis of the closure body |
 | `IntoIterator`, so `for x in xs` over an array | array iterators are the library's; the blanket impl it needs now works (G0.14b) |
@@ -386,9 +386,8 @@ prelude (G9.9). §4.3's `unwrap` is written in the
 language too, on `!` and `trap()` (G9.10). §3's consuming methods are built too
 (G9.11), and the heap's two halves below the language
 are built: the assembler defines `_end` and the runtime supplies `alloc` and
-`free` (G9.2). `Box` is built (G9.12). What is left is
-out-of-line drop glue, without which a recursive type does not compile, and
-then `Vec`, `String` and `collect`.
+`free` (G9.2). `Box` is built (G9.12) and Ch. 2 §8's binary tree
+runs (G9.13). What is left is `Vec`, `String` and `collect`.
 
 **B. Backend quality.** The instruction stream is a third of what it was
 (G8.6–G8.13, −66.6% on HPL), and memory is nearly out of the picture: frame
