@@ -3699,3 +3699,18 @@ fn a_character_encodes_without_a_buffer() {
         3 * 1_000_000 + 228 * 10_000 + 184 * 100 + 150
     );
 }
+
+#[test]
+fn the_library_prints_one_character_too() {
+    // The library could print a string and not a character, which left a
+    // program holding a character it had *computed* — as against one it had
+    // written down — reaching for `putchar` and doing its own encoding
+    // (Ch. 5 §1.5). `print_char` is that missing half, and it is what makes
+    // `print_rule('=', 80)` readable where `print_rule(61, 80)` was not.
+    let (_, out) = run("fn rule(c: char, n: taddr) { \
+             let mut i: taddr = 0; \
+             while i < n { print_char(c); i += 1; } \
+         } \
+         fn main() -> t27 { rule('=', 3); print_char('世'); print_char('\\n'); 0 }");
+    assert_eq!(out, "===世\n");
+}

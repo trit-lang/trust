@@ -41,9 +41,15 @@
 // decimal with the text in a comment above it, because string literals did
 // not print. They do now (Ch. 5 §1.5), so the text is the text — 224 lines
 // shorter, and the comment can no longer disagree with what is printed.
-// `putchar` is still declared here and still used directly for the column
-// arithmetic, where what is being emitted is a count of spaces rather than
-// anything anyone wrote down.
+//
+// `putchar` survives in exactly four places, all of them inside the digit
+// loops, and that is the boundary rather than an oversight: formatting a
+// number is what Ch. 5 §7 does not define, so the loops below *are* the
+// formatter, and the bottom of a formatter is where a value becomes a
+// character. Going through `char` there would mean `char::try_from(48 + d)`
+// and an `unwrap` per digit — a check that cannot fail, paid for once per
+// character printed. Everything a human wrote down is a string literal, and
+// everything that is one character is `print_char`.
 
 fn putchar(c: t9);
 
@@ -62,19 +68,19 @@ const CLOCK_HZ: t27 = 1000000;
 
 // ------------------------------------------------------------- printing
 
-fn print_rule(c: t9, n: taddr) {
+fn print_rule(c: char, n: taddr) {
     let mut i: taddr = 0;
     while i < n {
-        putchar(c);
+        print_char(c);
         i += 1;
     }
-    putchar(10);
+    print_char('\n');
 }
 
 fn spaces(n: taddr) {
     let mut i: taddr = 0;
     while i < n {
-        putchar(32);
+        print_char(' ');
         i += 1;
     }
 }
@@ -99,11 +105,11 @@ fn decimal_width(v: t27) -> taddr {
 fn print_decimal(value: t27) {
     let mut n = value;
     if n < 0 {
-        putchar(45);
+        print_char('-');
         n = -n;
     }
     if n == 0 {
-        putchar(48);
+        print_char('0');
         return;
     }
     let mut digits: [t9; 16] = [0; 16];
@@ -136,7 +142,7 @@ fn print_ratio(num: t27, den: t27, places: taddr, width: taddr) {
     let mut w = decimal_width(whole) + 1 + places;
     spaces(width - w);
     print_decimal(whole);
-    putchar(46);                        // '.'
+    print_char('.');                        // '.'
     let mut k: taddr = 0;
     while k < places {
         rest = rest * 10;
@@ -153,11 +159,11 @@ fn print_ratio(num: t27, den: t27, places: taddr, width: taddr) {
 fn print_sci(v: t27, exp_off: t27, digits: taddr, width: taddr) {
     spaces(width - (digits + 5));
     if v == 0 {
-        putchar(48);
-        putchar(46);
+        print_char('0');
+        print_char('.');
         let mut z: taddr = 1;
         while z < digits {
-            putchar(48);
+            print_char('0');
             z += 1;
         }
         print("e+00");
@@ -181,12 +187,12 @@ fn print_sci(v: t27, exp_off: t27, digits: taddr, width: taddr) {
         e -= 1;
     }
     if v < 0 {
-        putchar(45);
+        print_char('-');
     }
     // The mantissa, one digit before the point and the rest after it.
     let lead = div_floor(m, lo);
     putchar((lead as t9) + 48);
-    putchar(46);
+    print_char('.');
     let mut rest = m - lead * lo;
     let mut place = lo;
     let mut j: taddr = 1;
@@ -197,16 +203,16 @@ fn print_sci(v: t27, exp_off: t27, digits: taddr, width: taddr) {
         rest -= d * place;
         j += 1;
     }
-    putchar(101);                       // 'e'
+    print_char('e');                       // 'e'
     let mut ex = e + (digits as t27) - 1 + exp_off;
     if ex < 0 {
-        putchar(45);
+        print_char('-');
         ex = -ex;
     } else {
-        putchar(43);
+        print_char('+');
     }
     if ex < 10 {
-        putchar(48);
+        print_char('0');
     }
     print_decimal(ex);
 }
@@ -236,14 +242,14 @@ fn wrap_index(v: taddr, n: taddr) -> taddr {
     if r < 0 { r + n } else { r }
 }
 fn print_banner() {
-    print_rule(61, 80);
+    print_rule('=', 80);
     println("HPL-Trust 0.1  --  High-Performance Linpack  --  balanced ternary machine");
     println("An independent implementation in the output format of HPLinpack 2.3 (A.");
     println("Petitet, R. C. Whaley, J. Dongarra and A. Cleary, Innovative Computing");
     println("Laboratory, UTK).  Not their code, not validated by them, and not IEEE");
     println("double -- this machine has no floating point at all.  See eps below.");
-    print_rule(61, 80);
-    putchar(10);
+    print_rule('=', 80);
+    print_char('\n');
     println("An explanation of the input/output parameters follows:");
     println("T/V    : Wall time / encoded variant.");
     println("N      : The order of the coefficient matrix A.");
@@ -252,9 +258,9 @@ fn print_banner() {
     println("Q      : The number of process columns.");
     println("Time   : Time in seconds to solve the linear system.");
     println("Gflops : Rate of execution for solving the linear system.");
-    putchar(10);
+    print_char('\n');
     println("The following parameter values will be used:");
-    putchar(10);
+    print_char('\n');
 }
 
 fn print_params() {
@@ -273,9 +279,9 @@ fn print_params() {
     println("U      : no-transpose form");
     println("EQUIL  :      no");
     println("ALIGN  : 3 trytes");
-    putchar(10);
-    print_rule(45, 80);
-    putchar(10);
+    print_char('\n');
+    print_rule('-', 80);
+    print_char('\n');
     println("- The matrix A is pseudo-randomly generated for each test, and then one");
     println("  entry per row is weighted by N: fixed point has an absolute resolution,");
     println("  not a relative one, so an unweighted random matrix at these sizes reports");
@@ -286,13 +292,13 @@ fn print_params() {
 
 fn print_thresholds() {
     println("- Computational tests pass if scaled residuals are less than                16.0");
-    putchar(10);
-    print_rule(61, 80);
+    print_char('\n');
+    print_rule('=', 80);
 }
 
 fn print_table_head() {
     println("T/V                N    NB     P     Q               Time                 Gflops");
-    print_rule(45, 80);
+    print_rule('-', 80);
 }
 
 // -------------------------------------------------------- the system
@@ -539,10 +545,10 @@ fn main() -> t27 {
     let mut t: taddr = 0;
     while t < 4 {
         print_field(sizes[t] as t27, 8);
-        putchar(32);
+        print_char(' ');
         t += 1;
     }
-    putchar(10);
+    print_char('\n');
     print_params();
 
     // eps is 3^-11 exactly. Printing it needs no float: 10^12 divided by
@@ -550,7 +556,7 @@ fn main() -> t27 {
     // and the exponent where HPL's `%e` would.
     print("- The relative machine precision (eps) is taken to be");
     print_sci(1000000000000 / ONE, -12, 7, 27);
-    putchar(10);
+    print_char('\n');
     print_thresholds();
 
     let mut passed: t27 = 0;
@@ -610,7 +616,7 @@ fn main() -> t27 {
         // Gflops: operations per second, then the 10^-9. Both stay in
         // integers — `ops · CLOCK_HZ` fits a word at every size here.
         print_sci((ops * CLOCK_HZ) / cycles, -9, 4, 23);
-        putchar(10);
+        print_char('\n');
 
         // HPL prints a start and end wall-clock time here. This machine
         // has no calendar and no clock; it has a count of instructions
@@ -618,11 +624,11 @@ fn main() -> t27 {
         // bracket, so it is what is printed.
         print("HPL_trsolve() start cycle");
         print_field(start, 22);
-        putchar(10);
+        print_char('\n');
         print("HPL_trsolve() end cycle");
         print_field(finish, 24);
-        putchar(10);
-        print_rule(45, 80);
+        print_char('\n');
+        print_rule('-', 80);
 
         let r = residual_inf(&a0, &x, &b, n);
         let scale = residual_scale(norm_inf_matrix(&a0, n),
@@ -657,11 +663,11 @@ fn main() -> t27 {
                 failed += 1;
             }
         }
-        print_rule(61, 80);
+        print_rule('=', 80);
         test += 1;
     }
 
-    putchar(10);
+    print_char('\n');
     print("Finished");
     print_field(4, 7);
     println(" tests with the following results:");
@@ -671,10 +677,10 @@ fn main() -> t27 {
     println(" tests completed and failed residual checks,");
     print_field(skipped, 15);
     println(" tests skipped because of illegal input values.");
-    print_rule(45, 80);
-    putchar(10);
+    print_rule('-', 80);
+    print_char('\n');
     println("End of Tests.");
-    print_rule(61, 80);
+    print_rule('=', 80);
 
     // The exit status is the number of tests that did not pass, so the
     // shell learns the same thing the last block of the report says.

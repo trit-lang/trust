@@ -464,19 +464,23 @@ impl Iterator for Chars {
 
 fn putchar(c: t9);
 
+// A character below 128 is one code unit and *is* that unit — the test
+// `utf8_len` makes first anyway. Taking the branch here rather than in
+// `to_utf8` saves building a four-element buffer and returning it, which is
+// most of the cost of printing text that is all ASCII.
+//
+// This is `print_char`'s body written out rather than called, and it is the
+// one place in this file that repeats itself. There is no inliner, so a
+// one-line function is a call, and calling one per character costs 1.3% of
+// HPL. When there is an inliner this loop becomes `print_char(s[i])`.
 fn print(s: &str) {
     let mut i: taddr = 0;
     while i < s.len() {
-        let c = s[i];
-        // A character below 128 is one code unit and is that unit. The test
-        // is the one `utf8_len` makes first anyway; taking the branch here
-        // saves building a four-element buffer and returning it, which is
-        // most of the cost of printing text that is all ASCII.
-        let v = c as t27;
+        let v = s[i] as t27;
         if v < 128 {
             putchar(v as t9);
         } else {
-            let (units, n) = c.to_utf8();
+            let (units, n) = s[i].to_utf8();
             let mut j: taddr = 0;
             while j < n {
                 putchar(units[j]);
@@ -484,6 +488,23 @@ fn print(s: &str) {
             }
         }
         i += 1;
+    }
+}
+
+// One character. The library could print a string and not a character, which
+// left a program with a character it had *computed* — as against one it had
+// written down — reaching for `putchar` and doing its own encoding.
+fn print_char(c: char) {
+    let v = c as t27;
+    if v < 128 {
+        putchar(v as t9);
+    } else {
+        let (units, n) = c.to_utf8();
+        let mut j: taddr = 0;
+        while j < n {
+            putchar(units[j]);
+            j += 1;
+        }
     }
 }
 

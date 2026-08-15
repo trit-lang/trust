@@ -2077,6 +2077,32 @@ what it was. What moved is the *absolute* cycle counters printed either side
 of each solve, because there is more printing before them — which is the
 reading ISA §2.3 warrants and the difference is what HPL uses.
 
+*`print_char`, and what it cost.* The library could print a string and not a
+character, so a program with a character it had *computed* — as against one it
+had written down — had nothing to call but `putchar`. HPL's `print_rule(61,
+80)` is what that reads like at the call site. With `print_char` it is
+`print_rule('=', 80)`, and every constant `putchar` in the file is a literal.
+
+That cost **+1.0%** (3 615 930 → 3 661 618), and the cause is worth naming
+because it is not the design: **there is no inliner and no constant folding**.
+`print_char(' ')` is a call, a cast and a compare where `putchar(32)` is a
+call, and `spaces()` runs it a few thousand times. With an inliner the compare
+folds — `' '` is a constant and `v < 128` is decidable — and the difference
+goes to zero. §8 lists both passes as unbuilt; this is the first measurement
+that says what one of them is worth.
+
+The same reasoning kept `print` from being written as a loop over
+`print_char`: it is that function's body repeated, because calling it per
+character costs 1.3% of HPL. It is the one repetition in the prelude and it is
+marked as one.
+
+`putchar` survives in HPL in four places, all inside the digit loops, and that
+is a boundary rather than an oversight: formatting a number is what §7 does
+not define, so those loops *are* the formatter, and the bottom of a formatter
+is where a value becomes a character. Going through `char` there would mean
+`char::try_from(48 + d)` and an `unwrap` per digit — a check that cannot fail,
+paid once per character printed.
+
 *Still open.* Ch. 5 §1.5 would rather write `for c in s`, and that needs
 `impl IntoIterator for &str` — an impl whose **self type is a reference**,
 which the parser rejects with "expected a name, found `&`". `chars()` spells

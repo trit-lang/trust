@@ -209,8 +209,14 @@ fn print(s: &str) {
     }
 }
 
+fn print_char(c: char) { … }        // the same, for one character
 fn println(s: &str) { print(s); putchar(10); }
 ```
+
+`print_char` is there because the asymmetry was real: a library that prints a
+string and not a character leaves a program holding a character it *computed*
+— as against one it wrote down — with nothing to call but `putchar`, doing its
+own encoding at exactly the boundary this section says the library owns.
 
 So `putchar` is a **required target function**, the third after `alloc` and
 `free` (§2.1) and there for the same reason: it reaches a memory-mapped device
