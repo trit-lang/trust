@@ -239,12 +239,34 @@ pub fn compile(src: &str) -> Result<crate::tir::Module, Vec<SyntaxError>> {
         e.line = e.line.saturating_sub(prelude_lines);
         vec![e]
     })?;
-    let mut module = lower::lower(&file).map_err(|mut es| {
+    let module = lower::lower(&file).map_err(|mut es| {
         for e in &mut es {
             e.line = e.line.saturating_sub(prelude_lines);
         }
         es
     })?;
+
+    // Verified **before** pruning, and the order is the point. A function
+    // nothing calls is still a function this compiler emitted, and if it is
+    // ill-formed that is a bug whether or not any program reaches it.
+    //
+    // The other order hid one: a `loop` whose every path returned emitted an
+    // unreachable exit block reading a slot nothing defined, and the reduced
+    // test case *passed* — because the function was unused, so pruning
+    // removed it before the verifier ran (G9.9). Dead-code elimination is
+    // exactly the wrong thing to put in front of a checker.
+    let errs = crate::tir::verify(&module);
+    if !errs.is_empty() {
+        return Err(errs
+            .into_iter()
+            .map(|e| SyntaxError {
+                line: 0,
+                message: format!("the frontend produced ill-formed TIR: {e}"),
+            })
+            .collect());
+    }
+
+    let mut module = module;
     keep_reachable(&mut module, &prelude_functions());
     Ok(module)
 }

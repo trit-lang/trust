@@ -2975,3 +2975,32 @@ fn a_loop_nothing_breaks_out_of_has_no_exit() {
         3
     );
 }
+
+#[test]
+fn a_function_nothing_calls_is_still_verified() {
+    // The order matters and the fix is the order: `lang::compile` verifies
+    // before it prunes, because a function nothing calls is still a function
+    // this compiler emitted, and an ill-formed one is a bug whether or not
+    // any program reaches it.
+    //
+    // The other order hid one (G9.9): a `loop` whose every path returned
+    // emitted an unreachable exit block, and the reduced test case *passed*,
+    // because the function was unused and pruning removed it before the
+    // verifier ran.
+    //
+    // What this asserts is the consequence: `main` alone survives, and
+    // everything else was looked at on the way out.
+    let m = tir_of(
+        "fn never_called(o: Option<t27>) -> Option<t27> { \
+             loop { \
+                 match o { \
+                     Option::Some(x) => { if x > 0 { return Option::Some(x); } }, \
+                     Option::None => { return Option::None; }, \
+                 } \
+             } \
+         } \
+         fn main() -> t27 { 0 }",
+    );
+    assert_eq!(m.funcs.len(), 1, "{}", tir::print_module(&m));
+    assert_eq!(m.funcs[0].sig.name, "main");
+}

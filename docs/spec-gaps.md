@@ -1725,8 +1725,17 @@ is emitted no more than the block after a `return` is.
 That bug was reachable from Ch. 0 alone and had never been seen, because a
 reduced version of it *passed*: the function was unused, so `keep_reachable`
 (G9.7) dropped it before the verifier ran. Dead-code elimination hid a bug
-from the checker that would have caught it — worth knowing, since the fix is
-to verify before pruning and nothing does yet.
+from the checker that would have caught it.
+
+**Fixed by reversing the order**: `lang::compile` verifies and *then* prunes.
+A function nothing calls is still a function this compiler emitted, and an
+ill-formed one is a bug whether or not any program reaches it. Confirmed the
+way the eviction rule was — by disabling the `loop` fix and checking that the
+unused function is now reported, where before it was silently dropped.
+
+The general shape is worth keeping in mind wherever a pass removes code: a
+checker that runs after a remover only checks what survived, and what a
+remover removes is exactly the code nobody looked at.
 
 `Iterator` moved into the prelude, where Ch. 4 §5.7 always said it was the
 language's own. Three tests and `examples/trust/demo.tr` declared their own
