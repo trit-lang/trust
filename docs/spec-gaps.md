@@ -2259,12 +2259,32 @@ say so. `insert`'s shift runs **downwards**: a forward copy moving a block up
 overwrites what it has yet to read, and which direction is safe is a property
 of which way the block moves.
 
-`push_str` is a loop around `push` and is in the compiler rather than the
-library for one reason: an `impl` on a **concrete instantiation** —
-`impl Vec<char>` — is rejected with "an impl's type parameters and its self
-type's arguments must agree". That is the next thing in the way of writing
-`String`'s methods in Trust, and it is not `Vec`-specific: `impl Pair<t27>`
-fails the same way.
+`push_str` is a loop around `push`, written in the library — see G9.22.
+
+**G9.22 — an impl may name one instantiation.** `impl Vec<char>`, and
+`impl Pair<t27>` with it. The parser rejected both: it required an impl's
+parameter list and its self type's arguments to be empty together. Only one
+direction of that is a real rule — parameters the self type does not name are
+parameters nothing determines — and the other direction forbade an impl for a
+*single* instantiation, which has no holes to fill.
+
+Such an impl's methods are keyed by the name the instantiation answers to
+everywhere else, and `Self` is that name rather than an application of it: the
+arguments are already in it. With that, `String`'s one method of its own is
+written in the library in Trust rather than in the compiler, which is what
+Ch. 5 §2.6 always claimed.
+
+It also needed a `Vec` instantiation to resolve *back* from its mangled name.
+Every other one has a struct behind it; `Vec.char` has a language item, so
+`Self` in `impl Vec<char>` had nothing to resolve to.
+
+*And it found a leak.* `needs_heap` is set while a body is lowered, and a
+prelude body that uses the heap sets it whether or not anything calls that
+body — so `alloc` and `free` were declared by **every program** the moment the
+library gained a method that pushes. Declarations are pruned now, by the same
+rule as functions: what a program owes its target is what its *surviving* code
+calls. The test that says a declaration lowers to a declaration caught it,
+which is twice this session that a test written for something else has.
 
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but

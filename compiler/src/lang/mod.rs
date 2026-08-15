@@ -505,6 +505,18 @@ impl str {
     }
 }
 
+// `String`'s one method of its own (Ch. 5 §2.6). An impl for a single
+// instantiation, which is what `String` is: `Vec<char>` and no other.
+impl Vec<char> {
+    fn push_str(&mut self, t: &str) {
+        let mut i: taddr = 0;
+        while i < t.len() {
+            self.push(t[i]);
+            i += 1;
+        }
+    }
+}
+
 struct Chars { s: &str, at: taddr }
 
 impl Iterator for Chars {
@@ -668,14 +680,30 @@ fn prelude_functions() -> std::collections::HashSet<String> {
             }
             // An impl block's methods lower to `Type.method` (Ch. 4 §1.2).
             ast::Item::Impl(i) => {
+                // An impl for one instantiation keys its methods under the
+                // instantiation's name, which is the base and its arguments.
+                let owner = if i.generics.is_empty() && !i.self_args.is_empty() {
+                    let mut n = i.self_ty.clone();
+                    for a in &i.self_args {
+                        let ast::Ty::Name(x, _) = a else {
+                            n.clear();
+                            break;
+                        };
+                        n.push('.');
+                        n.push_str(x);
+                    }
+                    if n.is_empty() { i.self_ty.clone() } else { n }
+                } else {
+                    i.self_ty.clone()
+                };
                 for m in &i.methods {
-                    names.insert(format!("{}.{}", i.self_ty, m.name));
+                    names.insert(format!("{owner}.{}", m.name));
                 }
                 if let Some(t) = &i.trait_name
                     && let Some(ms) = trait_methods.get(t.as_str())
                 {
                     for m in ms {
-                        names.insert(format!("{}.{}", i.self_ty, m));
+                        names.insert(format!("{owner}.{m}"));
                     }
                 }
             }
@@ -743,4 +771,24 @@ fn keep_reachable(module: &mut crate::tir::Module, prelude: &std::collections::H
         }
     }
     module.funcs.retain(|f| live.contains(&f.sig.name));
+
+    // Declarations too. `needs_heap` is set while a body is lowered, and a
+    // prelude body that uses the heap sets it whether or not anything calls
+    // that body — so `alloc` and `free` were declared by every program the
+    // moment the library gained a method that pushes. What a program owes
+    // its target is what its *surviving* code calls.
+    let called: std::collections::HashSet<String> = module
+        .funcs
+        .iter()
+        .flat_map(|f| &f.blocks)
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| match &i.kind {
+            InstKind::Call {
+                callee: Callee::Direct(c),
+                ..
+            } => Some(c.clone()),
+            _ => None,
+        })
+        .collect();
+    module.decls.retain(|d| called.contains(&d.name));
 }

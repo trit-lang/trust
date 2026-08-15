@@ -4046,3 +4046,33 @@ fn a_string_appends_a_string() {
     // The room asked for was enough, so nothing grew.
     assert_eq!(status, 44);
 }
+
+#[test]
+fn an_impl_may_name_one_instantiation() {
+    // `impl Vec<char>` and `impl Pair<t27>` — an impl with no parameters
+    // because its self type has no holes. Its methods belong to that
+    // instantiation and are keyed by the name the type answers to everywhere
+    // else, which is what makes `String`'s one method of its own writable in
+    // the library rather than in the compiler (Ch. 4 §2.1).
+    assert_eq!(
+        run("struct Pair<T> { a: T, b: T } \
+             impl Pair<t27> { fn sum(&self) -> t27 { self.a + self.b } } \
+             fn main() -> t27 { let p: Pair<t27> = Pair { a: 3, b: 4 }; p.sum() }")
+        .0,
+        7
+    );
+}
+
+#[test]
+fn a_declaration_a_program_does_not_call_is_not_declared() {
+    // `needs_heap` is set while a body is lowered, and a prelude body that
+    // uses the heap sets it whether or not anything calls that body — so
+    // `alloc` and `free` were declared by every program the moment the
+    // library gained a method that pushes. What a program owes its target is
+    // what its surviving code calls.
+    let m = tir_of("fn main() -> t27 { 0 }");
+    assert!(m.decls.is_empty(), "{:?}", m.decls);
+    let m = tir_of("fn main() -> t27 { let mut v: Vec<t27> = Vec::new(); v.push(1); 0 }");
+    let names: Vec<&str> = m.decls.iter().map(|d| d.name.as_str()).collect();
+    assert!(names.contains(&"alloc"), "{names:?}");
+}

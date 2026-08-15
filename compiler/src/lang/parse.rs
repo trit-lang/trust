@@ -632,7 +632,11 @@ impl Parser {
         // impl's own parameters, so this impl is a *rule* over every type
         // satisfying the bounds rather than one type's (Ch. 4 §5.6).
         let blanket = generics.iter().any(|g| g.name() == self_ty);
-        if !blanket && generics.is_empty() != self_args.is_empty() {
+        // An impl with parameters must name them in its self type, or they
+        // are parameters nothing determines. The other direction is fine:
+        // `impl Vec<char>` has no parameters because its self type has no
+        // holes — it is an impl for *one* instantiation (Ch. 4 §2.1).
+        if !blanket && !generics.is_empty() && self_args.is_empty() {
             return self.err(
                 "an impl's type parameters and its self type's arguments must agree: \
                  `impl<T> Name<T>` (Ch. 4 §2.1)",

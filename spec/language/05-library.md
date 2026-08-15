@@ -434,7 +434,8 @@ value.
 rules of its own: `String::new`, `with_capacity` and `push(char)` are `Vec`'s,
 `&String` becomes `&str` by the coercion above, and every method §1.3 gives a
 string applies to one the moment it does. `push_str(&str)` is the one method
-that is a `String`'s alone, and it is a loop around `push`.
+that is a `String`'s alone: a loop around `push`, written in the library as
+`impl Vec<char>` — an impl for one instantiation (Ch. 4 §2.1).
 
 ---
 

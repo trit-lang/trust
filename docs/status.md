@@ -435,10 +435,16 @@ built (G9.21), and the claim that `insert` waited on a `copy_within` §7
 reserved was wrong — §7 reserved nothing of the kind, and now reserves it
 properly as the slice method it is.
 
+An impl may name one instantiation now (G9.22), so `String`'s `push_str` is
+written in the library in Trust as `impl Vec<char>`, and declarations are
+pruned like functions — `alloc` and `free` had begun appearing in every
+program the moment the library gained a method that pushes.
+
 What is left of Ch. 5 is `Cell`/`RefCell` (§5), `expect`, formatting, maps and
-sets, sorting and `Rc` — all of §7, all reserved. The nearest thing that is
-merely unbuilt is an `impl` on a concrete instantiation (`impl Vec<char>`),
-which is what would let `String`'s methods be written in Trust.
+sets, sorting and `Rc` — all of §7, all reserved. The nearest thing merely
+unbuilt is an impl whose self type is a **reference**, which would give
+`for c in s`, the `IntoIterator` step in `for`'s desugaring, and binding by
+reference in a `match` — three recorded gaps, one fix.
 
 **B. Backend quality.** The instruction stream is a third of what it was
 (G8.6–G8.13, −66.6% on HPL), and memory is nearly out of the picture: frame

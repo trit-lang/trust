@@ -247,6 +247,17 @@ A parameter of an impl block must appear in the type being implemented or in
 the trait being implemented; an unconstrained parameter is an error, because
 nothing could ever determine it.
 
+An impl may also name **one instantiation** and take no parameters at all:
+
+```
+impl Pair<t27, t27> { fn sum(&self) -> t27 { … } }
+```
+
+Its methods belong to that instantiation and to no other, and are found under
+the name that instantiation answers to everywhere else. This is how a method
+is written for `Vec<char>` and not for every `Vec` — which is what `String`
+having a method of its own means (Ch. 5 §2.6).
+
 ### 2.2 Bounds
 
 A bound restricts a parameter to types implementing a trait. It may be written

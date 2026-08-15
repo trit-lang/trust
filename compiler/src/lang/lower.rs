@@ -1527,7 +1527,6 @@ const BUILTIN_METHODS: &[&str] = &[
     "reserve",
     "insert",
     "remove",
-    "push_str",
     "capacity",
     "is_empty",
     "wrapping_add",
@@ -1937,7 +1936,34 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
 
     for item in &file.items {
         let ast::Item::Impl(imp) = item else { continue };
-        let self_ty = &imp.self_ty;
+        // `impl Vec<char>` — an impl for *one* instantiation. Its methods
+        // belong to that instantiation and are keyed by its name, which is
+        // the name the type answers to everywhere else (Ch. 4 §2.7).
+        let concrete_self;
+        let one_instantiation = imp.generics.is_empty() && !imp.self_args.is_empty();
+        let self_ty = if one_instantiation {
+            let ty = match resolve_ty(
+                &ast::Ty::App(imp.self_ty.clone(), imp.self_args.clone(), imp.line),
+                types,
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    errs.push(e);
+                    continue;
+                }
+            };
+            let Some(n) = nominal_name(&ty) else {
+                errs.push(SyntaxError {
+                    line: imp.line,
+                    message: format!("`{}` has no methods", imp.self_ty),
+                });
+                continue;
+            };
+            concrete_self = n;
+            &concrete_self
+        } else {
+            &imp.self_ty
+        };
 
         if let Some(t) = &imp.trait_name
             && covered.contains(t)
@@ -1977,6 +2003,9 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
                 // declaration to read parameters from; `Vec<A>` names them.
                 "trit" | "bool" | "t9" | "t27" | "taddr" | "char" | "str" | "Vec"
             )
+            // A concrete instantiation answers to its mangled name, which is
+            // registered rather than declared.
+            && !types.instantiations.borrow().contains_key(self_ty)
         {
             errs.push(SyntaxError {
                 line: imp.line,
@@ -2049,7 +2078,9 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
 
         // What `Self` means here: the concrete type, or the applied generic.
         let self_repr = SelfTy {
-            ty: if imp.self_args.is_empty() {
+            // For one instantiation the name *is* the type; the arguments
+            // are already in it.
+            ty: if imp.self_args.is_empty() || one_instantiation {
                 ast::Ty::Name(self_ty.clone(), imp.line)
             } else {
                 ast::Ty::App(self_ty.clone(), imp.self_args.clone(), imp.line)
@@ -3408,7 +3439,22 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
                 Ok(Ty::Struct(other.to_string()))
             }
             other if types.enums.borrow().contains_key(other) => Ok(Ty::Enum(other.to_string())),
-            other => err(*line, format!("`{other}` is not a type in scope")),
+            // A `Vec`'s instantiation answers to a mangled name like every
+            // other, but has no declaration behind it to have made a struct
+            // — `Vec` is a language item. `impl Vec<char>` writes `Self` as
+            // this name, so it has to resolve back (Ch. 5 §2.6).
+            other => {
+                if let Some(("Vec", args)) = types
+                    .instantiations
+                    .borrow()
+                    .get(other)
+                    .map(|(b, a)| (b.as_str(), a.clone()))
+                    && let [inner] = &args[..]
+                {
+                    return Ok(Ty::VecOf(Box::new(inner.clone())));
+                }
+                err(*line, format!("`{other}` is not a type in scope"))
+            }
         },
         ast::Ty::Array(elem, count, line) => {
             let elem = resolve_ty_env(elem, types, env)?;
@@ -6447,21 +6493,6 @@ impl Fn<'_> {
                 self.vec_remove(v, &elem, at, line)
             }
 
-            // `s.push_str(t)` — Ch. 5 §2.6, on a `String`.
-            "push_str" => {
-                let elem = vec_elem(&ty, "push_str", line)?;
-                if elem != Ty::Char {
-                    return err(
-                        line,
-                        format!("`push_str` applies to a `String`, not to a `Vec<{elem}>`"),
-                    );
-                }
-                let want = Ty::Ref(Box::new(Ty::Slice(Box::new(Ty::Char))), false);
-                let t = one_arg(self, &want)?;
-                self.vec_push_str(v, t, line)?;
-                Ok((unit(), Ty::Unit))
-            }
-
             "reserve" => {
                 let elem = vec_elem(&ty, "reserve", line)?;
                 let n = one_arg(self, &Ty::TAddr)?;
@@ -7150,56 +7181,6 @@ impl Fn<'_> {
         self.start(bad2);
         self.finish(Terminator::Trap(FaultCode::Trap));
         self.start(ok);
-        Ok(())
-    }
-
-    /// `s.push_str(t)` — Ch. 5 §2.6, on a `String`.
-    ///
-    /// A loop around `push`, which is what it would be if it were written in
-    /// the library. It is not, because an `impl` on a *concrete*
-    /// instantiation — `impl Vec<char>` — is not written yet (G9.21).
-    fn vec_push_str(&mut self, at: Operand, s: Operand, line: Line) -> R<()> {
-        let n = {
-            let a = self.offset(s.clone(), 3);
-            self.load_from(a, &Ty::TAddr)
-        };
-        let base = self.load_ptr(s);
-        let i = self.temp_slot(&Ty::TAddr);
-        self.store_at(&i, 0, &Ty::TAddr, konst_addr(0), line)?;
-        let (head, body, done) = (
-            self.fresh("pstr.head"),
-            self.fresh("pstr.body"),
-            self.fresh("pstr.done"),
-        );
-        self.jump(&head);
-        self.start(head.clone());
-        let at_i = self.load_slot(&i, &Ty::TAddr);
-        let c = self.emit(
-            "c",
-            Type::Int(1),
-            InstKind::Cmp {
-                ty: Type::Int(27),
-                a: at_i.clone(),
-                b: n,
-            },
-        );
-        self.br3(c, &body, &done, &done);
-        self.start(body);
-        let off = self.apply_binary("*", at_i.clone(), konst_addr(3), &Ty::TAddr, line)?;
-        let p = self.emit(
-            "e",
-            Type::Ptr,
-            InstKind::Offset {
-                p: base.clone(),
-                d: off,
-            },
-        );
-        let ch = self.load_from(p, &Ty::Char);
-        self.vec_push(at, &Ty::Char, ch, line)?;
-        let next = self.apply_binary("+", at_i, konst_addr(1), &Ty::TAddr, line)?;
-        self.store_at(&i, 0, &Ty::TAddr, next, line)?;
-        self.jump(&head);
-        self.start(done);
         Ok(())
     }
 
