@@ -3135,3 +3135,77 @@ fn a_program_shadows_the_prelude() {
         21
     );
 }
+
+#[test]
+fn a_box_owns_one_value_on_the_heap() {
+    // Ch. 5 §2.3. One word holding an address, never null, dropped by
+    // dropping the `T` and then freeing — and everything else about it is
+    // what Ch. 3 already does to any value.
+    assert_eq!(
+        run("struct P { x: t27, y: t27 } \
+             fn main() -> t27 { \
+                 let b = Box::new(P { x: 3, y: 4 }); \
+                 let mut c = Box::new(10); \
+                 *c = 32; \
+                 let o: Option<Box<t27>> = Option::Some(Box::new(5)); \
+                 b.x + b.y + *c + *o.unwrap_or(Box::new(0)) \
+             }")
+        .0,
+        3 + 4 + 32 + 5
+    );
+
+    // `Option<Box<T>>` is one word, because 0 is not the address of anything
+    // (ISA §2.2 reserves the first word) — the same niche a reference has.
+    let printed = tir::print_module(&tir_of(
+        "fn main() -> t27 { let o: Option<Box<t27>> = Option::None; 0 }",
+    ));
+    assert!(printed.contains("slot tryte[3]"), "{printed}");
+    assert!(!printed.contains("slot tryte[6]"), "{printed}");
+
+    // A `Box` is not `Copy`: it owns.
+    let e = error(
+        "fn take(b: Box<t27>) -> t27 { *b } \
+         fn main() -> t27 { let b = Box::new(1); take(b) + take(b) }",
+    );
+    assert!(e.contains("moved out of"), "{e}");
+}
+
+#[test]
+fn dropping_a_box_frees_after_the_value_is_dropped() {
+    // The destructor needs the storage it is about to give back, so the
+    // order is the `T` and then the allocation (Ch. 5 §2.3). The ledger
+    // shows the destructor ran; the allocator shows the block came back,
+    // because the next request of the same size gets the same address.
+    let (status, out) = run(
+        "fn putchar(c: t9); \
+         struct Port { id: t27 } \
+         impl Drop for Port { fn drop(self) { putchar((48 + self.id) as t9); } } \
+         fn main() -> t27 { \
+             { let b = Box::new(Port { id: 1 }); } \
+             putchar(45); \
+             { let c = Box::new(Port { id: 2 }); } \
+             0 \
+         }",
+    );
+    assert_eq!(status, 0);
+    assert_eq!(out, "1-2");
+}
+
+#[test]
+fn assigning_to_a_moved_local_gives_it_back() {
+    // `s = f(s)` moves `s` out and puts something back, and after it `s` owns
+    // again — which is what makes the idiom writable at all (Ch. 3 §1.2).
+    assert_eq!(
+        run("struct S { a: t27 } \
+             impl Drop for S { fn drop(self) { } } \
+             fn bump(s: S) -> S { S { a: s.a + 1 } } \
+             fn main() -> t27 { \
+                 let mut s = S { a: 1 }; \
+                 s = bump(s); \
+                 s = bump(s); \
+                 s.a \
+             }")
+        .0,
+        3
+    );
+}

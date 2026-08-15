@@ -1828,6 +1828,44 @@ now parsed separately from the program rather than pasted in front of it,
 which also removes the line-number arithmetic the paste needed — a program's
 error lines are its own, with nothing to subtract.
 
+**G9.12 — `Box`, and two things that had never come up because nothing owned
+a pointer before.** Ch. 5 §2.3 is built for a sized `T`: `Box::new`,
+`Box::try_new`, `*b`, `b.field`, moves, drops, and `Option<Box<T>>` in one
+word.
+
+**Why it is the compiler's and not the library's.** `alloc` returns a
+*pointer*, and Trust has no way to name one — so the declaration is emitted in
+TIR rather than written in Trust, and everything that reads it is inside the
+compiler. That is the whole of `Box`'s special status; owning, moving,
+dropping and dereferencing are what Ch. 3 already does to any value.
+
+Two smaller consequences fell out. Testing an address against null goes
+through a slot — `store ptr` then `load t27` — because TIR's `cmp` takes
+integers and there is no int↔ptr cast (TIR §5); that is the same move the
+niche machinery makes for `Option<&T>`. And the name mangler replaced spaces,
+commas, brackets and parentheses but not **angle brackets**, so
+`Option<Box<t27>>` reached the assembler with a `<` in its name — a hole that
+had waited for the first type whose `Display` writes one.
+
+**Two pre-existing bugs it turned up.**
+
+`s = f(s)` did not work: assigning to a moved-out local did not give it back,
+so the second `s = f(s)` said `s` was moved. Ownership is tracked per local,
+so a *whole* local that is written to owns again — a field is not enough,
+because that re-initializes part of it.
+
+`*b` moved `b`. Dereferencing reads the pointer, not the value it owns, and
+`*r` never moved `r` because a reference is `Copy`. `Box` is the first thing
+that is a pointer and is not.
+
+**What is not built: a recursive type.** `enum Tree { Node(Box<Tree>, …) }`
+compiles until its drop glue, which is generated *inline* field by field for
+a type with no destructor of its own — and inlining recursion does not
+terminate. It stops at the depth limit with "drop glue nested too deeply".
+The fix is out-of-line drop glue: a `drop.T` function for every nominal type
+that needs dropping, which is what the destructor case already has. Ch. 2 §8's
+example still does not run, and this is now the only reason.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

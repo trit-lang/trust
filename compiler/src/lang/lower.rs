@@ -69,6 +69,9 @@ pub enum Ty {
     /// `&T` or `&mut T`. A reference to a sized type is one word; a reference
     /// to a slice is two (Ch. 3 §5.2).
     Ref(Box<Ty>, bool),
+    /// `Box<T>` — one `T` on the heap, owned (Ch. 5 §2.3). One word, never
+    /// null, and dropped by dropping the `T` and then freeing.
+    Boxed(Box<Ty>),
     /// `[T]` — dynamically sized, and never the type of a place.
     Slice(Box<Ty>),
     /// `dyn Trait` — dynamically sized, and never the type of a place
@@ -88,6 +91,7 @@ impl std::fmt::Display for Ty {
             Ty::T27 => f.write_str("t27"),
             Ty::TAddr => f.write_str("taddr"),
             Ty::Char => f.write_str("char"),
+            Ty::Boxed(t) => write!(f, "Box<{t}>"),
             Ty::Unit => f.write_str("()"),
             Ty::Dyn(t) => write!(f, "dyn {t}"),
             Ty::Array(t, n) => write!(f, "[{t}; {n}]"),
@@ -116,7 +120,10 @@ impl Ty {
             Ty::T27 | Ty::TAddr | Ty::Char | Ty::Never | Ty::Unit => Type::Int(27),
             // Unsized on its own; only a reference to one is a value.
             Ty::Dyn(_) => Type::Ptr,
-            // A thin reference is an address — a word-sized value.
+            // A thin reference is an address — a word-sized value. So is a
+            // `Box`, which differs from one in what it owns, not in what it
+            // holds (Ch. 5 §2.3).
+            Ty::Boxed(_) => Type::Ptr,
             Ty::Ref(t, _) if !t.is_unsized() => Type::Ptr,
             // An aggregate is never an SSA value (TIR §2); it lives in
             // memory and its value is its address. A fat reference is two
@@ -191,6 +198,9 @@ impl Ty {
             Ty::Array(t, n) => layout::Ty::array(t.layout_ty(), *n),
             Ty::Tuple(ts) => layout::Ty::Tuple(ts.iter().map(Ty::layout_ty).collect()),
             Ty::Struct(n) | Ty::Enum(n) => layout::Ty::named(n),
+            // A `Box` is pointer-sized and never null, which is the layout
+            // engine's `Box` and the source of `Option<Box<T>>`'s niche.
+            Ty::Boxed(_) => layout::Ty::boxed(layout::Ty::Unit),
             // A thin reference has the layout of a reference; a fat one is a
             // pointer and a length (Ch. 3 §5.2).
             Ty::Ref(t, _) if !t.is_unsized() => layout::Ty::reference(layout::Ty::Unit),
@@ -433,6 +443,11 @@ impl Types {
             }
             Ty::Array(t, n) => *n > 0 && self.needs_drop(t),
             Ty::Tuple(ts) => ts.iter().any(|t| self.needs_drop(t)),
+            // A `Box` owns what it points at, so it is never `Copy` and it
+            // always has something to do when it dies — even for a `T` that
+            // does not, because the allocation is itself a resource
+            // (Ch. 5 §2.3).
+            Ty::Boxed(_) => true,
             _ => false,
         }
     }
@@ -831,6 +846,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
     let pending: RefCell<Vec<Job>> = RefCell::new(Vec::new());
     let vtables: RefCell<Vec<(String, String, ir::Global)>> = RefCell::new(Vec::new());
     let data: RefCell<Vec<ir::Global>> = RefCell::new(Vec::new());
+    let needs_heap = std::cell::Cell::new(false);
     let strings: RefCell<HashMap<Vec<i128>, String>> = RefCell::new(HashMap::new());
     let extra_fns: RefCell<Vec<ast::FnItem>> = RefCell::new(Vec::new());
     let world = World {
@@ -838,6 +854,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
         vtables: &vtables,
         data: &data,
         strings: &strings,
+        needs_heap: &needs_heap,
         extra_fns: &extra_fns,
         fn_bounds: &fn_bounds,
         sigs: &sigs,
@@ -903,6 +920,30 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
         .globals
         .extend(vtables.into_inner().into_iter().map(|(_, _, g)| g));
     module.globals.extend(data.into_inner());
+
+    // The allocator, declared where something calls it (Ch. 5 §2.1). It is
+    // TIR rather than Trust because it returns a *pointer*, and Trust has no
+    // way to name one — which is why `Box` is the compiler's and not the
+    // library's.
+    if needs_heap.get() {
+        module.decls.push(Signature {
+            name: ALLOC.to_string(),
+            params: vec![
+                ("size".into(), Type::Int(27)),
+                ("align".into(), Type::Int(27)),
+            ],
+            ret: Some(Type::Ptr),
+        });
+        module.decls.push(Signature {
+            name: FREE.to_string(),
+            params: vec![
+                ("at".into(), Type::Ptr),
+                ("size".into(), Type::Int(27)),
+                ("align".into(), Type::Int(27)),
+            ],
+            ret: None,
+        });
+    }
 
     if errs.is_empty() {
         Ok(module)
@@ -1325,6 +1366,12 @@ const BUILTIN_METHODS: &[&str] = &[
 
 /// The name of the hidden out-pointer for an aggregate return.
 const SRET: &str = "sret";
+
+/// The target's allocator (Ch. 5 §2.1). Declared in TIR rather than in Trust
+/// because it returns a *pointer*, and Trust has no way to name one — which
+/// is the whole reason `Box` is a language item.
+const ALLOC: &str = "alloc";
+const FREE: &str = "free";
 
 /// The name a function is known by. A destructor is keyed by its type, since
 /// every type may have one and they would otherwise collide.
@@ -2655,7 +2702,7 @@ fn mangle(name: &str, args: &[Ty]) -> String {
         out.push('.');
         out.push_str(
             &a.to_string()
-                .replace([' ', ',', '&', '[', ']', '(', ')'], "_"),
+                .replace([' ', ',', '&', '[', ']', '(', ')', '<', '>'], "_"),
         );
     }
     out
@@ -2985,6 +3032,16 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
                 .iter()
                 .map(|a| resolve_ty_env(a, types, env))
                 .collect::<R<_>>()?;
+            // `Box<T>` is a language item, not a struct anyone declared: its
+            // inside is not Trust, because an allocator's job is the one
+            // operation this language does not have (Ch. 5 §2.1).
+            if name == "Box" {
+                let [inner] = &args[..] else {
+                    return err(*line, "`Box` takes one type argument");
+                };
+                check_sized(inner, *line, "a `Box`'s contents")?;
+                return Ok(Ty::Boxed(Box::new(inner.clone())));
+            }
             types.instantiate(name, &args, *line)
         }
         // §3.4: a trait may be used as an object only if every method is
@@ -3196,6 +3253,9 @@ struct Fn<'a> {
     strings: &'a RefCell<HashMap<Vec<i128>, String>>,
     /// Functions synthesized while lowering this one — closure bodies.
     extra_fns: &'a RefCell<Vec<ast::FnItem>>,
+    /// Set the first time a `Box` is made or dropped, so the module declares
+    /// the allocator only where something calls it.
+    needs_heap: &'a std::cell::Cell<bool>,
     /// The signature each `impl Fn(…)` parameter was written with.
     fn_bounds: &'a HashMap<String, (ast::FnKind, Vec<ast::Ty>, Option<ast::Ty>)>,
     /// This function's own name, so a closure inside it gets a unique one.
@@ -3306,6 +3366,9 @@ struct World<'a> {
     strings: &'a RefCell<HashMap<Vec<i128>, String>>,
     /// Functions synthesized while lowering — closure bodies (Ch. 4 §4.2).
     extra_fns: &'a RefCell<Vec<ast::FnItem>>,
+    /// Set the first time a `Box` is made or dropped, so the module declares
+    /// the allocator only where something calls it.
+    needs_heap: &'a std::cell::Cell<bool>,
     /// The signature each `impl Fn(…)` parameter was written with.
     fn_bounds: &'a HashMap<String, (ast::FnKind, Vec<ast::Ty>, Option<ast::Ty>)>,
     sigs: &'a RefCell<HashMap<String, (Vec<Ty>, Ty)>>,
@@ -3330,6 +3393,7 @@ fn function(
         data,
         strings,
         extra_fns,
+        needs_heap,
         fn_bounds,
         sigs,
         generic_fns,
@@ -3346,6 +3410,7 @@ fn function(
         data,
         strings,
         extra_fns,
+        needs_heap,
         fn_bounds,
         name: key.to_string(),
         sigs,
@@ -3561,6 +3626,24 @@ impl Fn<'_> {
         {
             let zero = Operand::Const(Type::Int(1), Bt::ZERO);
             self.store_slot(&flag, &Ty::Bool, zero);
+        }
+    }
+
+    /// Record that a whole local was given a value again (Ch. 3 §1.2).
+    ///
+    /// `s = f(s)` moves `s` out and then puts something back, and after it
+    /// `s` owns again — which is what makes the idiom writable. Only a *whole*
+    /// local: writing one field of a moved-out value re-initializes part of
+    /// it, and ownership here is tracked per local rather than per place.
+    fn mark_initialized(&mut self, name: &str) {
+        if let Some(entry) = self.owned.iter_mut().rev().find(|o| o.name == name) {
+            entry.owns = Owns::Yes;
+        }
+        if let Some(local) = self.lookup(name)
+            && let Some(flag) = local.drop_flag
+        {
+            let one = Operand::Const(Type::Int(1), Bt::from_i128(1));
+            self.store_slot(&flag, &Ty::Bool, one);
         }
     }
 
@@ -3875,6 +3958,28 @@ impl Fn<'_> {
             return err(line, "drop glue nested too deeply");
         }
         if !self.types.needs_drop(ty) {
+            return Ok(());
+        }
+        // A `Box` is dropped by dropping the `T` and *then* freeing, in that
+        // order: the destructor needs the storage it is about to give back
+        // (Ch. 5 §2.3).
+        if let Ty::Boxed(inner) = ty {
+            let p = self.load_ptr(addr);
+            self.drop_at(p.clone(), inner, line, depth + 1)?;
+            let l = self.types.layout(inner);
+            self.needs_heap.set(true);
+            self.push(Inst {
+                results: Vec::new(),
+                kind: InstKind::Call {
+                    callee: Callee::Direct(FREE.to_string()),
+                    args: vec![
+                        p,
+                        Operand::Const(Type::Int(27), Bt::from_i128(l.size as i128)),
+                        Operand::Const(Type::Int(27), Bt::from_i128(l.align as i128)),
+                    ],
+                    ret: None,
+                },
+            });
             return Ok(());
         }
         // A type with a destructor is dropped by calling it, and by nothing
@@ -4407,7 +4512,10 @@ impl Fn<'_> {
 
             E::Deref(inner, line) => {
                 let (v, ty) = self.expr(inner, None)?;
-                let Ty::Ref(target, _) = ty else {
+                // `*b` on a `Box` reads what it owns, which is the same
+                // operation on the same representation as `*r` on a
+                // reference (Ch. 5 §2.3).
+                let (Ty::Ref(target, _) | Ty::Boxed(target)) = ty else {
                     return err(*line, format!("`*` applies to a reference, not {ty}"));
                 };
                 if target.is_unsized() {
@@ -4703,6 +4811,14 @@ impl Fn<'_> {
                 },
             });
         }
+        // A whole local that was moved out of owns again once something has
+        // been put back in it.
+        if op == "="
+            && let Some(path) = self.path_of(target)
+            && path.projections.is_empty()
+        {
+            self.mark_initialized(&path.root);
+        }
         Ok((unit(), Ty::Unit))
     }
 
@@ -4733,6 +4849,9 @@ impl Fn<'_> {
             ast::Expr::Deref(inner, l) => {
                 let ty = self.type_of_place(inner)?;
                 match ty {
+                    // A `Box` is owned, so writing through it needs only that
+                    // the box itself be writable (Ch. 5 §2.3).
+                    Some(Ty::Boxed(_)) => Ok(()),
                     Some(Ty::Ref(_, true)) => Ok(()),
                     Some(Ty::Ref(_, false)) => err(
                         *l,
@@ -4749,7 +4868,7 @@ impl Fn<'_> {
     /// expression is not a place, not that it has no type.
     fn type_of_place(&mut self, e: &ast::Expr) -> R<Option<Ty>> {
         let through_refs = |mut t: Ty| {
-            while let Ty::Ref(inner, _) = t.clone() {
+            while let Ty::Ref(inner, _) | Ty::Boxed(inner) = t.clone() {
                 if inner.is_unsized() {
                     break;
                 }
@@ -4789,7 +4908,7 @@ impl Fn<'_> {
                 }
             }
             ast::Expr::Deref(inner, _) => match self.type_of_place(inner)? {
-                Some(Ty::Ref(target, _)) => Some(*target),
+                Some(Ty::Ref(target, _) | Ty::Boxed(target)) => Some(*target),
                 _ => None,
             },
             _ => None,
@@ -5948,6 +6067,115 @@ impl Fn<'_> {
             "Option" => Some(("Option", args)),
             "Result" => Some(("Result", args)),
             _ => None,
+        }
+    }
+
+    /// `Box::new(v)`: one `T` on the heap.
+    ///
+    /// The allocator is the target's, declared here in TIR rather than in
+    /// Trust because it returns a *pointer* and Trust has no way to name one
+    /// (Ch. 5 §2.1). That is the whole of why `Box` is a language item: every
+    /// other part of it — owning, moving, dropping, dereferencing — is what
+    /// Ch. 3 already does to any value.
+    fn box_new(&mut self, arg: &ast::Expr, fallible: bool, line: Line) -> R<(Operand, Ty)> {
+        let (v, inner) = self.expr(arg, None)?;
+        check_sized(&inner, line, "a `Box`'s contents")?;
+        let l = self.types.layout(&inner);
+        let size = Operand::Const(Type::Int(27), Bt::from_i128(l.size as i128));
+        let align = Operand::Const(Type::Int(27), Bt::from_i128(l.align as i128));
+        self.needs_heap.set(true);
+
+        let p = self.emit(
+            "box",
+            Type::Ptr,
+            InstKind::Call {
+                callee: Callee::Direct(ALLOC.to_string()),
+                args: vec![size, align],
+                ret: Some(Type::Ptr),
+            },
+        );
+
+        // 0 is not the address of anything (ISA §2.2 reserves the first
+        // word), so it is what "could not" looks like.
+        let boxed = Ty::Boxed(Box::new(inner.clone()));
+        let (ok, bad, join) = (
+            self.fresh("box.ok"),
+            self.fresh("box.no"),
+            self.fresh("box.join"),
+        );
+        let out = if fallible {
+            let opt = self
+                .types
+                .instantiate("Option", std::slice::from_ref(&boxed), line)?;
+            Some((self.temp_slot(&opt), opt))
+        } else {
+            None
+        };
+        // 0 is not the address of anything, so it is what "could not" looks
+        // like — and reading an address *as an integer* to test it is the
+        // same move the niche machinery makes for `Option<&T>` (Ch. 3 §2.5).
+        let cell = self.temp_slot(&Ty::TAddr);
+        self.store_ptr(Operand::Value(cell.clone()), p.clone());
+        let n = self.load_slot(&cell, &Ty::TAddr);
+        let got = self.emit(
+            "c",
+            Type::Int(1),
+            InstKind::Cmp {
+                ty: Type::Int(27),
+                a: n,
+                b: Operand::Const(Type::Int(27), Bt::ZERO),
+            },
+        );
+        self.br3(got, &bad, &bad, &ok);
+
+        self.start(ok);
+        // An aggregate's value *is* an address, so it is copied; a scalar is
+        // stored (Ch. 2 §1).
+        if inner.is_aggregate() {
+            self.copy_typed(p.clone(), v, &inner, line)?;
+        } else {
+            self.push(Inst {
+                results: Vec::new(),
+                kind: InstKind::Store {
+                    ty: inner.tir(),
+                    v,
+                    p: p.clone(),
+                },
+            });
+        }
+        match &out {
+            Some((slot, opt)) => {
+                let ename = nominal_name(opt).expect("an instantiation is nominal");
+                let some = self
+                    .types
+                    .variant(&ename, "Some")
+                    .ok_or_else(|| one_err(line, "`Option` has no `Some`".into()))?;
+                let slot = slot.clone();
+                self.build_variant_into(&slot, &ename, some, &[("0".into(), p.clone())], line)?;
+                self.jump(&join);
+            }
+            None => self.jump(&join),
+        }
+
+        self.start(bad);
+        match &out {
+            Some((slot, opt)) => {
+                let ename = nominal_name(opt).expect("an instantiation is nominal");
+                let none = self
+                    .types
+                    .variant(&ename, "None")
+                    .ok_or_else(|| one_err(line, "`Option` has no `None`".into()))?;
+                let slot = slot.clone();
+                self.build_variant_into(&slot, &ename, none, &[], line)?;
+                self.jump(&join);
+            }
+            None => self.finish(Terminator::Trap(FaultCode::Trap)),
+        }
+
+        self.start(join);
+        match out {
+            Some((slot, opt)) => Ok((Operand::Value(slot), opt)),
+            None => Ok((p, boxed)),
         }
     }
 
@@ -7131,8 +7359,16 @@ impl Fn<'_> {
             }
 
             ast::Expr::Deref(inner, l) => {
+                // Dereferencing a `Box` reads the pointer, not the value it
+                // owns: `*b` does not move `b`, any more than `*r` moves `r`.
+                // A reference is `Copy` and so this never mattered before.
+                if let Some(Ty::Boxed(target)) = self.type_of_place(inner)? {
+                    let (at, _) = self.place(inner, *l)?;
+                    let p = self.load_ptr(at);
+                    return Ok((p, *target));
+                }
                 let (v, ty) = self.expr(inner, None)?;
-                let Ty::Ref(target, _) = ty else {
+                let (Ty::Ref(target, _) | Ty::Boxed(target)) = ty else {
                     return err(*l, format!("`*` applies to a reference, not {ty}"));
                 };
                 Ok((v, *target))
@@ -7146,7 +7382,7 @@ impl Fn<'_> {
     /// what makes `r.x` mean `(*r).x` (Ch. 3 §2.3).
     fn place_or_deref(&mut self, e: &ast::Expr, line: Line) -> R<(Operand, Ty)> {
         let (mut addr, mut ty) = self.place(e, line)?;
-        while let Ty::Ref(target, _) = ty.clone() {
+        while let Ty::Ref(target, _) | Ty::Boxed(target) = ty.clone() {
             if target.is_unsized() {
                 break; // a fat reference is indexed, not dereferenced
             }
@@ -7424,6 +7660,25 @@ impl Fn<'_> {
             if self.globals.contains_key(&key) {
                 return self.expr(&ast::Expr::Path(key, line), None);
             }
+        }
+
+        // `Box::new(v)` and `Box::try_new(v)` — the language item's two
+        // constructors (Ch. 5 §2.3). `new` traps if it cannot, which is the
+        // decision Ch. 2 §3 makes for an out-of-bounds index and Ch. 1 §4 for
+        // a trapping overflow: a failure the program did not say what to do
+        // about stops the program.
+        if path.segments.len() == 2
+            && head == "Box"
+            && matches!(path.segments[1].as_str(), "new" | "try_new")
+        {
+            let [(_, arg)] = fields else {
+                return err(
+                    line,
+                    format!("`Box::{}` takes one argument", path.segments[1]),
+                );
+            };
+            let fallible = path.segments[1] == "try_new";
+            return self.box_new(arg, fallible, line);
         }
 
         // `char::try_from(x)` — the one conversion into `char`, and the one
@@ -7873,7 +8128,7 @@ impl Fn<'_> {
         // A scrutinee behind a reference is dereferenced, exactly as `.` is
         // (Ch. 3 §2.3). Bindings then copy out of the referent, which the
         // copy rule of §1.2 already governs.
-        while let Ty::Ref(target, _) = ty.clone() {
+        while let Ty::Ref(target, _) | Ty::Boxed(target) = ty.clone() {
             if target.is_unsized() {
                 break;
             }
