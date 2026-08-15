@@ -1336,6 +1336,9 @@ fn nominal_name(ty: &Ty) -> Option<String> {
         Ty::T27 => "t27".into(),
         Ty::TAddr => "taddr".into(),
         Ty::Char => "char".into(),
+        // `str` is the name `[char]` goes by, and the name its methods are
+        // keyed under (Ch. 5 §1.3).
+        Ty::Slice(t) if **t == Ty::Char => "str".into(),
         _ => return None,
     })
 }
@@ -1613,7 +1616,10 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
             && !types.enums.borrow().contains_key(self_ty)
             && !types.generic_structs.contains_key(self_ty)
             && !types.generic_enums.contains_key(self_ty)
-            && !matches!(self_ty.as_str(), "trit" | "bool" | "t9" | "t27" | "taddr" | "char")
+            && !matches!(
+                self_ty.as_str(),
+                "trit" | "bool" | "t9" | "t27" | "taddr" | "char" | "str"
+            )
         {
             errs.push(SyntaxError {
                 line: imp.line,
@@ -5537,6 +5543,77 @@ impl Fn<'_> {
         }
     }
 
+    /// `char::try_from(x)`: `Some(x)` when `x` is a Unicode scalar value.
+    ///
+    /// Four comparisons and four branches, which is what the definition has:
+    /// non-negative, no greater than U+10FFFF, and outside the surrogate
+    /// range — those are reserved for UTF-16 and are not characters
+    /// (Ch. 5 §1.2).
+    fn char_try_from(&mut self, v: Operand, line: Line) -> R<(Operand, Ty)> {
+        let opt = self.types.instantiate("Option", &[Ty::Char], line)?;
+        let ename = nominal_name(&opt).expect("an instantiation is nominal");
+        let (some, none) = (
+            self.types
+                .variant(&ename, "Some")
+                .ok_or_else(|| one_err(line, "`Option` has no `Some`".into()))?,
+            self.types
+                .variant(&ename, "None")
+                .ok_or_else(|| one_err(line, "`Option` has no `None`".into()))?,
+        );
+        let slot = self.temp_slot(&opt);
+        let (good, bad, join) = (
+            self.fresh("char.ok"),
+            self.fresh("char.no"),
+            self.fresh("char.join"),
+        );
+        let (k1, k2, k3) = (
+            self.fresh("char.hi"),
+            self.fresh("char.sur"),
+            self.fresh("char.sur2"),
+        );
+
+        let against = |me: &mut Self, k: i128| -> Operand {
+            me.emit(
+                "c",
+                Type::Int(1),
+                InstKind::Cmp {
+                    ty: Type::Int(27),
+                    a: v.clone(),
+                    b: Operand::Const(Type::Int(27), Bt::from_i128(k)),
+                },
+            )
+        };
+
+        let c = against(self, 0);
+        self.br3(c, &bad, &k1, &k1);
+
+        self.start(k1);
+        let c = against(self, 0x10FFFF);
+        self.br3(c, &k2, &k2, &bad);
+
+        // Below the surrogates is a character; at or above needs the second
+        // bound.
+        self.start(k2);
+        let c = against(self, 0xD800);
+        self.br3(c, &good, &k3, &k3);
+
+        self.start(k3);
+        let c = against(self, 0xDFFF);
+        self.br3(c, &bad, &bad, &good);
+
+        self.start(good);
+        let payload = [("0".to_string(), v)];
+        self.build_variant_into(&slot, &ename, some, &payload, line)?;
+        self.jump(&join);
+
+        self.start(bad);
+        self.build_variant_into(&slot, &ename, none, &[], line)?;
+        self.jump(&join);
+
+        self.start(join);
+        Ok((Operand::Value(slot), opt))
+    }
+
     // ------------------------------------------------------------ places
 
     /// The concrete name a literal's path head refers to.
@@ -6472,7 +6549,14 @@ impl Fn<'_> {
             base = *inner;
             derefs += 1;
         }
-        let Some(type_name) = nominal_name(&base) else {
+        // A method on an unsized type takes `&self`, and the receiver is
+        // already that reference: there is nothing to dereference and nothing
+        // to borrow, because the fat pointer *is* the value (Ch. 5 §1.3).
+        let by_reference = matches!(&base, Ty::Ref(inner, _) if inner.is_unsized());
+        let Some(type_name) = nominal_name(&base).or_else(|| match &base {
+            Ty::Ref(inner, _) => nominal_name(inner),
+            _ => None,
+        }) else {
             return err(line, format!("{base} has no methods"));
         };
         let mut key = self.method_key(&type_name, name, line)?;
@@ -6526,6 +6610,7 @@ impl Fn<'_> {
             receiver = ast::Expr::Deref(Box::new(receiver), line);
         }
         let receiver = match &self_ty {
+            Ty::Ref(..) if by_reference => receiver,
             Ty::Ref(_, mutable) => ast::Expr::Borrow(Box::new(receiver), *mutable, line),
             _ => receiver,
         };
@@ -6853,6 +6938,19 @@ impl Fn<'_> {
             if self.globals.contains_key(&key) {
                 return self.expr(&ast::Expr::Path(key, line), None);
             }
+        }
+
+        // `char::try_from(x)` — the one conversion into `char`, and the one
+        // thing in Ch. 5 §1 that cannot be written in this language: every
+        // other library function here is ordinary Trust, and this one has to
+        // produce a `char` from a word, which is exactly what no `as` does.
+        if path.segments.len() == 2 && head == "char" && path.segments[1] == "try_from" {
+            let [(_, arg)] = fields else {
+                return err(line, "`char::try_from` takes one argument");
+            };
+            let (v, vt) = self.expr(arg, Some(&Ty::T27))?;
+            self.check(&vt, &Ty::T27, line, "`char::try_from`'s argument")?;
+            return self.char_try_from(v, line);
         }
 
         // `Type::function(args)` — an associated function, which is written

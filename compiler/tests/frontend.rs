@@ -2683,3 +2683,70 @@ fn an_unterminated_string_stops_at_the_line_it_started_on() {
     let e = error("fn main() -> t27 { let s = \"oops; 0 }\nfn other() {}");
     assert!(e.contains("unterminated string literal"), "{e}");
 }
+
+#[test]
+fn char_try_from_is_the_one_conversion_into_a_character() {
+    // Ch. 5 §1.2. Four comparisons: non-negative, no greater than U+10FFFF,
+    // and outside the surrogates, which UTF-16 reserves and which are not
+    // characters.
+    let ok = "fn ok(x: t27) -> t27 { \
+                  match char::try_from(x) { \
+                      Option::Some(c) => c as t27, \
+                      Option::None => -1, \
+                  } \
+              } ";
+    for (input, want) in [
+        (65, 65),
+        (0, 0),
+        (0x10FFFF, 0x10FFFF),
+        (0xD7FF, 0xD7FF),
+        (0xE000, 0xE000),
+        (-1, -1),
+        (0x110000, -1),
+        (0xD800, -1),
+        (0xDFFF, -1),
+        (0xDC00, -1),
+    ] {
+        assert_eq!(
+            run(&format!("{ok} fn main() -> t27 {{ ok({input}) }}")).0,
+            want,
+            "char::try_from({input})"
+        );
+    }
+}
+
+#[test]
+fn the_text_library_is_ordinary_trust_in_the_prelude() {
+    // Everything of Ch. 5 §1 except `char::try_from` is written in the
+    // language, in an `impl char` and an `impl str` a reader could have
+    // written. `to_utf8` is where the interchange format's variable width
+    // lives, and it is the only place it does.
+    assert_eq!(
+        run("fn main() -> t27 { \
+                 let mut sum: t27 = 0; \
+                 match '7'.to_digit(10) { Option::Some(v) => sum += v, Option::None => {} } \
+                 match 'Z'.to_digit(36) { Option::Some(v) => sum += v, Option::None => {} } \
+                 match 'Z'.to_digit(10) { Option::Some(v) => sum += v, Option::None => sum += 1000 } \
+                 sum * 100 + (\"一二三\".utf8_len() as t27) * 10 + ('🙂'.utf8_len() as t27) \
+             }")
+        .0,
+        (7 + 35 + 1000) * 100 + 9 * 10 + 4
+    );
+
+    // And a program pays for none of it if it says nothing about text.
+    let m = tir_of("fn main() -> t27 { 7 }");
+    assert_eq!(m.funcs.len(), 1, "{}", tir::print_module(&m));
+}
+
+#[test]
+fn a_method_on_an_unsized_type_takes_the_reference_it_already_has() {
+    // `impl str` gives methods to `[char]`, whose receiver is a fat pointer.
+    // There is nothing to dereference and nothing to borrow: the reference
+    // *is* the value (Ch. 5 §1.3).
+    assert_eq!(
+        run("impl str { fn second(&self) -> char { self[1] } } \
+             fn main() -> t27 { \"abc\".second() as t27 }")
+        .0,
+        98
+    );
+}

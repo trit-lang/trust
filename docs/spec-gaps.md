@@ -1606,6 +1606,46 @@ would have silently refused `impl char`.
 Still not built: `char::try_from`, `to_digit`, `from_digit`, `str.to_utf8` as
 a library function rather than an example's `print`, and `String`.
 
+**G9.7 — the library is Trust, and a program pays for none of it.** Ch. 5 §1
+is built, and all of it except one function is ordinary Trust in the prelude:
+`char::to_digit`, `char::utf8_len`, `char::to_utf8`, `str::utf8_len`,
+`str::to_utf8`, and the `floor_div`/`floor_mod` that G9.6 found the encoder
+needs. A reader could have written every one, which is the claim Ch. 5 §3
+makes about the iterator adaptors and which this section should make too.
+
+**The exception is `char::try_from`**, and it is the only thing in the chapter
+that cannot be written in the language: producing a `char` from a word is
+exactly what no `as` does. It is a compiler builtin — four comparisons and
+four branches, which is what Ch. 5 §1.2's definition has — and everything else
+that needed it (`from_digit` in particular) is now writable.
+
+**Making the prelude a place a library can live needed two things.**
+
+*Reachability.* The prelude is prepended to every program, so without pruning
+a program that never mentions text would emit the UTF-8 encoder. `keep_reachable`
+drops every function nothing can call. The roots are `main`, or — in a file
+with none, which is what a test and a library look like — every function the
+*program* defined, since nothing else says which of them matter; prelude
+functions are never roots, which is the point. And a function whose *address*
+appears in a global is always a root, because a vtable slot is an address and
+a method reached only through `dyn Trait` is reached only that way.
+
+The pass lives in `lang::compile` rather than in `lower`, because it is the
+place that knows what the prelude is. A first version put it in `lower`, where
+it could only bail out when there was no `main` — and that silently kept the
+whole prelude for every test that compiles a file without one, which three
+tests caught by counting `cmp`.
+
+*Methods on unsized types.* `impl str` gives methods to `[char]`, whose
+receiver is a fat pointer. The method-call path stripped references only while
+the pointee was sized, so `&str` had no name to look a method up under, and
+then tried to *borrow* a receiver that was already the reference. Both are
+fixed: an unsized pointee names the method, and the fat pointer is passed as
+it stands.
+
+`examples/trust/hello.tr` is now `print` over `s.to_utf8(&mut buf)`, and the
+only thing in it that is not Trust is `putchar`.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The
