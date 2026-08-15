@@ -45,6 +45,95 @@ fn floor_div(a: t27, b: t27) -> t27 {
 
 fn floor_mod(a: t27, b: t27) -> t27 { a - floor_div(a, b) * b }
 
+// --- Ch. 4 §5.7 and Ch. 5 §3: iteration -----------------------------------
+
+trait Iterator {
+    type Item;
+    fn next(&mut self) -> Option<Self::Item>;
+}
+
+// Each adaptor is a struct and an impl a reader could have written, which is
+// the claim Ch. 5 §3 makes about them. Nothing here is a language feature:
+// they need a closure (Ch. 4 §4) and an associated type (Ch. 4 §1.7), and
+// both exist.
+
+struct Map<I, F> { inner: I, f: F }
+struct Filter<I, P> { inner: I, p: P }
+struct Take<I> { inner: I, left: taddr }
+struct Skip<I> { inner: I, left: taddr }
+struct Enumerate<I> { inner: I, at: taddr }
+struct Zip<A, B> { a: A, b: B }
+
+impl<I, F> Iterator for Map<I, F> {
+    type Item = t27;
+    fn next(&mut self) -> Option<t27> {
+        match self.inner.next() {
+            Option::Some(x) => Option::Some((self.f)(x)),
+            Option::None => Option::None,
+        }
+    }
+}
+
+impl<I, P> Iterator for Filter<I, P> {
+    type Item = t27;
+    fn next(&mut self) -> Option<t27> {
+        loop {
+            match self.inner.next() {
+                Option::Some(x) => { if (self.p)(x) { return Option::Some(x); } },
+                Option::None => { return Option::None; },
+            }
+        }
+    }
+}
+
+impl<I> Iterator for Take<I> {
+    type Item = t27;
+    fn next(&mut self) -> Option<t27> {
+        if self.left == 0 { Option::None } else {
+            self.left -= 1;
+            self.inner.next()
+        }
+    }
+}
+
+impl<I> Iterator for Skip<I> {
+    type Item = t27;
+    fn next(&mut self) -> Option<t27> {
+        while self.left > 0 {
+            self.left -= 1;
+            self.inner.next();
+        }
+        self.inner.next()
+    }
+}
+
+impl<I> Iterator for Enumerate<I> {
+    type Item = (taddr, t27);
+    fn next(&mut self) -> Option<(taddr, t27)> {
+        match self.inner.next() {
+            Option::Some(x) => {
+                let at = self.at;
+                self.at += 1;
+                Option::Some((at, x))
+            },
+            Option::None => Option::None,
+        }
+    }
+}
+
+impl<A, B> Iterator for Zip<A, B> {
+    type Item = (t27, t27);
+    fn next(&mut self) -> Option<(t27, t27)> {
+        match self.a.next() {
+            Option::Some(x) => match self.b.next() {
+                Option::Some(y) => Option::Some((x, y)),
+                Option::None => Option::None,
+            },
+            Option::None => Option::None,
+        }
+    }
+}
+
 impl char {
     // The value of a digit in a given radix, or `None` if it is not one.
     // Both the radix's own digits and this machine's are `0`-`9` and `A`-`Z`,

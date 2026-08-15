@@ -1680,6 +1680,58 @@ out of giving the test suite a resource whose destructor prints. That
 instrument has now found four separate drop bugs and has never found anything
 else.
 
+**G9.9 — the iterator adaptors, and the five things in the way.** Ch. 5 §3
+claims the adaptors are "a struct and an `impl` a reader could have written".
+Writing them found five reasons that was not yet true, and each is now built.
+
+**Associated types in a generic impl.** `impl<I> Iterator for Map<I> { type
+Item = …; }` was refused outright — "what it chooses would depend on the
+instantiation". It does, so the choice is kept *as written* with the impl's
+parameter names and resolved when an instantiation exists. `Types::assoc` was
+already a cell "because an impl on an instantiated generic chooses at
+instantiation"; this is what that sentence was for.
+
+**`Self::Item` in a declared signature.** A generic impl's methods are
+compared against the trait's *as written*, because its parameters stand for
+nothing yet — so `Option<Self::Item>` and `Option<t27>` looked different. The
+impl's own choice is substituted textually first.
+
+**Associated type bindings.** `I: Iterator<Item = t27>` (Ch. 4 §1.7) did not
+parse: a bound's `<…>` accepted types, and `Item = t27` is not one. Both forms
+are read now and told apart by the `=`, and the binding is checked — an
+argument says *which* implementation is meant, a binding says what it must
+have chosen.
+
+**Calling a closure that is not a name.** An adaptor holds its closure in a
+*field*, and `(self.f)(x)` had nowhere to go: a call was a path followed by
+`(`, and nothing else. Any expression may be called now, and the diagnostic
+for calling something that is not a closure says so.
+
+**Inferring a closure inside a literal.** A closure has no type until it is
+lowered, so `Map { inner: c, f: |x| … }` could not tell what `F` was, and
+`total(Map { … })` could not tell what `I` was either. `instantiate_fn`
+already lowered a closure *argument* early and bound it to a name; literals
+and literals-holding-closures do the same now. What still needs writing is the
+closure's own parameter type — `|x: t27|` — because `Map<I, F>` puts no `Fn`
+bound on `F`, and a named `F: Fn(A) -> B` bound is not parsed. That is the one
+piece left, and Ch. 4 §4.3 is where it belongs.
+
+**And a pre-existing bug the adaptors uncovered.** `Filter::next` is a `loop`
+whose every path `return`s, and the compiler emitted the loop's exit block
+anyway — unreachable, and reading a slot nothing had defined on a path that
+reaches it. A loop nothing breaks out of has type `!`, and the block after it
+is emitted no more than the block after a `return` is.
+
+That bug was reachable from Ch. 0 alone and had never been seen, because a
+reduced version of it *passed*: the function was unused, so `keep_reachable`
+(G9.7) dropped it before the verifier ran. Dead-code elimination hid a bug
+from the checker that would have caught it — worth knowing, since the fix is
+to verify before pruning and nothing does yet.
+
+`Iterator` moved into the prelude, where Ch. 4 §5.7 always said it was the
+language's own. Three tests and `examples/trust/demo.tr` declared their own
+and now do not.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

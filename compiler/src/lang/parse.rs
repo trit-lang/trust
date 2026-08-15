@@ -34,6 +34,9 @@ struct Parser {
     counter: u32,
 }
 
+/// A bound's angle brackets: type arguments, and associated type bindings.
+type BoundArgs = (Vec<Ty>, Vec<(String, Ty)>);
+
 /// What a `trait` or `impl` body contains: methods, and associated types
 /// either declared (`type Item;`) or chosen (`type Item = t27;`).
 type MethodBlock = (
@@ -63,6 +66,13 @@ const ASSIGNMENTS: &[&str] = &["=", "+=", "-=", "*=", "/=", "%=", "<<=", ">>="];
 impl Parser {
     fn peek(&self) -> &Tok {
         &self.toks[self.pos].0
+    }
+
+    /// The token `n` ahead, for the one place a single token is not enough to
+    /// decide: `Item = t27` against `t27` inside a bound's arguments.
+    fn peek_at(&self, n: usize) -> &Tok {
+        let at = (self.pos + n).min(self.toks.len() - 1);
+        &self.toks[at].0
     }
 
     fn line(&self) -> Line {
@@ -399,8 +409,44 @@ impl Parser {
     /// which is the whole reason a trait may carry parameters.
     fn bound(&mut self) -> R<Bound> {
         let name = self.expect_ident()?;
-        let args = self.generic_args()?;
-        Ok(Bound { name, args })
+        let (args, assoc) = self.bound_args()?;
+        Ok(Bound { name, args, assoc })
+    }
+
+    /// A bound's `<…>`, which may hold type arguments, associated type
+    /// bindings, or both: `From<t9>`, `Iterator<Item = t27>`.
+    ///
+    /// The two are told apart by the `=`, which is why this cannot simply be
+    /// `generic_args`.
+    fn bound_args(&mut self) -> R<BoundArgs> {
+        let mut args = Vec::new();
+        let mut assoc = Vec::new();
+        if !self.at_op("<") {
+            return Ok((args, assoc));
+        }
+        self.bump();
+        if self.close_angle() {
+            return Ok((args, assoc));
+        }
+        loop {
+            if let Tok::Lifetime(_) = self.peek() {
+                self.bump();
+            } else if let (Tok::Ident(n), Tok::Op("=")) = (self.peek().clone(), self.peek_at(1)) {
+                self.bump();
+                self.bump();
+                assoc.push((n, self.ty()?));
+            } else {
+                args.push(self.ty()?);
+            }
+            if self.eat_op(",") {
+                if self.close_angle() {
+                    return Ok((args, assoc));
+                }
+                continue;
+            }
+            self.expect_angle()?;
+            return Ok((args, assoc));
+        }
     }
 
     /// `where T: Bound, U: Other` — the same bounds, written after the
@@ -1213,6 +1259,16 @@ impl Parser {
             // tighter than any operator and `a? + b?` is what it looks like.
             if self.eat_op("?") {
                 e = Expr::Try(Box::new(e), line);
+                continue;
+            }
+            // `(e)(args)` — calling something that is not a name. A path
+            // followed by `(` is a call and is read in `path_expr`; what
+            // reaches here is a field, an index or a parenthesized
+            // expression, and the only callable thing any of them holds is a
+            // closure (Ch. 4 §4.2).
+            if self.at_op("(") {
+                let args = self.args()?;
+                e = Expr::CallExpr(Box::new(e), args, line);
                 continue;
             }
             return Ok(e);

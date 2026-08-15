@@ -56,7 +56,7 @@ core/      2 082 lines  crate trit-core — Bt, Tint, flavors, faults, literals
 compiler/ 26 037 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
 vm/        4 566 lines  crate tritium  — machine, assembler, image format, profiler
 docs/
-├── spec-gaps.md               78 entries: every place the spec was silent or wrong
+├── spec-gaps.md               79 entries: every place the spec was silent or wrong
 └── status.md                  this file
 scripts/
 ├── stats.sh                   produces every number in this document
@@ -127,7 +127,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6) |
 
-**373 tests, zero clippy warnings, 59 commits.** `scripts/stats.sh`.
+**376 tests, zero clippy warnings, 60 commits.** `scripts/stats.sh`.
 
 ---
 
@@ -380,9 +380,11 @@ Three coherent directions, in no forced order:
 literal forms, `char::try_from`, and a text library written in Trust in the
 prelude, which a program pays nothing for unless it calls it.
 `examples/trust/hello.tr` prints `Hello, 世界! 🙂` and the only thing in it
-that is not Trust is `putchar`. §4's `?` is built too (G9.8). Next: the
-iterator adaptors, then the heap, which needs `_end` from the assembler (G9.2)
-and two functions from the runtime.
+that is not Trust is `putchar`. §4's `?` is built too (G9.8), and §3's adaptors —
+`Map`, `Filter`, `Take`, `Skip`, `Enumerate`, `Zip` — are structs in the
+prelude (G9.9). What is left of §3 is the consuming methods and `collect`,
+which needs `Vec`; what is left of the chapter is the heap, which needs `_end`
+from the assembler (G9.2) and two functions from the runtime.
 
 **B. Backend quality.** The instruction stream is a third of what it was
 (G8.6–G8.13, −66.6% on HPL), and memory is nearly out of the picture: frame

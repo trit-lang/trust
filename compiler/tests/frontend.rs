@@ -1553,11 +1553,7 @@ fn a_closure_cannot_be_returned_and_says_why() {
 fn an_associated_type_is_chosen_by_the_implementation() {
     // Ch. 4 §1.7: the trait declares it, the impl chooses it, and
     // `Option<Self::Item>` and `Option<t27>` are the same signature.
-    let src = "trait Iterator { \
-                   type Item; \
-                   fn next(&mut self) -> Option<Self::Item>; \
-               } \
-               struct Counter { n: t27, limit: t27 } \
+    let src = "struct Counter { n: t27, limit: t27 } \
                impl Iterator for Counter { \
                    type Item = t27; \
                    fn next(&mut self) -> Option<t27> { \
@@ -1596,7 +1592,7 @@ fn a_for_loop_is_the_desugaring_and_nothing_more() {
     // Ch. 4 §5.7's desugaring uses only Ch. 0 constructs, so `for` adds no
     // control flow the language did not have — `break` and `continue` work
     // in one as in any loop.
-    let src = "trait Iterator { type Item; fn next(&mut self) -> Option<Self::Item>; } \
+    let src = "\
                struct Upto { n: t27, limit: t27 } \
                impl Iterator for Upto { \
                    type Item = t27; \
@@ -2886,4 +2882,96 @@ fn a_return_inside_a_match_arm_does_not_retire_the_other_arms_values() {
          } \
          fn main() -> t27 { go(true); putchar(45); go(false); 0 }");
     assert_eq!(out, "1-21");
+}
+
+#[test]
+fn the_iterator_adaptors_are_structs_a_reader_could_have_written() {
+    // Ch. 5 §3. Nothing here is a language feature: each adaptor is a struct
+    // and an `impl`, needing a closure (Ch. 4 §4) and an associated type
+    // (Ch. 4 §1.7), and both exist. They live in the prelude, so a program
+    // that never iterates pays nothing for them.
+    let src = "struct Count { at: t27, end: t27 } \
+               impl Iterator for Count { \
+                   type Item = t27; \
+                   fn next(&mut self) -> Option<t27> { \
+                       if self.at >= self.end { Option::None } else { \
+                           let v = self.at; self.at += 1; Option::Some(v) \
+                       } \
+                   } \
+               } \
+               fn total<I: Iterator<Item = t27>>(it: I) -> t27 { \
+                   let mut it = it; \
+                   let mut sum: t27 = 0; \
+                   loop { \
+                       match it.next() { \
+                           Option::Some(v) => { sum += v; }, \
+                           Option::None => { break; }, \
+                       } \
+                   } \
+                   sum \
+               } ";
+    assert_eq!(
+        run(&format!(
+            "{src} fn main() -> t27 {{ \
+                 total(Map {{ inner: Count {{ at: 1, end: 5 }}, f: |x: t27| x * 10 }}) \
+             }}"
+        ))
+        .0,
+        100
+    );
+    assert_eq!(
+        run(&format!(
+            "{src} fn main() -> t27 {{ \
+                 total(Filter {{ inner: Count {{ at: 1, end: 10 }}, p: |x: t27| x % 3 == 0 }}) \
+             }}"
+        ))
+        .0,
+        3 + 6 + 9
+    );
+    assert_eq!(
+        run(&format!(
+            "{src} fn main() -> t27 {{ \
+                 total(Take {{ inner: Count {{ at: 1, end: 100 }}, left: 4 }}) \
+             }}"
+        ))
+        .0,
+        10
+    );
+}
+
+#[test]
+fn an_associated_type_binding_constrains_what_the_impl_chose() {
+    // Ch. 4 §1.7: an argument says which implementation is meant, a binding
+    // says what it must have chosen.
+    let e = error(
+        "struct C { at: t9 } \
+         impl Iterator for C { type Item = t9; fn next(&mut self) -> Option<t9> { Option::None } } \
+         fn total<I: Iterator<Item = t27>>(it: I) -> t27 { 0 } \
+         fn main() -> t27 { total(C { at: 0 }) }",
+    );
+    assert!(e.contains("is t9 and not t27"), "{e}");
+}
+
+#[test]
+fn a_loop_nothing_breaks_out_of_has_no_exit() {
+    // Its type is `!`, and the block that would have followed is emitted no
+    // more than the block after a `return` is. Emitting it anyway left an
+    // unreachable block reading a slot nothing had defined on a path that
+    // reaches it — which the verifier caught, once the function was reachable
+    // enough to be verified at all.
+    assert_eq!(
+        run("fn go(o: Option<t27>) -> Option<t27> { \
+                 loop { \
+                     match o { \
+                         Option::Some(x) => { if x > 0 { return Option::Some(x); } }, \
+                         Option::None => { return Option::None; }, \
+                     } \
+                 } \
+             } \
+             fn main() -> t27 { \
+                 match go(Option::Some(3)) { Option::Some(v) => v, Option::None => 0 } \
+             }")
+        .0,
+        3
+    );
 }

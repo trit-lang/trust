@@ -321,6 +321,11 @@ pub struct Types {
     /// What each mangled name was an instantiation of. A mangled name is not
     /// parseable back into its arguments, and a generic impl needs them.
     instantiations: RefCell<HashMap<String, (String, Vec<Ty>)>>,
+    /// What a *generic* impl chooses for an associated type, as written, with
+    /// the impl's parameter names. `impl<I> Iterator for Map<I>` may choose
+    /// `I::Item`, and what that is depends on the instantiation, so the
+    /// choice cannot be resolved until there is one (Ch. 4 §1.7).
+    generic_assoc: HashMap<(String, String), (Vec<String>, ast::Ty)>,
 }
 
 /// What a closure's anonymous type stands for (Ch. 4 §4.2).
@@ -344,6 +349,38 @@ struct VariantInfo {
 }
 
 impl Types {
+    /// What a generic impl chose for an associated type, for one
+    /// instantiation of the type it implements.
+    ///
+    /// The choice was kept as written because it may name the impl's own
+    /// parameters — `impl<I: Iterator> Iterator for Map<I> { type Item =
+    /// I::Item; }` — and only an instantiation says what those are. Resolved
+    /// once and cached, so the second ask is a lookup.
+    fn assoc_of_instantiation(&self, ty: &Ty, name: &str, line: Line) -> R<Option<Ty>> {
+        let Some(mangled) = nominal_name(ty) else {
+            return Ok(None);
+        };
+        let Some((base, args)) = self.instantiations.borrow().get(&mangled).cloned() else {
+            return Ok(None);
+        };
+        let Some((params, written)) = self.generic_assoc.get(&(base, name.to_string())).cloned()
+        else {
+            return Ok(None);
+        };
+        if params.len() != args.len() {
+            return err(
+                line,
+                format!("`{mangled}` chooses no type for `{name}` (Ch. 4 §1.7)"),
+            );
+        }
+        let env: HashMap<String, Ty> = params.into_iter().zip(args).collect();
+        let resolved = resolve_ty_env(&written, self, &env)?;
+        self.assoc
+            .borrow_mut()
+            .insert((mangled, name.to_string()), resolved.clone());
+        Ok(Some(resolved))
+    }
+
     /// The layout of a type, which is where every size, offset, discriminant
     /// and niche comes from (Ch. 2).
     fn layout(&self, ty: &Ty) -> layout::Layout {
@@ -879,6 +916,23 @@ fn one_err(line: Line, message: String) -> Error {
     SyntaxError { line, message }
 }
 
+/// Whether an expression contains a closure anywhere inside it.
+///
+/// A closure has no type until it is lowered, and a literal holding one
+/// inherits that: neither can be peeked, and both have to be lowered where
+/// their type is first needed.
+fn holds_a_closure(e: &ast::Expr) -> bool {
+    if matches!(e, ast::Expr::Closure(..)) {
+        return true;
+    }
+    let mut found = false;
+    for_each_child(e, &mut |c| found |= holds_a_closure(c));
+    if let ast::Expr::Aggregate(_, fields, _) = e {
+        found |= fields.iter().any(|(_, v)| holds_a_closure(v));
+    }
+    found
+}
+
 /// The names a closure body uses that it did not bind itself.
 ///
 /// Deliberately over-approximate: a name that turns out not to be a local of
@@ -893,6 +947,12 @@ fn free_names(e: &ast::Expr, bound: &mut Vec<String>, out: &mut Vec<String>) {
     match e {
         Char(..) | Str(..) => {}
         Try(a, _) => free_names(a, bound, out),
+        CallExpr(f, args, _) => {
+            free_names(f, bound, out);
+            for a in args {
+                free_names(a, bound, out);
+            }
+        }
         Path(n, _) => see(n, bound, out),
         Aggregate(_, fields, _) => {
             for (_, v) in fields {
@@ -1021,6 +1081,10 @@ fn for_each_child(e: &ast::Expr, f: &mut impl FnMut(&ast::Expr)) {
     match e {
         Char(..) | Str(..) => {}
         Try(a, _) => f(a),
+        CallExpr(c, args, _) => {
+            f(c);
+            args.iter().for_each(f);
+        }
         Cast(a, _, _)
         | Unary(_, a, _)
         | Deref(a, _)
@@ -1104,6 +1168,10 @@ fn for_each_child_mut(e: &mut ast::Expr, f: &mut impl FnMut(&mut ast::Expr)) {
     match e {
         Char(..) | Str(..) => {}
         Try(a, _) => f(a),
+        CallExpr(c, args, _) => {
+            f(c);
+            args.iter_mut().for_each(f);
+        }
         Cast(a, _, _)
         | Unary(_, a, _)
         | Deref(a, _)
@@ -1412,6 +1480,12 @@ fn subst_expr(e: &mut ast::Expr, self_ty: &SelfTy) {
     match e {
         Char(..) | Str(..) => {}
         Try(a, _) => subst_expr(a, self_ty),
+        CallExpr(c, args, _) => {
+            subst_expr(c, self_ty);
+            for a in args {
+                subst_expr(a, self_ty);
+            }
+        }
         Aggregate(path, fields, _) => {
             for seg in &mut path.segments {
                 if seg == "Self" {
@@ -1946,6 +2020,10 @@ fn check_trait_impl(
         // `Option<Self::Item>` and the impl says `Option<t27>`, and only the
         // resolved types can tell that those are the same (Ch. 4 §1.7).
         let want = subst_trait_params_fn(want, &decl.params, &imp.trait_args);
+        // `Self::Item` in the declaration is whatever this impl chose for it,
+        // and a generic impl's signature is compared *as written* — so the
+        // choice is substituted textually, before `Self` is (Ch. 4 §1.7).
+        let want = subst_assoc_fn(&want, &imp.assoc);
         let want = subst_self(&want, self_repr);
         let mismatch = || {
             err::<()>(
@@ -2052,6 +2130,49 @@ fn subst_self_ty(t: &ast::Ty, self_ty: &SelfTy) -> ast::Ty {
     let mut t = t.clone();
     subst_ty(&mut t, self_ty);
     t
+}
+
+/// Replace `Self::Name` by the type an impl chose for it.
+///
+/// Textual, and deliberately so: it runs before `Self` itself is substituted,
+/// while `Self::Item` is still spelled that way, and a generic impl's
+/// signature is compared as written because its parameters stand for nothing
+/// yet.
+fn subst_assoc(t: &ast::Ty, chosen: &[(String, ast::Ty)]) -> ast::Ty {
+    use ast::Ty::*;
+    match t {
+        Assoc(base, name, _) if matches!(**base, SelfTy(_)) => chosen
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, t)| t.clone())
+            .unwrap_or_else(|| t.clone()),
+        Assoc(base, n, l) => Assoc(Box::new(subst_assoc(base, chosen)), n.clone(), *l),
+        App(n, xs, l) => App(
+            n.clone(),
+            xs.iter().map(|x| subst_assoc(x, chosen)).collect(),
+            *l,
+        ),
+        Ref(x, m, l) => Ref(Box::new(subst_assoc(x, chosen)), *m, *l),
+        Slice(x, l) => Slice(Box::new(subst_assoc(x, chosen)), *l),
+        Array(x, n, l) => Array(Box::new(subst_assoc(x, chosen)), n.clone(), *l),
+        Tuple(xs, l) => Tuple(xs.iter().map(|x| subst_assoc(x, chosen)).collect(), *l),
+        other => other.clone(),
+    }
+}
+
+/// The same, over a whole signature.
+fn subst_assoc_fn(f: &ast::FnItem, chosen: &[(String, ast::Ty)]) -> ast::FnItem {
+    if chosen.is_empty() {
+        return f.clone();
+    }
+    let mut f = f.clone();
+    for (_, t) in &mut f.params {
+        *t = subst_assoc(t, chosen);
+    }
+    if let Some(r) = &mut f.ret {
+        *r = subst_assoc(r, chosen);
+    }
+    f
 }
 
 /// Replace a trait's own type parameters by the arguments an impl gave them.
@@ -2550,6 +2671,7 @@ fn build_types(file: &ast::File) -> R<Types> {
         generic_structs: HashMap::new(),
         generic_enums: HashMap::new(),
         assoc: RefCell::new(HashMap::new()),
+        generic_assoc: HashMap::new(),
         consts: HashMap::new(),
         closures: RefCell::new(HashMap::new()),
         traits: file
@@ -2759,12 +2881,20 @@ fn build_types(file: &ast::File) -> R<Types> {
     // be chosen as another's.
     for item in &file.items {
         let ast::Item::Impl(imp) = item else { continue };
-        if !imp.generics.is_empty() && !imp.assoc.is_empty() {
-            return err(
-                imp.line,
-                "an associated type in a generic impl is not implemented: what it \
-                 chooses would depend on the instantiation",
-            );
+        // A generic impl chooses per instantiation, so the choice is kept as
+        // written and resolved when the instantiation exists — which is what
+        // `assoc` being a cell was always for.
+        if !imp.generics.is_empty() {
+            for (name, t) in &imp.assoc {
+                types.generic_assoc.insert(
+                    (imp.self_ty.clone(), name.clone()),
+                    (
+                        imp.generics.iter().map(|g| g.name().to_string()).collect(),
+                        t.clone(),
+                    ),
+                );
+            }
+            continue;
         }
         for (name, t) in &imp.assoc {
             let ty = resolve_ty(t, &types)?;
@@ -2822,11 +2952,14 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
             let Some(owner) = nominal_name(&base) else {
                 return err(*line, format!("{base} has no associated types"));
             };
-            match types.assoc.borrow().get(&(owner.clone(), name.clone())) {
-                Some(t) => Ok(t.clone()),
+            if let Some(t) = types.assoc.borrow().get(&(owner, name.clone())) {
+                return Ok(t.clone());
+            }
+            match types.assoc_of_instantiation(&base, name, *line)? {
+                Some(t) => Ok(t),
                 None => err(
                     *line,
-                    format!("`{owner}` chooses no type for `{name}` (Ch. 4 §1.7)"),
+                    format!("`{base}` chooses no type for `{name}` (Ch. 4 §1.7)"),
                 ),
             }
         }
@@ -3149,6 +3282,11 @@ struct LoopCtx {
     head: String,
     /// The slot a `break` with a value writes to.
     result: Option<(String, Ty)>,
+    /// Whether any `break` targeted this loop. A loop nothing breaks out of
+    /// has no exit: its value is `!`, and emitting the exit block anyway
+    /// leaves an unreachable block reading a slot nothing defined on a path
+    /// that reaches it.
+    broke: bool,
 }
 
 /// Everything a function body is lowered against, which is the same for
@@ -3965,6 +4103,28 @@ impl Fn<'_> {
             // type known.
             E::Try(inner, line) => self.try_expr(inner, expected, *line),
 
+            // Calling something that is not a name. The only callable value
+            // in this language is a closure, and a closure is a place: its
+            // captures are the receiver its body takes (Ch. 4 §4.2).
+            E::CallExpr(callee, args, line) => {
+                let ty = match self.peek_ty(callee)? {
+                    Some(t) => t,
+                    None => self.expr(callee, None)?.1,
+                };
+                let Some(info) =
+                    nominal_name(&ty).and_then(|n| self.types.closures.borrow().get(&n).cloned())
+                else {
+                    return err(
+                        *line,
+                        format!("{ty} is not callable; only a closure is (Ch. 4 §4.3)"),
+                    );
+                };
+                let recv = ast::Expr::Borrow(callee.clone(), false, *line);
+                let mut full = vec![recv];
+                full.extend(args.iter().cloned());
+                self.call_key(&info.call, Vec::new(), &full, *line)
+            }
+
             // A string literal is a fat pointer to storage that outlives
             // every frame — an address and a length in characters, which is
             // what `&[char]` is anywhere else (Ch. 3 §5.2, Ch. 5 §1.4).
@@ -4080,6 +4240,7 @@ impl Fn<'_> {
                 let Some(ctx) = self.loops.last().cloned() else {
                     return err(*line, "`break` outside a loop");
                 };
+                self.loops.last_mut().expect("just read").broke = true;
                 match (value, &ctx.result) {
                     (Some(v), Some((slot, ty))) => {
                         let (val, vt) = self.expr(v, Some(ty))?;
@@ -4937,17 +5098,33 @@ impl Fn<'_> {
             }
             // A closure has no type until it is lowered, so lower it now and
             // give the value a name the rest of the call can use.
-            if let ast::Expr::Closure(cps, cret, body, cline) = arg.clone() {
-                // The bound says what signature is wanted, so a closure need
-                // not write its own types (Ch. 4 §4.1).
-                let hint = self.fn_hint(&def, want)?;
-                let (v, got) = self.closure(&cps, &cret, &body, hint, cline)?;
-                let Operand::Value(slot) = v else {
-                    return err(line, "a closure must have a slot");
-                };
-                let bound = self.bind_existing(slot, got.clone());
-                *arg = ast::Expr::Path(bound, line);
-                unify(want, &got, &def.generics, &mut env);
+            match arg.clone() {
+                ast::Expr::Closure(cps, cret, body, cline) => {
+                    // The bound says what signature is wanted, so a closure
+                    // need not write its own types (Ch. 4 §4.1).
+                    let hint = self.fn_hint(&def, want)?;
+                    let (v, got) = self.closure(&cps, &cret, &body, hint, cline)?;
+                    let Operand::Value(slot) = v else {
+                        return err(line, "a closure must have a slot");
+                    };
+                    let bound = self.bind_existing(slot, got.clone());
+                    *arg = ast::Expr::Path(bound, line);
+                    unify(want, &got, &def.generics, &mut env);
+                }
+                // And a literal *holding* a closure cannot be peeked either,
+                // for the same reason and one level down: `f(Map { inner: c,
+                // f: |x| x })` has to lower the whole literal to know what
+                // `Map`'s parameters are, let alone `f`'s.
+                ast::Expr::Aggregate(..) if holds_a_closure(arg) => {
+                    let (v, got) = self.expr(arg, None)?;
+                    let Operand::Value(slot) = v else {
+                        return err(line, "a literal must have a slot");
+                    };
+                    let bound = self.bind_existing(slot, got.clone());
+                    *arg = ast::Expr::Path(bound, line);
+                    unify(want, &got, &def.generics, &mut env);
+                }
+                _ => {}
             }
         }
 
@@ -5051,7 +5228,8 @@ impl Fn<'_> {
         line: Line,
     ) -> R<()> {
         if bound.args.is_empty() {
-            return self.check_bound(ty, &bound.name, callee, param, line);
+            self.check_bound(ty, &bound.name, callee, param, line)?;
+            return self.check_assoc_bindings(ty, bound, env, param, line);
         }
         let args: Vec<Ty> = bound
             .args
@@ -5068,10 +5246,10 @@ impl Fn<'_> {
         );
         // A rule that holds for every type satisfying a bound satisfies this
         // one too, wherever its own conditions hold (Ch. 4 §5.6).
-        if self.by_rule(ty, &bound.name, &args, 0) {
-            return Ok(());
+        if !self.by_rule(ty, &bound.name, &args, 0) {
+            self.check_bound_named(ty, &mangle(&bound.name, &args), &shown, callee, param, line)?;
         }
-        self.check_bound_named(ty, &mangle(&bound.name, &args), &shown, callee, param, line)
+        self.check_assoc_bindings(ty, bound, env, param, line)
     }
 
     /// Whether a blanket impl gives `ty` this trait with these arguments.
@@ -5125,6 +5303,50 @@ impl Fn<'_> {
 
     fn check_bound(&self, ty: &Ty, bound: &str, callee: &str, param: &str, line: Line) -> R<()> {
         self.check_bound_named(ty, bound, bound, callee, param, line)
+    }
+
+    /// `Iterator<Item = t27>`: the implementation exists *and* chose this.
+    ///
+    /// A binding constrains what the implementor picked, where an argument
+    /// picks which implementation is meant (Ch. 4 §1.7). Nothing else about
+    /// the bound changes.
+    fn check_assoc_bindings(
+        &self,
+        ty: &Ty,
+        bound: &ast::Bound,
+        env: &HashMap<String, Ty>,
+        param: &str,
+        line: Line,
+    ) -> R<()> {
+        for (name, written) in &bound.assoc {
+            let want = resolve_ty_env(written, self.types, env)?;
+            let chose = match nominal_name(ty)
+                .and_then(|n| self.types.assoc.borrow().get(&(n, name.clone())).cloned())
+            {
+                Some(t) => Some(t),
+                None => self.types.assoc_of_instantiation(ty, name, line)?,
+            };
+            match chose {
+                Some(got) if got == want => {}
+                Some(got) => {
+                    return err(
+                        line,
+                        format!(
+                            "`{param}` is `{ty}`, whose `{}::{name}` is {got} and not {want} \
+                             (Ch. 4 §1.7)",
+                            bound.name
+                        ),
+                    );
+                }
+                None => {
+                    return err(
+                        line,
+                        format!("`{ty}` chooses no type for `{name}` (Ch. 4 §1.7)"),
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The same, with the requirement spelled for a reader rather than for
@@ -5893,8 +6115,34 @@ impl Fn<'_> {
         Ok(match e {
             E::Int(..) => Some(Ty::T27),
             E::Trit(..) => Some(Ty::Trit),
+            E::Char(..) => Some(Ty::Char),
+            E::Str(..) => Some(Ty::Ref(Box::new(Ty::Slice(Box::new(Ty::Char))), false)),
             E::Bool(..) => Some(Ty::Bool),
             E::Unit(_) => Some(Ty::Unit),
+            // A struct or variant literal names its own type, and a generic
+            // one works its arguments out from the fields it was given —
+            // which is what makes `f(Wrapper { inner: x })` infer `f`'s
+            // parameter as well as `Wrapper`'s (Ch. 4 §2.3).
+            // A literal of a concrete nominal type carries its type plainly;
+            // a generic one works its arguments out from the fields it was
+            // given, which is what lets `f(Wrapper { inner: x })` infer both
+            // `f`'s parameter and `Wrapper`'s (Ch. 4 §2.3).
+            E::Aggregate(path, fields, line) => {
+                // A peek that cannot tell says so; it must never be the thing
+                // that reports an inference failure, because the caller has
+                // other ways to find the answer. `Option::None` on its own is
+                // the case: nothing in the literal says what `T` is, and the
+                // expected type at the *call* does.
+                match self.instantiate_head(path, fields, None, *line) {
+                    Ok(head) if self.types.structs.borrow().contains_key(&head) => {
+                        Some(Ty::Struct(head))
+                    }
+                    Ok(head) if self.types.enums.borrow().contains_key(&head) => {
+                        Some(Ty::Enum(head))
+                    }
+                    _ => None,
+                }
+            }
             E::Borrow(inner, mutable, _) => {
                 self.peek_ty(inner)?.map(|t| Ty::Ref(Box::new(t), *mutable))
             }
@@ -5920,19 +6168,6 @@ impl Fn<'_> {
                 Some(t) => self.peek_ty(t)?,
                 None => Some(Ty::Unit),
             },
-            // A literal of a concrete nominal type carries its type plainly;
-            // a generic one does not, since its arguments are what is being
-            // inferred.
-            E::Aggregate(path, _, _) => {
-                let head = &path.segments[0];
-                if self.types.structs.borrow().contains_key(head) {
-                    Some(Ty::Struct(head.clone()))
-                } else if self.types.enums.borrow().contains_key(head) {
-                    Some(Ty::Enum(head.clone()))
-                } else {
-                    None
-                }
-            }
             E::Method(..) => None,
             _ => None,
         })
@@ -7100,6 +7335,32 @@ impl Fn<'_> {
         expected: Option<&Ty>,
         line: Line,
     ) -> R<(Operand, Ty)> {
+        // A closure has no type until it is lowered, so a generic literal
+        // holding one cannot infer that parameter from a peek. Lower it here
+        // and give the value a name the rest of the literal uses — the same
+        // move `instantiate_fn` makes for a closure *argument*, for the same
+        // reason (Ch. 4 §4.2).
+        let mut owned;
+        let fields = if fields
+            .iter()
+            .any(|(_, e)| matches!(e, ast::Expr::Closure(..)))
+        {
+            owned = fields.to_vec();
+            for (_, e) in &mut owned {
+                let ast::Expr::Closure(cps, cret, body, cline) = e.clone() else {
+                    continue;
+                };
+                let (v, got) = self.closure(&cps, &cret, &body, None, cline)?;
+                let Operand::Value(slot) = v else {
+                    return err(line, "a closure must have a slot");
+                };
+                let bound = self.bind_existing(slot, got);
+                *e = ast::Expr::Path(bound, cline);
+            }
+            &owned[..]
+        } else {
+            fields
+        };
         let head = self.instantiate_head(path, fields, expected, line)?;
 
         // `Type::NAME` — an associated constant, which is a constant under a
@@ -7488,6 +7749,8 @@ impl Fn<'_> {
             exit: exit.clone(),
             head: head.clone(),
             result: None,
+            // A `while` always has an exit: the condition being false.
+            broke: true,
         });
         self.block(body, None)?;
         self.loops.pop();
@@ -7519,11 +7782,19 @@ impl Fn<'_> {
             exit: exit.clone(),
             head: head.clone(),
             result: result.clone(),
+            broke: false,
         });
         self.block(body, None)?;
-        self.loops.pop();
+        let ctx = self.loops.pop().expect("just pushed");
         self.check_no_move_in_loop(&before, _line)?;
         self.jump(&head);
+
+        // Nothing leaves this loop, so there is nowhere after it: its type is
+        // `!`, and the block that would have followed is emitted no more than
+        // the block after a `return` is.
+        if !ctx.broke {
+            return Ok((unit(), Ty::Never));
+        }
 
         self.start(exit);
         match result {
@@ -7969,6 +8240,12 @@ fn walk_expr(e: &ast::Expr, index: &mut u32, out: &mut HashMap<String, u32>) {
     match e {
         E::Char(..) | E::Str(..) => {}
         E::Try(a, _) => go(a, index, out),
+        E::CallExpr(c, args, _) => {
+            go(c, index, out);
+            for a in args {
+                go(a, index, out);
+            }
+        }
         // A closure's body is walked in place: its uses of a capture count
         // as uses at the point the closure is written, and the closure's own
         // binding extends them to its last use.

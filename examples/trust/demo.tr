@@ -124,10 +124,8 @@ fn total_area(shapes: &[&dyn Shape]) -> t27 {
 
 // ------------------------------------------------------- an iterator
 
-trait Iterator {
-    type Item;
-    fn next(&mut self) -> Option<Self::Item>;
-}
+// `Iterator` is the language's own (Ch. 4 §5.7), in the prelude beside
+// `Option` and `Result`, so this file does not declare it.
 
 // The powers of three, which is the only sequence this machine really has.
 struct Powers { at: t27, limit: t27 }

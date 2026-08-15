@@ -111,6 +111,10 @@ pub struct Bound {
     pub name: String,
     /// Its type arguments, empty for a trait that takes none.
     pub args: Vec<Ty>,
+    /// Associated type bindings: `Iterator<Item = t27>` (Ch. 4 §1.7). A
+    /// binding constrains what the implementation chose, where an argument
+    /// says which implementation is meant.
+    pub assoc: Vec<(String, Ty)>,
 }
 
 impl Bound {
@@ -119,6 +123,7 @@ impl Bound {
         Bound {
             name: name.into(),
             args: Vec::new(),
+            assoc: Vec::new(),
         }
     }
 }
@@ -334,6 +339,10 @@ pub enum Expr {
     Str(Vec<i128>, Line),
     /// `e?` — propagate a failure (Ch. 5 §4.1).
     Try(Box<Expr>, Line),
+    /// `(e)(args)` — call whatever an expression evaluates to. The only
+    /// thing it can be is a closure, and the only place one is not already a
+    /// name is a field (Ch. 4 §4.2).
+    CallExpr(Box<Expr>, Vec<Expr>, Line),
     /// `true` or `false`.
     Bool(bool, Line),
     /// `()`.
@@ -399,6 +408,7 @@ impl Expr {
             | Char(_, l)
             | Str(_, l)
             | Try(_, l)
+            | CallExpr(_, _, l)
             | Bool(_, l)
             | Unit(l)
             | Path(_, l)
