@@ -98,6 +98,9 @@ impl std::fmt::Display for Ty {
             Ty::Struct(n) | Ty::Enum(n) => f.write_str(n),
             Ty::Ref(t, true) => write!(f, "&mut {t}"),
             Ty::Ref(t, false) => write!(f, "&{t}"),
+            // `str` is `[char]`, and a reader who wrote `str` should see it
+            // back (Ch. 5 §1.3).
+            Ty::Slice(t) if **t == Ty::Char => f.write_str("str"),
             Ty::Slice(t) => write!(f, "[{t}]"),
             Ty::Never => f.write_str("!"),
         }
@@ -790,10 +793,14 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
 
     let pending: RefCell<Vec<Job>> = RefCell::new(Vec::new());
     let vtables: RefCell<Vec<(String, String, ir::Global)>> = RefCell::new(Vec::new());
+    let data: RefCell<Vec<ir::Global>> = RefCell::new(Vec::new());
+    let strings: RefCell<HashMap<Vec<i128>, String>> = RefCell::new(HashMap::new());
     let extra_fns: RefCell<Vec<ast::FnItem>> = RefCell::new(Vec::new());
     let world = World {
         traits: &types.traits.clone(),
         vtables: &vtables,
+        data: &data,
+        strings: &strings,
         extra_fns: &extra_fns,
         fn_bounds: &fn_bounds,
         sigs: &sigs,
@@ -858,6 +865,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
     module
         .globals
         .extend(vtables.into_inner().into_iter().map(|(_, _, g)| g));
+    module.globals.extend(data.into_inner());
 
     if errs.is_empty() {
         Ok(module)
@@ -883,7 +891,7 @@ fn free_names(e: &ast::Expr, bound: &mut Vec<String>, out: &mut Vec<String>) {
         }
     };
     match e {
-        Char(..) => {}
+        Char(..) | Str(..) => {}
         Path(n, _) => see(n, bound, out),
         Aggregate(_, fields, _) => {
             for (_, v) in fields {
@@ -1010,7 +1018,7 @@ fn writes_name(e: &ast::Expr, name: &str) -> bool {
 fn for_each_child(e: &ast::Expr, f: &mut impl FnMut(&ast::Expr)) {
     use ast::Expr::*;
     match e {
-        Char(..) => {}
+        Char(..) | Str(..) => {}
         Cast(a, _, _)
         | Unary(_, a, _)
         | Deref(a, _)
@@ -1092,7 +1100,7 @@ fn rewrite_captures(e: &mut ast::Expr, captures: &[String]) {
 fn for_each_child_mut(e: &mut ast::Expr, f: &mut impl FnMut(&mut ast::Expr)) {
     use ast::Expr::*;
     match e {
-        Char(..) => {}
+        Char(..) | Str(..) => {}
         Cast(a, _, _)
         | Unary(_, a, _)
         | Deref(a, _)
@@ -1396,7 +1404,7 @@ fn subst_expr(e: &mut ast::Expr, self_ty: &SelfTy) {
     use ast::Expr::*;
     let mut kids: Vec<&mut ast::Expr> = Vec::new();
     match e {
-        Char(..) => {}
+        Char(..) | Str(..) => {}
         Aggregate(path, fields, _) => {
             for seg in &mut path.segments {
                 if seg == "Self" {
@@ -1605,7 +1613,7 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
             && !types.enums.borrow().contains_key(self_ty)
             && !types.generic_structs.contains_key(self_ty)
             && !types.generic_enums.contains_key(self_ty)
-            && !matches!(self_ty.as_str(), "trit" | "bool" | "t9" | "t27" | "taddr")
+            && !matches!(self_ty.as_str(), "trit" | "bool" | "t9" | "t27" | "taddr" | "char")
         {
             errs.push(SyntaxError {
                 line: imp.line,
@@ -2867,6 +2875,10 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
             "t27" => Ok(Ty::T27),
             "taddr" => Ok(Ty::TAddr),
             "char" => Ok(Ty::Char),
+            // `str` is `[char]` and nothing more: a slice of characters, and
+            // dynamically sized for the same reason every slice is
+            // (Ch. 5 §1.3).
+            "str" => Ok(Ty::Slice(Box::new(Ty::Char))),
             // Ch. 1 §8 claims these so no user identifier can take them.
             "t3" | "t81" | "f27" => err(
                 *line,
@@ -3032,6 +3044,10 @@ struct Fn<'a> {
     traits: &'a HashMap<String, ast::TraitItem>,
     /// Vtables built so far (Ch. 4 §3.3).
     vtables: &'a RefCell<Vec<(String, String, ir::Global)>>,
+    /// Static data the program's literals need, and the globals already made
+    /// for a set of characters so that identical literals share one.
+    data: &'a RefCell<Vec<ir::Global>>,
+    strings: &'a RefCell<HashMap<Vec<i128>, String>>,
     /// Functions synthesized while lowering this one — closure bodies.
     extra_fns: &'a RefCell<Vec<ast::FnItem>>,
     /// The signature each `impl Fn(…)` parameter was written with.
@@ -3133,6 +3149,10 @@ struct World<'a> {
     /// Vtables built so far, keyed by (concrete type, trait), and the
     /// globals they became.
     vtables: &'a RefCell<Vec<(String, String, ir::Global)>>,
+    /// Static data the program's literals need, and the globals already made
+    /// for a set of characters so that identical literals share one.
+    data: &'a RefCell<Vec<ir::Global>>,
+    strings: &'a RefCell<HashMap<Vec<i128>, String>>,
     /// Functions synthesized while lowering — closure bodies (Ch. 4 §4.2).
     extra_fns: &'a RefCell<Vec<ast::FnItem>>,
     /// The signature each `impl Fn(…)` parameter was written with.
@@ -3156,6 +3176,8 @@ fn function(
     let World {
         traits,
         vtables,
+        data,
+        strings,
         extra_fns,
         fn_bounds,
         sigs,
@@ -3170,6 +3192,8 @@ fn function(
     let mut fx = Fn {
         traits,
         vtables,
+        data,
+        strings,
         extra_fns,
         fn_bounds,
         name: key.to_string(),
@@ -3906,13 +3930,27 @@ impl Fn<'_> {
     fn expr_inner(&mut self, e: &ast::Expr, expected: Option<&Ty>) -> R<(Operand, Ty)> {
         use ast::Expr as E;
         match e {
-            // An unconstrained integer literal is `t27` (Ch. 1 §3), and one
-            // that does not fit its type is an error, never a wrap.
             // A character literal is a `char` and nothing else: unlike an
             // integer literal it takes no type from context, because there
             // is only one type it could have (Ch. 5 §1.2).
             E::Char(v, _) => Ok((Operand::Const(Type::Int(27), Bt::from_i128(*v)), Ty::Char)),
 
+            // A string literal is a fat pointer to storage that outlives
+            // every frame — an address and a length in characters, which is
+            // what `&[char]` is anywhere else (Ch. 3 §5.2, Ch. 5 §1.4).
+            E::Str(chars, line) => {
+                let symbol = self.string_data(chars);
+                let ty = Ty::Ref(Box::new(Ty::Slice(Box::new(Ty::Char))), false);
+                let slot = self.temp_slot(&ty);
+                let at = Operand::Value(slot.clone());
+                self.store_ptr(at, Operand::Global(symbol));
+                let len = Operand::Const(Type::Int(27), Bt::from_i128(chars.len() as i128));
+                self.store_at(&slot, 3, &Ty::TAddr, len, *line)?;
+                Ok((Operand::Value(slot), ty))
+            }
+
+            // An unconstrained integer literal is `t27` (Ch. 1 §3), and one
+            // that does not fit its type is an error, never a wrap.
             E::Int(v, line) => {
                 let ty = match expected {
                     Some(t) if t.is_arithmetic() => t.clone(),
@@ -6074,6 +6112,34 @@ impl Fn<'_> {
         }
     }
 
+    /// The global holding a string literal's characters, one word each.
+    ///
+    /// Identical literals share one global. That is not an optimization the
+    /// program can observe — a `&'static str` has no identity beyond what it
+    /// points at, and nothing in this language compares addresses — so it is
+    /// free.
+    fn string_data(&mut self, chars: &[i128]) -> String {
+        let key: Vec<i128> = chars.to_vec();
+        if let Some(name) = self.strings.borrow().get(&key) {
+            return name.clone();
+        }
+        let name = format!("str.{}", self.strings.borrow().len());
+        let mut trytes = Vec::with_capacity(chars.len() * 3);
+        for c in chars {
+            let v = Bt::from_i128(*c);
+            for i in 0..3 {
+                trytes.push(InitItem::Tryte(v.shr(i * 9).wrap_to(9)));
+            }
+        }
+        self.data.borrow_mut().push(ir::Global {
+            name: name.clone(),
+            trytes: trytes.len() as u32,
+            init: Some(trytes),
+        });
+        self.strings.borrow_mut().insert(key, name.clone());
+        name
+    }
+
     /// The global holding the vtable for this (type, trait) pair, building
     /// it if this is the first coercion to it (Ch. 4 §3.3).
     ///
@@ -7632,7 +7698,7 @@ fn walk_expr(e: &ast::Expr, index: &mut u32, out: &mut HashMap<String, u32>) {
     use ast::Expr as E;
     let go = |x: &ast::Expr, i: &mut u32, o: &mut HashMap<String, u32>| walk_expr(x, i, o);
     match e {
-        E::Char(..) => {}
+        E::Char(..) | E::Str(..) => {}
         // A closure's body is walked in place: its uses of a capture count
         // as uses at the point the closure is written, and the closure's own
         // binding extends them to its last use.

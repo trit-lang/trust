@@ -16,6 +16,10 @@ pub enum Tok {
     TritLit(Trit),
     /// A character literal, as its Unicode scalar value (Ch. 5 §1.4).
     CharLit(i128),
+    /// A string literal, as its characters (Ch. 5 §1.4). Held decoded, since
+    /// text in this language is characters and the file's UTF-8 is a fact
+    /// about the file.
+    StrLit(Vec<i128>),
     /// A keyword (§1.3), interned.
     Kw(&'static str),
     /// A lifetime, `'a` (Ch. 3 §3.2), without its quote.
@@ -32,6 +36,13 @@ impl std::fmt::Display for Tok {
             Tok::Ident(n) => write!(f, "`{n}`"),
             Tok::Int(v) => write!(f, "`{v}`"),
             Tok::TritLit(t) => write!(f, "`{}t`", t.to_i8()),
+            Tok::StrLit(cs) => {
+                let text: String = cs
+                    .iter()
+                    .filter_map(|c| char::from_u32(*c as u32))
+                    .collect();
+                write!(f, "`\"{text}\"`")
+            }
             Tok::CharLit(v) => match char::from_u32(*v as u32) {
                 Some(c) => write!(f, "`'{c}'`"),
                 None => write!(f, "`'\\u{{{v:X}}}'`"),
@@ -168,14 +179,13 @@ pub fn lex(src: &str) -> Result<Vec<(Tok, Line)>, SyntaxError> {
             continue;
         }
 
-        // String literals wait on the storage they need (Ch. 5 §1.3).
+        // A string literal (Ch. 5 §1.4): a sequence of scalar values, whose
+        // storage is static and whose type is `&'static str`.
         if c == '"' {
-            return Err(err(
-                line,
-                "string literals are not implemented yet; a `&str` needs static storage \
-                 this compiler does not emit (Ch. 5 §1.4)"
-                    .into(),
-            ));
+            let (cs, next) = string_literal(&chars, i, line)?;
+            out.push((Tok::StrLit(cs), line));
+            i = next;
+            continue;
         }
 
         // A numeric literal, or a trit literal — which shares the `0t`
@@ -250,6 +260,42 @@ pub fn lex(src: &str) -> Result<Vec<(Tok, Line)>, SyntaxError> {
     Ok(out)
 }
 
+/// One string literal, returning its characters and where it ends.
+///
+/// A newline inside one is an error rather than a continuation: an unclosed
+/// quote would otherwise swallow the rest of the file and report its error
+/// somewhere unrelated.
+fn string_literal(
+    chars: &[char],
+    at: usize,
+    line: Line,
+) -> Result<(Vec<i128>, usize), SyntaxError> {
+    let mut out = Vec::new();
+    let mut i = at + 1;
+    loop {
+        match chars.get(i) {
+            None | Some('\n') => {
+                return Err(SyntaxError {
+                    line,
+                    message: "unterminated string literal".into(),
+                });
+            }
+            Some('"') => return Ok((out, i + 1)),
+            Some('\\') => {
+                // The escapes are the character literal's, and are read by
+                // the same code so that the two cannot drift apart.
+                let (v, next) = escape(chars, i, line)?;
+                out.push(v);
+                i = next;
+            }
+            Some(&c) => {
+                out.push(c as i128);
+                i += 1;
+            }
+        }
+    }
+}
+
 /// Whether the `'` at `i` opens a character literal rather than a lifetime.
 ///
 /// A lifetime is `'` and a name; a character literal is `'` and one character
@@ -262,73 +308,92 @@ fn closes_a_char(chars: &[char], i: usize) -> bool {
 
 /// One character literal, returning its scalar value and where it ends.
 fn char_literal(chars: &[char], at: usize, line: Line) -> Result<(i128, usize), SyntaxError> {
-    let mut i = at + 1;
     let bad = |m: &str| SyntaxError {
         line,
         message: format!("in a character literal: {m}"),
     };
-    let Some(&c) = chars.get(i) else {
-        return Err(bad("the file ends"));
-    };
-    let value: i128 = if c == '\\' {
-        i += 1;
-        let Some(&e) = chars.get(i) else {
-            return Err(bad("the file ends after `\\`"));
-        };
-        i += 1;
-        match e {
-            'n' => 10,
-            'r' => 13,
-            't' => 9,
-            '\\' => 92,
-            '\'' => 39,
-            '"' => 34,
-            '0' => 0,
-            'u' => {
-                // `\u{…}`, hexadecimal — it names a code point in an external
-                // standard, which writes them one way (Ch. 5 §1.4).
-                if chars.get(i) != Some(&'{') {
-                    return Err(bad("`\\u` is written `\\u{…}`"));
-                }
-                i += 1;
-                let start = i;
-                while chars.get(i).is_some_and(|c| c.is_ascii_hexdigit()) {
-                    i += 1;
-                }
-                if i == start || i - start > 6 {
-                    return Err(bad("`\\u{…}` takes one to six hexadecimal digits"));
-                }
-                if chars.get(i) != Some(&'}') {
-                    return Err(bad("`\\u{…}` is not closed"));
-                }
-                i += 1;
-                let text: String = chars[start..i - 1].iter().collect();
-                i128::from_str_radix(&text, 16).map_err(|_| bad("that is not a number"))?
-            }
-            'x' => {
-                return Err(bad(
-                    "there is no `\\x` escape: it names a byte, and text here is characters. \
-                     Write `\\u{…}` for a scalar value, or a `[t9]` for bytes (Ch. 5 §1.4)",
-                ));
-            }
-            other => return Err(bad(&format!("`\\{other}` is not an escape"))),
+    let mut i = at + 1;
+    let value = match chars.get(i) {
+        None => return Err(bad("the file ends")),
+        Some('\'') => return Err(bad("it is empty")),
+        Some('\\') => {
+            let (v, next) = escape(chars, i, line)?;
+            i = next;
+            v
         }
-    } else if c == '\'' {
-        return Err(bad("it is empty"));
-    } else {
-        i += 1;
-        c as i128
+        Some(&c) => {
+            i += 1;
+            c as i128
+        }
     };
     if chars.get(i) != Some(&'\'') {
         return Err(bad("it holds more than one character, or is not closed"));
     }
-    // Ch. 5 §1.2: a scalar value, which excludes the surrogates.
-    if !(0..=0x10FFFF).contains(&value) || (0xD800..=0xDFFF).contains(&value) {
-        return Err(bad(&format!(
-            "U+{value:04X} is not a Unicode scalar value (Ch. 5 §1.2)"
-        )));
+    Ok((scalar_value(value, line)?, i + 1))
+}
+
+/// One escape sequence, beginning at the backslash at `at`.
+///
+/// Shared by both literal forms so that the two cannot drift apart.
+fn escape(chars: &[char], at: usize, line: Line) -> Result<(i128, usize), SyntaxError> {
+    let bad = |m: &str| SyntaxError {
+        line,
+        message: format!("in an escape: {m}"),
+    };
+    let mut i = at + 1;
+    let Some(&e) = chars.get(i) else {
+        return Err(bad("the file ends after `\\`"));
+    };
+    i += 1;
+    let value = match e {
+        'n' => 10,
+        'r' => 13,
+        't' => 9,
+        '\\' => 92,
+        '\'' => 39,
+        '"' => 34,
+        '0' => 0,
+        'u' => {
+            // `\u{…}`, hexadecimal — it names a code point in an external
+            // standard, which writes them one way (Ch. 5 §1.4).
+            if chars.get(i) != Some(&'{') {
+                return Err(bad("`\\u` is written `\\u{…}`"));
+            }
+            i += 1;
+            let start = i;
+            while chars.get(i).is_some_and(|c| c.is_ascii_hexdigit()) {
+                i += 1;
+            }
+            if i == start || i - start > 6 {
+                return Err(bad("`\\u{…}` takes one to six hexadecimal digits"));
+            }
+            if chars.get(i) != Some(&'}') {
+                return Err(bad("`\\u{…}` is not closed"));
+            }
+            let text: String = chars[start..i].iter().collect();
+            i += 1;
+            i128::from_str_radix(&text, 16).map_err(|_| bad("that is not a number"))?
+        }
+        'x' => {
+            return Err(bad(
+                "there is no `\\x` escape: it names a byte, and text here is characters. \
+                 Write `\\u{…}` for a scalar value, or a `[t9]` for bytes (Ch. 5 §1.4)",
+            ));
+        }
+        other => return Err(bad(&format!("`\\{other}` is not an escape"))),
+    };
+    Ok((scalar_value(value, line)?, i))
+}
+
+/// Ch. 5 §1.2: a character is a scalar value, which excludes the surrogates.
+fn scalar_value(v: i128, line: Line) -> Result<i128, SyntaxError> {
+    if !(0..=0x10FFFF).contains(&v) || (0xD800..=0xDFFF).contains(&v) {
+        return Err(SyntaxError {
+            line,
+            message: format!("U+{v:04X} is not a Unicode scalar value (Ch. 5 §1.2)"),
+        });
     }
-    Ok((value, i + 1))
+    Ok(v)
 }
 
 #[cfg(test)]
@@ -388,16 +453,11 @@ mod tests {
     fn the_deferred_and_reserved_are_diagnosed_by_name() {
         // A string literal waits on the storage a `&str` needs (Ch. 5 §1.3);
         // a character literal does not, and lexes.
-        assert!(
-            lex("\"hi\"")
-                .unwrap_err()
-                .message
-                .contains("static storage")
-        );
+        // Both literal forms lex now (Ch. 5 §1.4).
         assert_eq!(lex("'a'").unwrap()[0].0, Tok::CharLit(97));
+        assert_eq!(lex("\"hi\"").unwrap()[0].0, Tok::StrLit(vec![104, 105]));
 
         assert!(lex("mod").unwrap_err().message.contains("reserved"));
         assert!(lex("a ^ b").unwrap_err().message.contains("tmul"));
     }
 }
-

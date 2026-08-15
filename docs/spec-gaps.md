@@ -1574,6 +1574,38 @@ What is not built: `str`, string literals, `char::try_from`, `to_digit`,
 needing static storage this compiler does not emit, which is the honest
 reason.
 
+**G9.6 — string literals, and the division UTF-8 wanted and did not get.**
+`str` is `[char]` and `&str` is the fat pointer every slice has: an address
+and a length **in characters**. Fixed width is what makes that mean something,
+and `s.len()` and `s[i]` are both O(1) — neither is available in a language
+whose strings are UTF-8, and the reason is UTF-8.
+
+Storage is a TIR global, one word per character, and identical literals share
+one. That is not an optimization a program can observe: a `&'static str` has
+no identity beyond what it points at and nothing in this language compares
+addresses.
+
+**What the first `print` got wrong.** Encoding a code point to UTF-8 is
+slicing it into fields of six bits, and slicing wants division that rounds
+*down*. Ch. 1 §4's `/` rounds to **nearest**, which is what arithmetic wants
+and what a field extraction must not have: 19990 / 4096 is 5 to the nearest
+and 4 to the floor, and only one of those is 世. The first version printed
+`Hello, ...x.界!` and the mangled character was the one whose fields the
+rounding crossed.
+
+This is worth recording because it is the cost of the interop format showing
+up exactly where Ch. 5 §1.1 said it would — at the boundary and nowhere else.
+Native storage never divides. `examples/trust/hello.tr` now carries
+`floor_div` and says why in a comment, and it is the first Trust program to
+print text in three scripts.
+
+**`char` may be `impl`ed on** — not yet used, but the list of built-in types
+an impl block may name had `trit`, `bool`, `t9`, `t27` and `taddr` in it and
+would have silently refused `impl char`.
+
+Still not built: `char::try_from`, `to_digit`, `from_digit`, `str.to_utf8` as
+a library function rather than an example's `print`, and `String`.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

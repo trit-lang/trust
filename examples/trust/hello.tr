@@ -1,18 +1,59 @@
 // hello.tr — the smallest interesting program in Trust.
 //
-// The message is an array of UTF-8 code units, one per t9, because Ch. 0 §1.4
-// has no string literal to offer and will not pretend otherwise.
+// The message is a string literal, which is a `&'static str`: a pointer to
+// static storage and a length in *characters*. Text here is one character per
+// word, fixed width (Ch. 5 §1.1), so `s.len()` counts characters and `s[i]`
+// is one — both O(1), and neither is available in a language whose strings
+// are UTF-8.
+//
+// The price is paid at the boundary instead, and `print` is where: the
+// machine's character port takes UTF-8 code units (ISA §2.2), so a character
+// is encoded on its way out.
 
 fn putchar(c: t9);          // declared here, defined outside the language
 
-const MESSAGE: [t9; 14] =
-    [72, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100, 33, 10];
+// UTF-8 slices a code point into fields of six bits, and slicing wants
+// division that rounds *down*. Ch. 1 §4's `/` rounds to nearest — which is
+// what arithmetic wants and what a field extraction must not have: 19990/4096
+// is 5 to the nearest and 4 to the floor, and only one of those is 世.
+fn floor_div(a: t27, b: t27) -> t27 {
+    let q = a / b;
+    if q * b > a { q - 1 } else { q }
+}
 
-fn main() -> t27 {
+fn field(a: t27, shift: t27) -> t27 {
+    let d = floor_div(a, shift);
+    d - floor_div(d, 64) * 64
+}
+
+fn print(s: &str) {
     let mut i: taddr = 0;
-    while i < 14 {
-        putchar(MESSAGE[i]);
+    while i < s.len() {
+        let c = s[i] as t27;
+        if c < 128 {
+            putchar(c as t9);
+        } else {
+            if c < 2048 {
+                putchar((192 + floor_div(c, 64)) as t9);
+                putchar((128 + field(c, 1)) as t9);
+            } else {
+                if c < 65536 {
+                    putchar((224 + floor_div(c, 4096)) as t9);
+                    putchar((128 + field(c, 64)) as t9);
+                    putchar((128 + field(c, 1)) as t9);
+                } else {
+                    putchar((240 + floor_div(c, 262144)) as t9);
+                    putchar((128 + field(c, 4096)) as t9);
+                    putchar((128 + field(c, 64)) as t9);
+                    putchar((128 + field(c, 1)) as t9);
+                }
+            }
+        }
         i += 1;
     }
+}
+
+fn main() -> t27 {
+    print("Hello, 世界! 🙂\n");
     0
 }

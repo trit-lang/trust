@@ -56,7 +56,7 @@ core/      2 082 lines  crate trit-core — Bt, Tint, flavors, faults, literals
 compiler/ 26 037 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
 vm/        4 566 lines  crate tritium  — machine, assembler, image format, profiler
 docs/
-├── spec-gaps.md               75 entries: every place the spec was silent or wrong
+├── spec-gaps.md               76 entries: every place the spec was silent or wrong
 └── status.md                  this file
 scripts/
 ├── stats.sh                   produces every number in this document
@@ -127,7 +127,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6) |
 
-**362 tests, zero clippy warnings, 56 commits.** `scripts/stats.sh`.
+**365 tests, zero clippy warnings, 57 commits.** `scripts/stats.sh`.
 
 ---
 
@@ -154,7 +154,7 @@ inference and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
 
 | Missing | Why |
 |---|---|
-| strings, so `"hello"` | `char` is built (G9.5); `str` needs static storage the compiler does not emit yet. Write `[t9; N]` of code units |
+| `String`, and growable text | `str` and string literals are built (G9.6) and are `&'static`; a growable one needs the heap |
 | ranges, so `for i in 0..10` | Ch. 0 §4 reserves range expressions |
 | a type parameterized by a `const` | `const N` works as an array *length* (G8.2); `struct Grid<const N: taddr>` is Ch. 4 §2.4 and unimplemented |
 | `Box`, any heap allocation | Ch. 5 §2 specifies it; the allocator is two functions a target supplies, and no target supplies them |
@@ -376,12 +376,12 @@ Three coherent directions, in no forced order:
 > double-free, found by a crash, in a session that is thinking about
 > allocation. The cheapest time to look is while nothing is at stake.
 
-**A. Ch. 5 as implementation.** `char` and character literals are built
-(G9.5). Next, in dependency order: static storage for string data, then `str`
-and string literals, then `char::try_from` and the UTF-8 conversion — after
-which the examples stop writing `putchar(48)`. Then `?`, which needs nothing
-new, then the iterator adaptors, then the heap, which needs `_end` from the
-assembler (G9.2) and two functions from the runtime.
+**A. Ch. 5 as implementation.** `char`, `str` and both literal forms are
+built (G9.5, G9.6): `examples/trust/hello.tr` prints `Hello, 世界! 🙂` from a
+string literal. Next: `char::try_from`, `to_digit`, `from_digit`, and
+`str.to_utf8` as a library function rather than an example's `print`. Then
+`?`, which needs nothing new, then the iterator adaptors, then the heap, which
+needs `_end` from the assembler (G9.2) and two functions from the runtime.
 
 **B. Backend quality.** The instruction stream is a third of what it was
 (G8.6–G8.13, −66.6% on HPL), and memory is nearly out of the picture: frame

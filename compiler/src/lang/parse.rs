@@ -1294,6 +1294,10 @@ impl Parser {
                 self.bump();
                 Ok(Expr::Char(v, line))
             }
+            Tok::StrLit(cs) => {
+                self.bump();
+                Ok(Expr::Str(cs, line))
+            }
             Tok::Kw("self") => {
                 self.bump();
                 Ok(Expr::Path("self".to_string(), line))

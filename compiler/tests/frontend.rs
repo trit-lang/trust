@@ -60,7 +60,7 @@ fn value(expr: &str) -> i128 {
 fn hello_world_runs_the_whole_way() {
     let (status, out) = run(include_str!("../../examples/trust/hello.tr"));
     assert_eq!(status, 0);
-    assert_eq!(out, "Hello, world!\n");
+    assert_eq!(out, "Hello, 世界! 🙂\n");
 }
 
 #[test]
@@ -319,7 +319,9 @@ fn immutable_bindings_cannot_be_assigned() {
 
 #[test]
 fn the_deferred_features_say_what_they_are_waiting_for() {
-    assert!(error("fn main() -> t27 { let s = \"hi\"; 0 }").contains("static storage"));
+    // Text is no longer deferred: Ch. 5 §1 defines it and §1.4's literals
+    // lex, so what is left is what waits on storage the compiler does not
+    // emit or on a chapter nobody has written.
     assert!(error("fn main() -> t27 { 1 ^ 2 }").contains("tmul"));
     // Reserved for a chapter nobody has written…
     assert!(error("fn main() -> t27 { mod m; 0 }").contains("not written yet"));
@@ -2636,4 +2638,48 @@ fn a_character_literal_is_told_from_a_lifetime_by_what_closes_it() {
         let e = error(src);
         assert!(e.contains(want), "{src}\n  gave: {e}");
     }
+}
+
+#[test]
+fn a_string_literal_is_a_fat_pointer_to_static_storage() {
+    // Ch. 5 §1.3. `str` is `[char]` and `&str` is the fat pointer every slice
+    // has: an address and a length in *characters*. Fixed width is what makes
+    // `len` and `[i]` mean that, and both are O(1).
+    assert_eq!(
+        run("fn main() -> t27 { \
+                 let s: &str = \"hello\"; \
+                 let t = \"一二三\"; \
+                 (s.len() as t27) * 100 + (t.len() as t27) * 10 + (s[1] as t27) \
+             }")
+        .0,
+        5 * 100 + 3 * 10 + 101
+    );
+
+    // The characters are one word each, in a global — one per distinct
+    // literal, since a `&'static str` has no identity beyond what it points
+    // at.
+    let printed = tir::print_module(&tir_of(
+        "fn main() -> t27 { let a = \"ab\"; let b = \"ab\"; let c = \"c\"; 0 }",
+    ));
+    assert_eq!(printed.matches("global @str.").count(), 2, "{printed}");
+    assert!(printed.contains("global @str.0 : tryte[6]"), "{printed}");
+    assert!(printed.contains("global @str.1 : tryte[3]"), "{printed}");
+}
+
+#[test]
+fn hello_world_says_hello_in_three_scripts() {
+    // The whole of Ch. 5 §1 that is built, end to end: a string literal, a
+    // character read out of it, and the UTF-8 encoding that happens at the
+    // boundary and nowhere else.
+    let (status, out) = run(include_str!("../../examples/trust/hello.tr"));
+    assert_eq!(status, 0);
+    assert_eq!(out, "Hello, 世界! 🙂\n");
+}
+
+#[test]
+fn an_unterminated_string_stops_at_the_line_it_started_on() {
+    // Not at the end of the file, which is where the error would otherwise be
+    // reported and where it would be useless.
+    let e = error("fn main() -> t27 { let s = \"oops; 0 }\nfn other() {}");
+    assert!(e.contains("unterminated string literal"), "{e}");
 }

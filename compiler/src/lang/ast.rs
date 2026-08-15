@@ -329,6 +329,9 @@ pub enum Expr {
     Trit(Trit, Line),
     /// A character literal, as its Unicode scalar value (Ch. 5 §1.4).
     Char(i128, Line),
+    /// A string literal, as its characters. Its type is `&'static str`, and
+    /// its storage is a global (Ch. 5 §1.4).
+    Str(Vec<i128>, Line),
     /// `true` or `false`.
     Bool(bool, Line),
     /// `()`.
@@ -392,6 +395,7 @@ impl Expr {
             Int(_, l)
             | Trit(_, l)
             | Char(_, l)
+            | Str(_, l)
             | Bool(_, l)
             | Unit(l)
             | Path(_, l)

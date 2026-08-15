@@ -93,15 +93,17 @@ The whole pipeline runs, from Trust source to the machine:
 $ cat examples/trust/hello.tr
 fn putchar(c: t9);          // declared here, defined outside the language
 
-const MESSAGE: [t9; 14] =
-    [72, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100, 33, 10];
-
-fn main() -> t27 {
+fn print(s: &str) {
     let mut i: taddr = 0;
-    while i < 14 {
-        putchar(MESSAGE[i]);
+    while i < s.len() {
+        let c = s[i] as t27;
+        ...                                     // UTF-8, at the boundary
         i += 1;
     }
+}
+
+fn main() -> t27 {
+    print("Hello, 世界! 🙂\n");
     0
 }
 
@@ -109,14 +111,19 @@ $ trustc compile examples/trust/hello.tr > hello.t27
 $ cat examples/trisc/runtime.t27 >> hello.t27   # "linking" is concatenation
 $ tritium asm hello.t27 -o hello.timg
 $ tritium run hello.timg
-Hello, world!
+Hello, 世界! 🙂
 ```
 
-There is no string literal because there is no text encoding yet (AM §5 defers
-it to the library chapter), and no `println!` because there is nothing for it
-to print through — `putchar` is *declared* in Trust and *defined* in assembly,
-since TIR §5 has no integer-to-pointer cast and so cannot name a device
-address at all.
+Text is **one character per word, fixed width** (Ch. 5 §1.1), so `s.len()`
+counts characters and `s[i]` is one — both O(1), and neither is available in a
+language whose strings are UTF-8. Against a UTF-8 carrier that costs 3× for
+ASCII, 1.5× for Greek, exactly the same for CJK, and *less* above the BMP.
+UTF-8 is what the boundary converts to, and `print` above is the boundary.
+
+There is no `println!` because there is nothing for it to print through, and
+no macros to write it with — `putchar` is *declared* in Trust and *defined* in
+assembly, since TIR §5 has no integer-to-pointer cast and so cannot name a
+device address at all.
 
 Correctness is held to the TIR spec's own criterion. Every test in
 `compiler/tests/pipeline.rs` runs a function on the TIR interpreter *and*
