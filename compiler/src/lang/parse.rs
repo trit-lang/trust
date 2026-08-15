@@ -909,6 +909,11 @@ impl Parser {
             };
             return Ok(Ty::ImplFn(kind, params, ret, line));
         }
+        // `!` — the type with no values (Ch. 1 §2). It takes no arguments
+        // and has no associated types, so it is returned as it stands.
+        if self.eat_op("!") {
+            return Ok(Ty::Never(line));
+        }
         let name = self.expect_ident()?;
         let args = self.generic_args()?;
         let base = if args.is_empty() {

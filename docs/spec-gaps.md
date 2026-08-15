@@ -1741,6 +1741,44 @@ remover removes is exactly the code nobody looked at.
 language's own. Three tests and `examples/trust/demo.tr` declared their own
 and now do not.
 
+**G9.10 — `!` was a type the compiler had and the specification did not.**
+`Ty::Never` has existed since the beginning: `return`, `break` and `continue`
+produce it, G9.9 gave it to a `loop` nothing breaks out of, and it prints as
+`!` in diagnostics. No chapter defined it, the grammar had no production for
+it, and `fn f() -> !` was a parse error. A user could be *shown* a type they
+could not write and could not look up.
+
+Ch. 1 §2 defines it now — the type with no values, from which both facts
+follow: nothing can be a `!`, so no place has that type and it has no width,
+size or alignment; and a value of a type with no values can be a value of any
+type, vacuously, so an expression of type `!` stands wherever a type is
+wanted.
+
+**And it was not enough on its own.** The only way to *reach* `!` was
+`loop {}`, which hangs rather than stops, so a library could not write "this
+cannot go on" — which is what `Ch. 5 §4.3`'s `unwrap` needs. Ch. 1 §6 gains
+`trap()`, of type `!`, and the name is the machine's: AM §4 calls it a fault,
+the ISA has a `trap` instruction and TIR a `trap` terminator, and a second
+word here would have been the only place the stack disagreed with itself.
+
+With both, Ch. 5 §4.3 is written in the language:
+
+```
+impl<T> Option<T> {
+    fn unwrap(self) -> T {
+        match self { Option::Some(v) => v, Option::None => trap() }
+    }
+}
+```
+
+`unwrap`, `unwrap_or`, `is_some`/`is_none` and the `Result` four are now
+prelude Trust. `expect` still does not exist, for the reason §4.3 gives.
+
+**The citation checker caught the author again**, and this time on the same
+turn: three comments named a subsection of Ch. 1's type table, which has
+none. That is the third batch of citations it has caught and the second
+written by someone who had just read the section they were citing.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

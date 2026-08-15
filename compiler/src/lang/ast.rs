@@ -250,6 +250,9 @@ pub enum Ty {
     Name(String, Line),
     /// `()`.
     Unit(Line),
+    /// `!` — the type with no values (Ch. 1 §2). Writable only in return
+    /// position, where it says the function does not return.
+    Never(Line),
     /// `[T; N]`.
     Array(Box<Ty>, Box<Expr>, Line),
     /// `(T, U, …)`.
@@ -280,6 +283,7 @@ impl Ty {
         match self {
             Ty::Name(_, l)
             | Ty::Unit(l)
+            | Ty::Never(l)
             | Ty::Array(_, _, l)
             | Ty::Tuple(_, l)
             | Ty::Ref(_, _, l)

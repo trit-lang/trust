@@ -3004,3 +3004,62 @@ fn a_function_nothing_calls_is_still_verified() {
     assert_eq!(m.funcs.len(), 1, "{}", tir::print_module(&m));
     assert_eq!(m.funcs[0].sig.name, "main");
 }
+
+#[test]
+fn the_type_with_no_values_is_writable_and_trap_has_it() {
+    // Ch. 1 §2: nothing can be a `!`, so a `!` may stand where any type is
+    // wanted — vacuously. Ch. 1 §6's `trap()` is the only one of the four
+    // ways to have it that is a function, and it is what lets a library say
+    // "this cannot go on" in the language.
+    assert_eq!(
+        run("fn get(o: Option<t27>) -> t27 { \
+                 match o { Option::Some(v) => v, Option::None => trap() } \
+             } \
+             fn main() -> t27 { get(Option::Some(7)) }")
+        .0,
+        7
+    );
+
+    // It is writable in return position, which is what says a function does
+    // not return.
+    assert_eq!(
+        run("fn boom() -> ! { trap() } \
+             fn main() -> t27 { let x: t27 = 3; if x > 100 { boom(); } x }")
+        .0,
+        3
+    );
+
+    let e = error("fn main() -> t27 { trap(1) }");
+    assert!(e.contains("takes no arguments"), "{e}");
+}
+
+#[test]
+fn unwrap_traps_and_is_written_in_the_language() {
+    // Ch. 5 §4.3. `expect` does not exist: its whole value is the message,
+    // and a message has nowhere to go.
+    assert_eq!(
+        run("fn main() -> t27 { \
+                 let a: Option<t27> = Option::Some(7); \
+                 let b: Option<t27> = Option::None; \
+                 let c: Result<t27, t9> = Result::Ok(3); \
+                 a.unwrap() * 1000 + b.unwrap_or(20) * 10 + c.unwrap() \
+             }")
+        .0,
+        7 * 1000 + 20 * 10 + 3
+    );
+
+    // And on the empty one it stops the program — the same kind of stop as
+    // an out-of-bounds index (Ch. 2 §3).
+    let asm = {
+        let m = tir_of("fn main() -> t27 { let b: Option<t27> = Option::None; b.unwrap() }");
+        let legalized = tir::legalize_module(&m, &tir::TargetDesc::tritium()).unwrap();
+        trustc::codegen::compile(&legalized, "main").unwrap()
+    };
+    let image = tritium::assemble(&asm).unwrap();
+    let mut vm = tritium::Vm::with_default_memory();
+    vm.load_image(&image);
+    assert!(matches!(
+        vm.run(1_000_000),
+        tritium::Stop::Fault(trit_core::FaultCode::Trap, _)
+    ));
+}

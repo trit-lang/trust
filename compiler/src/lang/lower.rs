@@ -1439,6 +1439,7 @@ struct SelfTy {
 
 fn subst_ty(t: &mut ast::Ty, self_ty: &SelfTy) {
     match t {
+        ast::Ty::Never(_) => {}
         ast::Ty::SelfTy(_) => *t = self_ty.ty.clone(),
         ast::Ty::Array(e, _, _) | ast::Ty::Ref(e, _, _) | ast::Ty::Slice(e, _) => {
             subst_ty(e, self_ty)
@@ -2940,6 +2941,8 @@ fn resolve_ty(t: &ast::Ty, types: &Types) -> R<Ty> {
 /// than of rewriting it.
 fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty> {
     match t {
+        // `!` — the type with no values (Ch. 1 §2).
+        ast::Ty::Never(_) => Ok(Ty::Never),
         // Substitution replaces every `Self` before lowering (Ch. 4 §1.2),
         // so one surviving here was written where there is no impl.
         ast::Ty::SelfTy(l) => err(
@@ -4978,6 +4981,18 @@ impl Fn<'_> {
         expected: Option<&Ty>,
         line: Line,
     ) -> R<(Operand, Ty)> {
+        // `trap()` — stop the program (Ch. 1 §6). A fault has no handler
+        // (AM §4), so nothing after it runs and its type is `!`: it is what
+        // lets a library function say "this cannot go on" in the language,
+        // which nothing else could.
+        if name == "trap" {
+            if !args.is_empty() {
+                return err(line, "`trap` takes no arguments");
+            }
+            self.finish(Terminator::Trap(FaultCode::Trap));
+            return Ok((unit(), Ty::Never));
+        }
+
         // `sign(x)` is a function, not a method (Ch. 1 §6).
         if name == "sign" {
             if args.len() != 1 {

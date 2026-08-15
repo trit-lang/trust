@@ -32,6 +32,43 @@ pub const PRELUDE: &str = r#"
 enum Option<T> { None, Some(T) }
 enum Result<T, E> { Ok(T), Err(E) }
 
+// --- Ch. 5 §4: what a failure does when nobody said ------------------------
+
+// `unwrap` traps: there is no unwinding and no handler (AM §4), so it is the
+// same kind of stop as an out-of-bounds index. `expect` does not exist,
+// because its whole value is the message and a message has nowhere to go
+// (Ch. 5 §4.3).
+
+impl<T> Option<T> {
+    fn unwrap(self) -> T {
+        match self { Option::Some(v) => v, Option::None => trap() }
+    }
+    fn unwrap_or(self, d: T) -> T {
+        match self { Option::Some(v) => v, Option::None => d }
+    }
+    fn is_some(&self) -> bool {
+        match self { Option::Some(v) => true, Option::None => false }
+    }
+    fn is_none(&self) -> bool {
+        match self { Option::Some(v) => false, Option::None => true }
+    }
+}
+
+impl<T, E> Result<T, E> {
+    fn unwrap(self) -> T {
+        match self { Result::Ok(v) => v, Result::Err(e) => trap() }
+    }
+    fn unwrap_or(self, d: T) -> T {
+        match self { Result::Ok(v) => v, Result::Err(e) => d }
+    }
+    fn is_ok(&self) -> bool {
+        match self { Result::Ok(v) => true, Result::Err(e) => false }
+    }
+    fn is_err(&self) -> bool {
+        match self { Result::Ok(v) => false, Result::Err(e) => true }
+    }
+}
+
 // --- Ch. 5 §1: text -------------------------------------------------------
 
 // Division that rounds *down*, and the matching remainder. Ch. 1 §4's `/`

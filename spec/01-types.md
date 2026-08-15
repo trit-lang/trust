@@ -50,6 +50,7 @@ radix-independent.
 | `t27` | ±3 812 798 742 493 | 27 trits | 3 trytes | 3 trytes |
 | `taddr` | target address range | word | 3 trytes | 3 trytes |
 | `()` | () | — | 0 | 1 |
+| `!` | none | — | — | — |
 
 Notes, in order:
 
@@ -85,6 +86,32 @@ a non-negative result, and bounds checks reject negatives like any other
 out-of-range index. (This is the one place the absence of unsigned types
 costs a compare; it buys the total absence of the unsigned-underflow bug
 class, e.g. the perennial `len - 1` wraparound.)
+
+**`!`** is the type with **no values**, and the two facts about it follow from
+that. Nothing can be a `!`, so no place has that type and no value is stored
+in one — which is why it has no width, no size and no alignment. And a value
+of a type with no values can be a value of any type, vacuously, so an
+expression of type `!` may appear wherever any type is wanted.
+
+It is written only in return position — `fn boom() -> !` — where it says the
+function does not return. An expression has it without anyone writing it:
+`return`, `break` and `continue` leave rather than produce, and a `loop` that
+nothing breaks out of has no exit. `trap()` (§6) is the fourth, and the only
+one that is a function.
+
+```
+fn get(o: Option<t27>) -> t27 {
+    match o { Option::Some(v) => v, Option::None => trap() }
+}
+```
+
+The second arm is a `t27` in the sense that matters: it has no value to be
+the wrong type.
+
+> **Why the language needs to say this at all (informative).** A library must
+> be able to write "this cannot go on" — `unwrap` is the case (Ch. 5 §4.3) —
+> and without `!` it cannot: every arm of a `match` would have to produce a
+> value, and there is no value to produce.
 
 ---
 
@@ -250,7 +277,15 @@ pick silently. The bridge is the explicit projection methods:
 t.is_pos()  t.is_zero()  t.is_neg()   : trit → bool
 b.to_trit()                           : bool → trit   (false→0t, true→1t)
 sign(x)  ≡  x <=> 0                   : integer → trit
+trap()                                : → !
 ```
+
+`trap()` stops the program. AM §4 gives a fault a code and no handler, so
+nothing after it runs and there is nothing to catch it; its type is `!` (§2)
+and it is the only way a program written in this language can say so. The name
+is the machine's: the AM calls it a fault, the ISA has a `trap` instruction
+and TIR a `trap` terminator, and inventing a second word here would be the
+only place the stack disagreed with itself.
 
 ---
 

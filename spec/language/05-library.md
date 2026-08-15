@@ -527,7 +527,15 @@ fn Option.unwrap_or_else(self, f: impl Fn() -> T) -> T;
 ```
 
 `unwrap` traps with `F_TRAP`. There is no unwinding and no handler (AM §4),
-so it is the same kind of stop as an out-of-bounds index.
+so it is the same kind of stop as an out-of-bounds index — and it is written
+in the language, because Ch. 1 §6's `trap()` has type `!` and an arm with no
+value is an arm of any type:
+
+```
+fn unwrap(self) -> T {
+    match self { Option::Some(v) => v, Option::None => trap() }
+}
+```
 
 **`expect(msg)` does not exist.** Its whole value is the message, and a
 message needs somewhere to go: AM §4 gives a fault a code and nothing else,

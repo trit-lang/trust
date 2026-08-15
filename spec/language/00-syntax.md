@@ -497,7 +497,7 @@ assoc_item  := fn | 'type' ident bounds? ( '=' type )? ';'
              | 'const' ident ':' type ( '=' expr )? ';'      -- Ch. 4 §1.7
 
 targs       := ( '<' ( type | lifetime ),* '>' )?
-type        := 'trit' | 'bool' | 't9' | 't27' | 'taddr' | 'char' | 'Self'
+type        := 'trit' | 'bool' | 't9' | 't27' | 'taddr' | 'char' | '!' | 'Self'
              | '(' type,* ')' | '[' type ( ';' expr )? ']'
              | '&' lifetime? 'mut'? type                     -- Ch. 3 §2.1
              | 'dyn' ident                                   -- Ch. 4 §3.1
