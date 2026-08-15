@@ -393,6 +393,26 @@ A binding is immutable unless it says `mut`. Ch. 1's numeric types are all
 `Copy`-shaped scalars, so nothing about ownership is visible here yet; Ch. 3
 is where that changes.
 
+**A block-shaped expression in statement position ends its statement.** `if`,
+`match`, `loop`, `while` and a bare `{ … }` may stand as statements without a
+`;`, and where one does, it ends at its closing brace: an operator on the next
+line begins a new statement rather than continuing the old one.
+
+```
+if a > 3 { n = 100; }
+(a) * 2 + n              // a second statement, not a call of the `if`
+```
+
+This is the rule Rust has, and it is here for the same reason: without it the
+two lines above parse as one, the `if`'s value is `()`, and the diagnostic is
+that `()` is not callable — true, and no help at all. The cost is that a
+method on a `match` in statement position needs parentheses, which is a cost
+paid where it is visible.
+
+In **tail** position nothing changes: a block-shaped expression is the block's
+value there, so `fn pick(c: bool) -> t27 { if c { 1 } else { 2 } }` means what
+it looks like.
+
 Literal type inference is Ch. 1 §3's: unconstrained integer literals default
 to `t27`, and a literal that does not fit its inferred type is an error rather
 than a wrap.

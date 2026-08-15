@@ -1977,11 +1977,23 @@ first version of the fix had no such condition and freed the binary tree of
 G9.13 three times over — `total(t: &Tree)` walks a borrowed tree, and every
 `Node(l, x, r)` arm was handing `l` and `r` a `Box` the tree still held.
 
-*Still open, and recorded rather than fixed:* a binding taken out of borrowed
-storage is a non-owning copy of an owning value, and nothing stops a program
-from moving it somewhere that will drop it. Matching through a reference
-should bind by reference; that it binds by copy-of-storage is a hole the
-ownership rules do not currently close.
+*Closed, and the closing found a second thing.* The first attempt marked a
+borrowed binding with `mark_moved`, which says the place is **uninitialized**
+— so a program that only wanted to read `p.id` through a `&Holder` was told
+`p` had been moved out of. `Owns` had been carrying two questions at once:
+"must this be dropped" and "may this be read", which have the same answer for
+every place but this one.
+
+They are separate now. A borrowed binding gets a slot, a name and **no entry
+in the owned set**, so nothing drops it, and it is marked so that moving out
+of it is refused with a diagnostic that is true: *"`p` names part of a value
+this `match` borrowed, so it cannot be moved out of; borrow it instead."*
+Ch. 3 §1.3 states the rule.
+
+Binding **by reference** — Rust's match ergonomics, which would let the
+refused program be written by naming what it is — is reserved. It needs the
+binding's type to become `&T`; refusing the move is sound and less
+convenient, and that trade is the one draft 0.1 makes everywhere else.
 
 **G9.16 — `if` in statement position is still an expression to the parser.**
 `if c { … } (a) * 2` parses as a *call* of the `if`'s value, and reports that
@@ -1989,8 +2001,18 @@ ownership rules do not currently close.
 statement position a statement reading; Ch. 0 §6's grammar says nothing about
 the distinction.
 
-*Not decided.* The workaround is a `let`, and the fix is a grammar rule about
-statement position that the author should choose the shape of.
+*Decision:* Rust's rule. A block-shaped expression in statement position is
+parsed **alone** — it ends at its closing brace, and an operator after it
+begins the next statement. Ch. 0 §5.2 states it.
+
+The choice was between that and requiring parentheses to disambiguate, and it
+was not close: `block_like` already let these expressions stand as statements
+without a `;`, with the comment "as in Rust", so the language had committed to
+half the rule already and the half it was missing was the half that decides
+where the statement *ends*. Tail position is untouched, so
+`fn pick(c: bool) -> t27 { if c { 1 } else { 2 } }` still means what it looks
+like, and the cost is that a method call on a `match` in statement position
+needs parentheses — paid where it is visible.
 
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but

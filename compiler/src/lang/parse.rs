@@ -980,7 +980,20 @@ impl Parser {
                 continue;
             }
 
-            let e = self.expr()?;
+            // In statement position a block-shaped expression is parsed
+            // *alone*: it ends where its closing brace does, and an operator
+            // after it begins the next statement rather than continuing it.
+            //
+            // Without this rule `if c { … } (a) * 2` reads as a call of the
+            // `if`'s value, and the diagnostic is about `()` not being
+            // callable — which is true and useless. It is still the tail if
+            // a `}` follows, so `fn f() -> t27 { if c { 1 } else { 2 } }`
+            // means what it looks like.
+            let e = if self.at_block_start() {
+                self.primary()?
+            } else {
+                self.expr()?
+            };
             if self.eat_op(";") {
                 stmts.push(Stmt::Expr(e));
             } else if self.at_op("}") {
@@ -996,6 +1009,14 @@ impl Parser {
             }
         }
         Ok(Block { stmts, tail, line })
+    }
+
+    /// True where a block-shaped expression begins.
+    fn at_block_start(&self) -> bool {
+        matches!(
+            self.peek(),
+            Tok::Kw("if") | Tok::Kw("match") | Tok::Kw("loop") | Tok::Kw("while")
+        ) || self.at_op("{")
     }
 
     fn let_stmt(&mut self) -> R<Stmt> {

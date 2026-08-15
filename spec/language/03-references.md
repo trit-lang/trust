@@ -76,6 +76,34 @@ Moving out of a place leaves *that place* uninitialized, not the whole
 variable: after `let a = p.x;` where `p.x` moves, `p.y` remains usable and `p`
 as a whole does not.
 
+**A `match` binding is a place, and who owns it depends on the scrutinee.**
+Matching a *value* moves it, so an arm's bindings receive what it held and are
+dropped at the end of the arm — an arm is a scope like any other (§1.4).
+Matching through a *reference* moves nothing: the bindings name storage the
+referent still owns, so they may be **read and borrowed from but not moved
+out of**, and nothing drops them.
+
+```
+match h {                       // h : &Holder
+    Holder::Has(p) => p.id,     // fine — a read through the borrow
+    …
+}
+match h {
+    Holder::Has(p) => { let taken: Port = p; … }   // rejected: not yours
+    …
+}
+```
+
+The two questions "must this be dropped" and "may this be read" have the same
+answer for every place but this one, which is why they are stated separately
+here. A borrowed binding is initialized — reading it is not a use of something
+uninitialized — and it is not an owner.
+
+*Reserved:* binding **by reference**, so that the second example above could
+be written by naming what it is rather than being refused. That is Rust's
+match ergonomics, and it needs the binding's type to become `&T`; draft 0.1
+refuses the move instead, which is sound and less convenient.
+
 ### 1.4 Destructors
 
 A type acquires a destructor by defining one:

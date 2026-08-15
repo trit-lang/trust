@@ -394,6 +394,11 @@ rules of its own. Building the last of those uncovered the drop ledger's fifth
 bug — an arm's pattern bindings were never dropped — and closing it needed the
 condition that they own only when the scrutinee was matched by value.
 
+Both gaps that opened underneath it are closed: a `match` binding taken
+through a reference may be read and borrowed but not moved out of (Ch. 3
+§1.3), and a block-shaped expression in statement position ends its statement
+(Ch. 0 §5.2).
+
 What is left of the chapter is `insert` and `remove` (both want the
 `copy_within` §7 reserves), `collect` and `FromIterator`, `push_str`, and
 `F: Fn(A) -> B` as a written bound, without which the adaptors need their

@@ -314,6 +314,15 @@ struct Local {
     /// A slot holding 1 while this local still owns its value, for the case
     /// where control flow makes ownership uncertain (Ch. 3 §1.4).
     drop_flag: Option<String>,
+    /// Set for a `match` binding read out of *borrowed* storage.
+    ///
+    /// `Owns` answers "must this be dropped", and a place also has to answer
+    /// "may this be read" — for every local but this one the two answers
+    /// agree, and that is why one enum carried both. A binding taken through
+    /// a reference is initialized and readable while the referent, not it,
+    /// owns what it names: it may be read and borrowed, and moving it would
+    /// make a second owner of one value (Ch. 3 §1.2).
+    borrowed: bool,
 }
 
 /// Everything the frontend knows about the nominal types in a file, plus the
@@ -3623,6 +3632,7 @@ impl Fn<'_> {
             ty,
             mutable: false,
             drop_flag: None,
+            borrowed: false,
         };
         self.scopes
             .last_mut()
@@ -3654,6 +3664,7 @@ impl Fn<'_> {
             ty,
             mutable,
             drop_flag: drop_flag.clone(),
+            borrowed: false,
         };
         let scope = self.scopes.last_mut().expect("a scope");
         scope.insert(name.to_string(), local.clone());
@@ -3670,6 +3681,34 @@ impl Fn<'_> {
                 depth: self.scopes.len() - 1,
             });
         }
+        local
+    }
+
+    /// Declare a `match` binding that names storage somebody else owns.
+    ///
+    /// Not `declare` followed by `mark_moved`: that says the place is *not
+    /// initialized*, and a reader of `p.id` through a `&Holder` was told `p`
+    /// had been moved out of. This one gives the name a slot and no entry in
+    /// the owned set at all, so nothing drops it — and marks it, so that
+    /// moving out of it is refused with a diagnostic that is true.
+    fn declare_borrowed(&mut self, name: &str, ty: Ty) -> Local {
+        let slot = self.fresh(&format!("{name}.slot"));
+        let trytes = self.types.size(&ty).max(1) as u32;
+        self.slots.push(Inst {
+            results: vec![slot.clone()],
+            kind: InstKind::Slot { trytes },
+        });
+        let local = Local {
+            slot,
+            ty,
+            mutable: false,
+            drop_flag: None,
+            borrowed: true,
+        };
+        self.scopes
+            .last_mut()
+            .expect("a scope")
+            .insert(name.to_string(), local.clone());
         local
     }
 
@@ -4472,6 +4511,20 @@ impl Fn<'_> {
                     // Reading a value that is not copyable moves it, and a
                     // moved-out place may not be read (Ch. 3 §1.2).
                     if !self.types.is_copyable(&local.ty) {
+                        // A binding taken through a reference names storage
+                        // the referent still owns, so there is nothing here
+                        // to move. It can be read through and borrowed from;
+                        // taking it would make a second owner of one value.
+                        if local.borrowed {
+                            return err(
+                                *line,
+                                format!(
+                                    "`{name}` names part of a value this `match` borrowed, \
+                                     so it cannot be moved out of; borrow it instead \
+                                     (Ch. 3 §1.2)"
+                                ),
+                            );
+                        }
                         match self.ownership(name) {
                             Some(Owns::No) => {
                                 return err(
@@ -9185,11 +9238,12 @@ impl Fn<'_> {
 
         if let ast::Pattern::Bind(name, _) = &arm.patterns[0] {
             let ty = Ty::Enum(enum_name.to_string());
-            let local = self.declare(name, ty.clone(), false);
+            let local = if borrowed {
+                self.declare_borrowed(name, ty.clone())
+            } else {
+                self.declare(name, ty.clone(), false)
+            };
             self.store_at(&local.slot, 0, &ty, addr.clone(), line)?;
-            if borrowed {
-                self.mark_moved(name);
-            }
         }
         if let (Some(index), ast::Pattern::Aggregate(_, fields, _)) = (variant, &arm.patterns[0]) {
             let declared = self.types.variant_fields(enum_name, index);
@@ -9216,14 +9270,15 @@ impl Fn<'_> {
                 };
                 let p = self.offset(addr.clone(), off);
                 let v = self.load_from(p, &ft);
-                let local = self.declare(bound, ft.clone(), false);
-                self.store_at(&local.slot, 0, &ft, v, arm.line)?;
                 // A binding read out of borrowed storage never owns: the
                 // referent still does, and two owners of one allocation is
                 // the bug this whole chapter exists to make impossible.
-                if borrowed {
-                    self.mark_moved(bound);
-                }
+                let local = if borrowed {
+                    self.declare_borrowed(bound, ft.clone())
+                } else {
+                    self.declare(bound, ft.clone(), false)
+                };
+                self.store_at(&local.slot, 0, &ft, v, arm.line)?;
             }
         }
 

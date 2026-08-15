@@ -3416,8 +3416,7 @@ fn reserve_asks_for_exactly_what_it_says() {
              let b: taddr = v.capacity(); \
              let mut n: t27 = 0; \
              if v.is_empty() { n = 100; } \
-             let r: t27 = (a as t27) * 100 + (b as t27) + n; \
-             r"
+             (a as t27) * 100 + (b as t27) + n"
         ),
         1010
     );
@@ -3540,4 +3539,85 @@ fn a_string_is_a_vec_of_char() {
     // interchange format is paid at the boundary and nowhere else.
     assert_eq!(out, "\u{4e16}\u{754c}!");
     assert_eq!(status, 3);
+}
+
+#[test]
+fn a_borrowed_binding_can_be_read_but_not_taken() {
+    // `Owns` answers "must this be dropped"; a place also has to answer "may
+    // this be read", and for every local but this one the two agree. A
+    // binding taken through a reference names storage the referent still
+    // owns: readable and borrowable, and moving it would make a second owner
+    // of one value (Ch. 3 §1.2).
+    let (status, out) = run("fn putchar(c: t9); \
+         struct Port { id: t27 } \
+         impl Drop for Port { fn drop(self) { putchar(48 + (self.id as t9)); } } \
+         enum Holder { Empty, Has(Port) } \
+         fn peek(h: &Holder) -> t27 { \
+             match h { \
+                 Holder::Empty => 0, \
+                 Holder::Has(p) => p.id, \
+             } \
+         } \
+         fn main() -> t27 { \
+             let h: Holder = Holder::Has(Port { id: 7 }); \
+             let a: t27 = peek(&h) + peek(&h); \
+             putchar(124); \
+             a \
+         }");
+    // Read twice through the borrow, dropped once at the end — after the
+    // `|`, because the holder outlives both reads.
+    assert_eq!(out, "|7");
+    assert_eq!(status, 14);
+}
+
+#[test]
+fn taking_a_borrowed_binding_says_why_it_cannot() {
+    // The first version of this rule reused `mark_moved`, which says the
+    // place is *uninitialized* — so a program that only read `p.id` was told
+    // `p` had been moved out of. The refusal has to be its own.
+    let msg = error(
+        "struct Port { id: t27 } \
+         impl Drop for Port { fn drop(self) { } } \
+         enum Holder { Empty, Has(Port) } \
+         fn steal(h: &Holder) -> t27 { \
+             match h { \
+                 Holder::Empty => 0, \
+                 Holder::Has(p) => { let taken: Port = p; 1 } \
+             } \
+         } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(msg.contains("borrowed"), "{msg}");
+    assert!(msg.contains("cannot be moved out of"), "{msg}");
+}
+
+#[test]
+fn a_block_shaped_expression_ends_its_statement() {
+    // In statement position `if`, `match`, `loop`, `while` and `{ … }` are
+    // parsed alone: they end where their closing brace does, and an operator
+    // after one begins the next statement. Without the rule the `(a)` below
+    // reads as a *call* of the `if`'s value, and the diagnostic is about `()`
+    // not being callable — true, and useless.
+    assert_eq!(
+        value(
+            "let mut n: t27 = 0; \
+             let a: t27 = 7; \
+             if a > 3 { n = 100; } \
+             (a) * 2 + n"
+        ),
+        114
+    );
+    // And a block-shaped expression in *tail* position is still a value, so
+    // the rule costs nothing that was working before.
+    assert_eq!(
+        run("fn pick(c: bool) -> t27 { if c { 1 } else { 2 } } \
+             fn main() -> t27 { \
+                 let m: t27 = match 2 { 1 => 10, 2 => 20, _ => 30 }; \
+                 let mut i: t27 = 0; \
+                 loop { i += 1; if i > 3 { break; } } \
+                 pick(true) * 1000 + m + i \
+             }")
+        .0,
+        1024
+    );
 }
