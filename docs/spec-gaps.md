@@ -2842,9 +2842,19 @@ whenever every discriminant fits.
 
 Specified well enough to build, simply not built yet:
 
-- **Expansion of `div`, `rem` and the shifts** — multi-part division and
-  multi-part shifting are unwritten. (`mul` is different: see G6.6, where the
-  instruction set is the obstacle.) Reported rather than mis-compiled.
+- **A wide shift by a *computed* amount.** `shr t54 %a, %k` with `%k` a value
+  rather than a constant is refused, in as many words. Everything else in
+  this family is built: multi-part `div` and `rem` expand into `lz.div.tN`
+  and `lz.rem.tN` and are tested, and a wide shift by a constant expands. No
+  Trust program can reach the missing case, because Ch. 1's types stop at a
+  word; it is a hole in TIR's coverage rather than in the language's.
+  (`mul` is different: see G6.6, where the instruction set is the obstacle.)
+
+  *This entry said "multi-part division and multi-part shifting are
+  unwritten" until it was checked.* `div t54` legalizes to 908 lines with a
+  real body, and `1000000 / 7` through the interpreter is 142857. A gap log
+  that claims something untrue is worse than one that is merely incomplete,
+  and this is the first entry here to have gone stale.
 - **Optimization passes** — the canonicalizer that "recognizes and re-fuses"
   two-valued predicate patterns (TIR §3.3). Inlining is built (G8.14), and so
   is constant folding (G8.16). Legalization
