@@ -56,7 +56,7 @@ core/      2 082 lines  crate trit-core — Bt, Tint, flavors, faults, literals
 compiler/ 26 037 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
 vm/        4 566 lines  crate tritium  — machine, assembler, image format, profiler
 docs/
-├── spec-gaps.md               77 entries: every place the spec was silent or wrong
+├── spec-gaps.md               78 entries: every place the spec was silent or wrong
 └── status.md                  this file
 scripts/
 ├── stats.sh                   produces every number in this document
@@ -127,7 +127,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6) |
 
-**368 tests, zero clippy warnings, 58 commits.** `scripts/stats.sh`.
+**373 tests, zero clippy warnings, 59 commits.** `scripts/stats.sh`.
 
 ---
 
@@ -162,7 +162,7 @@ inference and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
 | `FnOnce` | every capture is by reference; needs a move analysis of the closure body |
 | `IntoIterator`, so `for x in xs` over an array | array iterators are the library's; the blanket impl it needs now works (G0.14b) |
 | modules, `use`, `pub`, multiple files | reserved in Ch. 0 §1.3 |
-| `unsafe`, raw pointers, `?` | reserved |
+| `unsafe`, raw pointers | reserved; `?` is built (G9.8) |
 | bounds checks a loop condition already implies | every array index still costs two comparisons and two branches; branches and comparisons are 36% of everything HPL executes (G8.13). Removing them needs range analysis, which nothing here does |
 
 **Generic traits were the one substantial hole, and it is closed**
@@ -380,9 +380,9 @@ Three coherent directions, in no forced order:
 literal forms, `char::try_from`, and a text library written in Trust in the
 prelude, which a program pays nothing for unless it calls it.
 `examples/trust/hello.tr` prints `Hello, 世界! 🙂` and the only thing in it
-that is not Trust is `putchar`. Next: `?`, which needs nothing new, then the
-iterator adaptors, then the heap, which needs `_end` from the assembler
-(G9.2) and two functions from the runtime.
+that is not Trust is `putchar`. §4's `?` is built too (G9.8). Next: the
+iterator adaptors, then the heap, which needs `_end` from the assembler (G9.2)
+and two functions from the runtime.
 
 **B. Backend quality.** The instruction stream is a third of what it was
 (G8.6–G8.13, −66.6% on HPL), and memory is nearly out of the picture: frame

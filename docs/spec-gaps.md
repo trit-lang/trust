@@ -1646,6 +1646,40 @@ it stands.
 `examples/trust/hello.tr` is now `print` over `s.to_utf8(&mut buf)`, and the
 only thing in it that is not Trust is `putchar`.
 
+**G9.8 — `?`, and the drop bug it found.** Ch. 5 §4.1: two rules and no
+trait. On `Option`, `Some(v)` continues and `None` returns `None`; on
+`Result`, `Ok(v)` continues and `Err(e)` returns `Err(F::from(e))`, with the
+conversion skipped where the two error types are the same. The two do not mix,
+and the diagnostic says what to write instead.
+
+It is lowered by **desugaring to `match` and `return`**, which is what §4.1
+says it is. That is not laziness: leaving a function early has to drop
+everything the frame owns, and `return` already does — or rather, it was
+supposed to.
+
+**The bug.** `?`'s first test was a drop ledger, and it printed `1-2` where
+`1-21` was right: the value declared *before* the `?` was dropped on the early
+path and not on the other one. It is not `?`'s bug. The hand-written `match`
+with a `return` in an arm does the same, and so does an `if` with a `return`
+in it — a shape a reader meets on their first day.
+
+`return` called `drop_all`, which is `drop_scope(0)`, which **retires** what it
+drops. Retiring is right at the end of a function and wrong in the middle of
+one: a `return` leaves by one path while the paths beside it still own the
+same values, and retiring them there means the value the *other* path owns is
+never dropped at all.
+
+`drop_through` exists for exactly this and its comment names the three
+statements that need it — "`break`, `continue` and `return` leave along one
+path while the scope's other paths still own the same values". `break` and
+`continue` were given it. `return` was not. The comment was correct and the
+code was not, which is the failure mode a comment cannot catch.
+
+Found the same way the three batches before it were: G0.16 and G0.17 both came
+out of giving the test suite a resource whose destructor prints. That
+instrument has now found four separate drop bugs and has never found anything
+else.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

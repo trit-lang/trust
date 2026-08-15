@@ -892,6 +892,7 @@ fn free_names(e: &ast::Expr, bound: &mut Vec<String>, out: &mut Vec<String>) {
     };
     match e {
         Char(..) | Str(..) => {}
+        Try(a, _) => free_names(a, bound, out),
         Path(n, _) => see(n, bound, out),
         Aggregate(_, fields, _) => {
             for (_, v) in fields {
@@ -1019,6 +1020,7 @@ fn for_each_child(e: &ast::Expr, f: &mut impl FnMut(&ast::Expr)) {
     use ast::Expr::*;
     match e {
         Char(..) | Str(..) => {}
+        Try(a, _) => f(a),
         Cast(a, _, _)
         | Unary(_, a, _)
         | Deref(a, _)
@@ -1101,6 +1103,7 @@ fn for_each_child_mut(e: &mut ast::Expr, f: &mut impl FnMut(&mut ast::Expr)) {
     use ast::Expr::*;
     match e {
         Char(..) | Str(..) => {}
+        Try(a, _) => f(a),
         Cast(a, _, _)
         | Unary(_, a, _)
         | Deref(a, _)
@@ -1408,6 +1411,7 @@ fn subst_expr(e: &mut ast::Expr, self_ty: &SelfTy) {
     let mut kids: Vec<&mut ast::Expr> = Vec::new();
     match e {
         Char(..) | Str(..) => {}
+        Try(a, _) => subst_expr(a, self_ty),
         Aggregate(path, fields, _) => {
             for seg in &mut path.segments {
                 if seg == "Self" {
@@ -3687,6 +3691,19 @@ impl Fn<'_> {
         self.drop_scope(0, line)
     }
 
+    /// The drops a `return` needs: everything the frame owns, along *this*
+    /// path only.
+    ///
+    /// `drop_all` retires what it drops, which is right at the end of a
+    /// function and wrong in the middle of one — a `return` in a `match` arm
+    /// leaves by one path while the arms beside it still own the same values,
+    /// and retiring them there means the value the other path owns is never
+    /// dropped at all. `break` and `continue` were given `drop_through` for
+    /// exactly this reason and `return` was not.
+    fn drop_returning(&mut self, line: Line) -> R<()> {
+        self.drop_through(0, line)
+    }
+
     /// A value moved out of inside a loop would be moved again on the next
     /// iteration.
     fn check_no_move_in_loop(&mut self, before: &[Owned], line: Line) -> R<()> {
@@ -3941,6 +3958,13 @@ impl Fn<'_> {
             // is only one type it could have (Ch. 5 §1.2).
             E::Char(v, _) => Ok((Operand::Const(Type::Int(27), Bt::from_i128(*v)), Ty::Char)),
 
+            // `e?` — Ch. 5 §4.1. Two rules and no trait, and each is a
+            // `match` and a `return` spelled shorter, so it is lowered as
+            // exactly that: the arms below are the ones the chapter writes
+            // out, built here because only here is the function's own result
+            // type known.
+            E::Try(inner, line) => self.try_expr(inner, expected, *line),
+
             // A string literal is a fat pointer to storage that outlives
             // every frame — an address and a length in characters, which is
             // what `&[char]` is anywhere else (Ch. 3 §5.2, Ch. 5 §1.4).
@@ -4103,16 +4127,16 @@ impl Fn<'_> {
                         if ret.is_aggregate() {
                             let dst = Operand::Value(SRET.to_string());
                             self.copy_typed(dst, val, &ret, *line)?;
-                            self.drop_all(*line)?;
+                            self.drop_returning(*line)?;
                             self.finish(Terminator::Ret(None));
                         } else {
-                            self.drop_all(*line)?;
+                            self.drop_returning(*line)?;
                             self.finish(Terminator::Ret(Some(val)));
                         }
                     }
                     None => {
                         self.check(&Ty::Unit, &ret, *line, "`return` with no value")?;
-                        self.drop_all(*line)?;
+                        self.drop_returning(*line)?;
                         self.finish(Terminator::Ret(None));
                     }
                 }
@@ -5540,6 +5564,153 @@ impl Fn<'_> {
             }
 
             other => err(line, format!("`{other}` is not a method in this milestone")),
+        }
+    }
+
+    /// `e?` — propagate a failure (Ch. 5 §4.1).
+    ///
+    /// The two rules do not mix: `?` on an `Option` in a function returning
+    /// `Result` is an error, and so is the reverse. Converting between them
+    /// is `ok_or` and `ok`, written where it happens.
+    ///
+    /// Desugaring to `match` and `return` rather than emitting branches by
+    /// hand is not laziness: it is what makes the drops right. Leaving a
+    /// function early has to drop everything the frame owns, and `return`
+    /// already does.
+    fn try_expr(
+        &mut self,
+        inner: &ast::Expr,
+        expected: Option<&Ty>,
+        line: Line,
+    ) -> R<(Operand, Ty)> {
+        let (v, ty) = self.expr(inner, None)?;
+        let Some((kind, args)) = self.carrier(&ty) else {
+            return err(
+                line,
+                format!("`?` applies to `Result` and `Option`, not to {ty} (Ch. 5 §4.1)"),
+            );
+        };
+        let ret = self.ret.clone();
+        let Some((rkind, rargs)) = self.carrier(&ret) else {
+            return err(
+                line,
+                format!(
+                    "`?` needs a function that returns `Result` or `Option`, and this one \
+                     returns {ret} (Ch. 5 §4.1)"
+                ),
+            );
+        };
+        if kind != rkind {
+            return err(
+                line,
+                format!(
+                    "`?` on a `{kind}` in a function returning `{rkind}` does not convert \
+                     between them: write `ok_or(…)` or `ok()` where it happens \
+                     (Ch. 5 §4.1)"
+                ),
+            );
+        }
+
+        // The value is matched twice over — once per arm — so it is bound
+        // first and the arms name the binding.
+        let Operand::Value(slot) = v else {
+            return err(line, "`?` needs a place to match");
+        };
+        let bound = self.bind_existing(slot, ty.clone());
+        let scrutinee = ast::Expr::Path(bound, line);
+        let ok_bind = format!("#q{}", self.counter);
+        let bad_bind = format!("#r{}", self.counter);
+
+        let arm = |name: &str, payload: Vec<(String, ast::Pattern)>, body: ast::Expr| ast::Arm {
+            patterns: vec![ast::Pattern::Aggregate(
+                ast::Path {
+                    segments: vec![kind.to_string(), name.to_string()],
+                    targs: Vec::new(),
+                    line,
+                },
+                payload,
+                line,
+            )],
+            guard: None,
+            body,
+            line,
+        };
+        let path = |n: &str| ast::Expr::Path(n.to_string(), line);
+        let variant = |name: &str, fields: Vec<(String, ast::Expr)>| {
+            ast::Expr::Aggregate(
+                ast::Path {
+                    segments: vec![kind.to_string(), name.to_string()],
+                    targs: Vec::new(),
+                    line,
+                },
+                fields,
+                line,
+            )
+        };
+
+        let arms = if kind == "Option" {
+            vec![
+                arm(
+                    "Some",
+                    vec![("0".into(), ast::Pattern::Bind(ok_bind.clone(), line))],
+                    path(&ok_bind),
+                ),
+                arm(
+                    "None",
+                    Vec::new(),
+                    ast::Expr::Return(Some(Box::new(variant("None", Vec::new()))), line),
+                ),
+            ]
+        } else {
+            // `Err(e)` becomes `Err(F::from(e))`, and where the two error
+            // types are the same there is nothing to convert (Ch. 4 §5.6).
+            let (from_ty, to_ty) = (args[1].clone(), rargs[1].clone());
+            let converted = if from_ty == to_ty {
+                path(&bad_bind)
+            } else {
+                let Some(name) = nominal_name(&to_ty) else {
+                    return err(
+                        line,
+                        format!("`?` cannot convert {from_ty} into {to_ty} (Ch. 5 §4.1)"),
+                    );
+                };
+                ast::Expr::Aggregate(
+                    ast::Path {
+                        segments: vec![name, "from".to_string()],
+                        targs: Vec::new(),
+                        line,
+                    },
+                    vec![("0".to_string(), path(&bad_bind))],
+                    line,
+                )
+            };
+            vec![
+                arm(
+                    "Ok",
+                    vec![("0".into(), ast::Pattern::Bind(ok_bind.clone(), line))],
+                    path(&ok_bind),
+                ),
+                arm(
+                    "Err",
+                    vec![("0".into(), ast::Pattern::Bind(bad_bind.clone(), line))],
+                    ast::Expr::Return(
+                        Some(Box::new(variant("Err", vec![("0".to_string(), converted)]))),
+                        line,
+                    ),
+                ),
+            ]
+        };
+        self.match_expr(&scrutinee, &arms, expected, line)
+    }
+
+    /// Whether a type is one of the two `?` carries, and its arguments.
+    fn carrier(&self, ty: &Ty) -> Option<(&'static str, Vec<Ty>)> {
+        let name = nominal_name(ty)?;
+        let (base, args) = self.types.instantiations.borrow().get(&name)?.clone();
+        match base.as_str() {
+            "Option" => Some(("Option", args)),
+            "Result" => Some(("Result", args)),
+            _ => None,
         }
     }
 
@@ -7797,6 +7968,7 @@ fn walk_expr(e: &ast::Expr, index: &mut u32, out: &mut HashMap<String, u32>) {
     let go = |x: &ast::Expr, i: &mut u32, o: &mut HashMap<String, u32>| walk_expr(x, i, o);
     match e {
         E::Char(..) | E::Str(..) => {}
+        E::Try(a, _) => go(a, index, out),
         // A closure's body is walked in place: its uses of a capture count
         // as uses at the point the closure is written, and the closure's own
         // binding extends them to its last use.

@@ -332,6 +332,8 @@ pub enum Expr {
     /// A string literal, as its characters. Its type is `&'static str`, and
     /// its storage is a global (Ch. 5 §1.4).
     Str(Vec<i128>, Line),
+    /// `e?` — propagate a failure (Ch. 5 §4.1).
+    Try(Box<Expr>, Line),
     /// `true` or `false`.
     Bool(bool, Line),
     /// `()`.
@@ -396,6 +398,7 @@ impl Expr {
             | Trit(_, l)
             | Char(_, l)
             | Str(_, l)
+            | Try(_, l)
             | Bool(_, l)
             | Unit(l)
             | Path(_, l)

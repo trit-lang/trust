@@ -1209,6 +1209,12 @@ impl Parser {
                 e = Expr::Index(Box::new(e), Box::new(index), line);
                 continue;
             }
+            // `e?` — propagate a failure (Ch. 5 §4.1). Postfix, so it binds
+            // tighter than any operator and `a? + b?` is what it looks like.
+            if self.eat_op("?") {
+                e = Expr::Try(Box::new(e), line);
+                continue;
+            }
             return Ok(e);
         }
     }

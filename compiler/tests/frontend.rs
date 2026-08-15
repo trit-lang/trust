@@ -2750,3 +2750,140 @@ fn a_method_on_an_unsized_type_takes_the_reference_it_already_has() {
         98
     );
 }
+
+#[test]
+fn the_question_mark_is_a_match_and_a_return() {
+    // Ch. 5 §4.1: two rules and no trait. On `Option`, `Some(v)` continues
+    // and `None` returns `None`; on `Result`, `Ok(v)` continues and `Err(e)`
+    // returns `Err(F::from(e))`.
+    let src = "fn digit(c: char) -> Option<t27> { c.to_digit(10) } \
+               fn two(s: &str) -> Option<t27> { \
+                   let a = digit(s[0])?; \
+                   let b = digit(s[1])?; \
+                   Option::Some(a * 10 + b) \
+               } \
+               fn main() -> t27 { \
+                   let s = match two(\"42\") { Option::Some(v) => v, Option::None => -1 }; \
+                   let t = match two(\"4x\") { Option::Some(v) => v, Option::None => -1 }; \
+                   s * 100 + (t + 1) \
+               }";
+    assert_eq!(run(src).0, 42 * 100);
+}
+
+#[test]
+fn the_question_mark_converts_the_error_with_from() {
+    // Ch. 5 §4.1 leans on Ch. 4 §5.6: `Err(e)` becomes `Err(F::from(e))`, and
+    // where the two error types are the same there is nothing to convert.
+    let src = "trait From<T> { fn from(x: T) -> Self; } \
+               enum Low { NoDigit } \
+               enum High { Parse, Other } \
+               impl From<Low> for High { fn from(l: Low) -> High { High::Parse } } \
+               fn inner(c: char) -> Result<t27, Low> { \
+                   match c.to_digit(10) { \
+                       Option::Some(d) => Result::Ok(d), \
+                       Option::None => Result::Err(Low::NoDigit), \
+                   } \
+               } \
+               fn outer(c: char) -> Result<t27, High> { let d = inner(c)?; Result::Ok(d * 2) } \
+               fn main() -> t27 { \
+                   let a = match outer('4') { Result::Ok(v) => v, Result::Err(e) => -1 }; \
+                   let b = match outer('x') { \
+                       Result::Ok(v) => v, \
+                       Result::Err(e) => match e { High::Parse => 100, High::Other => 200 }, \
+                   }; \
+                   a * 1000 + b \
+               }";
+    assert_eq!(run(src).0, 8 * 1000 + 100);
+}
+
+#[test]
+fn the_two_rules_of_the_question_mark_do_not_mix() {
+    let e = error(
+        "fn f(o: Option<t27>) -> Result<t27, t9> { let v = o?; Result::Ok(v) } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("does not convert between them"), "{e}");
+
+    let e = error(
+        "fn f(r: Result<t27, t9>) -> Option<t27> { let v = r?; Option::Some(v) } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("does not convert between them"), "{e}");
+
+    // And it needs a function that carries a failure at all.
+    let e = error("fn f(o: Option<t27>) -> t27 { let v = o?; v } fn main() -> t27 { 0 }");
+    assert!(e.contains("needs a function that returns"), "{e}");
+
+    // And a value that is one.
+    let e = error(
+        "fn f(x: t27) -> Option<t27> { let v = x?; Option::Some(v) } \
+                   fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("applies to `Result` and `Option`"), "{e}");
+}
+
+#[test]
+fn leaving_early_with_a_question_mark_still_drops() {
+    // `?` is a `return`, and a `return` drops everything the frame owns
+    // (Ch. 3 §1.4). Lowering it as `match` and `return` rather than as
+    // branches is what makes that true without restating it.
+    let (_, out) = run("fn putchar(c: t9); \
+         struct Port { id: t27 } \
+         impl Drop for Port { fn drop(self) { putchar((48 + self.id) as t9); } } \
+         fn go(o: Option<t27>) -> Option<t27> { \
+             let a = Port { id: 1 }; \
+             let v = o?; \
+             let b = Port { id: 2 }; \
+             Option::Some(v) \
+         } \
+         fn main() -> t27 { \
+             go(Option::None); \
+             putchar(45); \
+             go(Option::Some(7)); \
+             0 \
+         }");
+    // The early exit drops `a` and never made `b`; the full path drops both,
+    // in reverse order of declaration.
+    assert_eq!(out, "1-21");
+}
+
+#[test]
+fn a_return_inside_a_match_arm_does_not_retire_the_other_arms_values() {
+    // The bug `?` found, in the form it has without `?`. A `return` leaves by
+    // one path; the arms beside it still own the same values, and retiring
+    // them there means the value the *other* path owns is never dropped.
+    // `break` and `continue` were given the non-retiring form for exactly
+    // this reason and `return` was not (Ch. 3 §1.4).
+    let (_, out) = run("fn putchar(c: t9); \
+         struct Port { id: t27 } \
+         impl Drop for Port { fn drop(self) { putchar((48 + self.id) as t9); } } \
+         fn go(o: Option<t27>) -> Option<t27> { \
+             let a = Port { id: 1 }; \
+             let v = match o { \
+                 Option::Some(x) => x, \
+                 Option::None => { return Option::None; }, \
+             }; \
+             let b = Port { id: 2 }; \
+             Option::Some(v) \
+         } \
+         fn main() -> t27 { \
+             go(Option::None); \
+             putchar(45); \
+             go(Option::Some(7)); \
+             0 \
+         }");
+    assert_eq!(out, "1-21");
+
+    // The same through an `if`, which is the shape a reader meets first.
+    let (_, out) = run("fn putchar(c: t9); \
+         struct Port { id: t27 } \
+         impl Drop for Port { fn drop(self) { putchar((48 + self.id) as t9); } } \
+         fn go(early: bool) -> t27 { \
+             let a = Port { id: 1 }; \
+             if early { return 0; } \
+             let b = Port { id: 2 }; \
+             1 \
+         } \
+         fn main() -> t27 { go(true); putchar(45); go(false); 0 }");
+    assert_eq!(out, "1-21");
+}
