@@ -511,3 +511,54 @@ fn a_callee_that_never_returns_leaves_no_continuation() {
     let errs = tir::verify(&out);
     assert!(errs.is_empty(), "{errs:?}\n{}", tir::print_module(&out));
 }
+
+#[test]
+fn what_is_already_known_is_computed() {
+    // TIR §6. The arithmetic is `trit_core`'s, which is where the AM's
+    // rounding and wrapping are defined — folding here and executing there
+    // cannot disagree without one of them being wrong.
+    let m = tir::parse_module(
+        "tir 0.1 target \"tritium\"\n\n\
+         fn @main() -> t27 {\n\
+         ^entry:\n\
+         %a = add.wrap t27 const t27 20, const t27 22\n\
+         %b = mul.wrap t27 %a, const t27 2\n\
+         ret %b\n\
+         }\n",
+    )
+    .expect("parses");
+    let mut f = m.funcs[0].clone();
+    tir::fold_constants(&mut f);
+    // Both are gone; what is returned is the answer.
+    assert!(
+        matches!(&f.blocks[0].term, tir::Terminator::Ret(Some(tir::Operand::Const(_, v)))
+            if v.to_i128() == Some(84)),
+        "{:?}",
+        f.blocks[0].term
+    );
+}
+
+#[test]
+fn a_fold_that_would_fault_is_not_a_fold() {
+    // `div` by zero and a `.trap` that overflows are things the *program*
+    // does, at the point it does them. A compiler that performed them early
+    // would report a fault for code that may never run.
+    let m = tir::parse_module(
+        "tir 0.1 target \"tritium\"\n\n\
+         fn @main() -> t27 {\n\
+         ^entry:\n\
+         %a = div t27 const t27 1, const t27 0\n\
+         %b = add.trap t9 const t9 9841, const t9 9841\n\
+         %c = add.wrap t27 %a, const t27 0\n\
+         ret %c\n\
+         }\n",
+    )
+    .expect("parses");
+    let mut f = m.funcs[0].clone();
+    tir::fold_constants(&mut f);
+    let text = tir::print_module(&tir::Module {
+        funcs: vec![f],
+        ..m.clone()
+    });
+    assert!(text.contains("div"), "{text}");
+}

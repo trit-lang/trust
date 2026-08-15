@@ -65,7 +65,7 @@
 
 use crate::tir::ir::*;
 use std::collections::{BTreeMap, BTreeSet};
-use trit_core::{Flavor, Trit};
+use trit_core::{Bt, Flavor, Trit};
 
 /// Canonicalize a module: the same program, in a form later passes handle
 /// better.
@@ -78,6 +78,7 @@ pub fn canonicalize_module(m: &Module) -> Module {
     for f in &mut out.funcs {
         promote_slots(f);
         crate::tir::mem2reg::promote(f);
+        fold_constants(f);
         branch_through_select(f);
         remove_dead(f);
     }
@@ -155,6 +156,125 @@ pub fn branch_through_select(f: &mut Function) {
 /// whether its result is wanted or not. `load` stays too, because this pass
 /// has no reason to reason about memory.
 ///
+/// Compute what is already known (TIR §6).
+///
+/// An instruction whose operands are all constants has a constant result, and
+/// the arithmetic is the machine's — `trit_core` is where the AM's rounding,
+/// wrapping and trit operations are defined, so folding here and executing
+/// there cannot disagree without one of them being wrong.
+///
+/// A fold that would **fault** is left alone. `div` by zero and a `.trap`
+/// that overflows are things the program does, at the point it does them; a
+/// compiler that performed them early would be reporting a fault for code
+/// that may never run.
+pub fn fold_constants(f: &mut Function) {
+    let mut known: BTreeMap<String, (Type, Bt)> = BTreeMap::new();
+    for b in &mut f.blocks {
+        for inst in &mut b.insts {
+            // Operands the earlier folds settled.
+            map_operands(&mut inst.kind, &mut |o| {
+                if let Operand::Value(v) = o
+                    && let Some((t, k)) = known.get(v)
+                {
+                    *o = Operand::Const(*t, k.clone());
+                }
+            });
+            let Some((ty, value)) = folded(&inst.kind) else {
+                continue;
+            };
+            if let [r] = &inst.results[..] {
+                known.insert(r.clone(), (ty, value.clone()));
+            }
+            inst.kind = InstKind::Plain {
+                op: PlainOp::TMax,
+                ty,
+                a: Operand::Const(ty, value.clone()),
+                b: Operand::Const(ty, value),
+            };
+        }
+        map_terminator(&mut b.term, &mut |o| {
+            if let Operand::Value(v) = o
+                && let Some((t, k)) = known.get(v)
+            {
+                *o = Operand::Const(*t, k.clone());
+            }
+        });
+    }
+    remove_dead(f);
+}
+
+/// The constant an instruction computes, if every operand is one and the
+/// result cannot fault.
+fn folded(k: &InstKind) -> Option<(Type, Bt)> {
+    let konst = |o: &Operand| match o {
+        Operand::Const(t, v) => Some((*t, v.clone())),
+        _ => None,
+    };
+    match k {
+        InstKind::Flavored {
+            op,
+            flavor,
+            ty,
+            a,
+            b,
+        } => {
+            let (_, x) = konst(a)?;
+            let (_, y) = konst(b)?;
+            let width = ty.width()?;
+            let exact = match op {
+                FlavoredOp::Add => x.to_i128()? + y.to_i128()?,
+                FlavoredOp::Sub => x.to_i128()? - y.to_i128()?,
+                FlavoredOp::Mul => x.to_i128()?.checked_mul(y.to_i128()?)?,
+                // A shift's amount is checked by the machine, so a fold that
+                // would fault is not a fold.
+                FlavoredOp::Shl => {
+                    let n = y.to_i128()?;
+                    if !(0..i128::from(width)).contains(&n) {
+                        return None;
+                    }
+                    x.to_i128()?.checked_mul(3i128.checked_pow(n as u32)?)?
+                }
+            };
+            let wrapped = Bt::from_i128(exact).wrap_to(width);
+            match flavor {
+                // `.wrap` is the only flavor that is a value and nothing
+                // else; `.trap` may fault and `.flag` yields two results.
+                Flavor::Wrap => Some((*ty, wrapped)),
+                Flavor::Trap if Bt::from_i128(exact).fits_width(width) => Some((*ty, wrapped)),
+                _ => None,
+            }
+        }
+        InstKind::Cmp { a, b, .. } => {
+            let (_, x) = konst(a)?;
+            let (_, y) = konst(b)?;
+            let (x, y) = (x.to_i128()?, y.to_i128()?);
+            let t = match x.cmp(&y) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            };
+            Some((Type::Int(1), Bt::from_i128(t)))
+        }
+        InstKind::Select3 {
+            t,
+            ty,
+            neg,
+            zero,
+            pos,
+        } => {
+            let (_, sel) = konst(t)?;
+            let arm = match sel.to_i128()? {
+                v if v < 0 => neg,
+                0 => zero,
+                _ => pos,
+            };
+            let (_, v) = konst(arm)?;
+            Some((*ty, v))
+        }
+        _ => None,
+    }
+}
+
 /// Iterated, because deleting one instruction is what makes the next one
 /// dead.
 pub fn remove_dead(f: &mut Function) {

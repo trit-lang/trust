@@ -2408,6 +2408,28 @@ case. None of them needed a new idea, and all of them had been there since the
 interpreter was written — which is what a profile is for, and why there was
 not one until this session.
 
+**G8.16 — constant folding, and −62 instructions.** An instruction whose
+operands are all constants has a constant result, and the arithmetic is
+`trit_core`'s — where the AM's rounding, wrapping and trit operations are
+defined — so folding and executing cannot disagree without one of them being
+wrong.
+
+A fold that would **fault** is left alone: `div` by zero and a `.trap` that
+overflows are things the *program* does, at the point it does them, and a
+compiler that performed them early would report a fault for code that may
+never run.
+
+*The payoff, which was measured before the pass was written and again after.*
+HPL's TIR has 440 binary operations and **31** of them have two constant
+operands. The pass removes **62 instructions from 3 247 122** — 0.002%. That
+is what the static count said it would be, and the reason to write it down is
+that "constant folding" sounds like it should matter and here it does not:
+the backend already folds constants into immediates where an immediate exists,
+and the frontend does not emit arithmetic on two literals.
+
+It stays because it is correct, costs nothing at run time, and closes a §8
+item — not because it was worth 62 instructions.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The
@@ -2766,8 +2788,8 @@ Specified well enough to build, simply not built yet:
   multi-part shifting are unwritten. (`mul` is different: see G6.6, where the
   instruction set is the obstacle.) Reported rather than mis-compiled.
 - **Optimization passes** — the canonicalizer that "recognizes and re-fuses"
-  two-valued predicate patterns (TIR §3.3), and constant folding (which `Bt`
-  already supports at every width). Inlining is built (G8.14). Legalization
+  two-valued predicate patterns (TIR §3.3). Inlining is built (G8.14), and so
+  is constant folding (G8.16). Legalization
   emits obvious redundancies — a mask after an operation that provably cannot
   overflow, a `select3` merging two carries at most one of which is nonzero —
   that a canonicalizer should clean up.
