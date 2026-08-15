@@ -101,7 +101,10 @@ uninitialized — and it is not an owner.
 
 *Reserved:* binding **by reference**, so that the second example above could
 be written by naming what it is rather than being refused. That is Rust's
-match ergonomics, and it needs the binding's type to become `&T`; draft 0.1
+match ergonomics, and it needs the binding's type to become `&T` — and with
+it a **deref coercion**, since a binding at `&Box<T>` is then handed to
+things that want `&T`. That is a third implicit conversion, and this chapter
+declines to add one as a side effect of a change to `match`. Draft 0.1
 refuses the move instead, which is sound and less convenient.
 
 ### 1.4 Destructors

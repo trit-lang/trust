@@ -451,10 +451,14 @@ reference's impls are found under its referent — so `Iterator` is an
 accepts both an iterator and a `&str`.
 
 What is left of Ch. 5 is `Cell`/`RefCell` (§5), `expect`, formatting, maps and
-sets, sorting and `Rc` — all of §7, all reserved. Ch. 4's own list is down to
-`impl Trait for &mut T`, a generic impl of a *parameterized* trait
-(`impl<T> Make<T> for Pair<T>`, G9.20), and binding by reference in a `match`
-(G9.15).
+sets, sorting and `Rc` — all of §7, all reserved. Ch. 4's list is now empty
+but for what the specification itself reserves: binding by reference in a
+`match` stays reserved (G9.15), because what it really needs is a deref
+coercion — the language's third implicit conversion — and that deserves its
+own decision rather than arriving as a consequence.
+
+The nearest thing merely unbuilt is Ch. 4 §5.5's `From` and `Into` in the
+prelude, which waits on the shadowing rule covering impls (G9.24).
 
 **B00. Interpreter speed.** 2.57 → **83.2 M instructions/second** on HPL, 32×
 (G8.15): `shr3` was a loop where its own comment already gave the closed

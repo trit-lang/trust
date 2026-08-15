@@ -1991,9 +1991,41 @@ this `match` borrowed, so it cannot be moved out of; borrow it instead."*
 Ch. 3 §1.3 states the rule.
 
 Binding **by reference** — Rust's match ergonomics, which would let the
-refused program be written by naming what it is — is reserved. It needs the
-binding's type to become `&T`; refusing the move is sound and less
-convenient, and that trade is the one draft 0.1 makes everywhere else.
+refused program be written by naming what it is — stays **reserved**. It was
+built far enough to see what it costs, and then reverted; the decision was the
+author's and this is what it was made on.
+
+*The implementation is not the obstacle.* Binding by reference is ten lines:
+declare the binding at `&T` and store the field's address instead of a copy
+of it. What is here now — a `borrowed` flag on the local and one refusal — is
+not something that would have to be worked around, it is something that would
+be deleted.
+
+*What it costs is `total(&*l)`.* With `l` bound at `&Box<Tree>`, `&*l` is a
+`&Box<Tree>` and the function wants a `&Tree`. Rust closes that with **deref
+coercion**; Trust has none, and the program in question is the binary tree
+Ch. 2 §8 prints. So the real threshold is not match ergonomics at all — it is
+the language's *third* implicit conversion, after `&T` to `&dyn Trait` and
+`&Vec<T>` to `&[T]`. Both of those convert a representation and neither
+follows a user-defined trait. A deref coercion is a different kind of thing
+and deserves to be decided as one, rather than arriving as a consequence of a
+change to `match`.
+
+*Is it still reversible later?* Yes, and the cost is source rather than
+design:
+
+- Nothing promises otherwise. Ch. 3 §1.3 states the rule and then reserves
+  this in the next paragraph, which is what that paragraph is for.
+- **No spelling works under both.** `Opt::Some(v) => v` compiles today and
+  needs `*v` after; `*v` today is "cannot dereference a `t27`". So switching
+  is an edit, not a discipline that can be adopted early.
+- **The shape it touches is narrow**: matching on a *reference* and using a
+  scalar payload *as a value*. Nearly every `match` in the library is on an
+  owned value — `fn unwrap(self)` takes `self` by value, and `it.next()`
+  returns one — so the library is almost entirely unaffected.
+- **Today the whole tree has three such sites**, all in tests. The cost grows
+  with how much reference-matching code accumulates before the switch, and
+  with nothing else.
 
 **G9.16 — `if` in statement position is still an expression to the parser.**
 `if c { … } (a) * 2` parses as a *call* of the `if`'s value, and reports that
