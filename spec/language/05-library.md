@@ -355,20 +355,47 @@ struct String;      // Vec<char>, with the methods of §1.3
 
 `Vec<T>` is a growable array, and a **language item** for `Box`'s reason and
 one more: the room beyond the length is memory that is *not yet a `T`*, and
-this language has no way to say that. `Vec::new`, `push`, `len` and indexing
-are built; `pop`, `insert`, `remove`, `clear`, `with_capacity` and `reserve`
-are not, and neither is the coercion of `&Vec<T>` to `&[T]`.
+this language has no way to say that.
+
+| | |
+|---|---|
+| `Vec::new()` | three zero words; no allocation |
+| `push(x)` | appends, growing if it must |
+| `pop() -> Option<T>` | moves the last element out; `None` when empty |
+| `len()`, `capacity()`, `is_empty()` | the second word, the third, and a test on the second |
+| `reserve(n)` | room for `n` **more** than there are |
+| `clear()` | drops every element; keeps the allocation |
+| `v[i]` | bounds-checked against the **length** |
+
+`insert` and `remove` are **not built**: both shift a run of elements, and the
+shift is the same operation as `copy_within`, which §7 reserves.
 
 Indexing is bounds-checked against the **length**, not the capacity — the room
-beyond it holds nothing a program may read.
+beyond it holds nothing a program may read. `capacity` is the only method that
+can see that room, and it can see only how much of it there is.
 
 Growth **doubles** the capacity, from a first allocation of 4 elements. The
 factor is specified rather than left open because a program that pushes *n*
 elements is entitled to know that it did O(*n*) work in total, and the
-amortized argument is a property of the factor.
+amortized argument is a property of the factor. `reserve` does **not** double:
+a program that says how much it wants has said something the guess cannot
+improve on, so it gets `len + n` exactly.
 
-`String` is `Vec<char>` with `push(char)`, `push_str(&str)`, and the
-conversions of §1.5. `&String` coerces to `&str`.
+There is no `realloc` (§7), so growing is three steps — allocate, copy, free —
+and the copy is a copy of storage, which is what a move is (Ch. 3 §1.2).
+
+`&Vec<T>` **coerces to `&[T]`**: the allocation and the length, which are a
+`Vec`'s first two words and a slice's only two. The capacity is left behind,
+and that is the whole of the conversion — a slice may read what is there and a
+`Vec` may grow, and only one of those needs to know how much room is left.
+This and `&Concrete` to `&dyn Trait` (Ch. 4 §3.2) are the only implicit
+conversions in the language, and both convert a *representation* rather than a
+value.
+
+`String` **is** `Vec<char>` — not a wrapper around one — so it needs no rules
+of its own: `String::new` and `push(char)` are `Vec`'s, `&String` becomes
+`&str` by the coercion above, and every method §1.3 gives a string applies to
+one the moment it does. `push_str(&str)` is not built.
 
 ---
 

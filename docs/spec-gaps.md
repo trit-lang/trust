@@ -1934,6 +1934,64 @@ the coercion of `&Vec<T>` to `&[T]` — without which a `Vec` cannot be handed
 to anything that takes a slice. `String` and `collect` wait on that coercion
 and on `FromIterator`.
 
+**G9.15 — the rest of `Vec`, `String`, and the drop bug the ledger found
+underneath them.** `pop`, `clear`, `reserve`, `capacity`, `is_empty`, the
+coercion of `&Vec<T>` to `&[T]`, and `String`.
+
+`pop` returns `Option<T>` and takes the length down **before** it reads the
+element, so what comes back is no longer inside the `Vec` and cannot be
+dropped twice. `clear` drops the elements and keeps the allocation, which is
+the whole difference between clearing a `Vec` and dropping one. `reserve` does
+not double — a program that says how much it wants has said something `push`'s
+guess cannot improve on — so it gets `len + n` exactly, and asking for room
+that is already there is not an error but nothing.
+
+`insert` and `remove` stayed unbuilt for a reason worth writing down rather
+than a lack of time: both shift a run of elements, and a shift *up* cannot use
+the forward copy the language already has. That is `copy_within`, which §7
+reserves, and building a private one for `Vec` would be deciding the reserved
+question sideways.
+
+`String` **is** `Vec<char>`, resolved as that name and not as a wrapper, so it
+inherits `new`, `push`, `len` and dropping, and `&String` becomes `&str`
+through the coercion. The only rule it needed of its own was that
+`String::new` may skip the annotation `Vec::new` requires — the element type
+is in the name.
+
+*The bug underneath.* The drop ledger found its **fifth**, and once again
+nothing else did. `enum_arm` pushed a scope for an arm's pattern bindings and
+popped it **without dropping them**, so a binding stayed in the owned set at
+its arm's depth and was swept up by the next scope that happened to end at the
+same depth — in the reduced case, an unrelated block three statements later.
+It had been invisible because every test that bound a payload bound one that
+needed no destructor.
+
+The fix is one line in principle and two conditions in practice. The drops
+must be emitted **before** the arm's jump to the join, because a drop emitted
+after a terminator is in no block at all — so the arm's scope ends inside
+`arm_body`, between storing the arm's value and leaving. And the bindings own
+only when the scrutinee was matched **by value**: matching a value moves it,
+so the bindings receive what it held, while matching through a reference moves
+nothing and the bindings are copies of storage the referent still owns. The
+first version of the fix had no such condition and freed the binary tree of
+G9.13 three times over — `total(t: &Tree)` walks a borrowed tree, and every
+`Node(l, x, r)` arm was handing `l` and `r` a `Box` the tree still held.
+
+*Still open, and recorded rather than fixed:* a binding taken out of borrowed
+storage is a non-owning copy of an owning value, and nothing stops a program
+from moving it somewhere that will drop it. Matching through a reference
+should bind by reference; that it binds by copy-of-storage is a hole the
+ownership rules do not currently close.
+
+**G9.16 — `if` in statement position is still an expression to the parser.**
+`if c { … } (a) * 2` parses as a *call* of the `if`'s value, and reports that
+`()` is not callable. Rust resolves this by giving block-like expressions in
+statement position a statement reading; Ch. 0 §6's grammar says nothing about
+the distinction.
+
+*Not decided.* The workaround is a `let`, and the fix is a grammar rule about
+statement position that the author should choose the shape of.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

@@ -387,9 +387,17 @@ language too, on `!` and `trap()` (G9.10). §3's consuming methods are built too
 (G9.11), and the heap's two halves below the language
 are built: the assembler defines `_end` and the runtime supplies `alloc` and
 `free` (G9.2). `Box` is built (G9.12), Ch. 2 §8's binary tree runs
-(G9.13), and `Vec` has `new`, `push`, `len`, indexing and dropping (G9.14).
-What is left of the chapter is the rest of `Vec`'s methods, the coercion of
-`&Vec<T>` to `&[T]`, and then `String` and `collect`.
+(G9.13), and `Vec` is built: `new`, `push`, `pop`, `len`, `capacity`,
+`is_empty`, `reserve`, `clear`, indexing, dropping, and the coercion of
+`&Vec<T>` to `&[T]` (G9.14, G9.15). `String` **is** `Vec<char>` and needed no
+rules of its own. Building the last of those uncovered the drop ledger's fifth
+bug — an arm's pattern bindings were never dropped — and closing it needed the
+condition that they own only when the scrutinee was matched by value.
+
+What is left of the chapter is `insert` and `remove` (both want the
+`copy_within` §7 reserves), `collect` and `FromIterator`, `push_str`, and
+`F: Fn(A) -> B` as a written bound, without which the adaptors need their
+closures annotated.
 
 **B. Backend quality.** The instruction stream is a third of what it was
 (G8.6–G8.13, −66.6% on HPL), and memory is nearly out of the picture: frame

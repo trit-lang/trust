@@ -3367,3 +3367,177 @@ fn a_vec_grows_and_gives_its_allocation_back() {
         "no bounds check"
     );
 }
+
+#[test]
+fn a_vec_gives_up_its_elements_and_keeps_its_room() {
+    // `pop` moves an element *out*: the length comes down before the element
+    // is read, so what is returned is no longer inside the `Vec` and cannot
+    // be dropped twice. `clear` is the other half — the elements go and the
+    // allocation stays, which is the whole difference between clearing a
+    // `Vec` and dropping one (Ch. 5 §2.6).
+    let (status, out) = run("fn putchar(c: t9); \
+         struct Port { id: t27 } \
+         impl Drop for Port { fn drop(self) { putchar(48 + (self.id as t9)); } } \
+         fn main() -> t27 { \
+             let mut v: Vec<Port> = Vec::new(); \
+             v.push(Port { id: 1 }); \
+             v.push(Port { id: 2 }); \
+             v.push(Port { id: 3 }); \
+             match v.pop() { \
+                 Option::Some(p) => { putchar(91); } \
+                 Option::None => {} \
+             } \
+             putchar(124); \
+             v.clear(); \
+             putchar(124); \
+             v.push(Port { id: 9 }); \
+             v.capacity() as t27 \
+         }");
+    // `[` then 3 — the popped port dies at the end of the arm that named it,
+    // not later. Then 1 and 2 from `clear`, then 9 when the `Vec` goes.
+    assert_eq!(out, "[3|12|9");
+    // Four elements' room, taken by the first push and kept through `clear`.
+    assert_eq!(status, 4);
+}
+
+#[test]
+fn reserve_asks_for_exactly_what_it_says() {
+    // `push` doubles because it is guessing; `reserve` does not, because a
+    // program that says how much it wants has said something the guess
+    // cannot improve on (Ch. 5 §2.6). Asking for room that is already there
+    // is not an error — it is nothing.
+    assert_eq!(
+        value(
+            "let mut v: Vec<t27> = Vec::new(); \
+             v.reserve(10); \
+             let a: taddr = v.capacity(); \
+             v.push(1); v.push(2); \
+             v.reserve(3); \
+             let b: taddr = v.capacity(); \
+             let mut n: t27 = 0; \
+             if v.is_empty() { n = 100; } \
+             let r: t27 = (a as t27) * 100 + (b as t27) + n; \
+             r"
+        ),
+        1010
+    );
+}
+
+#[test]
+fn a_matchs_binding_dies_at_the_end_of_its_arm() {
+    // An arm is a scope like any other (Ch. 3 §1.4), and it did not used to
+    // be: `enum_arm` pushed a scope for its bindings and popped it without
+    // dropping them, so a binding stayed in the owned set and was swept up
+    // by the next scope that happened to end at the same depth. The `<5 3>`
+    // below is that bug's signature — the port bound in the arm dying inside
+    // an unrelated block three statements later.
+    let (_, out) = run("fn putchar(c: t9); \
+         struct Port { id: t27 } \
+         impl Drop for Port { fn drop(self) { putchar(48 + (self.id as t9)); } } \
+         fn make() -> Option<Port> { Option::Some(Port { id: 3 }) } \
+         fn main() -> t27 { \
+             match make() { \
+                 Option::Some(p) => { putchar(91); } \
+                 Option::None => {} \
+             } \
+             putchar(124); \
+             let q: Port = Port { id: 7 }; \
+             { let r: Port = Port { id: 5 }; putchar(60); } \
+             putchar(62); \
+             0 \
+         }");
+    assert_eq!(out, "[3|<5>7");
+}
+
+#[test]
+fn matching_through_a_reference_moves_nothing() {
+    // The other half of the rule above, and the reason it needs a condition:
+    // matching a *value* moves it, so the arm's bindings receive what it
+    // held; matching through a reference moves nothing, so they are copies
+    // of storage the referent still owns. Dropping one would free a tree
+    // somebody is still holding — which is exactly what `total` walks.
+    assert_eq!(
+        run("enum Tree { Leaf, Node(Box<Tree>, t27, Box<Tree>) } \
+             fn insert(t: Tree, v: t27) -> Tree { \
+                 match t { \
+                     Tree::Leaf => \
+                         Tree::Node(Box::new(Tree::Leaf), v, Box::new(Tree::Leaf)), \
+                     Tree::Node(l, x, r) => match v <=> x { \
+                         -1t => Tree::Node(Box::new(insert(*l, v)), x, r), \
+                          1t => Tree::Node(l, x, Box::new(insert(*r, v))), \
+                          0t => Tree::Node(l, x, r), \
+                     }, \
+                 } \
+             } \
+             fn total(t: &Tree) -> t27 { \
+                 match t { \
+                     Tree::Leaf => 0, \
+                     Tree::Node(l, x, r) => total(&*l) + x + total(&*r), \
+                 } \
+             } \
+             fn main() -> t27 { \
+                 let mut t = Tree::Leaf; \
+                 t = insert(t, 5); \
+                 t = insert(t, 3); \
+                 t = insert(t, 8); \
+                 let s = total(&t) + total(&t) + total(&t); \
+                 s \
+             }")
+        .0,
+        (5 + 3 + 8) * 3
+    );
+}
+
+#[test]
+fn a_vec_becomes_a_slice_where_one_is_wanted() {
+    // `&Vec<T>` to `&[T]`: the allocation and the length, which are a
+    // `Vec`'s first two words and a slice's only two. The capacity is left
+    // behind, and that is the whole of the conversion — a slice may read
+    // what is there and a `Vec` may grow, and only one of those needs to
+    // know how much room is left (Ch. 5 §2.6).
+    assert_eq!(
+        run("fn total(xs: &[t27]) -> t27 { \
+                 let mut s: t27 = 0; \
+                 let mut i: taddr = 0; \
+                 while i < xs.len() { s += xs[i]; i += 1; } \
+                 s \
+             } \
+             fn main() -> t27 { \
+                 let mut v: Vec<t27> = Vec::new(); \
+                 v.push(3); v.push(4); v.push(5); \
+                 total(&v) + total(&v) \
+             }")
+        .0,
+        24
+    );
+}
+
+#[test]
+fn a_string_is_a_vec_of_char() {
+    // Ch. 5 §2.6 says `String` *is* `Vec<char>`, so it needs no rule of its
+    // own: `&String` becomes `&str` by the coercion above, and every method
+    // §1.3 gives a string applies to one the moment it does.
+    let (status, out) = run("fn putchar(c: t9); \
+         fn print(s: &str) { \
+             let mut buf: [t9; 64] = [0; 64]; \
+             match s.to_utf8(&mut buf) { \
+                 Option::Some(n) => { \
+                     let mut i: taddr = 0; \
+                     while i < n { putchar(buf[i]); i += 1; } \
+                 }, \
+                 Option::None => {}, \
+             } \
+         } \
+         fn main() -> t27 { \
+             let mut s: String = String::new(); \
+             s.push('\u{4e16}'); \
+             s.push('\u{754c}'); \
+             s.push('!'); \
+             print(&s); \
+             s.len() as t27 \
+         }");
+    // Three characters out, and nine UTF-8 code units in: the price of the
+    // interchange format is paid at the boundary and nowhere else.
+    assert_eq!(out, "\u{4e16}\u{754c}!");
+    assert_eq!(status, 3);
+}
