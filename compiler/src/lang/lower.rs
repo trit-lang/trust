@@ -2121,7 +2121,7 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
         // reference's methods have always been the referent's, and `Self` is
         // the reference (Ch. 4 §2.1).
         if imp.self_ref {
-            self_written = ast::Ty::Ref(Box::new(self_written), false, imp.line);
+            self_written = ast::Ty::Ref(Box::new(self_written), imp.self_mut, imp.line);
         }
         let self_repr = SelfTy {
             ty: self_written,

@@ -30,6 +30,9 @@ fn run(src: &str) -> (i128, String) {
     let target = tir::TargetDesc::tritium();
     // TIR §6's pipeline: target-independent optimization, then legalization.
     let module = tir::canonicalize_module(&module);
+    let mut module = tir::inline_module(&module);
+    tir::drop_uncalled(&mut module, &["main"]);
+    let module = tir::canonicalize_module(&module);
     let legalized = tir::legalize_module(&module, &target)
         .unwrap_or_else(|e| panic!("legalization failed: {e:?}"));
     // TIR §6's post-condition: the backend is entitled to assume this, so

@@ -2325,6 +2325,38 @@ had to learn about rules:
 
 Nothing is owed here now.
 
+**G8.14 — inlining, and a budget that wants to be small.** A call to a small,
+non-recursive function becomes the callee's blocks, renamed, with its
+parameters bound to the call's arguments and its `ret` turned into a branch to
+whatever followed the call. **HPL: 3 661 618 → 3 247 122, −11.3%**, and the
+four solve intervals fall about 12% each — this is the first change since the
+register allocator to move the measured number rather than the total.
+
+Two things it had to be told.
+
+A vtable names its methods by **address** and nothing calls them, so a global's
+initializer is a root for the pass that drops what is now uncalled. Three
+trait-object tests said so.
+
+A callee that never returns leaves nothing branching to the continuation, and
+what followed the call is then code control cannot reach. Dropping it is not
+an optimization: an unreachable block is one the verifier rejects.
+
+*The budget is 24 instructions, and larger is worse.* Measured on HPL:
+
+| budget | instructions | image |
+|---|---|---|
+| 24 | 3 247 122 | 24 741 lines |
+| 40 | 3 311 650 | 24 749 |
+| 64 | 3 315 827 | 35 735 |
+| 96 | 3 383 444 | 36 769 |
+
+A larger splice costs more in spills than it saves in calls, which is what a
+machine with 27 registers and no cache should be expected to say. It is also
+why Ch. 5 §1.5's `print` still repeats `print_char`'s body: `print_char` is
+over the budget, and raising the budget until it fits is 3 315 827 against
+3 247 122. The repetition is now a measurement rather than a guess.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The
@@ -2683,8 +2715,8 @@ Specified well enough to build, simply not built yet:
   multi-part shifting are unwritten. (`mul` is different: see G6.6, where the
   instruction set is the obstacle.) Reported rather than mis-compiled.
 - **Optimization passes** — the canonicalizer that "recognizes and re-fuses"
-  two-valued predicate patterns (TIR §3.3), constant folding (which `Bt`
-  already supports at every width), and dead-code elimination. Legalization
+  two-valued predicate patterns (TIR §3.3), and constant folding (which `Bt`
+  already supports at every width). Inlining is built (G8.14). Legalization
   emits obvious redundancies — a mask after an operation that provably cannot
   overflow, a `select3` merging two carries at most one of which is nonzero —
   that a canonicalizer should clean up.

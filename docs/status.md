@@ -456,6 +456,11 @@ sets, sorting and `Rc` — all of §7, all reserved. Ch. 4's own list is down to
 (`impl<T> Make<T> for Pair<T>`, G9.20), and binding by reference in a `match`
 (G9.15).
 
+**B0. Inlining.** A call to a small non-recursive function becomes its body
+(G8.14): HPL 3 661 618 → 3 247 122, −11.3%, with the four solve intervals down
+about 12% each. The budget is 24 instructions and larger is measurably worse —
+a bigger splice costs more in spills than it saves in calls.
+
 **B. Backend quality.** The instruction stream is a third of what it was
 (G8.6–G8.13, −66.6% on HPL), and memory is nearly out of the picture: frame
 traffic is 3.6%. What is left is analysis. Branches and comparisons are 36%

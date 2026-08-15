@@ -219,6 +219,11 @@ fn cmd_compile(args: &[String]) -> Result<(), String> {
     // legalization stage, then instruction selection. The backend consumes
     // legalized TIR only, so this runs the pass itself rather than trusting
     // its input.
+    // Inlining first, then canonicalize again: splicing a body in exposes
+    // constants and slots to the passes that fold and promote them.
+    let module = tir::canonicalize_module(&module);
+    let mut module = tir::inline_module(&module);
+    tir::drop_uncalled(&mut module, &["main"]);
     let module = tir::canonicalize_module(&module);
     let legalized = tir::legalize_module(&module, &target).map_err(|errs| {
         let mut msg = format!("{} instruction(s) could not be legalized:", errs.len());

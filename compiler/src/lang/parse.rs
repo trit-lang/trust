@@ -621,13 +621,12 @@ impl Parser {
         let first = self.expect_ident()?;
         let first_args = self.generic_args()?;
         let mut self_ref = false;
+        let mut self_mut = false;
         let (trait_name, trait_args, self_ty, self_args) = if self.eat_kw("for") {
             // `impl Trait for &Type` — the reference is the implementing
             // type, so `Self` is `&Type` (Ch. 4 §2.1).
             self_ref = self.eat_op("&");
-            if self_ref && self.eat_kw("mut") {
-                return self.err("`impl Trait for &mut T` is not implemented");
-            }
+            self_mut = self_ref && self.eat_kw("mut");
             let self_ty = self.expect_ident()?;
             let self_args = self.generic_args()?;
             (Some(first), first_args, self_ty, self_args)
@@ -695,6 +694,7 @@ impl Parser {
             self_args,
             self_ty,
             self_ref,
+            self_mut,
             methods,
             line,
         })

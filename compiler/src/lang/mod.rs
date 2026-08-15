@@ -567,15 +567,12 @@ impl Iterator for Chars {
 
 fn putchar(c: t9);
 
-// A character below 128 is one code unit and *is* that unit — the test
-// `utf8_len` makes first anyway. Taking the branch here rather than in
-// `to_utf8` saves building a four-element buffer and returning it, which is
-// most of the cost of printing text that is all ASCII.
-//
 // This is `print_char`'s body written out rather than called, and it is the
-// one place in this file that repeats itself. There is no inliner, so a
-// one-line function is a call, and calling one per character costs 1.3% of
-// HPL. When there is an inliner this loop becomes `print_char(s[i])`.
+// one place in this file that repeats itself. The inliner has a budget and
+// `print_char` is over it — and raising the budget until it fits makes HPL
+// *slower*, because a larger splice costs more in spills than it saves in
+// calls. Measured: 3 247 122 instructions this way, 3 303 442 as a loop over
+// `print_char`, and 3 315 827 with the budget raised far enough to take it.
 fn print(s: &str) {
     let mut i: taddr = 0;
     while i < s.len() {

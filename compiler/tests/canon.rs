@@ -460,3 +460,54 @@ fn @counts(%n: t27) -> t27 {
         .expect("^head");
     assert_eq!(head.params.len(), 2, "{}", tir::print_module(&out));
 }
+
+#[test]
+fn a_small_call_becomes_the_body_it_called() {
+    // TIR §6: a call to a small, non-recursive function becomes the callee's
+    // blocks, renamed, with its parameters bound to the call's arguments and
+    // its `ret` turned into a branch to whatever followed the call.
+    let m = tir::parse_module(
+        "tir 0.1 target \"tritium\"\n\n\
+         fn @twice(%x: t27) -> t27 {\n\
+         ^entry:\n\
+         %d = add.wrap t27 %x, %x\n\
+         ret %d\n\
+         }\n\n\
+         fn @main() -> t27 {\n\
+         ^entry:\n\
+         %v = call @twice(const t27 5) -> t27\n\
+         ret %v\n\
+         }\n",
+    )
+    .expect("parses");
+    let mut out = tir::inline_module(&m);
+    let errs = tir::verify(&out);
+    assert!(errs.is_empty(), "{errs:?}");
+    tir::drop_uncalled(&mut out, &["main"]);
+    // The callee is gone with the call, and `main` calls nothing.
+    assert!(out.function("twice").is_none());
+    assert_eq!(out.funcs.len(), 1);
+}
+
+#[test]
+fn a_callee_that_never_returns_leaves_no_continuation() {
+    // What followed the call is code control cannot reach, and dropping it
+    // is not an optimization: an unreachable block is one the verifier
+    // rejects.
+    let m = tir::parse_module(
+        "tir 0.1 target \"tritium\"\n\n\
+         fn @stop() -> t27 {\n\
+         ^entry:\n\
+         trap F_TRAP\n\
+         }\n\n\
+         fn @main() -> t27 {\n\
+         ^entry:\n\
+         %v = call @stop() -> t27\n\
+         ret %v\n\
+         }\n",
+    )
+    .expect("parses");
+    let out = tir::inline_module(&m);
+    let errs = tir::verify(&out);
+    assert!(errs.is_empty(), "{errs:?}\n{}", tir::print_module(&out));
+}

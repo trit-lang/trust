@@ -148,6 +148,8 @@ pub struct ImplItem {
     /// value for a type that could not otherwise be passed at all
     /// (Ch. 4 §2.1).
     pub self_ref: bool,
+    /// Set for `impl Trait for &mut Type`.
+    pub self_mut: bool,
     /// Its type arguments: `impl<T> Pair<T, T>` (Ch. 4 §2.1).
     pub self_args: Vec<Ty>,
     /// Its methods and associated functions.
