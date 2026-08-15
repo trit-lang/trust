@@ -3272,8 +3272,7 @@ fn a_variant_with_nothing_to_drop_is_still_told_apart() {
     // droppable variant is the untagged one dropped it unconditionally —
     // and `Leaf`, which lives in the `Box`'s niche, freed whatever its
     // storage happened to hold.
-    let (_, out) = run(
-        "fn putchar(c: t9); \
+    let (_, out) = run("fn putchar(c: t9); \
          struct Port { id: t27 } \
          impl Drop for Port { fn drop(self) { putchar((48 + self.id) as t9); } } \
          enum Maybe { Nothing, Held(Box<Port>) } \
@@ -3282,7 +3281,32 @@ fn a_variant_with_nothing_to_drop_is_still_told_apart() {
              putchar(45); \
              { let b = Maybe::Held(Box::new(Port { id: 2 })); } \
              0 \
-         }",
-    );
+         }");
     assert_eq!(out, "-2");
+}
+
+#[test]
+fn a_generic_recursive_type_compiles_too() {
+    // Drop glue is synthesized at the first drop rather than once over the
+    // file, because an instantiation does not exist until something asks for
+    // it: `List<t27>` is named while a body is being lowered, and a pass over
+    // the file would have missed it. Doing it up front fixed the concrete
+    // case and left this one at the depth limit.
+    assert_eq!(
+        run("enum List<T> { Nil, Cons(T, Box<List<T>>) } \
+             fn total(l: &List<t27>) -> t27 { \
+                 match l { \
+                     List::Nil => 0, \
+                     List::Cons(x, rest) => x + total(&*rest), \
+                 } \
+             } \
+             fn main() -> t27 { \
+                 let tail: List<t27> = List::Nil; \
+                 let mid: List<t27> = List::Cons(2, Box::new(tail)); \
+                 let l: List<t27> = List::Cons(1, Box::new(mid)); \
+                 total(&l) \
+             }")
+        .0,
+        3
+    );
 }

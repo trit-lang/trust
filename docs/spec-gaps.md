@@ -1867,14 +1867,21 @@ about `Box`.
 
 **Drop glue moved out of line.** It was generated *inline*, field by field, at
 each place a value died — and inlining recursion does not terminate, so a
-recursive type stopped at the depth limit. Now every concrete nominal type
-that needs dropping and has no destructor of its own gets a synthesized
-`drop.T`.
+recursive type stopped at the depth limit. Every nominal type that needs
+dropping and has no destructor of its own now gets a synthesized `drop.T`.
 
 The synthesis adds no mechanism. `drop.T` takes `self` by value and has an
 **empty body**, and the fields are dropped when its frame ends — which is what
 `fn drop(self) {}` already meant (Ch. 4 §5.2). The glue is a destructor that
 does nothing, and that was already the definition.
+
+It is synthesized **at the first drop**, not by a pass over the file, and the
+first version got that wrong: a pass over the file fixed
+`enum Tree { Node(Box<Tree>, …) }` and left
+`enum List<T> { Cons(T, Box<List<T>>) }` at the depth limit, because an
+instantiation of a generic type does not exist until something asks for it —
+`List<t27>` is named while a body is being lowered, after any pass over the
+file has run. The lazy form uses the queue closure bodies already use.
 
 **A move in one `match` arm was a move in the next.** Arms are alternatives,
 not a sequence, and `if`/`else` had joined ownership from the start; `match`

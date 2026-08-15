@@ -634,7 +634,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
     // Nominal types first: signatures and constants may mention them, and
     // every item in the file is visible to every other whatever the order
     // (Ch. 0 §3).
-    let mut types = match build_types(file) {
+    let types = match build_types(file) {
         Ok(t) => t,
         Err(e) => {
             errs.push(e);
@@ -682,46 +682,6 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
         })
         .chain(expanded)
         .collect();
-
-    // Drop glue, out of line, for every concrete type that needs dropping and
-    // has no destructor of its own.
-    //
-    // Glue used to be generated *inline*, field by field, at each place a
-    // value died — and inlining recursion does not terminate: `enum Tree {
-    // Node(Box<Tree>, …) }` ran into the depth limit rather than compiling.
-    //
-    // A synthesized destructor with an **empty body** is exactly the glue:
-    // `drop.T` takes `self` by value, does nothing, and the fields are
-    // dropped when its frame ends — which is what `fn drop(self) {}` already
-    // meant (Ch. 4 §5.2). So the fix adds no mechanism, it uses the one that
-    // was there.
-    let mut fns = fns;
-    let glued: Vec<String> = {
-        let structs = types.structs.borrow();
-        let enums = types.enums.borrow();
-        structs
-            .keys()
-            .map(|n| (n.clone(), Ty::Struct(n.clone())))
-            .chain(enums.keys().map(|n| (n.clone(), Ty::Enum(n.clone()))))
-            .filter(|(n, t)| types.needs_drop(t) && !types.destructors.contains(n))
-            .map(|(n, _)| n)
-            .collect()
-    };
-    for name in glued {
-        fns.push(ast::FnItem {
-            name: format!("drop.{name}"),
-            generics: Vec::new(),
-            params: vec![("self".into(), ast::Ty::Name(name.clone(), 0))],
-            ret: None,
-            body: Some(ast::Block {
-                stmts: Vec::new(),
-                tail: None,
-                line: 0,
-            }),
-            line: 0,
-        });
-        types.destructors.insert(name);
-    }
 
     // `impl Fn(…)` in argument position is an anonymous type parameter
     // (Ch. 4 §2.2). Naming it here is the whole of the desugaring, and it is
@@ -4031,9 +3991,8 @@ impl Fn<'_> {
         // Completeness is also what Ch. 4 §3.3's vtable drop slot assumes: a
         // caller with only a pointer and that slot must be able to drop the
         // whole value.
-        if let Ty::Struct(n) | Ty::Enum(n) = ty
-            && self.types.destructors.contains(n)
-        {
+        if let Ty::Struct(n) | Ty::Enum(n) = ty {
+            self.ensure_glue(n, ty, line)?;
             self.push(Inst {
                 results: Vec::new(),
                 kind: InstKind::Call {
@@ -4045,6 +4004,47 @@ impl Fn<'_> {
             return Ok(());
         }
         self.drop_fields(addr, ty, line, depth)
+    }
+
+    /// Make sure `drop.T` exists, synthesizing it if the type has no
+    /// destructor of its own.
+    ///
+    /// Drop glue used to be generated *inline*, field by field, at each place
+    /// a value died — and inlining recursion does not terminate, so a
+    /// recursive type stopped at the depth limit instead of compiling.
+    ///
+    /// The synthesis adds no mechanism. `drop.T` takes `self` by value and
+    /// has an **empty body**, and its fields are dropped when its frame ends
+    /// — which is what `fn drop(self) {}` already meant (Ch. 4 §5.2). The
+    /// glue is a destructor that does nothing, and that was already the
+    /// definition.
+    ///
+    /// It is done here, at the first drop, rather than once over the file,
+    /// because an instantiation of a generic type does not exist until
+    /// something asks for it: `List<t27>` is named while a body is being
+    /// lowered, and a pass over the file would have missed it.
+    fn ensure_glue(&mut self, name: &str, ty: &Ty, line: Line) -> R<()> {
+        let key = format!("drop.{name}");
+        if self.types.destructors.contains(name) || self.sigs.borrow().contains_key(&key) {
+            return Ok(());
+        }
+        let _ = line;
+        self.sigs
+            .borrow_mut()
+            .insert(key.clone(), (vec![ty.clone()], Ty::Unit));
+        self.extra_fns.borrow_mut().push(ast::FnItem {
+            name: key,
+            generics: Vec::new(),
+            params: vec![("self".into(), ast::Ty::Name(name.to_string(), 0))],
+            ret: None,
+            body: Some(ast::Block {
+                stmts: Vec::new(),
+                tail: None,
+                line: 0,
+            }),
+            line: 0,
+        });
+        Ok(())
     }
 
     /// The second half of dropping a value: its fields, without its own

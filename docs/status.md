@@ -127,7 +127,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6) |
 
-**391 tests, zero clippy warnings, 66 commits.** `scripts/stats.sh`.
+**392 tests, zero clippy warnings, 67 commits.** `scripts/stats.sh`.
 
 ---
 
