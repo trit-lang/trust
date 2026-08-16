@@ -87,5 +87,21 @@ for f in bootstrap/fns/*.tr; do
     i=$((i + 1))
 done
 
-printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees — all agreed\n' \
-    "$n" "$r" "$e" "$i"
+# A whole *program*, not a file. The machine has a character port and no
+# filesystem (ISA §2.2), so the driver walks the module tree and hands the
+# program over on stdin — which is where finding files belongs anyway, since
+# which files are compiled is a fact about a build (Ch. 6 §1.2).
+m=0
+for root in examples/trust/modules/main.tr bootstrap/whole.tr bootstrap/items.tr; do
+    rust=$("$trust" modules "$root")
+    mine=$("$trust" bundle "$root" | "$trust" run bootstrap/whole.tr)
+    if [ "$rust" != "$mine" ]; then
+        echo "bootstrap: the two disagree about the program rooted at $root" >&2
+        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10 >&2
+        exit 1
+    fi
+    m=$((m + $(printf '%s\n' "$rust" | wc -l)))
+done
+
+printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d modules of whole programs — all agreed\n' \
+    "$n" "$r" "$e" "$i" "$m"

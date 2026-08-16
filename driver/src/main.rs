@@ -26,6 +26,9 @@ usage:
                                        print its tree
     trust item <file.tr>               read the file as one function and
                                        print its tree
+    trust bundle <file.tr>             the whole module tree as one text,
+                                       for a compiler that cannot open files
+    trust modules <file.tr>            each module of it, and its token count
 
     --time                             report what each phase of the compile
                                        cost, on stderr
@@ -68,6 +71,60 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         };
+    }
+
+    // Each module of a program and how many tokens it holds — the line
+    // `bootstrap/whole.tr` prints, so that the two can be compared on a
+    // *program* rather than on a file.
+    if cmd == "modules" {
+        let program = lang::modules::load(std::path::Path::new(path));
+        if !program.errors.is_empty() {
+            for e in &program.errors {
+                eprintln!("trust: {}", e.message);
+            }
+            return ExitCode::FAILURE;
+        }
+        for source in &program.sources {
+            let name = match source.path.is_empty() {
+                true => "-".to_string(),
+                false => source.path.join("."),
+            };
+            match lang::lex::lex(&source.text) {
+                Ok(t) => println!("mod {name} {}", t.len()),
+                Err(e) => println!("mod {name} error {}", e.span.lo),
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    // The whole program as one text, for something that reads stdin.
+    //
+    // A compiler written in Trust cannot open a file: the machine has a
+    // character port and no filesystem (ISA §2.2), and giving it one would
+    // be putting an operating system inside a machine. So finding the files
+    // stays this side of the line — which is where it belongs, since which
+    // files are compiled is a fact about a *build* — and the compiler is
+    // handed the program it is to compile.
+    if cmd == "bundle" {
+        let program = lang::modules::load(std::path::Path::new(path));
+        if !program.errors.is_empty() {
+            for e in &program.errors {
+                eprintln!("trust: {}", e.message);
+            }
+            return ExitCode::FAILURE;
+        }
+        for source in &program.sources {
+            // Length-prefixed and in characters, which is what a `str` is
+            // indexed by (Ch. 5 §1.1): no escaping, and nothing a program
+            // could write can end a section early.
+            let name = match source.path.is_empty() {
+                true => "-".to_string(),
+                false => source.path.join("."),
+            };
+            println!("mod {name} {}", source.text.chars().count());
+            print!("{}", source.text);
+        }
+        return ExitCode::SUCCESS;
     }
 
     // The file, read as one function, printed as a tree.

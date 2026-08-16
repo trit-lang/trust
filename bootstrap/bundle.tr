@@ -1,0 +1,57 @@
+// Reading a whole program, when nothing here can open a file.
+//
+// The machine has a character port and no filesystem (ISA §2.2), so finding
+// the files stays on the other side of the line — which is where it belongs,
+// since which files are compiled is a fact about a *build* (Ch. 6 §1.2). The
+// driver walks the module tree and hands the program over:
+//
+//     trust bundle main.tr | trust run bootstrap/bundle.tr
+//
+// A section is `mod <path> <chars>` and then exactly that many characters.
+// Length-prefixed and counted in *characters*, which is what a `str` is
+// indexed by (Ch. 5 §1.1): nothing a program can write ends a section early,
+// so there is no escaping and nothing to get wrong about it.
+
+/// One module of a bundled program.
+pub struct Module {
+    pub path: String,
+    pub text: String,
+}
+
+/// Split a bundle into its modules, in the order the driver walked them.
+pub fn split(all: &str) -> Vec<Module> {
+    let mut out: Vec<Module> = Vec::new();
+    let mut i: taddr = 0;
+    while i < all.len() {
+        // `mod `
+        i += 4;
+        let name_from = i;
+        while i < all.len() && all[i] != ' ' {
+            i += 1;
+        }
+        let path = take(all, name_from, i);
+        i += 1;
+        let mut chars = 0;
+        while i < all.len() && all[i] != '\n' {
+            chars = chars * 10 + ((all[i] as t27) - ('0' as t27));
+            i += 1;
+        }
+        i += 1;
+        let n = chars as taddr;
+        let text = take(all, i, i + n);
+        i += n;
+        out.push(Module { path: path, text: text });
+    }
+    out
+}
+
+/// The characters `s[from..to]`, as text of its own.
+fn take(s: &str, from: taddr, to: taddr) -> String {
+    let mut out: String = Vec::new();
+    let mut i = from;
+    while i < to && i < s.len() {
+        out.push(s[i]);
+        i += 1;
+    }
+    out
+}

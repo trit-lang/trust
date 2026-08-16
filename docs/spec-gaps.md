@@ -2592,6 +2592,32 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.40 — a compiler written in Trust cannot open a file, and does not need
+to.** The machine has a character port and no filesystem (ISA §2.2). Giving
+it one would be putting an operating system inside a machine, so the line is
+drawn elsewhere: **the driver walks the module tree and hands the program
+over**.
+
+    trust bundle main.tr | trust run bootstrap/whole.tr
+
+That is where finding files belongs anyway. Ch. 6 §1.2 already says which
+files are compiled is a fact about the *program* and not about a directory;
+which files are *read* is a fact about a **build**, and a build is the thing
+outside the language. What self-hosts is the compiler, not the driver, and
+saying so is more honest than a `open()` that only the reference machine has.
+
+A section is `mod <path> <chars>` and then exactly that many characters —
+length-prefixed, and counted in **characters**, which is what a `str` is
+indexed by (Ch. 5 §1.1). Nothing a program can write ends a section early, so
+there is no escaping and nothing to get wrong about it.
+
+*What it costs, measured.* The Trust lexer retires **11 816 799**
+instructions over `HPL.tr` — 24 KB, about 140 ms of machine time against the
+Rust lexer's 15 ms of wall clock. A compiler of 900 KB of source would take
+seconds to lex and minutes to compile itself. That is the ordinary price of
+bootstrapping on a reference interpreter, and it is written down here rather
+than discovered later.
+
 **G9.39 — three things a parser needs that the parser did not have.** Growing
 `bootstrap/parse.tr` to statements and functions found each of them by
 failing to compile itself.

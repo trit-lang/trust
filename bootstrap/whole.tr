@@ -1,0 +1,97 @@
+// A whole program, lexed — every module of it, from one bundle on stdin.
+//
+//     trust bundle <root.tr> | trust run bootstrap/whole.tr
+//
+// It prints one line per module: its path and how many tokens it holds. That
+// is the smallest thing that says the bundle was read and every module of it
+// lexed, and it is comparable against the Rust side token for token.
+
+mod bundle;
+mod lex;
+
+fn getchar() -> t9;
+
+fn main() -> t27 {
+    let src = read_all();
+    let mods = bundle::split(&src);
+    let mut i: taddr = 0;
+    while i < mods.len() {
+        let n = count(&mods[i].text);
+        print("mod ");
+        print(&mods[i].path);
+        print(" ");
+        match n {
+            Result::Ok(k) => print_int(k),
+            Result::Err(at) => {
+                print("error ");
+                print_int(at);
+            }
+        }
+        println("");
+        i += 1;
+    }
+    0
+}
+
+/// How many tokens a module holds, or where it stopped being one.
+fn count(text: &str) -> Result<t27, t27> {
+    let mut at: taddr = 0;
+    let mut n = 0;
+    loop {
+        match lex::one(text, at) {
+            Result::Ok(t) => {
+                at = t.at;
+                n += 1;
+                match t.tok {
+                    lex::Tok::Eof => return Result::Ok(n),
+                    _ => {}
+                }
+            }
+            Result::Err(e) => return Result::Err(e.at as t27),
+        }
+    }
+}
+
+/// Everything on stdin, as text.
+fn read_all() -> String {
+    let mut out: String = Vec::new();
+    loop {
+        let b = next_byte();
+        if b < 0 {
+            return out;
+        }
+        let extra = if b < 128 { 0 } else if b < 224 { 1 } else if b < 240 { 2 } else { 3 };
+        let mut v = if extra == 0 {
+            b
+        } else if extra == 1 {
+            b - 192
+        } else if extra == 2 {
+            b - 224
+        } else {
+            b - 240
+        };
+        let mut k = 0;
+        while k < extra {
+            let c = next_byte();
+            if c < 0 {
+                return out;
+            }
+            v = v * 64 + (c - 128);
+            k += 1;
+        }
+        out.push(char::try_from(v).unwrap());
+    }
+}
+
+/// One code unit, or −1 when the input has ended (ISA §2.2).
+fn next_byte() -> t27 {
+    loop {
+        let c = getchar() as t27;
+        if c == 0 - 2 {
+            return 0 - 1;
+        }
+        if c >= 0 {
+            return c;
+        }
+    }
+}
