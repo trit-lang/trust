@@ -46,9 +46,13 @@ this one defines them. A name not listed here is not yet official.
 *Trust* is a high-frequency English word; the language is not findable by
 bare-word search and never will be. Therefore:
 
-- The public handle is **`trust-lang`** — GitHub organization, domain,
-  package scopes, social handles. This mirrors `rust-lang` exactly and for
-  the same reason.
+- The public handle is **`trit-lang`** — GitHub organization, domain,
+  package scopes, social handles. It follows `rust-lang`'s form and reason,
+  but not its word: `trust-lang` was the obvious choice and is held by
+  another account (§5). The substitute is not a fallback — `trit` is the
+  one term in this project that no other project's audience uses, which is
+  exactly the property the handle is for, and §1.1 already has *Trust* built
+  out of it.
 - First mention in any public document is "**the Trust programming
   language**"; thereafter plain *Trust* is fine.
 - Never introduce alternate spellings (TRust, trust!, Trust-lang as the
@@ -58,7 +62,7 @@ bare-word search and never will be. Therefore:
 
 ## 2. Repository and artifact names
 
-Monorepo: **`trust-lang/trust`**.
+Monorepo: **`trit-lang/trust`**.
 
 ```
 trust/
@@ -151,6 +155,8 @@ Recorded so future contributors do not re-propose them:
 | Name | Why avoided |
 |---|---|
 | **Triton** | established GPU compiler project; guaranteed collision in exactly this project's audience |
+| `trust-lang` (handle) | the first choice, and unavailable: held by a GitHub account with content, so it will not be released. The handle is `trit-lang` (§1.2). Do not re-propose padded variants — `the-trust-lang`, `trust-lang-project` — which keep the string and lose the reason for it |
+| **ternary-lang** (handle) | considered and rejected: it claims a whole category this language is only one member of |
 | **Setun** | the historical Soviet ternary computer; honored in prose, not claimed as a product name |
 | **TVM** | Apache TVM collision |
 | `i9`/`i27` type names | early drafts used them; rejected because `i` implies a signed/unsigned pair that does not exist — the `tN` scheme carries the radix in the name |

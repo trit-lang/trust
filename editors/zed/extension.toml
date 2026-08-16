@@ -16,7 +16,7 @@ repository = "https://github.com/Young-TW/trust-lang"
 # against the examples in the same commit that changes either.
 #
 # Note this is the repository the code is *pushed* to. Naming §2 names the
-# monorepo `trust-lang/trust`, which is where it is meant to end up; Zed needs
+# monorepo `trit-lang/trust`, which is where it is meant to end up; Zed needs
 # somewhere it can fetch from today (G0.6).
 [grammars.trust]
 repository = "https://github.com/Young-TW/trust-lang"

@@ -3009,16 +3009,24 @@ for a one-instruction add. A register-starved machine with no multiply
 penalty gets nothing from the classic transformation.
 
 **G0.6 — the repository is not where Naming §2 says it is.**
-Naming §2 names the monorepo **`trust-lang/trust`**, mirroring `rust-lang`.
-The code is pushed to **`Young-TW/trust-lang`**, and `editors/zed/extension.toml`
-names that one, because Zed fetches the tree-sitter grammar over git and needs
-a URL that resolves today. `Cargo.toml` and Naming §2 still say
-`trust-lang/trust`.
+Naming §2 names the monorepo **`trit-lang/trust`**. The code is pushed to
+**`Young-TW/trust-lang`**, and `editors/zed/extension.toml` names *that* one,
+because Zed fetches the tree-sitter grammar over git — `git remote add`,
+`git fetch <rev>`, `git checkout` — and so needs a URL that resolves today.
+`Cargo.toml` and Naming §2 name the destination.
 
-This is a gap in the same sense G0.3a is: the spec states an intent the
-repository has not reached. It is recorded rather than resolved because which
-way it resolves — move the repository under an organisation, or amend §2 — is
-a decision about the project and not about the code.
+The handle changed while this gap was open, which is worth recording rather
+than quietly fixing. §1.2 said the handle was `trust-lang`, mirroring
+`rust-lang` "exactly and for the same reason". It is held by a GitHub account
+with content, so it will not be released, and the rule could not be satisfied
+as written. `trit-lang` replaces it — not as a fallback, but because `trit` is
+the one term here no other project's audience uses, which is the property the
+rule exists to buy. §5 records `trust-lang` and the padded variants so neither
+is re-proposed.
+
+This closes when the organisation exists and the repository is under it: the
+two URLs in `extension.toml` follow, and this entry goes. Commit SHAs do not
+change when a repository moves, so the pinned `rev` stays valid either way.
 
 **G0.5 — an editor can be told what is wrong, and where.**
 `trust check` compiles no further than the frontend and prints one diagnostic

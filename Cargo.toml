@@ -6,7 +6,7 @@ members = ["core", "compiler", "driver", "lsp", "vm"]
 version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-only"
-repository = "https://github.com/trust-lang/trust"
+repository = "https://github.com/trit-lang/trust"
 
 [workspace.dependencies]
 trit-core = { path = "core" }
