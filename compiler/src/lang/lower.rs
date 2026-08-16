@@ -3697,6 +3697,16 @@ struct Fn<'a> {
     needs_heap: &'a std::cell::Cell<bool>,
     /// The signature each `impl Fn(…)` parameter was written with.
     fn_bounds: &'a HashMap<String, (ast::FnKind, Vec<ast::Ty>, Option<ast::Ty>)>,
+    /// Where the value being lowered is going, when that is already known.
+    ///
+    /// An aggregate has no value in TIR — it *is* its storage — so a literal
+    /// has to be built somewhere, and building it in a temporary that is
+    /// immediately copied is the cost this removes. Only the constructs that
+    /// are *transparent* to a destination forward it (`if`, `match`, a
+    /// block's tail); everything else drops it at the top of `expr_inner`,
+    /// because a subexpression must never take a destination meant for the
+    /// expression containing it (TIR §2).
+    dest: Option<String>,
     /// This function's own name, so a closure inside it gets a unique one.
     name: String,
     /// Generic function definitions, un-instantiated.
@@ -3863,6 +3873,7 @@ fn function(
     let (param_tys, ret) = sigs.borrow().get(key).cloned().unwrap();
     let destructor_of = key.strip_prefix("drop.").map(|t| t.to_string());
     let mut fx = Fn {
+        dest: None,
         traits,
         vtables,
         data,
@@ -3915,7 +3926,14 @@ fn function(
     if let Some(tail) = &body.tail {
         fx.check_return_root(tail, &ret, body.line)?;
     }
+    // An aggregate result is written through the caller's pointer, so that
+    // is where the body's value should be built rather than somewhere it is
+    // copied from (TIR §2).
+    if ret.is_aggregate() {
+        fx.dest = Some(SRET.to_string());
+    }
     let (value, ty) = fx.block(body, Some(&ret))?;
+    fx.dest = None;
     if !fx.done {
         // The parameters are this function's to drop too (Ch. 3 §1.1).
         if ret == Ty::Unit {
@@ -3924,8 +3942,11 @@ fn function(
         } else {
             fx.check(&ty, &ret, body.line, "function body")?;
             if ret.is_aggregate() {
-                let dst = Operand::Value(SRET.to_string());
-                fx.copy_typed(dst, value, &ret, body.line)?;
+                // Already there, if the body took the destination.
+                if value != Operand::Value(SRET.to_string()) {
+                    let dst = Operand::Value(SRET.to_string());
+                    fx.copy_typed(dst, value, &ret, body.line)?;
+                }
                 fx.drop_all(f.line)?;
                 fx.finish(Terminator::Ret(None));
             } else {
@@ -4188,6 +4209,10 @@ impl Fn<'_> {
 
     fn block(&mut self, b: &ast::Block, expected: Option<&Ty>) -> R<(Operand, Ty)> {
         let depth = self.scopes.len();
+        // A block's *value* is its tail's, so only the tail inherits a
+        // destination. A statement is not where the block's value comes
+        // from, and would take it.
+        let dest = self.dest.take();
         self.scopes.push(HashMap::new());
         for stmt in &b.stmts {
             self.stmt_index += 1;
@@ -4198,6 +4223,7 @@ impl Fn<'_> {
             Some(e) => {
                 self.stmt_index += 1;
                 self.stmt = self.stmt_index;
+                self.dest = dest;
                 self.expr(e, expected)?
             }
             None => (unit(), Ty::Unit),
@@ -4826,6 +4852,9 @@ impl Fn<'_> {
 
     fn expr_inner(&mut self, e: &ast::Expr, expected: Option<&Ty>) -> R<(Operand, Ty)> {
         use ast::Expr as E;
+        // Taken here, so that every arm below starts with nothing and only
+        // the ones that say so put it back.
+        let dest = self.dest.take();
         match e {
             // A character literal is a `char` and nothing else: unlike an
             // integer literal it takes no type from context, because there
@@ -4978,11 +5007,20 @@ impl Fn<'_> {
             E::Call(name, targs, args, line) => self.call(name, targs, args, expected, *line),
             E::Method(recv, name, args, line) => self.method(recv, name, args, expected, *line),
 
-            E::Block(b) => self.block(b, expected),
+            // Transparent to a destination: their value is one of their
+            // arms' values, and an arm may build where the whole is going.
+            E::Block(b) => {
+                self.dest = dest;
+                self.block(b, expected)
+            }
             E::If(cond, then, els, line) => {
+                self.dest = dest;
                 self.if_expr(cond, then, els.as_deref(), expected, *line)
             }
-            E::Match(scrutinee, arms, line) => self.match_expr(scrutinee, arms, expected, *line),
+            E::Match(scrutinee, arms, line) => {
+                self.dest = dest;
+                self.match_expr(scrutinee, arms, expected, *line)
+            }
             E::While(cond, body, line) => self.while_expr(cond, body, *line),
             E::Loop(body, line) => self.loop_expr(body, expected, *line),
 
@@ -5033,11 +5071,19 @@ impl Fn<'_> {
                 match value {
                     Some(v) => {
                         self.check_return_root(v, &self.ret.clone(), *line)?;
+                        if ret.is_aggregate() {
+                            self.dest = Some(SRET.to_string());
+                        }
                         let (val, vt) = self.expr(v, Some(&ret))?;
+                        self.dest = None;
                         self.check(&vt, &ret, *line, "returned value")?;
                         if ret.is_aggregate() {
-                            let dst = Operand::Value(SRET.to_string());
-                            self.copy_typed(dst, val, &ret, *line)?;
+                            // Already there, if the value took the
+                            // destination.
+                            if val != Operand::Value(SRET.to_string()) {
+                                let dst = Operand::Value(SRET.to_string());
+                                self.copy_typed(dst, val.clone(), &ret, *line)?;
+                            }
                             self.drop_returning(*line)?;
                             self.finish(Terminator::Ret(None));
                         } else {
@@ -5125,7 +5171,10 @@ impl Fn<'_> {
                 Ok((Operand::Value(slot), ty))
             }
 
-            E::Aggregate(path, fields, line) => self.aggregate(path, fields, expected, *line),
+            E::Aggregate(path, fields, line) => {
+                self.dest = dest;
+                self.aggregate(path, fields, expected, *line)
+            }
 
             E::Closure(params, ret, body, line) => self.closure(params, ret, body, None, *line),
 
@@ -9567,7 +9616,7 @@ impl Fn<'_> {
                 ),
             );
         }
-        let slot = self.temp_slot(&ty);
+        let slot = self.dest_or_temp(&ty);
         for (name, value) in fields {
             let Some((_, ft, off)) = declared.iter().find(|(n, _, _)| n == name).cloned() else {
                 return err(line, format!("`{head}` has no field `{name}`"));
@@ -9601,7 +9650,7 @@ impl Fn<'_> {
             );
         }
 
-        let slot = self.temp_slot(&ty);
+        let slot = self.dest_or_temp(&ty);
         let mut values = Vec::new();
         for (name, value) in fields {
             let Some((_, ft, _)) = declared.iter().find(|(n, _, _)| n == name).cloned() else {
@@ -9613,6 +9662,18 @@ impl Fn<'_> {
         }
         self.build_variant_into(&slot, enum_name, index, &values, line)?;
         Ok((Operand::Value(slot), ty))
+    }
+
+    /// The destination this value was told to go to, or a new temporary.
+    ///
+    /// A destination is used only when it is *this* value's: `dest` is taken
+    /// at the top of `expr_inner`, so by the time a literal asks, anything
+    /// meant for an enclosing expression is already gone.
+    fn dest_or_temp(&mut self, ty: &Ty) -> String {
+        match self.dest.take() {
+            Some(slot) => slot,
+            None => self.temp_slot(ty),
+        }
     }
 
     /// Write a variant into storage that already exists, from values rather
@@ -9798,6 +9859,10 @@ impl Fn<'_> {
         expected: Option<&Ty>,
         line: Line,
     ) -> R<(Operand, Ty)> {
+        // Where this `if`'s value is going, if it was told. Both arms are
+        // given it, so each may build its value there rather than somewhere
+        // the join copies from.
+        let dest = self.dest.take();
         // The condition is a `bool`, not a `trit`, and not "anything
         // nonzero" (Ch. 1 §2).
         let (c, ct) = self.expr(cond, Some(&Ty::Bool))?;
@@ -9812,10 +9877,18 @@ impl Fn<'_> {
 
         let before = self.owned_snapshot();
         self.start(then_l);
+        self.dest.clone_from(&dest);
         let (tv, tt) = self.block(then, expected)?;
+        self.dest = None;
         if tt != Ty::Never && tt != Ty::Unit {
-            let slot = self.temp_slot(&tt);
-            self.store_slot(&slot, &tt, tv);
+            let slot = match &dest {
+                Some(d) => d.clone(),
+                None => self.temp_slot(&tt),
+            };
+            // A value that was built in the join slot is already there.
+            if tv != Operand::Value(slot.clone()) {
+                self.store_slot(&slot, &tt, tv);
+            }
             result = Some((slot, tt.clone()));
         }
         self.jump(&join_l);
@@ -9826,13 +9899,17 @@ impl Fn<'_> {
         let et = match els {
             None => Ty::Unit,
             Some(e) => {
+                self.dest.clone_from(&dest);
                 let (ev, et) = self.expr(e, expected)?;
+                self.dest = None;
                 if let Some((slot, ty)) = &result
                     && et != Ty::Never
                 {
                     let (slot, ty) = (slot.clone(), ty.clone());
                     self.check(&et, &ty, line, "`else` branch")?;
-                    self.store_slot(&slot, &ty, ev);
+                    if ev != Operand::Value(slot.clone()) {
+                        self.store_slot(&slot, &ty, ev);
+                    }
                 }
                 et
             }
@@ -9943,6 +10020,7 @@ impl Fn<'_> {
         expected: Option<&Ty>,
         line: Line,
     ) -> R<(Operand, Ty)> {
+        let dest = self.dest.take();
         let (mut v, mut ty) = self.expr(scrutinee, None)?;
         // A scrutinee behind a reference is dereferenced, exactly as `.` is
         // (Ch. 3 §2.3). Bindings then copy out of the referent, which the
@@ -9968,7 +10046,7 @@ impl Fn<'_> {
             ty = *target;
         }
         if let Ty::Enum(name) = ty.clone() {
-            return self.match_enum(&name, v, arms, expected, borrowed, line);
+            return self.match_enum(&name, v, arms, expected, borrowed, dest, line);
         }
         if !ty.is_scalar() {
             return err(line, format!("cannot match on {ty}"));
@@ -9994,7 +10072,7 @@ impl Fn<'_> {
             for (arm, label) in arms.iter().zip(&labels) {
                 self.owned = before.clone();
                 self.start(label.clone());
-                self.arm_body(arm, expected, &mut result, &join, line, None)?;
+                self.arm_body(arm, expected, &mut result, &join, line, None, &dest)?;
                 merged = Some(self.join_arm(merged));
             }
             if let Some(m) = merged {
@@ -10014,7 +10092,7 @@ impl Fn<'_> {
             self.owned = before.clone();
             let unconditional = self.arm_test(arm, &v, &ty, &body, &next, line)?;
             self.start(body);
-            self.arm_body(arm, expected, &mut result, &join, line, None)?;
+            self.arm_body(arm, expected, &mut result, &join, line, None, &dest)?;
             merged = Some(self.join_arm(merged));
             if unconditional {
                 // A wildcard or binding matches everything, so no later arm
@@ -10040,6 +10118,7 @@ impl Fn<'_> {
     /// A three-variant fieldless enum with discriminants −1, 0, +1 is
     /// representation-identical to `trit`, and this is where Ch. 2 §5.2's
     /// promise is kept: the dispatch is one `br3`.
+    #[allow(clippy::too_many_arguments)]
     fn match_enum(
         &mut self,
         name: &str,
@@ -10047,6 +10126,7 @@ impl Fn<'_> {
         arms: &[ast::Arm],
         expected: Option<&Ty>,
         borrowed: bool,
+        dest: Option<String>,
         line: Line,
     ) -> R<(Operand, Ty)> {
         let ty = Ty::Enum(name.to_string());
@@ -10130,6 +10210,7 @@ impl Fn<'_> {
                     &join,
                     borrowed,
                     line,
+                    &dest,
                 )?;
                 merged = Some(self.join_arm(merged));
             }
@@ -10190,6 +10271,7 @@ impl Fn<'_> {
                 &join,
                 borrowed,
                 line,
+                &dest,
             )?;
             merged = Some(self.join_arm(merged));
             self.owned = before.clone();
@@ -10210,6 +10292,7 @@ impl Fn<'_> {
                     &join,
                     borrowed,
                     line,
+                    &dest,
                 )?;
                 merged = Some(self.join_arm(merged));
             }
@@ -10236,6 +10319,7 @@ impl Fn<'_> {
         join: &str,
         borrowed: bool,
         line: Line,
+        dest: &Option<String>,
     ) -> R<()> {
         let depth = self.scopes.len();
         self.scopes.push(HashMap::new());
@@ -10286,7 +10370,7 @@ impl Fn<'_> {
             }
         }
 
-        let r = self.arm_body(arm, expected, result, join, line, Some(depth));
+        let r = self.arm_body(arm, expected, result, join, line, Some(depth), dest);
         self.scopes.pop();
         r
     }
@@ -10327,6 +10411,7 @@ impl Fn<'_> {
     /// block at all. An arm is a scope like any other (Ch. 3 §1.4); it did
     /// not used to be, and a binding that outlived its arm was swept up by
     /// the next scope to end at the same depth.
+    #[allow(clippy::too_many_arguments)]
     fn arm_body(
         &mut self,
         arm: &ast::Arm,
@@ -10335,15 +10420,25 @@ impl Fn<'_> {
         join: &str,
         line: Line,
         scope: Option<usize>,
+        dest: &Option<String>,
     ) -> R<()> {
+        self.dest.clone_from(dest);
         let (v, ty) = self.expr(&arm.body, expected)?;
+        self.dest = None;
         if ty != Ty::Never && ty != Ty::Unit {
             if result.is_none() {
-                *result = Some((self.temp_slot(&ty), ty.clone()));
+                let slot = match dest {
+                    Some(d) => d.clone(),
+                    None => self.temp_slot(&ty),
+                };
+                *result = Some((slot, ty.clone()));
             }
             let (slot, want) = result.clone().expect("just set");
             self.check(&ty, &want, line, "match arm")?;
-            self.store_slot(&slot, &want, v);
+            // A value built in the join slot is already there.
+            if v != Operand::Value(slot.clone()) {
+                self.store_slot(&slot, &want, v);
+            }
         }
         if let Some(depth) = scope {
             self.drop_scope(depth, arm.line)?;

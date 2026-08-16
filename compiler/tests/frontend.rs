@@ -4304,3 +4304,35 @@ fn an_aligned_aggregate_is_copied_by_words() {
         15
     );
 }
+
+#[test]
+fn a_value_is_built_where_it_is_going() {
+    // An aggregate has no value in TIR — it *is* its storage — so a literal
+    // has to be built somewhere, and building it in a temporary that is
+    // immediately copied is pure cost. `if` and `match` are transparent to a
+    // destination: an arm builds where the whole expression's value is going.
+    //
+    // Nesting is what checks the rule that makes this safe — the destination
+    // is taken at the top of every expression, so a subexpression can never
+    // take one meant for the expression containing it.
+    assert_eq!(
+        run("enum Shape { Dot, Line(t27), Box(t27, t27) } \
+             struct Pair { a: Shape, b: Shape } \
+             fn pick(n: t27) -> Shape { \
+                 if n < 0 { Shape::Dot } \
+                 else { if n == 0 { Shape::Line(7) } else { Shape::Box(n, n * 2) } } \
+             } \
+             fn both(n: t27) -> Pair { Pair { a: pick(n), b: pick(-n) } } \
+             fn size(s: Shape) -> t27 { \
+                 match s { \
+                     Shape::Dot => 1, \
+                     Shape::Line(l) => l, \
+                     Shape::Box(w, h) => w * h, \
+                 } \
+             } \
+             fn main() -> t27 { let p = both(3); size(p.a) * 100 + size(p.b) }")
+        .0,
+        // `Box(3, 6)` is 18, and `pick(-3)` is a `Dot`.
+        18 * 100 + 1
+    );
+}

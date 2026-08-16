@@ -2533,11 +2533,32 @@ The range loop is **38 068** now, from 66 097: **−42%** across the two
 changes. An adaptor chain is −31%. HPL is −265 in total, which is what a
 program that constructs no enums in its hot loops should see.
 
-*Still 5.4× the `while` loop.* What is left is the three temporaries — the
-variant literal's, the `if`'s result, the caller's — and removing them needs
-an expression to be told where its value is going before it computes one.
-That is destination-passing, and it is the largest single thing left in the
-backend; §8's remaining pass is worth nothing beside it.
+*Then the temporaries.* An aggregate has no value in TIR — it **is** its
+storage — so a literal has to be built somewhere, and building it in a
+temporary that is immediately copied is pure cost. `Range::next` built its
+`Option` in one slot, copied it to the `if`'s result, and copied that to the
+caller's.
+
+An expression is now told where its value is going before it computes one.
+The destination is set in two places — the function's result pointer, for a
+body or a `return` — and consumed in one: a struct, tuple or variant literal
+builds *there* instead of in a temporary. `if`, `match` and a block's tail are
+**transparent** to it, because their value is one of their arms' values.
+
+The rule that makes this safe is one line: **the destination is taken at the
+top of every expression**, so only the constructs that put it back can pass it
+on, and a subexpression can never take one meant for the expression containing
+it. A block gives it to its tail and not to its statements, for the same
+reason.
+
+**`for i in 0..1000` is 21 043 instructions, from 66 097** — −68% across the
+three changes, and 3.0× the `while` and an index rather than 9.4×. An adaptor
+chain is **−54%**. HPL is unmoved, which is right: it constructs no aggregates
+in its hot loops, and this was never about HPL.
+
+*What is left.* A call still writes its aggregate result into a temporary that
+`let` then copies — the destination is not yet passed to a call's result
+pointer, which is the same idea one step further out.
 
 **G0.4 — `trust run`, and where the three seconds go.** `trustc compile`
 writes assembly and stops, `tritium asm` makes an image and `tritium run`

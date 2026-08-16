@@ -461,9 +461,15 @@ spelling in the grammar and nothing else — `for i in 0..v.len()` works. It
 costs more than the `while` and an index it replaces, and measuring why found
 two things: every enum construction zeroed its whole storage first for a
 determinism Ch. 2 §1 does not ask for, and an enum's storage was copied a
-tryte at a time although both ends are word-aligned. The range loop is **42%**
-cheaper without them and an adaptor chain 31%. What is left is destination
-passing — three temporaries where one would do.
+tryte at a time although both ends are word-aligned. The range loop is 42%
+cheaper without them and an adaptor chain 31%.
+
+Then **destination passing**: an expression is told where its value is going
+before it computes one, so a literal builds there rather than in a temporary
+something copies from. `for i in 0..1000` is **21 043** instructions from
+66 097 — **−68%** across the three changes, and 3.0× the `while` and an index
+rather than 9.4×. What is left is passing a destination to a *call's* result
+pointer, which is the same idea one step further out.
 
 What is left of Ch. 5 is `Cell`/`RefCell` (§5), `expect`, formatting, maps and
 sets, sorting and `Rc` — all of §7, all reserved. Ch. 4's list is now empty
