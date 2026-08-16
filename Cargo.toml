@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core", "compiler", "driver", "vm"]
+members = ["core", "compiler", "driver", "lsp", "vm"]
 
 [workspace.package]
 version = "0.1.0"

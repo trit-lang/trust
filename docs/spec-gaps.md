@@ -3008,6 +3008,38 @@ is worth zero on this machine**: `alui.mul` is 14% of HPL, but replacing
 for a one-instruction add. A register-starved machine with no multiply
 penalty gets nothing from the classic transformation.
 
+**G0.5 — an editor can be told what is wrong, and nothing else yet.**
+`trust check` compiles no further than the frontend and prints one diagnostic
+per line; `trust-lsp` sends the same over stdio, so an editor squiggles as you
+type, from **exactly the compiler that will build the program**. There is no
+second implementation of the language to drift.
+
+Both are small because the compiler is a library and `lang::compile` already
+returns every error the frontend found — several, since it recovers at each
+function.
+
+*What stops there, and why it is one reason.* A `SyntaxError` carries a
+**line** and a message; the lexer carries a line per token. There are no
+columns and no byte offsets **anywhere**. So a squiggle is a whole line, and
+hover, go-to-definition and completion are not merely unwritten — there is
+nothing to build them out of. Threading a span through the lexer, the parser
+and the AST is the one change that unblocks all of them at once, and it
+touches every use of `Line` in the frontend.
+
+*The other half of an editor is separate work.* Zed's highlighting is
+**tree-sitter only** — there is no regular-expression fallback — so it needs a
+`tree-sitter-trust` grammar, which is a **second grammar** and can drift from
+the parser. Ch. 0 §6's grammar is normative and most of the design, and the
+discipline that would keep them together is a test that every file in
+`examples/trust/` parses with no error node.
+
+*No dependency was added.* A language server usually reaches for `serde_json`
+and `lsp-types`. This repository has none at all, and a convenience tool is a
+poor reason to acquire its first: the JSON it needs is a reader, a writer, and
+the surrogate-pair case an editor sends for anything outside the basic plane —
+which matters here, since the protocol carries source text and this language's
+source may contain any of it.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

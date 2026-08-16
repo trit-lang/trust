@@ -126,7 +126,8 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | Backend (TIR → TRISC-27) | works, with a **linear-scan register allocator over live intervals**, decided once per function (G8.9, G8.11: −34.8%, and frame traffic down from 44% of everything executed to 13.5%) and instruction selection that uses the fields the encoding has — immediates, branch displacements, access displacements (G8.6−G8.8: a further −26.0% on HPL). A parameter stays in the register it arrived in where nothing can clobber it, and a function whose values all fit in registers opens no frame. Block parameters are allocated too, with each edge a parallel copy (G8.12); no peephole pass |
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6). **83 M instructions/second**, 32× what it was (G8.15) |
-| `trust` driver | compile and run in one command, nothing on the disk (G0.4) |
+| `trust` driver | compile and run in one command, nothing on the disk (G0.4); `trust check` reports diagnostics and stops |
+| `trust-lsp` | diagnostics over stdio, from the compiler itself — no second implementation of the language. Whole-line ranges, because a diagnostic carries a line and nothing narrower (G0.5) |
 
 **447 tests, zero clippy warnings, 95 commits.** `scripts/stats.sh`.
 

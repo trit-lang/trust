@@ -1,0 +1,20 @@
+[package]
+name = "trust-lsp"
+description = "A language server for Trust: diagnostics, over stdio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The compiler and nothing else. A language server usually reaches for
+# `serde_json` and `lsp-types`; this repository has no external dependency at
+# all, and a convenience tool is a poor reason to acquire its first.
+[dependencies]
+trustc = { path = "../compiler" }
+
+[[bin]]
+name = "trust-lsp"
+path = "src/main.rs"
+
+[lints.rust]
+missing_docs = "warn"

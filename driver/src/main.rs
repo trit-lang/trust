@@ -20,9 +20,14 @@ usage:
     trust run <file.tr> [--stats]      compile, link the runtime, execute;
                                        stdin to stdout
     trust asm <file.tr>                print the assembly it would run
+    trust check <file.tr>              report what is wrong with it, and stop
 
     --time                             report what each phase of the compile
                                        cost, on stderr
+
+`check` compiles no further than it must to know: it is what an editor runs
+on every save, and what `trust-lsp` reports. Its output is one diagnostic per
+line, `file:line: message`, and it exits 1 if there was one.
 
 `run` exits with the program's own status, so it composes with a shell the
 way any other program does. `--stats` reports instructions retired (ISA §2.3)
@@ -50,6 +55,12 @@ fn main() -> ExitCode {
         }
     };
 
+    // `check` stops before code generation, because nothing after the
+    // frontend can tell a program anything about itself.
+    if cmd == "check" {
+        return check(&src, path);
+    }
+
     let asm = match assemble_source(&src, path, timed) {
         Ok(a) => a,
         Err(code) => return code,
@@ -71,6 +82,35 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Everything wrong with a program, and nothing else.
+///
+/// The frontend is where every diagnostic a reader can act on comes from:
+/// what follows it is legalization and code generation, whose errors are
+/// about this compiler rather than about the program. So `check` runs the
+/// frontend and the verifier, and stops.
+fn check(src: &str, path: &str) -> ExitCode {
+    let module = match lang::compile(src) {
+        Ok(m) => m,
+        Err(errs) => {
+            for e in &errs {
+                println!("{path}:{}: {}", e.line, e.message);
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+    // Ill-formed TIR is this compiler's fault and not the program's, but a
+    // reader who hits one would rather be told than have it surface later as
+    // something stranger.
+    let errs = tir::verify(&module);
+    if !errs.is_empty() {
+        for e in &errs {
+            println!("{path}: internal: the frontend emitted ill-formed TIR: {e:?}");
+        }
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
 }
 
 /// Source to assembly, by the pipeline TIR §6 describes.

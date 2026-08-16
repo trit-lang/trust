@@ -229,6 +229,7 @@ core/        crate trit-core: balanced ternary arithmetic
 compiler/    crate trustc: TIR, legalization, and the Ch. 2 layout engine
 vm/          crate tritium: the reference machine and its assembler
 driver/      crate trust: compile a program and run it, in one command
+lsp/         crate trust-lsp: diagnostics for an editor, over stdio
 targets/     target descriptions (TIR §7)
 examples/    TIR modules and Trust programs that run
 docs/        notes about the spec, including every derived decision
