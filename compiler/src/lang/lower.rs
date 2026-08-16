@@ -10746,7 +10746,6 @@ impl Fn<'_> {
     /// A three-variant fieldless enum with discriminants −1, 0, +1 is
     /// representation-identical to `trit`, and this is where Ch. 2 §5.2's
     /// promise is kept: the dispatch is one `br3`.
-    #[allow(clippy::too_many_arguments)]
     /// `match p { P { a, b } => … }` — one arm, no test, no join.
     #[allow(clippy::too_many_arguments)]
     fn match_struct(
@@ -10791,6 +10790,7 @@ impl Fn<'_> {
         Ok(out)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn match_enum(
         &mut self,
         name: &str,
