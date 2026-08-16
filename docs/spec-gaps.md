@@ -3008,7 +3008,7 @@ is worth zero on this machine**: `alui.mul` is 14% of HPL, but replacing
 for a one-instruction add. A register-starved machine with no multiply
 penalty gets nothing from the classic transformation.
 
-**G0.5 — an editor can be told what is wrong, and nothing else yet.**
+**G0.5 — an editor can be told what is wrong, and where.**
 `trust check` compiles no further than the frontend and prints one diagnostic
 per line; `trust-lsp` sends the same over stdio, so an editor squiggles as you
 type, from **exactly the compiler that will build the program**. There is no
@@ -3018,13 +3018,34 @@ Both are small because the compiler is a library and `lang::compile` already
 returns every error the frontend found — several, since it recovers at each
 function.
 
-*What stops there, and why it is one reason.* A `SyntaxError` carries a
-**line** and a message; the lexer carries a line per token. There are no
-columns and no byte offsets **anywhere**. So a squiggle is a whole line, and
-hover, go-to-definition and completion are not merely unwritten — there is
-nothing to build them out of. Threading a span through the lexer, the parser
-and the AST is the one change that unblocks all of them at once, and it
-touches every use of `Line` in the frontend.
+*What used to stop there — and no longer does.* A `SyntaxError` carried a
+**line** and nothing narrower, so a squiggle was a whole line. Every token,
+every AST node and every error now carries a `Span`: the line, and the
+half-open range of **characters** it covers. `LineMap` turns an offset back
+into a 1-based column for a terminal and a 0-based UTF-16 offset for the
+protocol, which are different numbers as soon as a file holds anything
+outside the basic plane.
+
+Offsets count characters and not bytes because the lexer reads a file as a
+`Vec<char>` and an editor counts code units; bytes would mean converting at
+both ends instead of at neither.
+
+A span is the **whole extent** of what it covers, not the token that names
+it: `a + b` reaches from `a` to `b`, because what reads a span is something
+drawing a line under what is wrong, and what is wrong with `a + b` is
+`a + b`. Two diagnostics moved with it — a body's type is its tail's, and a
+`let`'s initializer is what has the wrong type — because a span made it
+possible to say so.
+
+`Span` carries a line it could recompute from its offset. That redundancy is
+allowed by a test: for every token of a file, the line in the span is the
+line `LineMap` finds. It is kept because most diagnostics are printed by
+something holding a line and no source text to count newlines in.
+
+*What is still not there.* Hover, go-to-definition and completion need more
+than a position: they need the compiler to answer *what is at this offset*,
+which means keeping the lowered result and an index from span to meaning
+rather than throwing both away at the end of `compile`.
 
 *The other half of an editor is separate work.* Zed's highlighting is
 **tree-sitter only** — there is no regular-expression fallback — so it needs a

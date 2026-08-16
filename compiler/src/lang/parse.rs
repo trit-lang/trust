@@ -5,7 +5,7 @@
 //! `a <=> b <=> c` are syntax errors rather than surprises.
 
 use super::ast::*;
-use super::lex::{Line, SyntaxError, Tok, lex};
+use super::lex::{Span, SyntaxError, Tok, lex};
 
 type R<T> = Result<T, SyntaxError>;
 
@@ -25,7 +25,7 @@ pub fn parse(src: &str) -> R<File> {
 }
 
 struct Parser {
-    toks: Vec<(Tok, Line)>,
+    toks: Vec<(Tok, Span)>,
     pos: usize,
     /// Set while parsing a condition, where a struct literal's `{` would be
     /// read as the block that follows (§2.8).
@@ -75,8 +75,24 @@ impl Parser {
         &self.toks[at].0
     }
 
-    fn line(&self) -> Line {
+    fn span(&self) -> Span {
         self.toks[self.pos].1
+    }
+
+    /// The span of the token just read.
+    fn prev(&self) -> Span {
+        self.toks[self.pos.saturating_sub(1)].1
+    }
+
+    /// From where a production began to the end of what it has read.
+    ///
+    /// A production knows where it starts before it knows where it ends, so
+    /// it notes the first token's span, parses, and asks this how wide the
+    /// node turned out to be. That is the whole extent and not the token that
+    /// names it, because what reads a span is something drawing a line under
+    /// what is wrong (see `Expr::spanning`).
+    fn since(&self, start: Span) -> Span {
+        start.to(self.prev())
     }
 
     fn at(&self, t: &Tok) -> bool {
@@ -119,7 +135,7 @@ impl Parser {
 
     fn err<T>(&self, msg: impl Into<String>) -> R<T> {
         Err(SyntaxError {
-            line: self.line(),
+            span: self.span(),
             message: msg.into(),
         })
     }
@@ -176,7 +192,7 @@ impl Parser {
         let mut repr = Repr::Lang;
         let mut derives: Vec<String> = Vec::new();
         while self.at_op("#") {
-            let line = self.line();
+            let span = self.span();
             self.bump();
             self.expect_op("[")?;
             let name = self.expect_ident()?;
@@ -189,7 +205,7 @@ impl Parser {
                         "linear" => Repr::Linear,
                         other => {
                             return Err(SyntaxError {
-                                line,
+                                span,
                                 message: format!(
                                     "`repr({other})` is not a layout regime; use `lang` or \
                                      `linear`"
@@ -203,7 +219,7 @@ impl Parser {
                     let t = self.expect_ident()?;
                     if !matches!(t.as_str(), "Eq" | "Ord" | "Clone") {
                         return Err(SyntaxError {
-                            line,
+                            span,
                             message: format!(
                                 "`{t}` is not derivable; Ch. 4 §6 derives `Eq`, `Ord` and \
                                  `Clone`, and says why `Copy`, `Sized` and `Drop` are not"
@@ -217,7 +233,7 @@ impl Parser {
                 },
                 other => {
                     return Err(SyntaxError {
-                        line,
+                        span,
                         message: format!(
                             "`{other}` is not an attribute; draft 0.1 defines `repr` (Ch. 2 §1) \
                              and `derive` (Ch. 4 §6)"
@@ -255,7 +271,7 @@ impl Parser {
 
     /// `struct Name { … }`, `struct Name(…);`, `struct Name;` (§3.3).
     fn struct_item(&mut self, repr: Repr, derives: Vec<String>) -> R<StructItem> {
-        let line = self.line();
+        let span = self.span();
         self.bump(); // struct
         let name = self.expect_ident()?;
         let generics = self.generic_params()?;
@@ -278,12 +294,12 @@ impl Parser {
             derives,
             repr,
             fields,
-            line,
+            span,
         })
     }
 
     fn enum_item(&mut self, repr: Repr, derives: Vec<String>) -> R<EnumItem> {
-        let line = self.line();
+        let span = self.span();
         self.bump(); // enum
         let name = self.expect_ident()?;
         let generics = self.generic_params()?;
@@ -293,7 +309,7 @@ impl Parser {
             if self.at(&Tok::Eof) {
                 return self.err("unterminated enum");
             }
-            let vline = self.line();
+            let vline = self.span();
             let vname = self.expect_ident()?;
             let fields = if self.at_op("{") {
                 self.named_fields()?
@@ -326,7 +342,7 @@ impl Parser {
                 name: vname,
                 fields,
                 discriminant,
-                line: vline,
+                span: vline,
             });
             if !self.eat_op(",") && !self.at_op("}") {
                 return self.err("expected `,` between variants");
@@ -338,7 +354,7 @@ impl Parser {
             derives,
             repr,
             variants,
-            line,
+            span,
         })
     }
 
@@ -572,7 +588,7 @@ impl Parser {
 
     /// `trait Name<T>: Super + Other { … }` (Ch. 4 §§1.1, 1.7).
     fn trait_item(&mut self) -> R<TraitItem> {
-        let line = self.line();
+        let span = self.span();
         self.bump(); // trait
         let name = self.expect_ident()?;
         // A trait's parameters are chosen by whoever implements it, once per
@@ -632,13 +648,13 @@ impl Parser {
             methods,
             assoc: names,
             consts: declared,
-            line,
+            span,
         })
     }
 
     /// `impl Type { … }` or `impl Trait for Type { … }` (Ch. 4 §1.2).
     fn impl_item(&mut self) -> R<ImplItem> {
-        let line = self.line();
+        let span = self.span();
         self.bump(); // impl
         let mut generics = self.generic_params()?;
         // `impl !Copy for T` — the one negative impl (Ch. 4 §5.1).
@@ -701,7 +717,7 @@ impl Parser {
                     name,
                     ty,
                     value,
-                    line,
+                    span,
                 }),
                 None => {
                     return self.err(format!(
@@ -723,7 +739,7 @@ impl Parser {
             self_ref,
             self_mut,
             methods,
-            line,
+            span,
         })
     }
 
@@ -793,7 +809,7 @@ impl Parser {
     /// `&mut self` share a prefix.
     fn self_param(&mut self) -> Option<(String, Ty)> {
         let start = self.pos;
-        let line = self.line();
+        let span = self.span();
         if self.at_kw("self") {
             self.bump();
             // `self: Buffer` is the long form Ch. 3 §1.4 writes; leave it to
@@ -802,7 +818,7 @@ impl Parser {
                 self.pos = start;
                 return None;
             }
-            return Some(("self".to_string(), Ty::SelfTy(line)));
+            return Some(("self".to_string(), Ty::SelfTy(span)));
         }
         if self.eat_op("&") {
             if let Tok::Lifetime(_) = self.peek() {
@@ -813,7 +829,7 @@ impl Parser {
                 self.bump();
                 return Some((
                     "self".to_string(),
-                    Ty::Ref(Box::new(Ty::SelfTy(line)), mutable, line),
+                    Ty::Ref(Box::new(Ty::SelfTy(span)), mutable, span),
                 ));
             }
         }
@@ -822,7 +838,7 @@ impl Parser {
     }
 
     fn fn_item(&mut self) -> R<FnItem> {
-        let line = self.line();
+        let span = self.span();
         self.bump(); // fn
         let name = self.expect_ident()?;
         let mut generics = self.generic_params()?;
@@ -879,12 +895,12 @@ impl Parser {
             ret,
             body,
             requires,
-            line,
+            span,
         })
     }
 
     fn const_item(&mut self) -> R<ConstItem> {
-        let line = self.line();
+        let span = self.span();
         self.bump(); // const
         let name = self.expect_ident()?;
         self.expect_op(":")?;
@@ -896,18 +912,23 @@ impl Parser {
             name,
             ty,
             value,
-            line,
+            span,
         })
     }
 
     fn ty(&mut self) -> R<Ty> {
-        let line = self.line();
+        let start = self.span();
+        Ok(self.ty_inner()?.spanning(self.since(start)))
+    }
+
+    fn ty_inner(&mut self) -> R<Ty> {
+        let span = self.span();
         if self.at_op("(") {
             let tys = self.type_list("(", ")")?;
             return Ok(if tys.is_empty() {
-                Ty::Unit(line)
+                Ty::Unit(span)
             } else {
-                Ty::Tuple(tys, line)
+                Ty::Tuple(tys, span)
             });
         }
         if self.eat_op("[") {
@@ -915,12 +936,12 @@ impl Parser {
             // `[T]` is a slice — dynamically sized, legal only behind a
             // reference (Ch. 3 §5.1). `[T; N]` is an array.
             if self.eat_op("]") {
-                return Ok(Ty::Slice(Box::new(elem), line));
+                return Ok(Ty::Slice(Box::new(elem), span));
             }
             self.expect_op(";")?;
             let n = self.expr()?;
             self.expect_op("]")?;
-            return Ok(Ty::Array(Box::new(elem), Box::new(n), line));
+            return Ok(Ty::Array(Box::new(elem), Box::new(n), span));
         }
         if self.eat_op("&") {
             // A lifetime is erased before TIR (Ch. 3 §3.1), so it is parsed
@@ -929,15 +950,15 @@ impl Parser {
                 self.bump();
             }
             let mutable = self.eat_kw("mut");
-            return Ok(Ty::Ref(Box::new(self.ty()?), mutable, line));
+            return Ok(Ty::Ref(Box::new(self.ty()?), mutable, span));
         }
         if self.at_kw("Self") {
             self.bump();
-            return self.assoc_tail(Ty::SelfTy(line), line);
+            return self.assoc_tail(Ty::SelfTy(span), span);
         }
         // `dyn Trait` (Ch. 4 §3.1).
         if self.eat_kw("dyn") {
-            return Ok(Ty::Dyn(self.expect_ident()?, line));
+            return Ok(Ty::Dyn(self.expect_ident()?, span));
         }
         // `impl Fn(T) -> R` in argument position (Ch. 4 §2.2, §4.3).
         if self.eat_kw("impl") {
@@ -960,27 +981,27 @@ impl Parser {
             } else {
                 None
             };
-            return Ok(Ty::ImplFn(kind, params, ret, line));
+            return Ok(Ty::ImplFn(kind, params, ret, span));
         }
         // `!` — the type with no values (Ch. 1 §2). It takes no arguments
         // and has no associated types, so it is returned as it stands.
         if self.eat_op("!") {
-            return Ok(Ty::Never(line));
+            return Ok(Ty::Never(span));
         }
         let name = self.expect_ident()?;
         let args = self.generic_args()?;
         let base = if args.is_empty() {
-            Ty::Name(name, line)
+            Ty::Name(name, span)
         } else {
-            Ty::App(name, args, line)
+            Ty::App(name, args, span)
         };
-        self.assoc_tail(base, line)
+        self.assoc_tail(base, span)
     }
 
     /// `::Item` after a type, as many times as it is written (Ch. 4 §1.7).
-    fn assoc_tail(&mut self, mut base: Ty, line: Line) -> R<Ty> {
+    fn assoc_tail(&mut self, mut base: Ty, span: Span) -> R<Ty> {
         while self.eat_op("::") {
-            base = Ty::Assoc(Box::new(base), self.expect_ident()?, line);
+            base = Ty::Assoc(Box::new(base), self.expect_ident()?, span);
         }
         Ok(base)
     }
@@ -1016,7 +1037,14 @@ impl Parser {
     // -------------------------------------------------------- statements
 
     fn block(&mut self) -> R<Block> {
-        let line = self.line();
+        let start = self.span();
+        let mut b = self.block_inner()?;
+        b.span = self.since(start);
+        Ok(b)
+    }
+
+    fn block_inner(&mut self) -> R<Block> {
+        let span = self.span();
         self.expect_op("{")?;
         let mut stmts = Vec::new();
         let mut tail = None;
@@ -1061,7 +1089,7 @@ impl Parser {
                 return self.err(format!("expected `;` or `}}`, found {}", self.peek()));
             }
         }
-        Ok(Block { stmts, tail, line })
+        Ok(Block { stmts, tail, span })
     }
 
     /// True where a block-shaped expression begins.
@@ -1080,10 +1108,10 @@ impl Parser {
     /// rules need no case of their own — moving out of `#t.0` leaves `#t.1`
     /// usable, which Ch. 3 §1.3 already says.
     fn let_stmt(&mut self) -> R<Vec<Stmt>> {
-        let line = self.line();
+        let span = self.span();
         self.bump(); // let
         if self.at_op("(") {
-            return self.let_tuple(line);
+            return self.let_tuple(span);
         }
         let mutable = self.eat_kw("mut");
         let name = self.expect_ident()?;
@@ -1100,11 +1128,11 @@ impl Parser {
             name,
             ty,
             value,
-            line,
+            span,
         }])
     }
 
-    fn let_tuple(&mut self, line: Line) -> R<Vec<Stmt>> {
+    fn let_tuple(&mut self, span: Span) -> R<Vec<Stmt>> {
         self.expect_op("(")?;
         let mut names = Vec::new();
         while !self.eat_op(")") {
@@ -1135,7 +1163,7 @@ impl Parser {
             name: whole.clone(),
             ty,
             value,
-            line,
+            span,
         }];
         for (i, (mutable, name)) in names.into_iter().enumerate() {
             out.push(Stmt::Let {
@@ -1143,11 +1171,11 @@ impl Parser {
                 name,
                 ty: None,
                 value: Expr::Field(
-                    Box::new(Expr::Path(whole.clone(), line)),
+                    Box::new(Expr::Path(whole.clone(), span)),
                     i.to_string(),
-                    line,
+                    span,
                 ),
-                line,
+                span,
             });
         }
         Ok(out)
@@ -1157,7 +1185,7 @@ impl Parser {
 
     /// The whole expression grammar, loosest first: assignment.
     pub fn expr(&mut self) -> R<Expr> {
-        let line = self.line();
+        let span = self.span();
         let lhs = self.range()?;
         if let Tok::Op(op) = self.peek()
             && ASSIGNMENTS.contains(op)
@@ -1165,7 +1193,9 @@ impl Parser {
             let op = *op;
             self.bump();
             let rhs = self.expr()?; // right-associative
-            return Ok(Expr::Assign(op, Box::new(lhs), Box::new(rhs), line));
+            return Ok(
+                Expr::Assign(op, Box::new(lhs), Box::new(rhs), span).spanning(self.since(span))
+            );
         }
         Ok(lhs)
     }
@@ -1180,7 +1210,7 @@ impl Parser {
     /// `..=` is reserved — an inclusive range cannot express an empty one
     /// and cannot reach the top of its type, and neither is decided here.
     fn range(&mut self) -> R<Expr> {
-        let line = self.line();
+        let span = self.span();
         let lhs = self.binary(0)?;
         if self.at_op("..=") {
             return self.err(
@@ -1196,11 +1226,12 @@ impl Parser {
             Path {
                 segments: vec!["Range".to_string()],
                 targs: Vec::new(),
-                line,
+                span,
             },
             vec![("start".to_string(), lhs), ("end".to_string(), rhs)],
-            line,
-        ))
+            span,
+        )
+        .spanning(self.since(span)))
     }
 
     fn binary(&mut self, level: usize) -> R<Expr> {
@@ -1211,6 +1242,7 @@ impl Parser {
             return self.cast();
         }
         let ops = LEVELS[level];
+        let start = self.span();
         let mut lhs = self.binary(level + 1)?;
         loop {
             let Tok::Op(op) = self.peek() else {
@@ -1219,15 +1251,16 @@ impl Parser {
             if !ops.contains(op) {
                 return Ok(lhs);
             }
-            let (op, line) = (*op, self.line());
+            let (op, span) = (*op, self.span());
             self.bump();
             let rhs = self.binary(level + 1)?;
-            lhs = Expr::Binary(op, Box::new(lhs), Box::new(rhs), line);
+            lhs = Expr::Binary(op, Box::new(lhs), Box::new(rhs), span).spanning(self.since(start));
         }
     }
 
     /// `==` and friends, then `<=>`. Both are non-associative (§2.1).
     fn comparison(&mut self) -> R<Expr> {
+        let start = self.span();
         let lhs = self.spaceship()?;
         let Tok::Op(op) = self.peek() else {
             return Ok(lhs);
@@ -1235,7 +1268,7 @@ impl Parser {
         if !COMPARISONS.contains(op) {
             return Ok(lhs);
         }
-        let (op, line) = (*op, self.line());
+        let (op, span) = (*op, self.span());
         self.bump();
         let rhs = self.spaceship()?;
         if let Tok::Op(next) = self.peek()
@@ -1243,53 +1276,58 @@ impl Parser {
         {
             return self.err("comparison operators do not chain: parenthesize");
         }
-        Ok(Expr::Binary(op, Box::new(lhs), Box::new(rhs), line))
+        Ok(Expr::Binary(op, Box::new(lhs), Box::new(rhs), span).spanning(self.since(start)))
     }
 
     fn spaceship(&mut self) -> R<Expr> {
+        let start = self.span();
         let lhs = self.binary(COMPARE_LEVEL + 1)?;
         if !self.at_op("<=>") {
             return Ok(lhs);
         }
-        let line = self.line();
+        let span = self.span();
         self.bump();
         let rhs = self.binary(COMPARE_LEVEL + 1)?;
         if self.at_op("<=>") {
             return self.err("`<=>` does not chain: parenthesize");
         }
-        Ok(Expr::Binary("<=>", Box::new(lhs), Box::new(rhs), line))
+        Ok(Expr::Binary("<=>", Box::new(lhs), Box::new(rhs), span).spanning(self.since(start)))
     }
 
     fn cast(&mut self) -> R<Expr> {
+        let start = self.span();
         let mut e = self.unary()?;
         while self.at_kw("as") {
-            let line = self.line();
+            let span = self.span();
             self.bump();
-            e = Expr::Cast(Box::new(e), self.ty()?, line);
+            e = Expr::Cast(Box::new(e), self.ty()?, span).spanning(self.since(start));
         }
         Ok(e)
     }
 
     fn unary(&mut self) -> R<Expr> {
-        let line = self.line();
+        let span = self.span();
         for op in ["-", "!"] {
             if self.at_op(op) {
                 self.bump();
-                return Ok(Expr::Unary(op, Box::new(self.unary()?), line));
+                let e = Expr::Unary(op, Box::new(self.unary()?), span);
+                return Ok(e.spanning(self.since(span)));
             }
         }
         if self.eat_op("&") {
             let mutable = self.eat_kw("mut");
-            return Ok(Expr::Borrow(Box::new(self.unary()?), mutable, line));
+            let e = Expr::Borrow(Box::new(self.unary()?), mutable, span);
+            return Ok(e.spanning(self.since(span)));
         }
         if self.eat_op("*") {
-            return Ok(Expr::Deref(Box::new(self.unary()?), line));
+            let e = Expr::Deref(Box::new(self.unary()?), span);
+            return Ok(e.spanning(self.since(span)));
         }
         // A closure (Ch. 4 §4.1). `||` here is two parameter delimiters and
         // not the logical-or of §2.1 — the re-examination of `|` that Ch. 0
         // §7 anticipated, and the whole of it.
         if self.at_op("|") || self.at_op("||") {
-            return self.closure(line);
+            return self.closure(span);
         }
         self.postfix()
     }
@@ -1303,40 +1341,40 @@ impl Parser {
     ///
     /// The iterator's name contains a dot, which no Trust identifier may, so
     /// it cannot shadow or be shadowed by anything a program wrote.
-    fn desugar_for(&mut self, name: String, iter: Expr, body: Block, line: Line) -> Expr {
+    fn desugar_for(&mut self, name: String, iter: Expr, body: Block, span: Span) -> Expr {
         self.counter += 1;
         let it = format!("it.{}", self.counter);
         let path = |segs: &[&str]| Path {
             segments: segs.iter().map(|s| s.to_string()).collect(),
             targs: Vec::new(),
-            line,
+            span,
         };
         let next = Expr::Method(
-            Box::new(Expr::Path(it.clone(), line)),
+            Box::new(Expr::Path(it.clone(), span)),
             "next".to_string(),
             Vec::new(),
-            line,
+            span,
         );
         let arms = vec![
             Arm {
                 patterns: vec![Pattern::Aggregate(
                     path(&["Option", "Some"]),
-                    vec![("0".to_string(), Pattern::Bind(name, line))],
-                    line,
+                    vec![("0".to_string(), Pattern::Bind(name, span))],
+                    span,
                 )],
                 guard: None,
                 body: Expr::Block(body),
-                line,
+                span,
             },
             Arm {
                 patterns: vec![Pattern::Aggregate(
                     path(&["Option", "None"]),
                     Vec::new(),
-                    line,
+                    span,
                 )],
                 guard: None,
-                body: Expr::Break(None, line),
-                line,
+                body: Expr::Break(None, span),
+                span,
             },
         ];
         Expr::Block(Block {
@@ -1348,24 +1386,24 @@ impl Parser {
                     // Ch. 4 §5.7: the loop's expression is turned into an
                     // iterator first, which is what lets `for c in s` walk a
                     // string and not only something that is already one.
-                    value: Expr::Method(Box::new(iter), "into_iter".to_string(), Vec::new(), line),
-                    line,
+                    value: Expr::Method(Box::new(iter), "into_iter".to_string(), Vec::new(), span),
+                    span,
                 },
                 Stmt::Expr(Expr::Loop(
                     Block {
                         stmts: Vec::new(),
-                        tail: Some(Box::new(Expr::Match(Box::new(next), arms, line))),
-                        line,
+                        tail: Some(Box::new(Expr::Match(Box::new(next), arms, span))),
+                        span,
                     },
-                    line,
+                    span,
                 )),
             ],
             tail: None,
-            line,
+            span,
         })
     }
 
-    fn closure(&mut self, line: Line) -> R<Expr> {
+    fn closure(&mut self, span: Span) -> R<Expr> {
         let mut params = Vec::new();
         if self.eat_op("||") {
             // no parameters
@@ -1396,27 +1434,28 @@ impl Parser {
         } else {
             self.expr()?
         };
-        Ok(Expr::Closure(params, ret, Box::new(body), line))
+        Ok(Expr::Closure(params, ret, Box::new(body), span).spanning(self.since(span)))
     }
 
     fn postfix(&mut self) -> R<Expr> {
+        let start = self.span();
         let mut e = self.primary()?;
         loop {
-            let line = self.line();
+            let span = self.span();
             if self.eat_op(".") {
                 // `x.0` is a tuple index; `x.f` is a field; `x.f(…)` a method.
                 if let Tok::Int(v) = self.peek().clone() {
                     self.bump();
                     let index = v.to_i128().unwrap_or(-1);
-                    e = Expr::Field(Box::new(e), index.to_string(), line);
+                    e = Expr::Field(Box::new(e), index.to_string(), span).spanning(self.since(start));
                     continue;
                 }
                 let name = self.expect_ident()?;
                 if self.at_op("(") {
                     let args = self.args()?;
-                    e = Expr::Method(Box::new(e), name, args, line);
+                    e = Expr::Method(Box::new(e), name, args, span).spanning(self.since(start));
                 } else {
-                    e = Expr::Field(Box::new(e), name, line);
+                    e = Expr::Field(Box::new(e), name, span).spanning(self.since(start));
                 }
                 continue;
             }
@@ -1424,13 +1463,13 @@ impl Parser {
                 self.bump();
                 let index = self.expr()?;
                 self.expect_op("]")?;
-                e = Expr::Index(Box::new(e), Box::new(index), line);
+                e = Expr::Index(Box::new(e), Box::new(index), span).spanning(self.since(start));
                 continue;
             }
             // `e?` — propagate a failure (Ch. 5 §4.1). Postfix, so it binds
             // tighter than any operator and `a? + b?` is what it looks like.
             if self.eat_op("?") {
-                e = Expr::Try(Box::new(e), line);
+                e = Expr::Try(Box::new(e), span).spanning(self.since(start));
                 continue;
             }
             // `(e)(args)` — calling something that is not a name. A path
@@ -1440,7 +1479,7 @@ impl Parser {
             // closure (Ch. 4 §4.2).
             if self.at_op("(") {
                 let args = self.args()?;
-                e = Expr::CallExpr(Box::new(e), args, line);
+                e = Expr::CallExpr(Box::new(e), args, span).spanning(self.since(start));
                 continue;
             }
             return Ok(e);
@@ -1448,7 +1487,11 @@ impl Parser {
     }
 
     /// The tail of a path expression, after its first segment.
-    fn path_expr(&mut self, first: String, line: Line) -> R<Expr> {
+    fn path_expr(&mut self, first: String, span: Span) -> R<Expr> {
+        Ok(self.path_expr_inner(first, span)?.spanning(self.since(span)))
+    }
+
+    fn path_expr_inner(&mut self, first: String, span: Span) -> R<Expr> {
         let mut segments = vec![first];
         let mut targs = Vec::new();
         while self.eat_op("::") {
@@ -1463,7 +1506,7 @@ impl Parser {
         let path = Path {
             segments,
             targs,
-            line,
+            span,
         };
 
         // `Name(args)` is a call when the name is a function and a
@@ -1472,25 +1515,25 @@ impl Parser {
         if self.at_op("(") {
             let args = self.args()?;
             if path.segments.len() == 1 {
-                return Ok(Expr::Call(path.segments[0].clone(), path.targs, args, line));
+                return Ok(Expr::Call(path.segments[0].clone(), path.targs, args, span));
             }
             let fields = args
                 .into_iter()
                 .enumerate()
                 .map(|(i, e)| (i.to_string(), e))
                 .collect();
-            return Ok(Expr::Aggregate(path, fields, line));
+            return Ok(Expr::Aggregate(path, fields, span));
         }
         // A struct literal is ambiguous with a block in a condition position,
         // and is not permitted there without parentheses (§2.8).
         if self.at_op("{") && !self.no_struct {
             let fields = self.field_values()?;
-            return Ok(Expr::Aggregate(path, fields, line));
+            return Ok(Expr::Aggregate(path, fields, span));
         }
         if path.segments.len() > 1 {
-            return Ok(Expr::Aggregate(path, Vec::new(), line));
+            return Ok(Expr::Aggregate(path, Vec::new(), span));
         }
-        Ok(Expr::Path(path.segments[0].clone(), line))
+        Ok(Expr::Path(path.segments[0].clone(), span))
     }
 
     fn args(&mut self) -> R<Vec<Expr>> {
@@ -1513,34 +1556,42 @@ impl Parser {
         Ok(args)
     }
 
+    /// A primary expression, widened to the whole of what it turned out to
+    /// cover: the productions below build their node from the token that
+    /// opened it, and none of them can know where it closes.
     fn primary(&mut self) -> R<Expr> {
-        let line = self.line();
+        let start = self.span();
+        Ok(self.primary_inner()?.spanning(self.since(start)))
+    }
+
+    fn primary_inner(&mut self) -> R<Expr> {
+        let span = self.span();
         match self.peek().clone() {
             Tok::Int(v) => {
                 self.bump();
-                Ok(Expr::Int(v, line))
+                Ok(Expr::Int(v, span))
             }
             Tok::TritLit(t) => {
                 self.bump();
-                Ok(Expr::Trit(t, line))
+                Ok(Expr::Trit(t, span))
             }
             Tok::CharLit(v) => {
                 self.bump();
-                Ok(Expr::Char(v, line))
+                Ok(Expr::Char(v, span))
             }
             Tok::StrLit(cs) => {
                 self.bump();
-                Ok(Expr::Str(cs, line))
+                Ok(Expr::Str(cs, span))
             }
             Tok::Kw("self") => {
                 self.bump();
-                Ok(Expr::Path("self".to_string(), line))
+                Ok(Expr::Path("self".to_string(), span))
             }
             // `Self::new()` and `Self { … }` are paths like any other; the
             // name is substituted away before lowering (Ch. 4 §1.2).
             Tok::Kw("Self") => {
                 self.bump();
-                self.path_expr("Self".to_string(), line)
+                self.path_expr("Self".to_string(), span)
             }
             // `for name in iter { … }` (Ch. 4 §5.7) — sugar, and nothing
             // more, so it is expanded here and no later pass learns it
@@ -1557,19 +1608,19 @@ impl Parser {
                 let iter = self.expr()?;
                 self.no_struct = saved;
                 let body = self.block()?;
-                Ok(self.desugar_for(name, iter, body, line))
+                Ok(self.desugar_for(name, iter, body, span))
             }
             Tok::Kw("true") => {
                 self.bump();
-                Ok(Expr::Bool(true, line))
+                Ok(Expr::Bool(true, span))
             }
             Tok::Kw("false") => {
                 self.bump();
-                Ok(Expr::Bool(false, line))
+                Ok(Expr::Bool(false, span))
             }
             Tok::Ident(name) => {
                 self.bump();
-                self.path_expr(name, line)
+                self.path_expr(name, span)
             }
             Tok::Op("(") => {
                 self.bump();
@@ -1577,7 +1628,7 @@ impl Parser {
                 let outer = std::mem::replace(&mut self.no_struct, false);
                 if self.eat_op(")") {
                     self.no_struct = outer;
-                    return Ok(Expr::Unit(line));
+                    return Ok(Expr::Unit(span));
                 }
                 let first = self.expr()?;
                 let result = if self.at_op(",") {
@@ -1589,7 +1640,7 @@ impl Parser {
                         items.push(self.expr()?);
                     }
                     self.expect_op(")")?;
-                    Expr::Tuple(items, line)
+                    Expr::Tuple(items, span)
                 } else {
                     self.expect_op(")")?;
                     first
@@ -1600,13 +1651,13 @@ impl Parser {
             Tok::Op("[") => {
                 self.bump();
                 if self.eat_op("]") {
-                    return Ok(Expr::Array(Vec::new(), line));
+                    return Ok(Expr::Array(Vec::new(), span));
                 }
                 let first = self.expr()?;
                 if self.eat_op(";") {
                     let count = self.expr()?;
                     self.expect_op("]")?;
-                    return Ok(Expr::Repeat(Box::new(first), Box::new(count), line));
+                    return Ok(Expr::Repeat(Box::new(first), Box::new(count), span));
                 }
                 let mut items = vec![first];
                 while self.eat_op(",") {
@@ -1616,33 +1667,33 @@ impl Parser {
                     items.push(self.expr()?);
                 }
                 self.expect_op("]")?;
-                Ok(Expr::Array(items, line))
+                Ok(Expr::Array(items, span))
             }
             Tok::Op("{") => Ok(Expr::Block(self.block()?)),
             Tok::Kw("if") => self.if_expr(),
             Tok::Kw("match") => self.match_expr(),
             Tok::Kw("loop") => {
                 self.bump();
-                Ok(Expr::Loop(self.block()?, line))
+                Ok(Expr::Loop(self.block()?, span))
             }
             Tok::Kw("while") => {
                 self.bump();
                 let cond = self.no_struct_expr()?;
-                Ok(Expr::While(Box::new(cond), self.block()?, line))
+                Ok(Expr::While(Box::new(cond), self.block()?, span))
             }
             Tok::Kw("break") => {
                 self.bump();
                 let v = self.optional_value()?;
-                Ok(Expr::Break(v, line))
+                Ok(Expr::Break(v, span))
             }
             Tok::Kw("continue") => {
                 self.bump();
-                Ok(Expr::Continue(line))
+                Ok(Expr::Continue(span))
             }
             Tok::Kw("return") => {
                 self.bump();
                 let v = self.optional_value()?;
-                Ok(Expr::Return(v, line))
+                Ok(Expr::Return(v, span))
             }
             other => self.err(format!("expected an expression, found {other}")),
         }
@@ -1674,12 +1725,12 @@ impl Parser {
             if self.at(&Tok::Eof) {
                 return self.err("unterminated struct literal");
             }
-            let line = self.line();
+            let span = self.span();
             let name = self.expect_ident()?;
             let value = if self.eat_op(":") {
                 self.expr()?
             } else {
-                Expr::Path(name.clone(), line)
+                Expr::Path(name.clone(), span)
             };
             fields.push((name, value));
             if !self.eat_op(",") && !self.at_op("}") {
@@ -1690,7 +1741,12 @@ impl Parser {
     }
 
     fn if_expr(&mut self) -> R<Expr> {
-        let line = self.line();
+        let start = self.span();
+        Ok(self.if_expr_inner()?.spanning(self.since(start)))
+    }
+
+    fn if_expr_inner(&mut self) -> R<Expr> {
+        let span = self.span();
         self.bump(); // if
         let cond = self.no_struct_expr()?;
         let then = self.block()?;
@@ -1703,11 +1759,16 @@ impl Parser {
         } else {
             None
         };
-        Ok(Expr::If(Box::new(cond), then, els, line))
+        Ok(Expr::If(Box::new(cond), then, els, span))
     }
 
     fn match_expr(&mut self) -> R<Expr> {
-        let line = self.line();
+        let start = self.span();
+        Ok(self.match_expr_inner()?.spanning(self.since(start)))
+    }
+
+    fn match_expr_inner(&mut self) -> R<Expr> {
+        let span = self.span();
         self.bump(); // match
         let scrutinee = self.no_struct_expr()?;
         self.expect_op("{")?;
@@ -1716,7 +1777,7 @@ impl Parser {
             if self.at(&Tok::Eof) {
                 return self.err("unterminated `match`");
             }
-            let arm_line = self.line();
+            let arm_line = self.span();
             let mut patterns = vec![self.pattern()?];
             while self.eat_op("|") {
                 patterns.push(self.pattern()?);
@@ -1734,13 +1795,13 @@ impl Parser {
                 patterns,
                 guard,
                 body,
-                line: arm_line,
+                span: arm_line,
             });
             if !self.eat_op(",") && needs_comma && !self.at_op("}") {
                 return self.err("expected `,` between match arms");
             }
         }
-        Ok(Expr::Match(Box::new(scrutinee), arms, line))
+        Ok(Expr::Match(Box::new(scrutinee), arms, span))
     }
 
     fn pattern_list(&mut self, open: &str, close: &str) -> R<Vec<Pattern>> {
@@ -1765,12 +1826,12 @@ impl Parser {
             if self.at(&Tok::Eof) {
                 return self.err("unterminated field pattern");
             }
-            let line = self.line();
+            let span = self.span();
             let name = self.expect_ident()?;
             let pat = if self.eat_op(":") {
                 self.pattern()?
             } else {
-                Pattern::Bind(name.clone(), line)
+                Pattern::Bind(name.clone(), span)
             };
             out.push((name, pat));
             if !self.eat_op(",") && !self.at_op("}") {
@@ -1781,42 +1842,47 @@ impl Parser {
     }
 
     fn pattern(&mut self) -> R<Pattern> {
-        let line = self.line();
+        let start = self.span();
+        Ok(self.pattern_inner()?.spanning(self.since(start)))
+    }
+
+    fn pattern_inner(&mut self) -> R<Pattern> {
+        let span = self.span();
         match self.peek().clone() {
             Tok::Op("_") => {
                 self.bump();
-                Ok(Pattern::Wild(line))
+                Ok(Pattern::Wild(span))
             }
             Tok::Int(v) => {
                 self.bump();
-                Ok(Pattern::Int(v, line))
+                Ok(Pattern::Int(v, span))
             }
             Tok::TritLit(t) => {
                 self.bump();
-                Ok(Pattern::Trit(t, line))
+                Ok(Pattern::Trit(t, span))
             }
             Tok::CharLit(v) => {
                 self.bump();
-                Ok(Pattern::Char(v, line))
+                Ok(Pattern::Char(v, span))
             }
             Tok::Op("-") => {
                 self.bump();
                 match self.bump() {
-                    Tok::Int(v) => Ok(Pattern::Int(v.neg(), line)),
-                    Tok::TritLit(t) => Ok(Pattern::Trit(t.tneg(), line)),
+                    Tok::Int(v) => Ok(Pattern::Int(v.neg(), span)),
+                    Tok::TritLit(t) => Ok(Pattern::Trit(t.tneg(), span)),
                     other => Err(SyntaxError {
-                        line,
+                        span,
                         message: format!("expected a literal after `-`, found {other}"),
                     }),
                 }
             }
             Tok::Kw("true") => {
                 self.bump();
-                Ok(Pattern::Bool(true, line))
+                Ok(Pattern::Bool(true, span))
             }
             Tok::Kw("false") => {
                 self.bump();
-                Ok(Pattern::Bool(false, line))
+                Ok(Pattern::Bool(false, span))
             }
             Tok::Ident(name) => {
                 self.bump();
@@ -1827,7 +1893,7 @@ impl Parser {
                 let path = Path {
                     segments,
                     targs: Vec::new(),
-                    line,
+                    span,
                 };
 
                 if self.at_op("(") {
@@ -1837,14 +1903,14 @@ impl Parser {
                         .enumerate()
                         .map(|(i, p)| (i.to_string(), p))
                         .collect();
-                    return Ok(Pattern::Aggregate(path, fields, line));
+                    return Ok(Pattern::Aggregate(path, fields, span));
                 }
                 if self.at_op("{") {
                     let fields = self.field_patterns()?;
-                    return Ok(Pattern::Aggregate(path, fields, line));
+                    return Ok(Pattern::Aggregate(path, fields, span));
                 }
                 if path.segments.len() > 1 {
-                    return Ok(Pattern::Aggregate(path, Vec::new(), line));
+                    return Ok(Pattern::Aggregate(path, Vec::new(), span));
                 }
                 // `name @ pattern` binds the whole while matching (§4).
                 if self.eat_op("@") {
@@ -1853,17 +1919,17 @@ impl Parser {
                         Path {
                             segments: vec![path.segments[0].clone()],
                             targs: Vec::new(),
-                            line,
+                            span,
                         },
                         vec![("@".to_string(), inner)],
-                        line,
+                        span,
                     ));
                 }
-                Ok(Pattern::Bind(path.segments[0].clone(), line))
+                Ok(Pattern::Bind(path.segments[0].clone(), span))
             }
             Tok::Op("(") => {
                 let inner = self.pattern_list("(", ")")?;
-                Ok(Pattern::Tuple(inner, line))
+                Ok(Pattern::Tuple(inner, span))
             }
             other => self.err(format!("expected a pattern, found {other}")),
         }
@@ -1877,4 +1943,61 @@ fn block_like(e: &Expr) -> bool {
         e,
         Expr::Block(_) | Expr::If(..) | Expr::Match(..) | Expr::Loop(..) | Expr::While(..)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The source text a span covers, which is what an editor draws under.
+    fn text(src: &str, span: Span) -> String {
+        src.chars()
+            .skip(span.lo as usize)
+            .take((span.hi - span.lo) as usize)
+            .collect()
+    }
+
+    fn tail(src: &str) -> (Expr, String) {
+        let file = parse(src).expect("parses");
+        let Item::Fn(f) = &file.items[0] else {
+            panic!("a function")
+        };
+        let e = *f.body.as_ref().unwrap().tail.clone().unwrap();
+        (e.clone(), text(src, e.span()))
+    }
+
+    #[test]
+    fn an_expression_spans_all_of_itself_and_not_its_operator() {
+        let src = "fn f() -> t27 { a + b * c }";
+        let (e, whole) = tail(src);
+        assert_eq!(whole, "a + b * c");
+        // And so does each part, down to the leaves.
+        let Expr::Binary("+", lhs, rhs, _) = e else {
+            panic!("a sum")
+        };
+        assert_eq!(text(src, lhs.span()), "a");
+        assert_eq!(text(src, rhs.span()), "b * c");
+    }
+
+    #[test]
+    fn a_postfix_chain_grows_leftward_from_where_it_started() {
+        let src = "fn f() -> t27 { xs[0].len().max(y) }";
+        let (e, whole) = tail(src);
+        assert_eq!(whole, "xs[0].len().max(y)");
+        let Expr::Method(recv, name, args, _) = e else {
+            panic!("a method call")
+        };
+        assert_eq!(name, "max");
+        assert_eq!(text(src, recv.span()), "xs[0].len()");
+        assert_eq!(text(src, args[0].span()), "y");
+    }
+
+    #[test]
+    fn a_span_reaches_across_the_lines_a_construct_covers() {
+        let src = "fn f() -> t27 {\n    if a {\n        1\n    } else {\n        2\n    }\n}";
+        let (_, whole) = tail(src);
+        assert!(whole.starts_with("if a {"), "{whole:?}");
+        assert!(whole.ends_with('}'), "{whole:?}");
+        assert_eq!(whole.lines().count(), 5);
+    }
 }

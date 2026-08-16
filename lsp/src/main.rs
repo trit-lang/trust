@@ -106,17 +106,8 @@ impl Server {
             Ok(_) => Vec::new(),
             Err(errs) => errs,
         };
-        let lines: Vec<&str> = src.lines().collect();
-        let diagnostics: Vec<(usize, usize, &str)> = found
-            .iter()
-            .map(|e| {
-                // Ours are 1-based and the protocol's are 0-based, and a
-                // whole line is the only range there is anything to say.
-                let line = e.line.saturating_sub(1) as usize;
-                let end = lines.get(line).map_or(0, |l| l.chars().count());
-                (line, end, e.message.as_str())
-            })
-            .collect();
+        let map = lang::LineMap::new(src);
+        let diagnostics: Vec<Diagnostic<'_>> = found.iter().map(|e| at(&map, e)).collect();
         publish(uri, &diagnostics);
     }
 }
@@ -137,18 +128,50 @@ fn reply(id: Option<&Json>, result: &str) {
     ));
 }
 
+/// One diagnostic, in the protocol's coordinates: 0-based lines, and columns
+/// in UTF-16 code units.
+struct Diagnostic<'a> {
+    start: (u32, u32),
+    end: (u32, u32),
+    message: &'a str,
+}
+
+/// Place one error, by the span it carries.
+///
+/// A span with no line is one the compiler synthesized rather than read
+/// (`Span::NONE`), and belongs at the top of the file: it is a fault in this
+/// compiler, and hiding it under the first thing a program wrote would blame
+/// the program.
+fn at<'a>(map: &lang::LineMap, e: &'a lang::SyntaxError) -> Diagnostic<'a> {
+    if e.span.line == 0 {
+        return Diagnostic {
+            start: (0, 0),
+            end: (0, 0),
+            message: &e.message,
+        };
+    }
+    let lo = map.pos(e.span.lo);
+    let hi = map.pos(e.span.hi);
+    Diagnostic {
+        start: (lo.line - 1, lo.utf16),
+        end: (hi.line - 1, hi.utf16),
+        message: &e.message,
+    }
+}
+
 /// Send the diagnostics for one file, which replaces whatever was sent last.
-fn publish(uri: &str, found: &[(usize, usize, &str)]) {
+fn publish(uri: &str, found: &[Diagnostic<'_>]) {
     let mut items = String::new();
-    for (i, (line, end, message)) in found.iter().enumerate() {
+    for (i, d) in found.iter().enumerate() {
         if i > 0 {
             items.push(',');
         }
         let mut text = String::new();
-        json::quote(message, &mut text);
+        json::quote(d.message, &mut text);
+        let ((sl, sc), (el, ec)) = (d.start, d.end);
         items.push_str(&format!(
-            "{{\"range\":{{\"start\":{{\"line\":{line},\"character\":0}},\
-               \"end\":{{\"line\":{line},\"character\":{end}}}}},\
+            "{{\"range\":{{\"start\":{{\"line\":{sl},\"character\":{sc}}},\
+               \"end\":{{\"line\":{el},\"character\":{ec}}}}},\
                \"severity\":1,\"source\":\"trust\",\"message\":{text}}}"
         ));
     }
@@ -208,17 +231,29 @@ mod tests {
     }
 
     #[test]
-    fn a_file_with_an_error_produces_one_diagnostic_on_its_line() {
-        let mut s = Server::default();
-        s.open.insert(
-            "file:///a.tr".into(),
-            "fn main() -> t27 {\n    let x: t9 = 5;\n    x\n}\n".into(),
-        );
-        // The body's type is wrong, on the line the body's tail is on.
-        let errs = lang::compile(&s.open["file:///a.tr"]).expect_err("an error");
+    fn a_diagnostic_lands_on_the_expression_that_is_wrong() {
+        let src = "fn main() -> t27 {\n    let x: t9 = 5;\n    x\n}\n";
+        let errs = lang::compile(src).expect_err("an error");
         assert_eq!(errs.len(), 1);
         assert!(errs[0].message.contains("expected t27"), "{errs:?}");
-        // 1-based here, 0-based there.
-        assert!(errs[0].line >= 1);
+        // The tail `x` is on the third line, four characters in, and one
+        // character wide — not the whole line, which is what this server sent
+        // before a span existed to send instead.
+        let d = at(&lang::LineMap::new(src), &errs[0]);
+        assert_eq!((d.start, d.end), ((2, 4), (2, 5)));
+    }
+
+    #[test]
+    fn a_column_is_counted_in_utf16_because_the_protocol_is() {
+        // Two astral characters before the error: four UTF-16 code units for
+        // two characters, and an editor that was told two would put the
+        // squiggle in the wrong place.
+        let src = "// 🙂🙂\nfn main() -> t27 { nope() }\n";
+        let errs = lang::compile(src).expect_err("an error");
+        let map = lang::LineMap::new(src);
+        assert_eq!(map.pos(3).utf16, 3);
+        assert_eq!(map.pos(5).utf16, 7);
+        let d = at(&map, &errs[0]);
+        assert_eq!(d.start.0, 1, "the second line: {errs:?}");
     }
 }

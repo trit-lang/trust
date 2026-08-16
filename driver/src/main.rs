@@ -27,7 +27,7 @@ usage:
 
 `check` compiles no further than it must to know: it is what an editor runs
 on every save, and what `trust-lsp` reports. Its output is one diagnostic per
-line, `file:line: message`, and it exits 1 if there was one.
+line, `file:line:column: message`, and it exits 1 if there was one.
 
 `run` exits with the program's own status, so it composes with a shell the
 way any other program does. `--stats` reports instructions retired (ISA §2.3)
@@ -94,8 +94,12 @@ fn check(src: &str, path: &str) -> ExitCode {
     let module = match lang::compile(src) {
         Ok(m) => m,
         Err(errs) => {
+            let map = lang::LineMap::new(src);
             for e in &errs {
-                println!("{path}:{}: {}", e.line, e.message);
+                // `line:column`, which is what an editor's error list, a
+                // terminal's hyperlink and `vim +N` all read.
+                let at = map.pos(e.span.lo);
+                println!("{path}:{}:{}: {}", at.line, at.column, e.message);
             }
             return ExitCode::FAILURE;
         }
@@ -132,7 +136,7 @@ fn assemble_source(src: &str, path: &str, timed: bool) -> Result<String, ExitCod
         Err(errs) => {
             eprintln!("trust: {} error(s) in `{path}`:", errs.len());
             for e in &errs {
-                eprintln!("  {path}:line {}: {}", e.line, e.message);
+                eprintln!("  {path}:line {}: {}", e.line(), e.message);
             }
             return Err(ExitCode::FAILURE);
         }

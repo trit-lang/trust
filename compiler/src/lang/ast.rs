@@ -1,6 +1,6 @@
 //! The abstract syntax tree (Language Ch. 0 §§3–5).
 
-use super::lex::Line;
+use super::lex::Span;
 use trit_core::{Bt, Trit};
 
 /// A whole source file.
@@ -98,7 +98,7 @@ pub struct TraitItem {
     /// Its associated constants: name and type (Ch. 4 §1.7).
     pub consts: Vec<(String, Ty)>,
     /// Where it was written.
-    pub line: Line,
+    pub span: Span,
 }
 
 /// One requirement on a type parameter: `T: From<U>` is `From` with `[U]`.
@@ -159,7 +159,7 @@ pub struct ImplItem {
     /// The values it gives the trait's associated constants (Ch. 4 §1.7).
     pub consts: Vec<ConstItem>,
     /// Where it was written.
-    pub line: Line,
+    pub span: Span,
 }
 
 /// How a nominal type is laid out (§3.4, Ch. 2 §1).
@@ -187,7 +187,7 @@ pub struct StructItem {
     /// `1`, …; a unit struct has none.
     pub fields: Vec<(String, Ty)>,
     /// Where it was written.
-    pub line: Line,
+    pub span: Span,
 }
 
 /// An enum item.
@@ -204,7 +204,7 @@ pub struct EnumItem {
     /// Its variants, in declaration order.
     pub variants: Vec<Variant>,
     /// Where it was written.
-    pub line: Line,
+    pub span: Span,
 }
 
 /// One enum variant.
@@ -217,7 +217,7 @@ pub struct Variant {
     /// An explicit discriminant, which may be negative (Ch. 2 §5.1).
     pub discriminant: Option<i128>,
     /// Where it was written.
-    pub line: Line,
+    pub span: Span,
 }
 
 /// A function item.
@@ -238,7 +238,7 @@ pub struct FnItem {
     /// clause as the type bounds and checked once on entry (Ch. 4 §2.8).
     pub requires: Vec<Expr>,
     /// Where it was written.
-    pub line: Line,
+    pub span: Span,
 }
 
 /// A constant item.
@@ -251,46 +251,46 @@ pub struct ConstItem {
     /// Its value.
     pub value: Expr,
     /// Where it was written.
-    pub line: Line,
+    pub span: Span,
 }
 
 /// A type as written (§3.5).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Ty {
     /// A named primitive: `trit`, `bool`, `t9`, `t27`, `taddr`.
-    Name(String, Line),
+    Name(String, Span),
     /// `()`.
-    Unit(Line),
+    Unit(Span),
     /// `!` — the type with no values (Ch. 1 §2). Writable only in return
     /// position, where it says the function does not return.
-    Never(Line),
+    Never(Span),
     /// `[T; N]`.
-    Array(Box<Ty>, Box<Expr>, Line),
+    Array(Box<Ty>, Box<Expr>, Span),
     /// `(T, U, …)`.
-    Tuple(Vec<Ty>, Line),
+    Tuple(Vec<Ty>, Span),
     /// `&T` or `&mut T`; the lifetime, if written, is erased (Ch. 3 §3.1).
-    Ref(Box<Ty>, bool, Line),
+    Ref(Box<Ty>, bool, Span),
     /// `[T]` — dynamically sized, and legal only behind a reference.
-    Slice(Box<Ty>, Line),
+    Slice(Box<Ty>, Span),
     /// `Self` — the implementing type, substituted away before lowering
     /// (Ch. 4 §1.2).
-    SelfTy(Line),
+    SelfTy(Span),
     /// `Name<T, U>` — a generic type applied to arguments (Ch. 4 §2.1).
     /// Substituted and mangled to a plain `Name` before layout ever sees it.
-    App(String, Vec<Ty>, Line),
+    App(String, Vec<Ty>, Span),
     /// `dyn Trait` — dynamically sized, and legal only behind a reference
     /// (Ch. 4 §3.1).
-    Dyn(String, Line),
+    Dyn(String, Span),
     /// `T::Item` — an associated type (Ch. 4 §1.7).
-    Assoc(Box<Ty>, String, Line),
+    Assoc(Box<Ty>, String, Span),
     /// `impl Fn(T) -> R` in argument position: sugar for an anonymous type
     /// parameter bounded by one of §4.3's traits (Ch. 4 §2.2).
-    ImplFn(FnKind, Vec<Ty>, Option<Box<Ty>>, Line),
+    ImplFn(FnKind, Vec<Ty>, Option<Box<Ty>>, Span),
 }
 
 impl Ty {
     /// Where it was written.
-    pub fn line(&self) -> Line {
+    pub fn span(&self) -> Span {
         match self {
             Ty::Name(_, l)
             | Ty::Unit(l)
@@ -306,6 +306,29 @@ impl Ty {
             | Ty::ImplFn(_, _, _, l) => *l,
         }
     }
+
+    /// The same type, told how wide it turned out to be.
+    ///
+    /// A production knows where it started before it knows where it ends, so
+    /// it builds the node with the span of its first token and widens it once
+    /// the last is read (`Parser::since`).
+    pub fn spanning(mut self, span: Span) -> Ty {
+        match &mut self {
+            Ty::Name(_, l)
+            | Ty::Unit(l)
+            | Ty::Never(l)
+            | Ty::Array(_, _, l)
+            | Ty::Tuple(_, l)
+            | Ty::Ref(_, _, l)
+            | Ty::Slice(_, l)
+            | Ty::SelfTy(l)
+            | Ty::App(_, _, l)
+            | Ty::Dyn(_, l)
+            | Ty::Assoc(_, _, l)
+            | Ty::ImplFn(_, _, _, l) => *l = span,
+        }
+        self
+    }
 }
 
 /// A block: statements, then an optional trailing expression whose value is
@@ -317,7 +340,7 @@ pub struct Block {
     /// The trailing expression, if any.
     pub tail: Option<Box<Expr>>,
     /// Where it opened.
-    pub line: Line,
+    pub span: Span,
 }
 
 /// A statement (§5.2).
@@ -334,7 +357,7 @@ pub enum Stmt {
         /// Its initializer.
         value: Expr,
         /// Where it was written.
-        line: Line,
+        span: Span,
     },
     /// An expression evaluated for its effect.
     Expr(Expr),
@@ -344,78 +367,78 @@ pub enum Stmt {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Expr {
     /// An integer literal, whose type is inferred (§5.2).
-    Int(Bt, Line),
+    Int(Bt, Span),
     /// A `trit` literal.
-    Trit(Trit, Line),
+    Trit(Trit, Span),
     /// A character literal, as its Unicode scalar value (Ch. 5 §1.4).
-    Char(i128, Line),
+    Char(i128, Span),
     /// A string literal, as its characters. Its type is `&'static str`, and
     /// its storage is a global (Ch. 5 §1.4).
-    Str(Vec<i128>, Line),
+    Str(Vec<i128>, Span),
     /// `e?` — propagate a failure (Ch. 5 §4.1).
-    Try(Box<Expr>, Line),
+    Try(Box<Expr>, Span),
     /// `(e)(args)` — call whatever an expression evaluates to. The only
     /// thing it can be is a closure, and the only place one is not already a
     /// name is a field (Ch. 4 §4.2).
-    CallExpr(Box<Expr>, Vec<Expr>, Line),
+    CallExpr(Box<Expr>, Vec<Expr>, Span),
     /// `true` or `false`.
-    Bool(bool, Line),
+    Bool(bool, Span),
     /// `()`.
-    Unit(Line),
+    Unit(Span),
     /// A name: a local, a parameter, or a constant.
-    Path(String, Line),
+    Path(String, Span),
     /// `[a, b, c]`.
-    Array(Vec<Expr>, Line),
+    Array(Vec<Expr>, Span),
     /// `[value; count]`.
-    Repeat(Box<Expr>, Box<Expr>, Line),
+    Repeat(Box<Expr>, Box<Expr>, Span),
     /// A unary operator: `-`, `!`.
-    Unary(&'static str, Box<Expr>, Line),
+    Unary(&'static str, Box<Expr>, Span),
     /// A binary operator (§2.1).
-    Binary(&'static str, Box<Expr>, Box<Expr>, Line),
+    Binary(&'static str, Box<Expr>, Box<Expr>, Span),
     /// `lhs = rhs`, or a compound form, which is sugar for `lhs = lhs op rhs`.
-    Assign(&'static str, Box<Expr>, Box<Expr>, Line),
+    Assign(&'static str, Box<Expr>, Box<Expr>, Span),
     /// `x as T`.
-    Cast(Box<Expr>, Ty, Line),
+    Cast(Box<Expr>, Ty, Span),
     /// `f(args)`, with any type arguments written `f::<T>(args)`.
-    Call(String, Vec<Ty>, Vec<Expr>, Line),
+    Call(String, Vec<Ty>, Vec<Expr>, Span),
     /// `receiver.method(args)` — how the trit-wise operations are spelled
     /// (Ch. 1 §4, Ch. 0 §2.5).
-    Method(Box<Expr>, String, Vec<Expr>, Line),
+    Method(Box<Expr>, String, Vec<Expr>, Span),
     /// `base[index]`.
-    Index(Box<Expr>, Box<Expr>, Line),
+    Index(Box<Expr>, Box<Expr>, Span),
     /// `x.field` or `x.0`.
-    Field(Box<Expr>, String, Line),
+    Field(Box<Expr>, String, Span),
     /// `&place` or `&mut place`.
-    Borrow(Box<Expr>, bool, Line),
+    Borrow(Box<Expr>, bool, Span),
     /// `*r`.
-    Deref(Box<Expr>, Line),
+    Deref(Box<Expr>, Span),
     /// `(a, b, …)`.
-    Tuple(Vec<Expr>, Line),
+    Tuple(Vec<Expr>, Span),
     /// `Name { field: value, … }` or `Name(a, b)` or `Name::Variant …`.
-    Aggregate(Path, Vec<(String, Expr)>, Line),
+    Aggregate(Path, Vec<(String, Expr)>, Span),
     /// A block used as an expression.
     Block(Block),
     /// `if cond { … } else { … }`.
-    If(Box<Expr>, Block, Option<Box<Expr>>, Line),
+    If(Box<Expr>, Block, Option<Box<Expr>>, Span),
     /// `match scrutinee { arms }`.
-    Match(Box<Expr>, Vec<Arm>, Line),
+    Match(Box<Expr>, Vec<Arm>, Span),
     /// `loop { … }`.
-    Loop(Block, Line),
+    Loop(Block, Span),
     /// `while cond { … }`.
-    While(Box<Expr>, Block, Line),
+    While(Box<Expr>, Block, Span),
     /// `break` with an optional value.
-    Break(Option<Box<Expr>>, Line),
+    Break(Option<Box<Expr>>, Span),
     /// `continue`.
-    Continue(Line),
+    Continue(Span),
     /// `return` with an optional value.
-    Return(Option<Box<Expr>>, Line),
+    Return(Option<Box<Expr>>, Span),
     /// `|x| body` or `|x: T| -> R { body }` (Ch. 4 §4.1).
-    Closure(Vec<(String, Option<Ty>)>, Option<Ty>, Box<Expr>, Line),
+    Closure(Vec<(String, Option<Ty>)>, Option<Ty>, Box<Expr>, Span),
 }
 
 impl Expr {
     /// Where it was written.
-    pub fn line(&self) -> Line {
+    pub fn span(&self) -> Span {
         use Expr::*;
         match self {
             Int(_, l)
@@ -449,8 +472,53 @@ impl Expr {
             | Continue(l)
             | Return(_, l)
             | Closure(_, _, _, l) => *l,
-            Block(b) => b.line,
+            Block(b) => b.span,
         }
+    }
+
+    /// The same expression, told how wide it turned out to be.
+    ///
+    /// Every expression's span is the whole of what it covers rather than the
+    /// token that names it: `a + b` reaches from `a` to `b`, not to the `+`.
+    /// What reads a span is something drawing a line under what is wrong, and
+    /// what is wrong with `a + b` is `a + b`.
+    pub fn spanning(mut self, span: Span) -> Expr {
+        use Expr::*;
+        match &mut self {
+            Int(_, l)
+            | Trit(_, l)
+            | Char(_, l)
+            | Str(_, l)
+            | Try(_, l)
+            | CallExpr(_, _, l)
+            | Bool(_, l)
+            | Unit(l)
+            | Path(_, l)
+            | Array(_, l)
+            | Repeat(_, _, l)
+            | Unary(_, _, l)
+            | Binary(_, _, _, l)
+            | Assign(_, _, _, l)
+            | Cast(_, _, l)
+            | Call(_, _, _, l)
+            | Method(_, _, _, l)
+            | Index(_, _, l)
+            | Field(_, _, l)
+            | Borrow(_, _, l)
+            | Deref(_, l)
+            | Tuple(_, l)
+            | Aggregate(_, _, l)
+            | If(_, _, _, l)
+            | Match(_, _, l)
+            | Loop(_, l)
+            | While(_, _, l)
+            | Break(_, l)
+            | Continue(l)
+            | Return(_, l)
+            | Closure(_, _, _, l) => *l = span,
+            Block(b) => b.span = span,
+        }
+        self
     }
 }
 
@@ -464,7 +532,7 @@ pub struct Arm {
     /// The arm's value.
     pub body: Expr,
     /// Where it was written.
-    pub line: Line,
+    pub span: Span,
 }
 
 /// A path: one name, or a type and a variant (`Sign::Neg`).
@@ -475,7 +543,7 @@ pub struct Path {
     /// Type arguments written with `::<…>` (Ch. 4 §2.3).
     pub targs: Vec<Ty>,
     /// Where it was written.
-    pub line: Line,
+    pub span: Span,
 }
 
 impl Path {
@@ -489,27 +557,27 @@ impl Path {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Pattern {
     /// `_` — matches anything, binds nothing.
-    Wild(Line),
+    Wild(Span),
     /// A binding.
-    Bind(String, Line),
+    Bind(String, Span),
     /// An integer literal.
-    Int(Bt, Line),
+    Int(Bt, Span),
     /// A `trit` literal.
-    Trit(Trit, Line),
+    Trit(Trit, Span),
     /// A character literal, as its Unicode scalar value (Ch. 5 §1.4).
-    Char(i128, Line),
+    Char(i128, Span),
     /// `true` or `false`.
-    Bool(bool, Line),
+    Bool(bool, Span),
     /// A struct or variant pattern: `Sign::Neg`, `Shape::Line(n)`,
     /// `Point { x, y }`.
-    Aggregate(Path, Vec<(String, Pattern)>, Line),
+    Aggregate(Path, Vec<(String, Pattern)>, Span),
     /// `(a, b)`.
-    Tuple(Vec<Pattern>, Line),
+    Tuple(Vec<Pattern>, Span),
 }
 
 impl Pattern {
     /// Where it was written.
-    pub fn line(&self) -> Line {
+    pub fn span(&self) -> Span {
         match self {
             Pattern::Wild(l)
             | Pattern::Bind(_, l)
@@ -520,5 +588,20 @@ impl Pattern {
             | Pattern::Aggregate(_, _, l)
             | Pattern::Tuple(_, l) => *l,
         }
+    }
+
+    /// The same pattern, told how wide it turned out to be.
+    pub fn spanning(mut self, span: Span) -> Pattern {
+        match &mut self {
+            Pattern::Wild(l)
+            | Pattern::Bind(_, l)
+            | Pattern::Int(_, l)
+            | Pattern::Trit(_, l)
+            | Pattern::Char(_, l)
+            | Pattern::Bool(_, l)
+            | Pattern::Aggregate(_, _, l)
+            | Pattern::Tuple(_, l) => *l = span,
+        }
+        self
     }
 }

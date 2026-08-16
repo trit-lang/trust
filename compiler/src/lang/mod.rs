@@ -11,7 +11,7 @@ pub mod lex;
 pub mod lower;
 pub mod parse;
 
-pub use lex::SyntaxError;
+pub use lex::{LineMap, Pos, Span, SyntaxError};
 
 /// What every program is compiled with in front of it.
 ///
@@ -710,7 +710,7 @@ pub fn compile(src: &str) -> Result<crate::tir::Module, Vec<SyntaxError>> {
         return Err(errs
             .into_iter()
             .map(|e| SyntaxError {
-                line: 0,
+                span: Span::NONE,
                 message: format!("the frontend produced ill-formed TIR: {e}"),
             })
             .collect());

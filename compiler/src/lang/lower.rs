@@ -19,7 +19,7 @@
 //! reason.
 
 use super::ast;
-use super::lex::{Line, SyntaxError};
+use super::lex::{Span, SyntaxError};
 use crate::layout;
 use crate::tir::ir::{self, *};
 use std::cell::RefCell;
@@ -31,9 +31,9 @@ pub type Error = SyntaxError;
 
 type R<T> = Result<T, Error>;
 
-fn err<T>(line: Line, message: impl Into<String>) -> R<T> {
+fn err<T>(span: Span, message: impl Into<String>) -> R<T> {
     Err(SyntaxError {
-        line,
+        span,
         message: message.into(),
     })
 }
@@ -270,7 +270,7 @@ struct Loan {
     /// The statement after which this loan is dead. A borrow lives to its
     /// last use, not to the end of its scope (Ch. 3 §4.2).
     dies: u32,
-    line: Line,
+    span: Span,
 }
 
 /// What is being done to a place, for the aliasing rule.
@@ -494,7 +494,7 @@ impl Types {
     /// parameters — `impl<I: Iterator> Iterator for Map<I> { type Item =
     /// I::Item; }` — and only an instantiation says what those are. Resolved
     /// once and cached, so the second ask is a lookup.
-    fn assoc_of_instantiation(&self, ty: &Ty, name: &str, line: Line) -> R<Option<Ty>> {
+    fn assoc_of_instantiation(&self, ty: &Ty, name: &str, span: Span) -> R<Option<Ty>> {
         let Some(mangled) = nominal_name(ty) else {
             return Ok(None);
         };
@@ -508,7 +508,7 @@ impl Types {
         };
         if params.len() != args.len() {
             return err(
-                line,
+                span,
                 format!("`{mangled}` chooses no type for `{name}` (Ch. 4 §1.7)"),
             );
         }
@@ -519,13 +519,13 @@ impl Types {
         for e in &extras {
             let Some(cname) = args.get(e.from).and_then(nominal_name) else {
                 return err(
-                    line,
+                    span,
                     format!("`{mangled}` chooses no type for `{name}` (Ch. 4 §1.7)"),
                 );
             };
             let Some(info) = self.closures.borrow().get(&cname).cloned() else {
                 return err(
-                    line,
+                    span,
                     format!("`{mangled}` chooses no type for `{name}` (Ch. 4 §1.7)"),
                 );
             };
@@ -535,7 +535,7 @@ impl Types {
                     Some(t) => t.clone(),
                     None => {
                         return err(
-                            line,
+                            span,
                             format!("`{mangled}` chooses no type for `{name}` (Ch. 4 §1.7)"),
                         );
                     }
@@ -647,7 +647,7 @@ impl Types {
     /// The instantiation is an ordinary nominal type under a mangled name, so
     /// the layout engine, the drop machinery and code generation never learn
     /// that generics exist.
-    fn instantiate(&self, name: &str, args: &[Ty], line: Line) -> R<Ty> {
+    fn instantiate(&self, name: &str, args: &[Ty], span: Span) -> R<Ty> {
         let mangled = mangle(name, args);
         self.instantiations
             .borrow_mut()
@@ -668,7 +668,7 @@ impl Types {
                     let known = self.structs.borrow().contains_key(name)
                         || self.enums.borrow().contains_key(name);
                     return err(
-                        line,
+                        span,
                         if known {
                             format!("`{name}` takes no type arguments")
                         } else {
@@ -679,7 +679,7 @@ impl Types {
             };
         if params.len() != args.len() {
             return err(
-                line,
+                span,
                 format!(
                     "`{name}` takes {} type argument(s), {} given",
                     params.len(),
@@ -705,7 +705,7 @@ impl Types {
                 .iter()
                 .map(|(n, t)| {
                     let ty = resolve_ty_env(t, self, &env)?;
-                    check_sized(&ty, t.line(), &format!("the field `{n}`"))?;
+                    check_sized(&ty, t.span(), &format!("the field `{n}`"))?;
                     Ok((n.clone(), ty))
                 })
                 .collect::<R<_>>()?;
@@ -749,7 +749,7 @@ impl Types {
         }
 
         if let Err(e) = layout::layout_of(&self.db.borrow(), &layout::Ty::named(&mangled)) {
-            return err(line, format!("`{name}` cannot be laid out here: {e}"));
+            return err(span, format!("`{name}` cannot be laid out here: {e}"));
         }
         Ok(if is_struct {
             Ty::Struct(mangled)
@@ -852,14 +852,14 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
         .map(|mut f| {
             let mut i = 0;
             for (_, t) in &mut f.params {
-                let ast::Ty::ImplFn(kind, ps, r, line) = t.clone() else {
+                let ast::Ty::ImplFn(kind, ps, r, span) = t.clone() else {
                     continue;
                 };
                 let pname = format!("#F{i}");
                 i += 1;
                 let key = format!("{}{pname}", f.name);
                 fn_bounds.insert(key.clone(), (kind, ps, r.map(|b| *b)));
-                *t = ast::Ty::Name(pname.clone(), line);
+                *t = ast::Ty::Name(pname.clone(), span);
                 f.generics.push(ast::GenericParam::Type {
                     name: pname,
                     bounds: vec![ast::Bound::plain(format!("Fn@{key}"))],
@@ -898,7 +898,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
         if !f.generics.is_empty() {
             if f.body.is_none() {
                 errs.push(SyntaxError {
-                    line: f.line,
+                    span: f.span,
                     message: format!(
                         "`{}` is a declaration, so there is no body to instantiate; \
                          an external function cannot be generic",
@@ -909,7 +909,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
             }
             if generic_fns.insert(f.name.clone(), f.clone()).is_some() {
                 errs.push(SyntaxError {
-                    line: f.line,
+                    span: f.span,
                     message: format!("`{}` is defined more than once", f.name),
                 });
             }
@@ -925,7 +925,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
                 .iter()
                 .map(|(n, t)| {
                     let ty = resolve_ty(t, &types)?;
-                    check_sized(&ty, t.line(), &format!("the parameter `{n}`"))?;
+                    check_sized(&ty, t.span(), &format!("the parameter `{n}`"))?;
                     Ok(ty)
                 })
                 .collect();
@@ -938,7 +938,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
                 Some((n, ast::Ty::Ref(..))) if n == "self"
             );
             if let (Ok(p), Ok(r)) = (&params, &ret)
-                && let Err(e) = check_returned_reference(p, r, self_ref, f.line)
+                && let Err(e) = check_returned_reference(p, r, self_ref, f.span)
             {
                 errs.push(e);
                 continue;
@@ -947,7 +947,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
                 (Ok(p), Ok(r)) => {
                     if sigs.borrow_mut().insert(fn_key(f), (p, r)).is_some() {
                         errs.push(SyntaxError {
-                            line: f.line,
+                            span: f.span,
                             message: format!("`{}` is defined more than once", f.name),
                         });
                     }
@@ -966,7 +966,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
             ast::Item::Const(c) => consts.push(c.clone()),
             ast::Item::Impl(imp) => {
                 let self_repr = SelfTy {
-                    ty: ast::Ty::Name(imp.self_ty.clone(), imp.line),
+                    ty: ast::Ty::Name(imp.self_ty.clone(), imp.span),
                     name: imp.self_ty.clone(),
                 };
                 for c in &imp.consts {
@@ -976,7 +976,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
                         name: format!("{}.{}", imp.self_ty, c.name),
                         ty: subst_self_ty(&c.ty, &self_repr),
                         value,
-                        line: c.line,
+                        span: c.span,
                     });
                 }
             }
@@ -991,7 +991,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
                 Ok(g) => {
                     if globals.insert(c.name.clone(), g).is_some() {
                         errs.push(SyntaxError {
-                            line: c.line,
+                            span: c.span,
                             message: format!("`{}` is defined more than once", c.name),
                         });
                     }
@@ -1139,8 +1139,8 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
 }
 
 /// One error, for the places that build one rather than return it.
-fn one_err(line: Line, message: String) -> Error {
-    SyntaxError { line, message }
+fn one_err(span: Span, message: String) -> Error {
+    SyntaxError { span, message }
 }
 
 /// Whether an expression contains a closure anywhere inside it.
@@ -1374,16 +1374,16 @@ fn for_each_child_block(b: &ast::Block, f: &mut impl FnMut(&ast::Expr)) {
 /// field, which is what makes the closure body an ordinary function body.
 fn rewrite_captures(e: &mut ast::Expr, captures: &[String]) {
     use ast::Expr::*;
-    if let Path(n, line) = e
+    if let Path(n, span) = e
         && captures.contains(n)
     {
         *e = Deref(
             Box::new(Field(
-                Box::new(Path("self".to_string(), *line)),
+                Box::new(Path("self".to_string(), *span)),
                 n.clone(),
-                *line,
+                *span,
             )),
-            *line,
+            *span,
         );
         return;
     }
@@ -1486,7 +1486,7 @@ fn object_methods(
 fn object_safe(m: &ast::FnItem, trait_name: &str) -> R<()> {
     let complaint = |what: &str| {
         err(
-            m.line,
+            m.span,
             format!(
                 "`{trait_name}::{}` is not object-safe: {what} (Ch. 4 §3.4). \
                  A trait object has erased its type, so any signature that needs \
@@ -1571,10 +1571,10 @@ fn peel(ty: &Ty) -> &Ty {
 }
 
 /// The element type of a `Vec`, however the receiver is held.
-fn vec_elem(ty: &Ty, method: &str, line: Line) -> R<Ty> {
+fn vec_elem(ty: &Ty, method: &str, span: Span) -> R<Ty> {
     match peel(ty) {
         Ty::VecOf(e) => Ok((**e).clone()),
-        _ => err(line, format!("`{method}` applies to a `Vec`, not {ty}")),
+        _ => err(span, format!("`{method}` applies to a `Vec`, not {ty}")),
     }
 }
 
@@ -1620,7 +1620,7 @@ fn fn_key(f: &ast::FnItem) -> String {
 /// exactly one reference among the parameters, the returned reference borrows
 /// from it, and the caller's loan is extended to cover the result. With none
 /// or several, the signature is the one §3.3 calls ill-formed.
-fn check_returned_reference(params: &[Ty], ret: &Ty, self_ref: bool, line: Line) -> R<()> {
+fn check_returned_reference(params: &[Ty], ret: &Ty, self_ref: bool, span: Span) -> R<()> {
     if !contains_reference(ret) {
         return Ok(());
     }
@@ -1633,14 +1633,14 @@ fn check_returned_reference(params: &[Ty], ret: &Ty, self_ref: bool, line: Line)
     match sources {
         1 => Ok(()),
         0 => err(
-            line,
+            span,
             format!(
                 "this function returns {ret} but borrows from nothing: the reference could \
                  only point into a local, which dies when the function does (Ch. 3 §4.1)"
             ),
         ),
         n => err(
-            line,
+            span,
             format!(
                 "this function returns {ret} and has {n} reference parameters, so elision \
                  cannot choose which one it borrows from; writing the lifetimes out needs \
@@ -1652,10 +1652,10 @@ fn check_returned_reference(params: &[Ty], ret: &Ty, self_ref: bool, line: Line)
 
 /// A dynamically sized type is never the type of a place (Ch. 3 §5.1): not a
 /// parameter, not a local, not a field. It appears only behind a reference.
-fn check_sized(ty: &Ty, line: Line, what: &str) -> R<()> {
+fn check_sized(ty: &Ty, span: Span, what: &str) -> R<()> {
     if ty.is_unsized() {
         return err(
-            line,
+            span,
             format!("{what} cannot have type {ty}: it has no size, so it lives only behind `&`"),
         );
     }
@@ -1901,7 +1901,7 @@ struct Blanket {
     /// Method name to the generic function its body became.
     methods: HashMap<String, String>,
     /// Where it was written.
-    line: Line,
+    span: Span,
 }
 
 /// A method becomes a function named `Type.method`, `Self` substituted away
@@ -1920,7 +1920,7 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
             && traits.insert(t.name.clone(), t).is_some()
         {
             errs.push(SyntaxError {
-                line: t.line,
+                span: t.span,
                 message: format!("`{}` is defined more than once", t.name),
             });
         }
@@ -1929,7 +1929,7 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
         for s in &t.supertraits {
             if !traits.contains_key(s) && s != "Eq" && s != "Ord" {
                 errs.push(SyntaxError {
-                    line: t.line,
+                    span: t.span,
                     message: format!("`{s}` is not a trait in scope"),
                 });
             }
@@ -1981,7 +1981,7 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
 
     // Which methods each type already has, so a collision is reported rather
     // than silently resolved (§1.3).
-    let mut defined: HashMap<String, Line> = HashMap::new();
+    let mut defined: HashMap<String, Span> = HashMap::new();
 
     for item in &file.items {
         let ast::Item::Impl(imp) = item else { continue };
@@ -1992,7 +1992,7 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
         let one_instantiation = imp.generics.is_empty() && !imp.self_args.is_empty();
         let self_ty = if one_instantiation {
             let ty = match resolve_ty(
-                &ast::Ty::App(imp.self_ty.clone(), imp.self_args.clone(), imp.line),
+                &ast::Ty::App(imp.self_ty.clone(), imp.self_args.clone(), imp.span),
                 types,
             ) {
                 Ok(t) => t,
@@ -2003,7 +2003,7 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
             };
             let Some(n) = nominal_name(&ty) else {
                 errs.push(SyntaxError {
-                    line: imp.line,
+                    span: imp.span,
                     message: format!("`{}` has no methods", imp.self_ty),
                 });
                 continue;
@@ -2024,7 +2024,7 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
             && !imp.generics.iter().any(|g| g.name() == *self_ty)
         {
             errs.push(SyntaxError {
-                line: imp.line,
+                span: imp.span,
                 message: format!(
                     "`{t}` holds for every type by a blanket impl, so it may not be \
                      implemented by hand: implementing it for `{self_ty}` would overlap, \
@@ -2062,7 +2062,7 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
             && !types.instantiations.borrow().contains_key(self_ty)
         {
             errs.push(SyntaxError {
-                line: imp.line,
+                span: imp.span,
                 message: format!("`{self_ty}` is not a type in scope"),
             });
             continue;
@@ -2074,7 +2074,7 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
             && self_ty != "Vec"
         {
             errs.push(SyntaxError {
-                line: imp.line,
+                span: imp.span,
                 message: format!(
                     "`{self_ty}` is not a generic type, so this impl has \
                                   type parameters nothing can determine (Ch. 4 §2.1)"
@@ -2084,7 +2084,7 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
         }
         if !imp.generics.is_empty() && imp.trait_name.as_deref() == Some("Drop") {
             errs.push(SyntaxError {
-                line: imp.line,
+                span: imp.span,
                 message: "a destructor on a generic type is not implemented; whether a \
                           type needs dropping is decided before its instantiations exist"
                     .into(),
@@ -2100,7 +2100,7 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
             let params = traits.get(trait_name).map_or(0, |t| t.params.len());
             if params != imp.trait_args.len() {
                 errs.push(SyntaxError {
-                    line: imp.line,
+                    span: imp.span,
                     message: format!(
                         "`{trait_name}` takes {params} type argument(s), {} given",
                         imp.trait_args.len()
@@ -2155,15 +2155,15 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
         let mut self_written = if imp.self_args.is_empty() || one_instantiation {
             // For one instantiation the name *is* the type; the arguments
             // are already in it.
-            ast::Ty::Name(self_ty.clone(), imp.line)
+            ast::Ty::Name(self_ty.clone(), imp.span)
         } else {
-            ast::Ty::App(self_ty.clone(), imp.self_args.clone(), imp.line)
+            ast::Ty::App(self_ty.clone(), imp.self_args.clone(), imp.span)
         };
         // `impl Trait for &T` — the methods are keyed under `T`, because a
         // reference's methods have always been the referent's, and `Self` is
         // the reference (Ch. 4 §2.1).
         if imp.self_ref {
-            self_written = ast::Ty::Ref(Box::new(self_written), imp.self_mut, imp.line);
+            self_written = ast::Ty::Ref(Box::new(self_written), imp.self_mut, imp.span);
         }
         let self_repr = SelfTy {
             ty: self_written,
@@ -2187,7 +2187,7 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
             } else {
                 let Some(decl) = traits.get(trait_name) else {
                     errs.push(SyntaxError {
-                        line: imp.line,
+                        span: imp.span,
                         message: format!("`{trait_name}` is not a trait in scope"),
                     });
                     continue;
@@ -2243,7 +2243,7 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
                     .find(|g| ordered.iter().any(|o| o.name() == g.name()))
                 {
                     errs.push(SyntaxError {
-                        line: f.line,
+                        span: f.span,
                         message: format!(
                             "`{}` names a type parameter this `impl` already has; \
                              a method's own parameters must be named differently \
@@ -2261,7 +2261,7 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
             let is_destructor = imp.trait_name.as_deref() == Some("Drop") && f.name == "drop";
             if !is_destructor && f.name == "drop" {
                 errs.push(SyntaxError {
-                    line: f.line,
+                    span: f.span,
                     message: "a destructor is written `impl Drop for T` (Ch. 4 §5.2); \
                               an inherent `drop` would never be called"
                         .into(),
@@ -2280,13 +2280,13 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
                     .or_default()
                     .push(key.clone());
             }
-            if let Some(first) = defined.insert(key.clone(), f.line) {
+            if let Some(first) = defined.insert(key.clone(), f.span) {
                 errs.push(SyntaxError {
-                    line: f.line,
+                    span: f.span,
                     message: format!(
-                        "`{self_ty}` already has a method `{}` (line {first}); \
+                        "`{self_ty}` already has a method `{}` (line {}); \
                          §1.3 requires the ambiguity be written out",
-                        f.name
+                        f.name, first.line
                     ),
                 });
                 continue;
@@ -2316,7 +2316,7 @@ fn blanket_impl(
 ) -> R<Blanket> {
     let Some(trait_name) = imp.trait_name.clone() else {
         return err(
-            imp.line,
+            imp.span,
             format!(
                 "`{}` is a type parameter, so this impl gives methods to no type; \
                  an inherent impl needs a type (Ch. 4 §1.2)",
@@ -2325,11 +2325,11 @@ fn blanket_impl(
         );
     };
     let Some(decl) = traits.get(&trait_name) else {
-        return err(imp.line, format!("`{trait_name}` is not a trait in scope"));
+        return err(imp.span, format!("`{trait_name}` is not a trait in scope"));
     };
     if decl.params.len() != imp.trait_args.len() {
         return err(
-            imp.line,
+            imp.span,
             format!(
                 "`{trait_name}` takes {} type argument(s), {} given",
                 decl.params.len(),
@@ -2339,14 +2339,14 @@ fn blanket_impl(
     }
 
     let self_repr = SelfTy {
-        ty: ast::Ty::Name(imp.self_ty.clone(), imp.line),
+        ty: ast::Ty::Name(imp.self_ty.clone(), imp.span),
         name: imp.self_ty.clone(),
     };
     let mut methods = HashMap::new();
     for m in &imp.methods {
         let Some(want) = decl.methods.iter().find(|d| d.name == m.name) else {
             return err(
-                m.line,
+                m.span,
                 format!(
                     "`{trait_name}` has no method `{}`, and a trait impl may supply \
                      nothing else",
@@ -2376,7 +2376,7 @@ fn blanket_impl(
                 .all(|((_, a), (_, b))| same_ast_ty(a, b))
         {
             return err(
-                m.line,
+                m.span,
                 format!(
                     "`{}` does not match the signature `{trait_name}` declares",
                     m.name
@@ -2385,7 +2385,7 @@ fn blanket_impl(
         }
         if !got.generics.is_empty() {
             return err(
-                m.line,
+                m.span,
                 "a method with type parameters of its own, inside a blanket impl, \
                  is not implemented",
             );
@@ -2405,29 +2405,29 @@ fn blanket_impl(
         trait_name,
         trait_args: imp.trait_args.clone(),
         methods,
-        line: imp.line,
+        span: imp.span,
     })
 }
 
 /// `impl Drop for T` must supply exactly `fn drop(self)` (Ch. 4 §5.2).
 fn check_drop_impl(imp: &ast::ImplItem) -> R<()> {
-    let bad = |line| {
+    let bad = |span| {
         err(
-            line,
+            span,
             "`impl Drop` supplies exactly one method, `fn drop(self)` (Ch. 4 §5.2)",
         )
     };
     if imp.methods.len() != 1 {
-        return bad(imp.line);
+        return bad(imp.span);
     }
     let m = &imp.methods[0];
     if m.name != "drop" || m.ret.is_some() {
-        return bad(m.line);
+        return bad(m.span);
     }
     match m.params.as_slice() {
         [(n, ast::Ty::SelfTy(_))] if n == "self" => Ok(()),
         _ => err(
-            m.line,
+            m.span,
             "a destructor takes `self` by value, so that dropping its fields is not \
              a drop of `self` (Ch. 3 §1.4)",
         ),
@@ -2445,7 +2445,7 @@ fn check_trait_impl(
     for m in &imp.methods {
         let Some(want) = decl.methods.iter().find(|d| d.name == m.name) else {
             return err(
-                m.line,
+                m.span,
                 format!(
                     "`{}` has no method `{}`, and a trait impl may supply nothing else",
                     decl.name, m.name
@@ -2463,7 +2463,7 @@ fn check_trait_impl(
         let want = subst_self(&want, self_repr);
         let mismatch = || {
             err::<()>(
-                m.line,
+                m.span,
                 format!(
                     "`{}` does not match the signature `{}` declares",
                     m.name, decl.name
@@ -2505,13 +2505,13 @@ fn check_trait_impl(
             }
         }
         if m.body.is_none() {
-            return err(m.line, format!("`{}` needs a body here", m.name));
+            return err(m.span, format!("`{}` needs a body here", m.name));
         }
     }
     for (c, _) in &decl.consts {
         if !imp.consts.iter().any(|k| &k.name == c) {
             return err(
-                imp.line,
+                imp.span,
                 format!(
                     "`impl {} for {}` is missing `const {c}`, which the trait requires \
                      (Ch. 4 §1.7)",
@@ -2523,7 +2523,7 @@ fn check_trait_impl(
     for a in &decl.assoc {
         if !imp.assoc.iter().any(|(n, _)| n == a) {
             return err(
-                imp.line,
+                imp.span,
                 format!(
                     "`impl {} for {}` is missing `type {a}`, which the trait requires \
                      (Ch. 4 §1.7)",
@@ -2535,7 +2535,7 @@ fn check_trait_impl(
     for (n, _) in &imp.assoc {
         if !decl.assoc.contains(n) {
             return err(
-                imp.line,
+                imp.span,
                 format!("`{}` declares no associated type `{n}`", decl.name),
             );
         }
@@ -2549,7 +2549,7 @@ fn check_trait_impl(
             Some(_) => defaults.push(d.clone()),
             None => {
                 return err(
-                    imp.line,
+                    imp.span,
                     format!(
                         "`impl {} for {}` is missing `{}`, which the trait requires",
                         decl.name, imp.self_ty, d.name
@@ -2786,9 +2786,9 @@ fn derived_functions(file: &ast::File, types: &Types) -> (Vec<Function>, Vec<Ty>
     let mut errs = Vec::new();
 
     for item in &file.items {
-        let (name, derives, line, generics) = match item {
-            ast::Item::Struct(s) => (&s.name, &s.derives, s.line, &s.generics),
-            ast::Item::Enum(e) => (&e.name, &e.derives, e.line, &e.generics),
+        let (name, derives, span, generics) = match item {
+            ast::Item::Struct(s) => (&s.name, &s.derives, s.span, &s.generics),
+            ast::Item::Enum(e) => (&e.name, &e.derives, e.span, &e.generics),
             _ => continue,
         };
         if derives.is_empty() {
@@ -2796,7 +2796,7 @@ fn derived_functions(file: &ast::File, types: &Types) -> (Vec<Function>, Vec<Ty>
         }
         if !generics.is_empty() {
             errs.push(SyntaxError {
-                line,
+                span,
                 message: "deriving for a generic type is not implemented; the derived \
                           impl would need the bound §6 puts on every parameter"
                     .into(),
@@ -2815,7 +2815,7 @@ fn derived_functions(file: &ast::File, types: &Types) -> (Vec<Function>, Vec<Ty>
                 let variants = types.enums.borrow()[name].clone();
                 if variants.iter().any(|v| !v.fields.is_empty()) {
                     errs.push(SyntaxError {
-                        line,
+                        span,
                         message: "deriving for an enum with a payload is not implemented; \
                                   §6 orders it by discriminant and then by payload, and \
                                   only the discriminant half is built"
@@ -2831,7 +2831,7 @@ fn derived_functions(file: &ast::File, types: &Types) -> (Vec<Function>, Vec<Ty>
             match d.as_str() {
                 "Ord" => match derive_cmp(name, &ty, &fields, types) {
                     Ok(f) => funcs.push(f),
-                    Err(e) => errs.push(SyntaxError { line, message: e }),
+                    Err(e) => errs.push(SyntaxError { span, message: e }),
                 },
                 "Eq" => funcs.push(derive_eq(name)),
                 "Clone" => funcs.push(derive_clone(name, &ty, types)),
@@ -3195,7 +3195,7 @@ fn build_types(file: &ast::File) -> R<Types> {
                     .iter()
                     .map(|(n, t)| {
                         let ty = resolve_ty(t, &types)?;
-                        check_sized(&ty, t.line(), &format!("the field `{n}`"))?;
+                        check_sized(&ty, t.span(), &format!("the field `{n}`"))?;
                         Ok((n.clone(), ty))
                     })
                     .collect::<R<_>>()?;
@@ -3253,7 +3253,7 @@ fn build_types(file: &ast::File) -> R<Types> {
             && !types.enums.borrow().contains_key(&imp.self_ty)
         {
             return err(
-                imp.line,
+                imp.span,
                 format!(
                     "`{}` cannot have a destructor: it is not declared in this file",
                     imp.self_ty
@@ -3262,7 +3262,7 @@ fn build_types(file: &ast::File) -> R<Types> {
         }
         if !types.destructors.insert(imp.self_ty.clone()) {
             return err(
-                imp.line,
+                imp.span,
                 format!("`{}` has more than one destructor", imp.self_ty),
             );
         }
@@ -3277,26 +3277,26 @@ fn build_types(file: &ast::File) -> R<Types> {
             continue;
         }
         let [(param, ty)] = &f.params[..] else {
-            return err(f.line, "`drop` takes exactly one parameter, named `self`");
+            return err(f.span, "`drop` takes exactly one parameter, named `self`");
         };
         if param != "self" {
-            return err(f.line, "a destructor's parameter must be named `self`");
+            return err(f.span, "a destructor's parameter must be named `self`");
         }
         let ty = resolve_ty(ty, &types)?;
         let name = match &ty {
             Ty::Struct(n) | Ty::Enum(n) => n.clone(),
             other => {
                 return err(
-                    f.line,
+                    f.span,
                     format!("`{other}` cannot have a destructor: it is not declared in this file"),
                 );
             }
         };
         if f.ret.is_some() {
-            return err(f.line, "a destructor returns nothing");
+            return err(f.span, "a destructor returns nothing");
         }
         if !types.destructors.insert(name.clone()) {
-            return err(f.line, format!("`{name}` has more than one destructor"));
+            return err(f.span, format!("`{name}` has more than one destructor"));
         }
     }
 
@@ -3309,13 +3309,13 @@ fn build_types(file: &ast::File) -> R<Types> {
         }
         if imp.trait_name.as_deref() != Some("Copy") {
             return err(
-                imp.line,
+                imp.span,
                 "`!Copy` is the only negative implementation the language has, and \
                  §5.1 says why it exists at all",
             );
         }
         if !imp.methods.is_empty() {
-            return err(imp.line, "`impl !Copy` has an empty body");
+            return err(imp.span, "`impl !Copy` has an empty body");
         }
         types.no_copy.insert(imp.self_ty.clone());
     }
@@ -3350,13 +3350,13 @@ fn build_types(file: &ast::File) -> R<Types> {
     // ill-formed one — an infinite type, a duplicate discriminant — is
     // reported here rather than at its first use.
     for item in &file.items {
-        let (name, line) = match item {
-            ast::Item::Struct(s) if s.generics.is_empty() => (&s.name, s.line),
-            ast::Item::Enum(e) if e.generics.is_empty() => (&e.name, e.line),
+        let (name, span) = match item {
+            ast::Item::Struct(s) if s.generics.is_empty() => (&s.name, s.span),
+            ast::Item::Enum(e) if e.generics.is_empty() => (&e.name, e.span),
             _ => continue,
         };
         if let Err(e) = layout::layout_of(&types.db.borrow(), &layout::Ty::named(name)) {
-            return err(line, e.to_string());
+            return err(span, e.to_string());
         }
     }
     Ok(types)
@@ -3390,18 +3390,18 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
             "`Self` names the implementing type, and there is none here",
         ),
         // `T::Item` — the type this impl chose (Ch. 4 §1.7).
-        ast::Ty::Assoc(base, name, line) => {
+        ast::Ty::Assoc(base, name, span) => {
             let base = resolve_ty_env(base, types, env)?;
             let Some(owner) = nominal_name(&base) else {
-                return err(*line, format!("{base} has no associated types"));
+                return err(*span, format!("{base} has no associated types"));
             };
             if let Some(t) = types.assoc.borrow().get(&(owner, name.clone())) {
                 return Ok(t.clone());
             }
-            match types.assoc_of_instantiation(&base, name, *line)? {
+            match types.assoc_of_instantiation(&base, name, *span)? {
                 Some(t) => Ok(t),
                 None => err(
-                    *line,
+                    *span,
                     format!("`{base}` chooses no type for `{name}` (Ch. 4 §1.7)"),
                 ),
             }
@@ -3420,7 +3420,7 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
         ),
         // `Name<T, U>` — instantiate now, so that everything downstream sees
         // an ordinary nominal type (Ch. 4 §2.7).
-        ast::Ty::App(name, args, line) => {
+        ast::Ty::App(name, args, span) => {
             let args: Vec<Ty> = args
                 .iter()
                 .map(|a| resolve_ty_env(a, types, env))
@@ -3430,16 +3430,16 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
             // operation this language does not have (Ch. 5 §2.1).
             if name == "Box" {
                 let [inner] = &args[..] else {
-                    return err(*line, "`Box` takes one type argument");
+                    return err(*span, "`Box` takes one type argument");
                 };
-                check_sized(inner, *line, "a `Box`'s contents")?;
+                check_sized(inner, *span, "a `Box`'s contents")?;
                 return Ok(Ty::Boxed(Box::new(inner.clone())));
             }
             if name == "Vec" {
                 let [inner] = &args[..] else {
-                    return err(*line, "`Vec` takes one type argument");
+                    return err(*span, "`Vec` takes one type argument");
                 };
-                check_sized(inner, *line, "a `Vec`'s elements")?;
+                check_sized(inner, *span, "a `Vec`'s elements")?;
                 // A `Vec` is a language item *and* a nominal type, so that
                 // the library can write `impl<A> FromIterator<A> for Vec<A>`
                 // the way Ch. 5 §3.3 says it does. Registering the
@@ -3452,13 +3452,13 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
                     .or_insert_with(|| ("Vec".to_string(), args.clone()));
                 return Ok(Ty::VecOf(Box::new(inner.clone())));
             }
-            types.instantiate(name, &args, *line)
+            types.instantiate(name, &args, *span)
         }
         // §3.4: a trait may be used as an object only if every method is
         // object-safe, and this is where "used as" happens.
-        ast::Ty::Dyn(name, line) => {
+        ast::Ty::Dyn(name, span) => {
             if !types.traits.contains_key(name) {
-                return err(*line, format!("`{name}` is not a trait in scope"));
+                return err(*span, format!("`{name}` is not a trait in scope"));
             }
             for m in &object_methods(&types.traits, name, &mut Vec::new()) {
                 object_safe(m, name)?;
@@ -3474,14 +3474,14 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
         ast::Ty::Ref(t, mutable, _) => {
             Ok(Ty::Ref(Box::new(resolve_ty_env(t, types, env)?), *mutable))
         }
-        ast::Ty::Slice(t, line) => {
+        ast::Ty::Slice(t, span) => {
             let elem = resolve_ty_env(t, types, env)?;
             if elem.is_unsized() {
-                return err(*line, "a slice element must have a size");
+                return err(*span, "a slice element must have a size");
             }
             Ok(Ty::Slice(Box::new(elem)))
         }
-        ast::Ty::Name(name, line) => match name.as_str() {
+        ast::Ty::Name(name, span) => match name.as_str() {
             "trit" => Ok(Ty::Trit),
             "bool" => Ok(Ty::Bool),
             "t9" => Ok(Ty::T9),
@@ -3508,7 +3508,7 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
             }
             // Ch. 1 §8 claims these so no user identifier can take them.
             "t3" | "t81" | "f27" => err(
-                *line,
+                *span,
                 format!("`{name}` is a reserved type name (Ch. 1 §8)"),
             ),
             // A type parameter in scope.
@@ -3518,7 +3518,7 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
                     || types.generic_enums.contains_key(other) =>
             {
                 err(
-                    *line,
+                    *span,
                     format!("`{other}` is generic and needs its arguments written: `{other}<…>`"),
                 )
             }
@@ -3540,15 +3540,15 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
                 {
                     return Ok(Ty::VecOf(Box::new(inner.clone())));
                 }
-                err(*line, format!("`{other}` is not a type in scope"))
+                err(*span, format!("`{other}` is not a type in scope"))
             }
         },
-        ast::Ty::Array(elem, count, line) => {
+        ast::Ty::Array(elem, count, span) => {
             let elem = resolve_ty_env(elem, types, env)?;
             let n = const_int_in(count, &types.consts)?;
             if n < 0 {
                 // Ch. 2 §3: the type-level face of the signed-taddr decision.
-                return err(*line, format!("array length {n} is negative"));
+                return err(*span, format!("array length {n} is negative"));
             }
             Ok(Ty::Array(Box::new(elem), n))
         }
@@ -3564,11 +3564,11 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
 /// `const N: taddr = 8;` may be an array's length (Ch. 0 §3.2 says a length
 /// is a constant expression, and a `const` is one).
 fn const_int_in(e: &ast::Expr, named: &HashMap<String, i128>) -> R<i128> {
-    if let ast::Expr::Path(name, line) = e {
+    if let ast::Expr::Path(name, span) = e {
         return match named.get(name) {
             Some(v) => Ok(*v),
             None => err(
-                *line,
+                *span,
                 format!("`{name}` is not a constant this expression can use"),
             ),
         };
@@ -3578,18 +3578,18 @@ fn const_int_in(e: &ast::Expr, named: &HashMap<String, i128>) -> R<i128> {
 
 fn const_int_raw(e: &ast::Expr, named: &HashMap<String, i128>) -> R<i128> {
     let const_int = |e: &ast::Expr| const_int_in(e, named);
-    let big = |v: &Bt, line: Line| {
+    let big = |v: &Bt, span: Span| {
         v.to_i128()
             .ok_or(())
-            .or_else(|()| err(line, format!("{v} is too large")))
+            .or_else(|()| err(span, format!("{v} is too large")))
     };
     match e {
-        ast::Expr::Int(v, line) => big(v, *line),
+        ast::Expr::Int(v, span) => big(v, *span),
         ast::Expr::Trit(t, _) => Ok(i128::from(t.to_i8())),
         ast::Expr::Bool(b, _) => Ok(i128::from(*b)),
         ast::Expr::Unary("-", inner, _) => Ok(-const_int(inner)?),
-        ast::Expr::Unary(op, _, line) => err(*line, format!("`{op}` is not a constant operation")),
-        ast::Expr::Binary(op, a, b, line) => {
+        ast::Expr::Unary(op, _, span) => err(*span, format!("`{op}` is not a constant operation")),
+        ast::Expr::Binary(op, a, b, span) => {
             let (a, b) = (const_int(a)?, const_int(b)?);
             let bt = |v: i128| Bt::from_i128(v);
             match *op {
@@ -3601,30 +3601,30 @@ fn const_int_raw(e: &ast::Expr, named: &HashMap<String, i128>) -> R<i128> {
                 // would compute (Ch. 1 §4).
                 "/" | "%" => {
                     if b == 0 {
-                        return err(*line, "division by zero in a constant");
+                        return err(*span, "division by zero in a constant");
                     }
                     let Some((q, r)) = bt(a).divrem(&bt(b)) else {
-                        return err(*line, "division by zero in a constant");
+                        return err(*span, "division by zero in a constant");
                     };
-                    big(if *op == "/" { &q } else { &r }, *line)
+                    big(if *op == "/" { &q } else { &r }, *span)
                 }
                 ">>" | "<<" => {
                     let k = u32::try_from(b.abs()).map_err(|_| SyntaxError {
-                        line: *line,
+                        span: *span,
                         message: "shift too large".into(),
                     })?;
                     if *op == "<<" {
-                        big(&bt(a).shl(k), *line)
+                        big(&bt(a).shl(k), *span)
                     } else {
-                        big(&bt(a).shr(k), *line)
+                        big(&bt(a).shr(k), *span)
                     }
                 }
-                other => err(*line, format!("`{other}` is not a constant operation")),
+                other => err(*span, format!("`{other}` is not a constant operation")),
             }
         }
         ast::Expr::Cast(inner, _, _) => const_int(inner),
         other => err(
-            other.line(),
+            other.span(),
             "this is not a constant expression: draft 0.1 evaluates literals and \
              arithmetic on them (Ch. 0 §3.2)",
         ),
@@ -3635,10 +3635,10 @@ fn const_item(c: &ast::ConstItem, module: &mut Module, types: &Types) -> R<Globa
     let const_int = |e: &ast::Expr| const_int_in(e, &types.consts);
     let ty = resolve_ty(&c.ty, types)?;
     match (&ty, &c.value) {
-        (Ty::Array(elem, n), ast::Expr::Array(items, line)) => {
+        (Ty::Array(elem, n), ast::Expr::Array(items, span)) => {
             if items.len() as i128 != *n {
                 return err(
-                    *line,
+                    *span,
                     format!("expected {n} elements, found {}", items.len()),
                 );
             }
@@ -3647,7 +3647,7 @@ fn const_item(c: &ast::ConstItem, module: &mut Module, types: &Types) -> R<Globa
                 let v = const_int(item)?;
                 let width = elem.width().unwrap_or(27);
                 if !Bt::from_i128(v).fits_width(width) {
-                    return err(item.line(), format!("{v} does not fit in {elem}"));
+                    return err(item.span(), format!("{v} does not fit in {elem}"));
                 }
                 // Little-trytean, like every other multi-tryte value.
                 let value = Bt::from_i128(v);
@@ -3667,11 +3667,11 @@ fn const_item(c: &ast::ConstItem, module: &mut Module, types: &Types) -> R<Globa
             let v = const_int(&c.value)?;
             let width = t.width().unwrap_or(27);
             if !Bt::from_i128(v).fits_width(width) {
-                return err(c.value.line(), format!("{v} does not fit in {t}"));
+                return err(c.value.span(), format!("{v} does not fit in {t}"));
             }
             Ok(Global::Const(Bt::from_i128(v), ty))
         }
-        _ => err(c.line, "this constant's form is not supported yet"),
+        _ => err(c.span, "this constant's form is not supported yet"),
     }
 }
 
@@ -3920,7 +3920,7 @@ fn function(
         let incoming = Operand::Value(name.clone());
         let local = fx.declare(name, ty.clone(), true);
         let slot = local.slot.clone();
-        fx.store_at(&slot, 0, ty, incoming, f.line)?;
+        fx.store_at(&slot, 0, ty, incoming, f.span)?;
     }
 
     // What the caller was required to have established, checked once here
@@ -3929,7 +3929,7 @@ fn function(
     // bounds check not tested at all, every iteration of every loop below.
     for pred in &f.requires {
         let (c, ct) = fx.expr(pred, Some(&Ty::Bool))?;
-        fx.check(&ct, &Ty::Bool, pred.line(), "a `where` predicate")?;
+        fx.check(&ct, &Ty::Bool, pred.span(), "a `where` predicate")?;
         let (ok, bad) = (fx.fresh("req.ok"), fx.fresh("req.no"));
         fx.br3(c, &bad, &bad, &ok);
         fx.start(bad);
@@ -3938,7 +3938,7 @@ fn function(
     }
 
     if let Some(tail) = &body.tail {
-        fx.check_return_root(tail, &ret, body.line)?;
+        fx.check_return_root(tail, &ret, body.span)?;
     }
     // An aggregate result is written through the caller's pointer, so that
     // is where the body's value should be built rather than somewhere it is
@@ -3951,20 +3951,24 @@ fn function(
     if !fx.done {
         // The parameters are this function's to drop too (Ch. 3 §1.1).
         if ret == Ty::Unit {
-            fx.drop_all(f.line)?;
+            fx.drop_all(f.span)?;
             fx.finish(Terminator::Ret(None));
         } else {
-            fx.check(&ty, &ret, body.line, "function body")?;
+            // A body's type is its tail's, so that is what the complaint is
+            // about: underlining the whole body says the function is wrong
+            // when one expression in it is.
+            let at = body.tail.as_ref().map_or(body.span, |t| t.span());
+            fx.check(&ty, &ret, at, "function body")?;
             if ret.is_aggregate() {
                 // Already there, if the body took the destination.
                 if value != Operand::Value(SRET.to_string()) {
                     let dst = Operand::Value(SRET.to_string());
-                    fx.copy_typed(dst, value, &ret, body.line)?;
+                    fx.copy_typed(dst, value, &ret, body.span)?;
                 }
-                fx.drop_all(f.line)?;
+                fx.drop_all(f.span)?;
                 fx.finish(Terminator::Ret(None));
             } else {
-                fx.drop_all(f.line)?;
+                fx.drop_all(f.span)?;
                 fx.finish(Terminator::Ret(Some(value)));
             }
         }
@@ -4146,7 +4150,7 @@ impl Fn<'_> {
         if let Some(flag) = &drop_flag {
             let one = Operand::Const(Type::Int(1), Bt::from_i128(1));
             let flag = flag.clone();
-            self.store_slot(&flag, &Ty::Bool, one);
+            self.store_slot(&flag, &Ty::Bool, one, Span::NONE);
             self.owned.push(Owned {
                 name: name.to_string(),
                 slot: local.slot.clone(),
@@ -4196,7 +4200,7 @@ impl Fn<'_> {
             && let Some(flag) = local.drop_flag
         {
             let zero = Operand::Const(Type::Int(1), Bt::ZERO);
-            self.store_slot(&flag, &Ty::Bool, zero);
+            self.store_slot(&flag, &Ty::Bool, zero, Span::NONE);
         }
     }
 
@@ -4214,7 +4218,7 @@ impl Fn<'_> {
             && let Some(flag) = local.drop_flag
         {
             let one = Operand::Const(Type::Int(1), Bt::from_i128(1));
-            self.store_slot(&flag, &Ty::Bool, one);
+            self.store_slot(&flag, &Ty::Bool, one, Span::NONE);
         }
     }
 
@@ -4256,12 +4260,12 @@ impl Fn<'_> {
 
     // -------------------------------------------------------------- checks
 
-    fn check(&self, got: &Ty, want: &Ty, line: Line, what: &str) -> R<()> {
+    fn check(&self, got: &Ty, want: &Ty, span: Span, what: &str) -> R<()> {
         if got == want || *got == Ty::Never {
             return Ok(());
         }
         err(
-            line,
+            span,
             format!("{what} has type {got}, expected {want} (there are no implicit conversions)"),
         )
     }
@@ -4289,16 +4293,16 @@ impl Fn<'_> {
             }
             None => (unit(), Ty::Unit),
         };
-        self.drop_scope(depth, b.line)?;
+        self.drop_scope(depth, b.span)?;
         self.scopes.pop();
         Ok(result)
     }
 
     /// Drop every local of this scope that still owns its value, in reverse
     /// order of declaration (Ch. 3 §1.4).
-    fn drop_scope(&mut self, depth: usize, line: Line) -> R<()> {
+    fn drop_scope(&mut self, depth: usize, span: Span) -> R<()> {
         if !self.done {
-            self.drop_through(depth, line)?;
+            self.drop_through(depth, span)?;
         }
         // Whether control left by this path or another, the scope is over.
         self.owned.retain(|o| o.depth < depth);
@@ -4308,7 +4312,7 @@ impl Fn<'_> {
     /// Emit the drops that leaving these scopes needs, **without** retiring
     /// them: `break`, `continue` and `return` leave along one path while the
     /// scope's other paths still own the same values.
-    fn drop_through(&mut self, depth: usize, line: Line) -> R<()> {
+    fn drop_through(&mut self, depth: usize, span: Span) -> R<()> {
         let mine: Vec<Owned> = self
             .owned
             .iter()
@@ -4326,9 +4330,9 @@ impl Fn<'_> {
             match (e.owns, e.drop_flag.clone()) {
                 (Owns::Yes, _) if fields_only => {
                     let addr = Operand::Value(e.slot.clone());
-                    self.drop_fields(addr, &e.ty, line, 0)?;
+                    self.drop_fields(addr, &e.ty, span, 0)?;
                 }
-                (Owns::Yes, _) => self.emit_drop(&e.slot, &e.ty, line)?,
+                (Owns::Yes, _) => self.emit_drop(&e.slot, &e.ty, span)?,
                 // Ownership depends on the path taken, so the flag decides.
                 (_, Some(flag)) => {
                     let f = self.load_slot(&flag, &Ty::Bool);
@@ -4337,14 +4341,14 @@ impl Fn<'_> {
                     self.start(yes);
                     if fields_only {
                         let addr = Operand::Value(e.slot.clone());
-                        self.drop_fields(addr, &e.ty, line, 0)?;
+                        self.drop_fields(addr, &e.ty, span, 0)?;
                     } else {
-                        self.emit_drop(&e.slot, &e.ty, line)?;
+                        self.emit_drop(&e.slot, &e.ty, span)?;
                     }
                     self.jump(&join);
                     self.start(join);
                 }
-                _ => self.emit_drop(&e.slot, &e.ty, line)?,
+                _ => self.emit_drop(&e.slot, &e.ty, span)?,
             }
         }
         Ok(())
@@ -4382,7 +4386,7 @@ impl Fn<'_> {
     }
 
     /// Check an access against the live loans (Ch. 3 §2.2).
-    fn check_access(&mut self, path: &PlacePath, access: Access, line: Line) -> R<()> {
+    fn check_access(&mut self, path: &PlacePath, access: Access, span: Span) -> R<()> {
         // §4.1's first check, before the aliasing one: a place is used only
         // where it is certainly initialized. A move out of a local leaves
         // every projection of it uninitialized too, so `a.x` after `a` moved
@@ -4396,7 +4400,7 @@ impl Fn<'_> {
         if let Some(what) = moved
             && !path.projections.is_empty()
         {
-            return err(line, format!("`{root}` {what} (Ch. 3 §4.1)"));
+            return err(span, format!("`{root}` {what} (Ch. 3 §4.1)"));
         }
 
         self.retire_loans();
@@ -4405,7 +4409,7 @@ impl Fn<'_> {
                 continue;
             }
             let borrowed = describe(&loan.place);
-            let since = loan.line;
+            let since = loan.span;
             let kind = if loan.mutable {
                 "exclusively"
             } else {
@@ -4425,10 +4429,11 @@ impl Fn<'_> {
             };
             if let Some(what) = complaint {
                 return err(
-                    line,
+                    span,
                     format!(
                         "`{borrowed}` cannot be {what} here: it is {kind} borrowed \
-                         on line {since}, and that borrow is still live (Ch. 3 §2.2)"
+                         on line {}, and that borrow is still live (Ch. 3 §2.2)",
+                        since.line
                     ),
                 );
             }
@@ -4438,19 +4443,19 @@ impl Fn<'_> {
 
     /// Record a borrow. It dies after the last use of whatever holds it,
     /// which the caller patches once the binding is known.
-    fn add_loan(&mut self, path: PlacePath, mutable: bool, line: Line) {
+    fn add_loan(&mut self, path: PlacePath, mutable: bool, span: Span) {
         let dies = self.stmt;
         self.loans.push(Loan {
             place: path,
             mutable,
             dies,
-            line,
+            span,
         });
     }
 
     /// A returned reference must be rooted at a parameter. Rooted at a local
     /// it would dangle, which is what §4.1 exists to prevent.
-    fn check_return_root(&mut self, e: &ast::Expr, ty: &Ty, line: Line) -> R<()> {
+    fn check_return_root(&mut self, e: &ast::Expr, ty: &Ty, span: Span) -> R<()> {
         if !contains_reference(ty) {
             return Ok(());
         }
@@ -4465,7 +4470,7 @@ impl Fn<'_> {
         };
         if !ok {
             return err(
-                line,
+                span,
                 format!(
                     "cannot return a reference into `{path}`: it is local to this function \
                      and dies when the function returns (Ch. 3 §4.1)"
@@ -4487,8 +4492,8 @@ impl Fn<'_> {
 
     /// Drop everything this function still owns — its locals and its
     /// parameters — on the way out.
-    fn drop_all(&mut self, line: Line) -> R<()> {
-        self.drop_scope(0, line)
+    fn drop_all(&mut self, span: Span) -> R<()> {
+        self.drop_scope(0, span)
     }
 
     /// The drops a `return` needs: everything the frame owns, along *this*
@@ -4500,13 +4505,13 @@ impl Fn<'_> {
     /// and retiring them there means the value the other path owns is never
     /// dropped at all. `break` and `continue` were given `drop_through` for
     /// exactly this reason and `return` was not.
-    fn drop_returning(&mut self, line: Line) -> R<()> {
-        self.drop_through(0, line)
+    fn drop_returning(&mut self, span: Span) -> R<()> {
+        self.drop_through(0, span)
     }
 
     /// A value moved out of inside a loop would be moved again on the next
     /// iteration.
-    fn check_no_move_in_loop(&mut self, before: &[Owned], line: Line) -> R<()> {
+    fn check_no_move_in_loop(&mut self, before: &[Owned], span: Span) -> R<()> {
         for e in before {
             let (name, was) = (&e.name, e.owns);
             if was != Owns::Yes {
@@ -4516,7 +4521,7 @@ impl Fn<'_> {
                 && now != Owns::Yes
             {
                 return err(
-                    line,
+                    span,
                     format!("`{name}` is moved out of here, and the loop may reach this again"),
                 );
             }
@@ -4525,13 +4530,13 @@ impl Fn<'_> {
     }
 
     /// The drop glue of a type: its own destructor, then its fields'.
-    fn emit_drop(&mut self, addr: &str, ty: &Ty, line: Line) -> R<()> {
-        self.drop_at(Operand::Value(addr.to_string()), ty, line, 0)
+    fn emit_drop(&mut self, addr: &str, ty: &Ty, span: Span) -> R<()> {
+        self.drop_at(Operand::Value(addr.to_string()), ty, span, 0)
     }
 
-    fn drop_at(&mut self, addr: Operand, ty: &Ty, line: Line, depth: u32) -> R<()> {
+    fn drop_at(&mut self, addr: Operand, ty: &Ty, span: Span, depth: u32) -> R<()> {
         if depth > 8 {
-            return err(line, "drop glue nested too deeply");
+            return err(span, "drop glue nested too deeply");
         }
         if !self.types.needs_drop(ty) {
             return Ok(());
@@ -4548,7 +4553,7 @@ impl Fn<'_> {
             if self.types.needs_drop(&elem) {
                 let base = self.load_ptr(addr.clone());
                 let i = self.temp_slot(&Ty::TAddr);
-                self.store_at(&i, 0, &Ty::TAddr, konst_addr(0), line)?;
+                self.store_at(&i, 0, &Ty::TAddr, konst_addr(0), span)?;
                 let (head, body, out) = (
                     self.fresh("vdrop.head"),
                     self.fresh("vdrop.body"),
@@ -4573,7 +4578,7 @@ impl Fn<'_> {
                     at.clone(),
                     konst_addr(l.size as i128),
                     &Ty::TAddr,
-                    line,
+                    span,
                 )?;
                 let e = self.emit(
                     "e",
@@ -4583,9 +4588,9 @@ impl Fn<'_> {
                         d: off,
                     },
                 );
-                self.drop_at(e, &elem, line, depth + 1)?;
-                let next = self.apply_binary("+", at, konst_addr(1), &Ty::TAddr, line)?;
-                self.store_at(&i, 0, &Ty::TAddr, next, line)?;
+                self.drop_at(e, &elem, span, depth + 1)?;
+                let next = self.apply_binary("+", at, konst_addr(1), &Ty::TAddr, span)?;
+                self.store_at(&i, 0, &Ty::TAddr, next, span)?;
                 self.jump(&head);
                 self.start(out);
             }
@@ -4594,7 +4599,7 @@ impl Fn<'_> {
                 self.load_from(at, &Ty::TAddr)
             };
             let bytes =
-                self.apply_binary("*", cap, konst_addr(l.size as i128), &Ty::TAddr, line)?;
+                self.apply_binary("*", cap, konst_addr(l.size as i128), &Ty::TAddr, span)?;
             let p = self.load_ptr(addr);
             self.free_if_any(p, bytes, l.align as i128);
             return Ok(());
@@ -4605,7 +4610,7 @@ impl Fn<'_> {
         // (Ch. 5 §2.3).
         if let Ty::Boxed(inner) = ty {
             let p = self.load_ptr(addr);
-            self.drop_at(p.clone(), inner, line, depth + 1)?;
+            self.drop_at(p.clone(), inner, span, depth + 1)?;
             let l = self.types.layout(inner);
             self.needs_heap.set(true);
             self.push(Inst {
@@ -4632,7 +4637,7 @@ impl Fn<'_> {
         // caller with only a pointer and that slot must be able to drop the
         // whole value.
         if let Ty::Struct(n) | Ty::Enum(n) = ty {
-            self.ensure_glue(n, ty, line)?;
+            self.ensure_glue(n, ty, span)?;
             self.push(Inst {
                 results: Vec::new(),
                 kind: InstKind::Call {
@@ -4643,7 +4648,7 @@ impl Fn<'_> {
             });
             return Ok(());
         }
-        self.drop_fields(addr, ty, line, depth)
+        self.drop_fields(addr, ty, span, depth)
     }
 
     /// Make sure `drop.T` exists, synthesizing it if the type has no
@@ -4663,12 +4668,11 @@ impl Fn<'_> {
     /// because an instantiation of a generic type does not exist until
     /// something asks for it: `List<t27>` is named while a body is being
     /// lowered, and a pass over the file would have missed it.
-    fn ensure_glue(&mut self, name: &str, ty: &Ty, line: Line) -> R<()> {
+    fn ensure_glue(&mut self, name: &str, ty: &Ty, span: Span) -> R<()> {
         let key = format!("drop.{name}");
         if self.types.destructors.contains(name) || self.sigs.borrow().contains_key(&key) {
             return Ok(());
         }
-        let _ = line;
         self.sigs
             .borrow_mut()
             .insert(key.clone(), (vec![ty.clone()], Ty::Unit));
@@ -4676,30 +4680,30 @@ impl Fn<'_> {
             requires: Vec::new(),
             name: key,
             generics: Vec::new(),
-            params: vec![("self".into(), ast::Ty::Name(name.to_string(), 0))],
+            params: vec![("self".into(), ast::Ty::Name(name.to_string(), span))],
             ret: None,
             body: Some(ast::Block {
                 stmts: Vec::new(),
                 tail: None,
-                line: 0,
+                span,
             }),
-            line: 0,
+            span,
         });
         Ok(())
     }
 
     /// The second half of dropping a value: its fields, without its own
     /// destructor. This is what a destructor's `self` gets.
-    fn drop_fields(&mut self, addr: Operand, ty: &Ty, line: Line, depth: u32) -> R<()> {
+    fn drop_fields(&mut self, addr: Operand, ty: &Ty, span: Span, depth: u32) -> R<()> {
         if depth > 8 {
-            return err(line, "drop glue nested too deeply");
+            return err(span, "drop glue nested too deeply");
         }
         match ty {
             Ty::Struct(_) | Ty::Tuple(_) => {
                 for (_, ft, off) in self.types.fields(ty) {
                     if self.types.needs_drop(&ft) {
                         let at = self.offset(addr.clone(), off);
-                        self.drop_at(at, &ft, line, depth + 1)?;
+                        self.drop_at(at, &ft, span, depth + 1)?;
                     }
                 }
             }
@@ -4709,14 +4713,14 @@ impl Fn<'_> {
                 if self.types.needs_drop(&elem) {
                     for i in 0..n {
                         let at = self.offset(addr.clone(), i * size);
-                        self.drop_at(at, &elem, line, depth + 1)?;
+                        self.drop_at(at, &elem, span, depth + 1)?;
                     }
                 }
             }
             // An enum's payload varies by variant, so dropping it is a
             // dispatch on the discriminant (Ch. 3 §1.4 item 2: "payload order
             // for an enum variant").
-            Ty::Enum(name) => self.drop_enum_payload(addr, &name.clone(), line, depth)?,
+            Ty::Enum(name) => self.drop_enum_payload(addr, &name.clone(), span, depth)?,
             _ => {}
         }
         Ok(())
@@ -4728,7 +4732,7 @@ impl Fn<'_> {
     /// with each arm dropping that variant's fields. Variants whose payload
     /// needs no dropping are not tested at all, so the common case — one
     /// droppable variant, as in `Option<Buffer>` — is one comparison.
-    fn drop_enum_payload(&mut self, addr: Operand, name: &str, line: Line, depth: u32) -> R<()> {
+    fn drop_enum_payload(&mut self, addr: Operand, name: &str, span: Span, depth: u32) -> R<()> {
         let ty = Ty::Enum(name.to_string());
         let l = self.types.layout(&ty);
         let e = l.enum_layout.clone().expect("an enum");
@@ -4800,12 +4804,12 @@ impl Fn<'_> {
             );
             self.br3(c, &next, &body, &next);
             self.start(body);
-            self.drop_variant_fields(addr.clone(), name, i, line, depth)?;
+            self.drop_variant_fields(addr.clone(), name, i, span, depth)?;
             self.jump(&join);
             self.start(next);
         }
         if let Some(i) = untagged {
-            self.drop_variant_fields(addr, name, i, line, depth)?;
+            self.drop_variant_fields(addr, name, i, span, depth)?;
         }
         self.jump(&join);
         self.start(join);
@@ -4818,13 +4822,13 @@ impl Fn<'_> {
         addr: Operand,
         name: &str,
         variant: usize,
-        line: Line,
+        span: Span,
         depth: u32,
     ) -> R<()> {
         for (_, ft, off) in self.types.variant_fields(name, variant) {
             if self.types.needs_drop(&ft) {
                 let at = self.offset(addr.clone(), off);
-                self.drop_at(at, &ft, line, depth + 1)?;
+                self.drop_at(at, &ft, span, depth + 1)?;
             }
         }
         Ok(())
@@ -4837,14 +4841,14 @@ impl Fn<'_> {
                 name,
                 ty,
                 value,
-                line,
+                span,
             } => {
                 let declared = match ty {
                     Some(t) => {
                         let d = self.resolve(t)?;
                         // A dynamically sized type is legal only behind a
                         // reference (Ch. 3 §5.1, Ch. 4 §3.1).
-                        check_sized(&d, *line, &format!("the local `{name}`"))?;
+                        check_sized(&d, *span, &format!("the local `{name}`"))?;
                         Some(d)
                     }
                     None => None,
@@ -4855,11 +4859,14 @@ impl Fn<'_> {
                 let (v, vt) = self.expr(value, declared.as_ref())?;
                 let ty = match declared {
                     Some(d) => {
-                        self.check(&vt, &d, *line, "initializer")?;
+                        // The initializer is what has the wrong type, so that
+                        // is what the complaint points at rather than the
+                        // `let` the whole statement starts with.
+                        self.check(&vt, &d, value.span(), "initializer")?;
                         d
                     }
                     None if vt == Ty::Never || vt == Ty::Unit => {
-                        return err(*line, format!("cannot bind a value of type {vt}"));
+                        return err(*span, format!("cannot bind a value of type {vt}"));
                     }
                     None => vt,
                 };
@@ -4875,9 +4882,9 @@ impl Fn<'_> {
                         loan.dies = loan.dies.max(dies);
                     }
                 }
-                check_sized(&ty, *line, &format!("the binding `{name}`"))?;
+                check_sized(&ty, *span, &format!("the binding `{name}`"))?;
                 if !ty.is_scalar() && !ty.is_aggregate() {
-                    return err(*line, format!("cannot bind a value of type {ty}"));
+                    return err(*span, format!("cannot bind a value of type {ty}"));
                 }
                 // The initializer's storage becomes the binding's, where it
                 // was made for this value: a computed aggregate lives in a
@@ -4900,7 +4907,7 @@ impl Fn<'_> {
                 // An aggregate is copied into the binding's own storage, so
                 // that writing to one does not write through to another.
                 let slot = local.slot.clone();
-                self.store_at(&slot, 0, &ty, v, *line)?;
+                self.store_at(&slot, 0, &ty, v, *span)?;
                 Ok(())
             }
             ast::Stmt::Expr(e) => {
@@ -4921,10 +4928,10 @@ impl Fn<'_> {
         if let Some(want) = expected
             && ty != *want
         {
-            if let Some(fat) = self.coerce_dyn(v.clone(), &ty, want, e.line())? {
+            if let Some(fat) = self.coerce_dyn(v.clone(), &ty, want, e.span())? {
                 return Ok(fat);
             }
-            if let Some(fat) = self.coerce_vec(v.clone(), &ty, want, e.line())? {
+            if let Some(fat) = self.coerce_vec(v.clone(), &ty, want, e.span())? {
                 return Ok(fat);
             }
         }
@@ -4947,12 +4954,12 @@ impl Fn<'_> {
             // exactly that: the arms below are the ones the chapter writes
             // out, built here because only here is the function's own result
             // type known.
-            E::Try(inner, line) => self.try_expr(inner, expected, *line),
+            E::Try(inner, span) => self.try_expr(inner, expected, *span),
 
             // Calling something that is not a name. The only callable value
             // in this language is a closure, and a closure is a place: its
             // captures are the receiver its body takes (Ch. 4 §4.2).
-            E::CallExpr(callee, args, line) => {
+            E::CallExpr(callee, args, span) => {
                 let ty = match self.peek_ty(callee)? {
                     Some(t) => t,
                     None => self.expr(callee, None)?.1,
@@ -4961,40 +4968,40 @@ impl Fn<'_> {
                     nominal_name(&ty).and_then(|n| self.types.closures.borrow().get(&n).cloned())
                 else {
                     return err(
-                        *line,
+                        *span,
                         format!("{ty} is not callable; only a closure is (Ch. 4 §4.3)"),
                     );
                 };
-                let recv = ast::Expr::Borrow(callee.clone(), false, *line);
+                let recv = ast::Expr::Borrow(callee.clone(), false, *span);
                 let mut full = vec![recv];
                 full.extend(args.iter().cloned());
-                self.call_key(&info.call, Vec::new(), &full, *line)
+                self.call_key(&info.call, Vec::new(), &full, *span)
             }
 
             // A string literal is a fat pointer to storage that outlives
             // every frame — an address and a length in characters, which is
             // what `&[char]` is anywhere else (Ch. 3 §5.2, Ch. 5 §1.4).
-            E::Str(chars, line) => {
+            E::Str(chars, span) => {
                 let symbol = self.string_data(chars);
                 let ty = Ty::Ref(Box::new(Ty::Slice(Box::new(Ty::Char))), false);
                 let slot = self.temp_slot(&ty);
                 let at = Operand::Value(slot.clone());
                 self.store_ptr(at, Operand::Global(symbol));
                 let len = Operand::Const(Type::Int(27), Bt::from_i128(chars.len() as i128));
-                self.store_at(&slot, 3, &Ty::TAddr, len, *line)?;
+                self.store_at(&slot, 3, &Ty::TAddr, len, *span)?;
                 Ok((Operand::Value(slot), ty))
             }
 
             // An unconstrained integer literal is `t27` (Ch. 1 §3), and one
             // that does not fit its type is an error, never a wrap.
-            E::Int(v, line) => {
+            E::Int(v, span) => {
                 let ty = match expected {
                     Some(t) if t.is_arithmetic() => t.clone(),
                     _ => Ty::T27,
                 };
                 let width = ty.width().unwrap_or(27);
                 if !v.fits_width(width) {
-                    return err(*line, format!("{v} does not fit in {ty}"));
+                    return err(*span, format!("{v} does not fit in {ty}"));
                 }
                 Ok((Operand::Const(ty.tir(), v.clone()), ty))
             }
@@ -5009,7 +5016,7 @@ impl Fn<'_> {
 
             E::Unit(_) => Ok((unit(), Ty::Unit)),
 
-            E::Path(name, line) => {
+            E::Path(name, span) => {
                 if let Some(local) = self.lookup(name) {
                     // Reading a value that is not copyable moves it, and a
                     // moved-out place may not be read (Ch. 3 §1.2).
@@ -5020,7 +5027,7 @@ impl Fn<'_> {
                         // taking it would make a second owner of one value.
                         if local.borrowed {
                             return err(
-                                *line,
+                                *span,
                                 format!(
                                     "`{name}` names part of a value this `match` borrowed, \
                                      so it cannot be moved out of; borrow it instead \
@@ -5031,13 +5038,13 @@ impl Fn<'_> {
                         match self.ownership(name) {
                             Some(Owns::No) => {
                                 return err(
-                                    *line,
+                                    *span,
                                     format!("`{name}` was moved out of and cannot be used again"),
                                 );
                             }
                             Some(Owns::Maybe) => {
                                 return err(
-                                    *line,
+                                    *span,
                                     format!(
                                         "`{name}` may have been moved out of on some path here"
                                     ),
@@ -5049,14 +5056,14 @@ impl Fn<'_> {
                             root: name.clone(),
                             projections: Vec::new(),
                         };
-                        self.check_access(&path, Access::Move, *line)?;
+                        self.check_access(&path, Access::Move, *span)?;
                         self.mark_moved(name);
                     }
                     let path = PlacePath {
                         root: name.clone(),
                         projections: Vec::new(),
                     };
-                    self.check_access(&path, Access::Read, *line)?;
+                    self.check_access(&path, Access::Read, *span)?;
                     if !local.ty.is_scalar() {
                         // An array's value is its address.
                         return Ok((Operand::Value(local.slot), local.ty));
@@ -5077,23 +5084,23 @@ impl Fn<'_> {
                         Ok((Operand::Const(ty.tir(), v.clone()), ty.clone()))
                     }
                     Some(Global::Array(sym, ty)) => Ok((Operand::Global(sym.clone()), ty.clone())),
-                    None => err(*line, format!("`{name}` is not in scope")),
+                    None => err(*span, format!("`{name}` is not in scope")),
                 }
             }
 
-            E::Unary(op, inner, line) => self.unary(op, inner, expected, *line),
-            E::Binary(op, a, b, line) => self.binary(op, a, b, expected, *line),
-            E::Assign(op, target, value, line) => self.assign(op, target, value, *line),
-            E::Cast(inner, ty, line) => self.cast(inner, ty, *line),
+            E::Unary(op, inner, span) => self.unary(op, inner, expected, *span),
+            E::Binary(op, a, b, span) => self.binary(op, a, b, expected, *span),
+            E::Assign(op, target, value, span) => self.assign(op, target, value, *span),
+            E::Cast(inner, ty, span) => self.cast(inner, ty, *span),
             // A call *writes* its aggregate result, so it consumes a
             // destination rather than passing one on.
-            E::Call(name, targs, args, line) => {
+            E::Call(name, targs, args, span) => {
                 self.dest = dest;
-                self.call(name, targs, args, expected, *line)
+                self.call(name, targs, args, expected, *span)
             }
-            E::Method(recv, name, args, line) => {
+            E::Method(recv, name, args, span) => {
                 self.dest = dest;
-                self.method(recv, name, args, expected, *line)
+                self.method(recv, name, args, expected, *span)
             }
 
             // Transparent to a destination: their value is one of their
@@ -5102,26 +5109,26 @@ impl Fn<'_> {
                 self.dest = dest;
                 self.block(b, expected)
             }
-            E::If(cond, then, els, line) => {
+            E::If(cond, then, els, span) => {
                 self.dest = dest;
-                self.if_expr(cond, then, els.as_deref(), expected, *line)
+                self.if_expr(cond, then, els.as_deref(), expected, *span)
             }
-            E::Match(scrutinee, arms, line) => {
+            E::Match(scrutinee, arms, span) => {
                 self.dest = dest;
-                self.match_expr(scrutinee, arms, expected, *line)
+                self.match_expr(scrutinee, arms, expected, *span)
             }
-            E::While(cond, body, line) => self.while_expr(cond, body, *line),
-            E::Loop(body, line) => self.loop_expr(body, expected, *line),
+            E::While(cond, body, span) => self.while_expr(cond, body, *span),
+            E::Loop(body, span) => self.loop_expr(body, expected, *span),
 
-            E::Break(value, line) => {
+            E::Break(value, span) => {
                 let Some(ctx) = self.loops.last().cloned() else {
-                    return err(*line, "`break` outside a loop");
+                    return err(*span, "`break` outside a loop");
                 };
                 self.loops.last_mut().expect("just read").broke = true;
                 match (value, &ctx.result) {
                     (Some(v), Some((slot, ty))) => {
                         let (val, vt) = self.expr(v, Some(ty))?;
-                        self.check(&vt, ty, *line, "`break` value")?;
+                        self.check(&vt, ty, *span, "`break` value")?;
                         let (slot, ty) = (slot.clone(), ty.clone());
                         self.push(Inst {
                             results: Vec::new(),
@@ -5133,7 +5140,7 @@ impl Fn<'_> {
                         });
                     }
                     (Some(_), None) => {
-                        return err(*line, "this loop's `break` cannot carry a value");
+                        return err(*span, "this loop's `break` cannot carry a value");
                     }
                     (None, _) => {}
                 }
@@ -5141,48 +5148,48 @@ impl Fn<'_> {
                 // what they own dies with them (Ch. 3 §1.1). Emitted rather
                 // than retired: the loop's other paths still own the same
                 // values.
-                self.drop_through(ctx.depth, *line)?;
+                self.drop_through(ctx.depth, *span)?;
                 self.jump(&ctx.exit);
                 Ok((unit(), Ty::Never))
             }
 
-            E::Continue(line) => {
+            E::Continue(span) => {
                 let Some(ctx) = self.loops.last().cloned() else {
-                    return err(*line, "`continue` outside a loop");
+                    return err(*span, "`continue` outside a loop");
                 };
-                self.drop_through(ctx.depth, *line)?;
+                self.drop_through(ctx.depth, *span)?;
                 self.jump(&ctx.head);
                 Ok((unit(), Ty::Never))
             }
 
-            E::Return(value, line) => {
+            E::Return(value, span) => {
                 let ret = self.ret.clone();
                 match value {
                     Some(v) => {
-                        self.check_return_root(v, &self.ret.clone(), *line)?;
+                        self.check_return_root(v, &self.ret.clone(), *span)?;
                         if ret.is_aggregate() {
                             self.dest = Some(SRET.to_string());
                         }
                         let (val, vt) = self.expr(v, Some(&ret))?;
                         self.dest = None;
-                        self.check(&vt, &ret, *line, "returned value")?;
+                        self.check(&vt, &ret, *span, "returned value")?;
                         if ret.is_aggregate() {
                             // Already there, if the value took the
                             // destination.
                             if val != Operand::Value(SRET.to_string()) {
                                 let dst = Operand::Value(SRET.to_string());
-                                self.copy_typed(dst, val.clone(), &ret, *line)?;
+                                self.copy_typed(dst, val.clone(), &ret, *span)?;
                             }
-                            self.drop_returning(*line)?;
+                            self.drop_returning(*span)?;
                             self.finish(Terminator::Ret(None));
                         } else {
-                            self.drop_returning(*line)?;
+                            self.drop_returning(*span)?;
                             self.finish(Terminator::Ret(Some(val)));
                         }
                     }
                     None => {
-                        self.check(&Ty::Unit, &ret, *line, "`return` with no value")?;
-                        self.drop_returning(*line)?;
+                        self.check(&Ty::Unit, &ret, *span, "`return` with no value")?;
+                        self.drop_returning(*span)?;
                         self.finish(Terminator::Ret(None));
                     }
                 }
@@ -5191,7 +5198,7 @@ impl Fn<'_> {
 
             // An array literal builds its storage and fills it, like any
             // other aggregate.
-            E::Array(items, line) => {
+            E::Array(items, span) => {
                 let hint = match expected {
                     Some(Ty::Array(t, _)) => Some((**t).clone()),
                     _ => None,
@@ -5201,44 +5208,44 @@ impl Fn<'_> {
                 for item in items {
                     let (v, t) = self.expr(item, elem.as_ref())?;
                     if let Some(want) = &elem {
-                        self.check(&t, want, item.line(), "array element")?;
+                        self.check(&t, want, item.span(), "array element")?;
                     } else {
                         elem = Some(t);
                     }
                     values.push(v);
                 }
                 let Some(elem) = elem else {
-                    return err(*line, "an empty array literal needs a written type");
+                    return err(*span, "an empty array literal needs a written type");
                 };
                 let ty = Ty::Array(Box::new(elem.clone()), values.len() as i128);
                 let slot = self.temp_slot(&ty);
                 let size = self.types.size(&elem);
                 for (i, v) in values.into_iter().enumerate() {
-                    self.store_at(&slot, i as i128 * size, &elem, v, *line)?;
+                    self.store_at(&slot, i as i128 * size, &elem, v, *span)?;
                 }
                 Ok((Operand::Value(slot), ty))
             }
 
-            E::Repeat(value, count, line) => {
+            E::Repeat(value, count, span) => {
                 let hint = match expected {
                     Some(Ty::Array(t, _)) => Some((**t).clone()),
                     _ => None,
                 };
                 let n = const_int_in(count, &self.types.consts)?;
                 if n < 0 {
-                    return err(*line, format!("array length {n} is negative"));
+                    return err(*span, format!("array length {n} is negative"));
                 }
                 let (v, elem) = self.expr(value, hint.as_ref())?;
                 let ty = Ty::Array(Box::new(elem.clone()), n);
                 let slot = self.temp_slot(&ty);
                 let size = self.types.size(&elem);
                 for i in 0..n {
-                    self.store_at(&slot, i * size, &elem, v.clone(), *line)?;
+                    self.store_at(&slot, i * size, &elem, v.clone(), *span)?;
                 }
                 Ok((Operand::Value(slot), ty))
             }
 
-            E::Tuple(items, line) => {
+            E::Tuple(items, span) => {
                 let mut tys = Vec::new();
                 let mut values = Vec::new();
                 let hint = match expected {
@@ -5255,26 +5262,26 @@ impl Fn<'_> {
                 let slot = self.temp_slot(&ty);
                 let fields = self.types.fields(&ty);
                 for ((_, ft, off), v) in fields.into_iter().zip(values) {
-                    self.store_at(&slot, off, &ft, v, *line)?;
+                    self.store_at(&slot, off, &ft, v, *span)?;
                 }
                 Ok((Operand::Value(slot), ty))
             }
 
-            E::Aggregate(path, fields, line) => {
+            E::Aggregate(path, fields, span) => {
                 self.dest = dest;
-                self.aggregate(path, fields, expected, *line)
+                self.aggregate(path, fields, expected, *span)
             }
 
-            E::Closure(params, ret, body, line) => self.closure(params, ret, body, None, *line),
+            E::Closure(params, ret, body, span) => self.closure(params, ret, body, None, *span),
 
             // A borrow is the address of a place — which every local already
             // has, since every local lives in a slot.
-            E::Borrow(place, mutable, line) => {
+            E::Borrow(place, mutable, span) => {
                 if let Some(path) = self.path_of(place) {
-                    self.check_access(&path, Access::Borrow(*mutable), *line)?;
-                    self.add_loan(path, *mutable, *line);
+                    self.check_access(&path, Access::Borrow(*mutable), *span)?;
+                    self.add_loan(path, *mutable, *span);
                 }
-                let (addr, ty) = self.place(place, *line)?;
+                let (addr, ty) = self.place(place, *span)?;
                 // An array reference coerces to a slice reference, which is a
                 // pointer and a length (Ch. 3 §5.3).
                 if let Ty::Array(elem, n) = &ty {
@@ -5284,39 +5291,39 @@ impl Fn<'_> {
                     // A fat pointer is a pointer and a length (Ch. 3 §5.2).
                     let at = Operand::Value(slot.clone());
                     self.store_ptr(at, addr);
-                    self.store_at(&slot, 3, &Ty::TAddr, len, *line)?;
+                    self.store_at(&slot, 3, &Ty::TAddr, len, *span)?;
                     return Ok((Operand::Value(slot), slice));
                 }
                 Ok((addr, Ty::Ref(Box::new(ty), *mutable)))
             }
 
-            E::Deref(inner, line) => {
+            E::Deref(inner, span) => {
                 let (v, ty) = self.expr(inner, None)?;
                 // `*b` on a `Box` reads what it owns, which is the same
                 // operation on the same representation as `*r` on a
                 // reference (Ch. 5 §2.3).
                 let (Ty::Ref(target, _) | Ty::Boxed(target)) = ty else {
-                    return err(*line, format!("`*` applies to a reference, not {ty}"));
+                    return err(*span, format!("`*` applies to a reference, not {ty}"));
                 };
                 if target.is_unsized() {
-                    return err(*line, format!("cannot read a value of type {target}"));
+                    return err(*span, format!("cannot read a value of type {target}"));
                 }
                 Ok((self.load_from(v, &target), *target))
             }
 
             E::Field(..) | E::Index(..) => {
-                let line = e.line();
+                let span = e.span();
                 let path = self.path_of(e);
-                let (addr, ty) = self.place(e, line)?;
+                let (addr, ty) = self.place(e, span)?;
                 // Reading a place of non-copyable type *moves* it (Ch. 3
                 // §1.2), and that is as true of a field as of a whole local.
                 // Draft 0.1 tracks ownership per local rather than per place,
                 // so a move out of any part moves the whole: conservative,
                 // where doing nothing — which is what it did — was unsound.
                 match (&path, self.types.is_copyable(&ty)) {
-                    (Some(p), true) => self.check_access(p, Access::Read, line)?,
+                    (Some(p), true) => self.check_access(p, Access::Read, span)?,
                     (Some(p), false) => {
-                        self.check_access(p, Access::Move, line)?;
+                        self.check_access(p, Access::Move, span)?;
                         let root = p.root.clone();
                         if self.lookup(&root).is_some() {
                             self.mark_moved(&root);
@@ -5334,7 +5341,7 @@ impl Fn<'_> {
         op: &str,
         inner: &ast::Expr,
         expected: Option<&Ty>,
-        line: Line,
+        span: Span,
     ) -> R<(Operand, Ty)> {
         let (v, ty) = self.expr(inner, expected)?;
         match op {
@@ -5343,7 +5350,7 @@ impl Fn<'_> {
                 let r = self.emit("n", ty.tir(), InstKind::Neg { ty: ty.tir(), a: v });
                 Ok((r, ty))
             }
-            "-" => err(line, format!("`-` does not apply to {ty}")),
+            "-" => err(span, format!("`-` does not apply to {ty}")),
             "!" if ty == Ty::Bool => {
                 // `false` is 0 and `true` is 1, so negation is `1 − b`.
                 let one = Operand::Const(Type::Int(1), Bt::from_i128(1));
@@ -5360,8 +5367,8 @@ impl Fn<'_> {
                 );
                 Ok((r, Ty::Bool))
             }
-            "!" => err(line, format!("`!` applies to bool, not {ty}")),
-            _ => err(line, format!("unknown unary operator `{op}`")),
+            "!" => err(span, format!("`!` applies to bool, not {ty}")),
+            _ => err(span, format!("unknown unary operator `{op}`")),
         }
     }
 
@@ -5371,18 +5378,18 @@ impl Fn<'_> {
         a: &ast::Expr,
         b: &ast::Expr,
         expected: Option<&Ty>,
-        line: Line,
+        span: Span,
     ) -> R<(Operand, Ty)> {
         // Short-circuit operators are control flow, not arithmetic.
         if op == "&&" || op == "||" {
-            return self.short_circuit(op, a, b, line);
+            return self.short_circuit(op, a, b, span);
         }
 
         let arith_hint = expected.filter(|t| t.is_arithmetic());
         let (va, ta) = self.expr(a, arith_hint)?;
         let (vb, tb) = self.expr(b, Some(&ta))?;
         // Mixed-width arithmetic is a compile-time error (Ch. 1, P2).
-        self.check(&tb, &ta, line, "right operand")?;
+        self.check(&tb, &ta, span, "right operand")?;
 
         // A comparison of two nominal values goes through `Ord` and `Eq`
         // (Ch. 4 §5.3), which is the only place an operator on a user type
@@ -5390,16 +5397,16 @@ impl Fn<'_> {
         // the addresses the comparison wants.
         if matches!(op, "==" | "!=" | "<" | "<=" | ">" | ">=" | "<=>") && ta.is_aggregate() {
             let Some(name) = nominal_name(&ta) else {
-                return err(line, format!("`{op}` does not apply to {ta}"));
+                return err(span, format!("`{op}` does not apply to {ta}"));
             };
-            return self.compare_nominal(op, &name, va, vb, line);
+            return self.compare_nominal(op, &name, va, vb, span);
         }
 
         let tir = ta.tir();
         match op {
             "+" | "-" | "*" | "<<" => {
                 if !ta.is_arithmetic() {
-                    return err(line, format!("`{op}` does not apply to {ta}"));
+                    return err(span, format!("`{op}` does not apply to {ta}"));
                 }
                 let fop = match op {
                     "+" => FlavoredOp::Add,
@@ -5426,7 +5433,7 @@ impl Fn<'_> {
 
             "/" | "%" | ">>" => {
                 if !ta.is_arithmetic() {
-                    return err(line, format!("`{op}` does not apply to {ta}"));
+                    return err(span, format!("`{op}` does not apply to {ta}"));
                 }
                 let pop = match op {
                     "/" => PlainOp::Div,
@@ -5495,7 +5502,7 @@ impl Fn<'_> {
                 Ok((r, Ty::Bool))
             }
 
-            _ => err(line, format!("unknown operator `{op}`")),
+            _ => err(span, format!("unknown operator `{op}`")),
         }
     }
 
@@ -5505,10 +5512,10 @@ impl Fn<'_> {
         op: &str,
         a: &ast::Expr,
         b: &ast::Expr,
-        line: Line,
+        span: Span,
     ) -> R<(Operand, Ty)> {
         let (va, ta) = self.expr(a, Some(&Ty::Bool))?;
-        self.check(&ta, &Ty::Bool, line, "left operand")?;
+        self.check(&ta, &Ty::Bool, span, "left operand")?;
 
         let slot = self.temp_slot(&Ty::Bool);
         let rhs = self.fresh("sc.rhs");
@@ -5516,7 +5523,7 @@ impl Fn<'_> {
         let short = self.fresh("sc.short");
 
         // Store the short-circuit answer, then test.
-        self.store_slot(&slot, &Ty::Bool, va.clone());
+        self.store_slot(&slot, &Ty::Bool, va.clone(), span);
         if op == "&&" {
             self.br3(va, &short, &short, &rhs);
         } else {
@@ -5528,8 +5535,8 @@ impl Fn<'_> {
 
         self.start(rhs);
         let (vb, tb) = self.expr(b, Some(&Ty::Bool))?;
-        self.check(&tb, &Ty::Bool, line, "right operand")?;
-        self.store_slot(&slot, &Ty::Bool, vb);
+        self.check(&tb, &Ty::Bool, span, "right operand")?;
+        self.store_slot(&slot, &Ty::Bool, vb, span);
         self.jump(&join);
 
         self.start(join);
@@ -5542,19 +5549,19 @@ impl Fn<'_> {
         op: &str,
         target: &ast::Expr,
         value: &ast::Expr,
-        line: Line,
+        span: Span,
     ) -> R<(Operand, Ty)> {
         // Writing to a local needs `mut`; writing through a reference needs
         // that reference to be exclusive (Ch. 3 §2.1).
-        self.check_writable(target, line)?;
+        self.check_writable(target, span)?;
         if let Some(path) = self.path_of(target) {
-            self.check_access(&path, Access::Write, line)?;
+            self.check_access(&path, Access::Write, span)?;
         }
-        let (addr, ty) = self.place(target, line)?;
+        let (addr, ty) = self.place(target, span)?;
 
         let v = if op == "=" {
             let (v, vt) = self.expr(value, Some(&ty))?;
-            self.check(&vt, &ty, line, "assigned value")?;
+            self.check(&vt, &ty, span, "assigned value")?;
 
             // The value being overwritten is going away, and Ch. 3 §1.1 gives
             // it exactly one owner and one drop. Draft 0.1 stored over it,
@@ -5566,7 +5573,7 @@ impl Fn<'_> {
                     .map(|p| self.ownership(&p.root) != Some(Owns::No))
                     .unwrap_or(true);
                 if live {
-                    self.drop_at(addr.clone(), &ty, line, 0)?;
+                    self.drop_at(addr.clone(), &ty, span, 0)?;
                 }
             }
             v
@@ -5575,12 +5582,12 @@ impl Fn<'_> {
             let binop = &op[..op.len() - 1];
             let current = self.load_from(addr.clone(), &ty);
             let (rhs, rt) = self.expr(value, Some(&ty))?;
-            self.check(&rt, &ty, line, "assigned value")?;
-            self.apply_binary(binop, current, rhs, &ty, line)?
+            self.check(&rt, &ty, span, "assigned value")?;
+            self.apply_binary(binop, current, rhs, &ty, span)?
         };
 
         if ty.is_aggregate() {
-            self.copy_typed(addr, v, &ty, line)?;
+            self.copy_typed(addr, v, &ty, span)?;
         } else {
             self.push(Inst {
                 results: Vec::new(),
@@ -5603,7 +5610,7 @@ impl Fn<'_> {
     }
 
     /// The root of a place decides whether it may be written to.
-    fn check_writable(&mut self, target: &ast::Expr, line: Line) -> R<()> {
+    fn check_writable(&mut self, target: &ast::Expr, span: Span) -> R<()> {
         match target {
             ast::Expr::Path(name, l) => match self.lookup(name) {
                 None => err(*l, format!("`{name}` is not in scope")),
@@ -5619,11 +5626,11 @@ impl Fn<'_> {
                 let base_ty = self.type_of_place(base)?;
                 match base_ty {
                     Some(Ty::Ref(_, false)) => err(
-                        line,
+                        span,
                         "cannot write through a shared reference; it would need `&mut`",
                     ),
                     Some(Ty::Ref(_, true)) => Ok(()),
-                    _ => self.check_writable(base, line),
+                    _ => self.check_writable(base, span),
                 }
             }
             ast::Expr::Deref(inner, l) => {
@@ -5640,7 +5647,7 @@ impl Fn<'_> {
                     _ => err(*l, "`*` applies to a reference"),
                 }
             }
-            _ => err(line, "this expression is not a place"),
+            _ => err(span, "this expression is not a place"),
         }
     }
 
@@ -5702,10 +5709,10 @@ impl Fn<'_> {
         a: Operand,
         b: Operand,
         ty: &Ty,
-        line: Line,
+        span: Span,
     ) -> R<Operand> {
         if !ty.is_arithmetic() {
-            return err(line, format!("`{op}=` does not apply to {ty}"));
+            return err(span, format!("`{op}=` does not apply to {ty}"));
         }
         let tir = ty.tir();
         Ok(match op {
@@ -5745,12 +5752,12 @@ impl Fn<'_> {
                     },
                 )
             }
-            _ => return err(line, format!("unknown operator `{op}=`")),
+            _ => return err(span, format!("unknown operator `{op}=`")),
         })
     }
 
     /// `x as T` (Ch. 1 §6).
-    fn cast(&mut self, inner: &ast::Expr, to: &ast::Ty, line: Line) -> R<(Operand, Ty)> {
+    fn cast(&mut self, inner: &ast::Expr, to: &ast::Ty, span: Span) -> R<(Operand, Ty)> {
         let to = self.resolve(to)?;
         let (v, from) = self.expr(inner, None)?;
 
@@ -5759,14 +5766,14 @@ impl Fn<'_> {
         // fallible, and library `try_from` territory (Ch. 2 §5.3).
         if let Ty::Enum(name) = &from {
             if !to.is_arithmetic() && to != Ty::Trit {
-                return err(line, format!("an enum casts only to an integer, not {to}"));
+                return err(span, format!("an enum casts only to an integer, not {to}"));
             }
             if self.types.enums.borrow()[name]
                 .iter()
                 .any(|v| !v.fields.is_empty())
             {
                 return err(
-                    line,
+                    span,
                     format!("`{name}` has variants with payloads, so it has no integer value"),
                 );
             }
@@ -5805,7 +5812,7 @@ impl Fn<'_> {
         if from == Ty::Char {
             if to != Ty::T27 {
                 return err(
-                    line,
+                    span,
                     format!(
                         "a `char` converts only to `t27`, not to {to}: the scalar value is \
                          a word, and narrowing it would be a conversion that can be wrong \
@@ -5817,7 +5824,7 @@ impl Fn<'_> {
         }
         if to == Ty::Char {
             return err(
-                line,
+                span,
                 format!(
                     "there is no `as` from {from} to `char`: most words are not scalar \
                      values, so the conversion can fail. `char::try_from` is the checked \
@@ -5830,14 +5837,14 @@ impl Fn<'_> {
         // plausible, so the language refuses to pick (Ch. 1 §6).
         if (from == Ty::Trit && to == Ty::Bool) || (from == Ty::Bool && to == Ty::Trit) {
             return err(
-                line,
+                span,
                 "there is no `as` between `trit` and `bool`: use `is_pos`/`is_zero`/`is_neg` \
                  or `to_trit` (Ch. 1 §6)",
             );
         }
         if let Ty::Enum(name) = &to {
             return err(
-                line,
+                span,
                 format!(
                     "there is no cast from {from} to `{name}`: an integer need not name a \
                      variant, so the conversion is fallible and belongs to a library \
@@ -5846,7 +5853,7 @@ impl Fn<'_> {
             );
         }
         let (Some(fw), Some(tw)) = (from.width(), to.width()) else {
-            return err(line, format!("cannot cast {from} to {to}"));
+            return err(span, format!("cannot cast {from} to {to}"));
         };
         let value = match fw.cmp(&tw) {
             std::cmp::Ordering::Less => self.emit(
@@ -5878,7 +5885,7 @@ impl Fn<'_> {
         targs: &[ast::Ty],
         args: &[ast::Expr],
         expected: Option<&Ty>,
-        line: Line,
+        span: Span,
     ) -> R<(Operand, Ty)> {
         // `trap()` — stop the program (Ch. 1 §6). A fault has no handler
         // (AM §4), so nothing after it runs and its type is `!`: it is what
@@ -5886,7 +5893,7 @@ impl Fn<'_> {
         // which nothing else could.
         if name == "trap" {
             if !args.is_empty() {
-                return err(line, "`trap` takes no arguments");
+                return err(span, "`trap` takes no arguments");
             }
             self.finish(Terminator::Trap(FaultCode::Trap));
             return Ok((unit(), Ty::Never));
@@ -5895,11 +5902,11 @@ impl Fn<'_> {
         // `sign(x)` is a function, not a method (Ch. 1 §6).
         if name == "sign" {
             if args.len() != 1 {
-                return err(line, "`sign` takes one argument");
+                return err(span, "`sign` takes one argument");
             }
             let (v, ty) = self.expr(&args[0], None)?;
             if !ty.is_arithmetic() && ty != Ty::Trit {
-                return err(line, format!("`sign` does not apply to {ty}"));
+                return err(span, format!("`sign` does not apply to {ty}"));
             }
             let zero = Operand::Const(ty.tir(), Bt::ZERO);
             let r = self.emit(
@@ -5925,9 +5932,9 @@ impl Fn<'_> {
             let path = ast::Path {
                 segments: vec![name.to_string()],
                 targs: Vec::new(),
-                line,
+                span,
             };
-            return self.aggregate(&path, &fields, None, line);
+            return self.aggregate(&path, &fields, None, span);
         }
 
         // `f(args)` where `f` is a local holding a closure: the call goes to
@@ -5938,26 +5945,26 @@ impl Fn<'_> {
             && let Some(info) = self.types.closures.borrow().get(&cname).cloned()
         {
             let recv = ast::Expr::Borrow(
-                Box::new(ast::Expr::Path(name.to_string(), line)),
+                Box::new(ast::Expr::Path(name.to_string(), span)),
                 false,
-                line,
+                span,
             );
             let mut full = vec![recv];
             full.extend(args.iter().cloned());
-            return self.call_key(&info.call, Vec::new(), &full, line);
+            return self.call_key(&info.call, Vec::new(), &full, span);
         }
 
         // A generic callee is instantiated here, at the call site, which is
         // also where its bounds are checked (Ch. 4 §2.2).
         if self.generic_fns.contains_key(name) || self.specials.borrow().contains_key(name) {
-            let (key, args) = self.instantiate_fn(name, targs, args, expected, line)?;
-            return self.call_key(&key, Vec::new(), &args, line);
+            let (key, args) = self.instantiate_fn(name, targs, args, expected, span)?;
+            return self.call_key(&key, Vec::new(), &args, span);
         }
 
         if !targs.is_empty() {
-            return err(line, format!("`{name}` takes no type arguments"));
+            return err(span, format!("`{name}` takes no type arguments"));
         }
-        self.call_key(name, Vec::new(), args, line)
+        self.call_key(name, Vec::new(), args, span)
     }
 
     /// Instantiate a generic function for this call, and return the name the
@@ -5968,12 +5975,12 @@ impl Fn<'_> {
         targs: &[ast::Ty],
         args: &[ast::Expr],
         expected: Option<&Ty>,
-        line: Line,
+        span: Span,
     ) -> R<(String, Vec<ast::Expr>)> {
         let def = self.generic_def(name).expect("a generic function");
         if def.params.len() != args.len() {
             return err(
-                line,
+                span,
                 format!(
                     "`{name}` takes {} argument(s), {} given",
                     def.params.len(),
@@ -5991,7 +5998,7 @@ impl Fn<'_> {
         let mut env: HashMap<String, Ty> = self.special_env(name);
         if targs.len() > def.generics.len() {
             return err(
-                line,
+                span,
                 format!(
                     "`{name}` takes {} type argument(s), {} given",
                     def.generics.len(),
@@ -6020,10 +6027,10 @@ impl Fn<'_> {
                     let hint = self.fn_hint(&def, want, &env)?;
                     let (v, got) = self.closure(&cps, &cret, &body, hint, cline)?;
                     let Operand::Value(slot) = v else {
-                        return err(line, "a closure must have a slot");
+                        return err(span, "a closure must have a slot");
                     };
                     let bound = self.bind_existing(slot, got.clone());
-                    *arg = ast::Expr::Path(bound, line);
+                    *arg = ast::Expr::Path(bound, span);
                     unify(want, &got, &def.generics, &mut env);
                 }
                 // And a literal *holding* a closure cannot be peeked either,
@@ -6033,10 +6040,10 @@ impl Fn<'_> {
                 ast::Expr::Aggregate(..) if holds_a_closure(arg) => {
                     let (v, got) = self.expr(arg, None)?;
                     let Operand::Value(slot) = v else {
-                        return err(line, "a literal must have a slot");
+                        return err(span, "a literal must have a slot");
                     };
                     let bound = self.bind_existing(slot, got.clone());
-                    *arg = ast::Expr::Path(bound, line);
+                    *arg = ast::Expr::Path(bound, span);
                     unify(want, &got, &def.generics, &mut env);
                 }
                 // And a method call, for the same reason two levels up:
@@ -6047,10 +6054,10 @@ impl Fn<'_> {
                 ast::Expr::Method(..) => {
                     let (v, got) = self.expr(arg, None)?;
                     let Operand::Value(slot) = v else {
-                        return err(line, "a method's result must have a slot");
+                        return err(span, "a method's result must have a slot");
                     };
                     let bound = self.bind_existing(slot, got.clone());
-                    *arg = ast::Expr::Path(bound, line);
+                    *arg = ast::Expr::Path(bound, span);
                     unify(want, &got, &def.generics, &mut env);
                 }
                 _ => {}
@@ -6065,7 +6072,7 @@ impl Fn<'_> {
             } = p
             else {
                 return err(
-                    line,
+                    span,
                     "a const generic argument cannot be inferred, and `::<>` is \
                      Ch. 4 §2.3, not implemented yet",
                 );
@@ -6080,7 +6087,7 @@ impl Fn<'_> {
             }
             let Some(ty) = env.get(pname) else {
                 return err(
-                    line,
+                    span,
                     format!(
                         "cannot tell what `{pname}` is in this call to `{name}`; \
                          give an argument a written type (Ch. 4 §2.3)"
@@ -6091,18 +6098,18 @@ impl Fn<'_> {
             // the call site, and not inside the body.
             for b in bounds {
                 let ty = ty.clone();
-                self.check_bound_in(&ty, b, &env, name, pname, line)?;
+                self.check_bound_in(&ty, b, &env, name, pname, span)?;
             }
             targs.push(ty.clone());
         }
 
         let _ = targs;
-        Ok((self.instantiate_with(name, env, line)?, args))
+        Ok((self.instantiate_with(name, env, span)?, args))
     }
 
     /// Instantiate a generic function with an environment already worked out,
     /// queueing its body if this is the first time (Ch. 4 §2.7).
-    fn instantiate_with(&mut self, name: &str, env: HashMap<String, Ty>, line: Line) -> R<String> {
+    fn instantiate_with(&mut self, name: &str, env: HashMap<String, Ty>, span: Span) -> R<String> {
         let def = self.generic_def(name).expect("a generic function");
         let targs: Vec<Ty> = def.generics.iter().map(|p| env[p.name()].clone()).collect();
         let key = mangle(name, &targs);
@@ -6111,7 +6118,7 @@ impl Fn<'_> {
         }
         if self.pending.borrow().len() as u32 > INSTANTIATION_LIMIT {
             return err(
-                line,
+                span,
                 format!(
                     "instantiating `{name}` does not terminate: more than \
                      {INSTANTIATION_LIMIT} instantiations are outstanding (Ch. 4 §2.7)"
@@ -6126,7 +6133,7 @@ impl Fn<'_> {
             .iter()
             .map(|(n, t)| {
                 let ty = resolve_ty_env(t, self.types, &env)?;
-                check_sized(&ty, t.line(), &format!("the parameter `{n}`"))?;
+                check_sized(&ty, t.span(), &format!("the parameter `{n}`"))?;
                 Ok(ty)
             })
             .collect::<R<_>>()?;
@@ -6135,7 +6142,7 @@ impl Fn<'_> {
             Some(t) => resolve_ty_env(t, self.types, &env)?,
         };
         let self_ref = matches!(def.params.first(), Some((n, ast::Ty::Ref(..))) if n == "self");
-        check_returned_reference(&params, &ret, self_ref, line)?;
+        check_returned_reference(&params, &ret, self_ref, span)?;
         self.sigs
             .borrow_mut()
             .insert(key.clone(), (params, ret.clone()));
@@ -6162,11 +6169,11 @@ impl Fn<'_> {
         env: &HashMap<String, Ty>,
         callee: &str,
         param: &str,
-        line: Line,
+        span: Span,
     ) -> R<()> {
         if bound.args.is_empty() {
-            self.check_bound(ty, &bound.name, env, callee, param, line)?;
-            return self.check_assoc_bindings(ty, bound, env, param, line);
+            self.check_bound(ty, &bound.name, env, callee, param, span)?;
+            return self.check_assoc_bindings(ty, bound, env, param, span);
         }
         let args: Vec<Ty> = bound
             .args
@@ -6191,10 +6198,10 @@ impl Fn<'_> {
                 env,
                 callee,
                 param,
-                line,
+                span,
             )?;
         }
-        self.check_assoc_bindings(ty, bound, env, param, line)
+        self.check_assoc_bindings(ty, bound, env, param, span)
     }
 
     /// Whether a blanket impl gives `ty` this trait with these arguments.
@@ -6242,7 +6249,7 @@ impl Fn<'_> {
                                 &HashMap::new(),
                                 "",
                                 "",
-                                rule.line,
+                                rule.span,
                             )
                             .is_ok()
                 })
@@ -6261,9 +6268,9 @@ impl Fn<'_> {
         env: &HashMap<String, Ty>,
         callee: &str,
         param: &str,
-        line: Line,
+        span: Span,
     ) -> R<()> {
-        self.check_bound_named(ty, bound, bound, env, callee, param, line)
+        self.check_bound_named(ty, bound, bound, env, callee, param, span)
     }
 
     /// `Iterator<Item = t27>`: the implementation exists *and* chose this.
@@ -6277,7 +6284,7 @@ impl Fn<'_> {
         bound: &ast::Bound,
         env: &HashMap<String, Ty>,
         param: &str,
-        line: Line,
+        span: Span,
     ) -> R<()> {
         for (name, written) in &bound.assoc {
             let want = resolve_ty_env(written, self.types, env)?;
@@ -6285,13 +6292,13 @@ impl Fn<'_> {
                 .and_then(|n| self.types.assoc.borrow().get(&(n, name.clone())).cloned())
             {
                 Some(t) => Some(t),
-                None => self.types.assoc_of_instantiation(ty, name, line)?,
+                None => self.types.assoc_of_instantiation(ty, name, span)?,
             };
             match chose {
                 Some(got) if got == want => {}
                 Some(got) => {
                     return err(
-                        line,
+                        span,
                         format!(
                             "`{param}` is `{ty}`, whose `{}::{name}` is {got} and not {want} \
                              (Ch. 4 §1.7)",
@@ -6301,7 +6308,7 @@ impl Fn<'_> {
                 }
                 None => {
                     return err(
-                        line,
+                        span,
                         format!("`{ty}` chooses no type for `{name}` (Ch. 4 §1.7)"),
                     );
                 }
@@ -6321,14 +6328,14 @@ impl Fn<'_> {
         env: &HashMap<String, Ty>,
         callee: &str,
         param: &str,
-        line: Line,
+        span: Span,
     ) -> R<()> {
         // `Copy` is structural and automatic (Ch. 4 §5.1); `Sized` is a fact
         // about the type, not a claim about it (§2.5).
         // `Fn@…` is the bound an `impl Fn(…)` parameter was given: satisfied
         // by a closure whose signature is the written one (Ch. 4 §§2.2, 4.3).
         if let Some(key) = bound.strip_prefix("Fn@") {
-            return self.check_fn_bound(ty, key, env, callee, param, line);
+            return self.check_fn_bound(ty, key, env, callee, param, span);
         }
         // A trait object implements its own trait, and its supertraits
         // (Ch. 4 §3.1): dispatch through it is what the vtable is for.
@@ -6389,7 +6396,7 @@ impl Fn<'_> {
             return Ok(());
         }
         err(
-            line,
+            span,
             format!(
                 "`{ty}` does not implement `{shown}`, which `{callee}` requires of \
                  `{param}` (Ch. 4 §2.2)"
@@ -6441,7 +6448,7 @@ impl Fn<'_> {
                 return true;
             }
             bounds.iter().all(|b| {
-                self.check_bound_named(ty, &b.name, &b.name, &HashMap::new(), "", "", rule.line)
+                self.check_bound_named(ty, &b.name, &b.name, &HashMap::new(), "", "", rule.span)
                     .is_ok()
             })
         })
@@ -6455,14 +6462,14 @@ impl Fn<'_> {
         name: &str,
         pre: Vec<(Operand, Ty)>,
         args: &[ast::Expr],
-        line: Line,
+        span: Span,
     ) -> R<(Operand, Ty)> {
         let Some((params, ret)) = self.sigs.borrow().get(name).cloned() else {
-            return err(line, format!("`{name}` is not a function in scope"));
+            return err(span, format!("`{name}` is not a function in scope"));
         };
         if params.len() != args.len() + pre.len() {
             return err(
-                line,
+                span,
                 format!(
                     "`{name}` takes {} argument(s), {} given",
                     params.len(),
@@ -6482,7 +6489,7 @@ impl Fn<'_> {
             values.push(Operand::Value(slot.clone()));
         }
         for ((v, got), want) in pre.into_iter().zip(&params) {
-            self.check(&got, want, line, "receiver")?;
+            self.check(&got, want, span, "receiver")?;
             values.push(v);
         }
         for (arg, want) in args
@@ -6490,7 +6497,7 @@ impl Fn<'_> {
             .zip(params.iter().skip(values.len() - out.is_some() as usize))
         {
             let (v, got) = self.expr(arg, Some(want))?;
-            self.check(&got, want, arg.line(), "argument")?;
+            self.check(&got, want, arg.span(), "argument")?;
             values.push(v);
         }
         let kind = InstKind::Call {
@@ -6532,33 +6539,33 @@ impl Fn<'_> {
         name: &str,
         args: &[ast::Expr],
         expected: Option<&Ty>,
-        line: Line,
+        span: Span,
     ) -> R<(Operand, Ty)> {
         // Ch. 1's own methods are the language's, and are not overridable;
         // everything else resolves through impl blocks (Ch. 4 §1.3).
         if !BUILTIN_METHODS.contains(&name) {
-            return self.user_method(recv, name, args, expected, line);
+            return self.user_method(recv, name, args, expected, span);
         }
         // A `Vec` is mutated in place and never read as a value here, so its
         // receiver is a *place*: reading it would move it, and `v.push(x)` in
         // a loop would then move the same `v` twice (Ch. 3 §1.2).
         let (v, ty) = match self.type_of_place(recv)? {
-            Some(Ty::VecOf(_)) => self.place(recv, line)?,
+            Some(Ty::VecOf(_)) => self.place(recv, span)?,
             _ => self.expr(recv, None)?,
         };
         let one_arg = |this: &mut Self, want: &Ty| -> R<Operand> {
             if args.len() != 1 {
-                return err(line, format!("`{name}` takes one argument"));
+                return err(span, format!("`{name}` takes one argument"));
             }
             let (a, at) = this.expr(&args[0], Some(want))?;
-            this.check(&at, want, line, "argument")?;
+            this.check(&at, want, span, "argument")?;
             Ok(a)
         };
 
         match name {
             "tmin" | "tmax" | "tmul" => {
                 if !ty.is_arithmetic() && ty != Ty::Trit {
-                    return err(line, format!("`{name}` does not apply to {ty}"));
+                    return err(span, format!("`{name}` does not apply to {ty}"));
                 }
                 let b = one_arg(self, &ty)?;
                 let op = match name {
@@ -6583,7 +6590,7 @@ impl Fn<'_> {
             // writing trit-manipulation code (Ch. 1 §4).
             "tneg" => {
                 if !args.is_empty() {
-                    return err(line, "`tneg` takes no arguments");
+                    return err(span, "`tneg` takes no arguments");
                 }
                 let r = self.emit("n", ty.tir(), InstKind::Neg { ty: ty.tir(), a: v });
                 Ok((r, ty))
@@ -6591,10 +6598,10 @@ impl Fn<'_> {
 
             "is_pos" | "is_zero" | "is_neg" => {
                 if ty != Ty::Trit {
-                    return err(line, format!("`{name}` applies to trit, not {ty}"));
+                    return err(span, format!("`{name}` applies to trit, not {ty}"));
                 }
                 if !args.is_empty() {
-                    return err(line, format!("`{name}` takes no arguments"));
+                    return err(span, format!("`{name}` takes no arguments"));
                 }
                 let k = |v: i128| Operand::Const(Type::Int(1), Bt::from_i128(v));
                 let (n, z, p) = match name {
@@ -6620,7 +6627,7 @@ impl Fn<'_> {
             // this is a retype and not an operation.
             "to_trit" => {
                 if ty != Ty::Bool {
-                    return err(line, format!("`to_trit` applies to bool, not {ty}"));
+                    return err(span, format!("`to_trit` applies to bool, not {ty}"));
                 }
                 Ok((v, Ty::Trit))
             }
@@ -6630,7 +6637,7 @@ impl Fn<'_> {
             // hence flavorless: the high half always fits.
             "mulh" => {
                 if !ty.is_arithmetic() {
-                    return err(line, format!("`mulh` does not apply to {ty}"));
+                    return err(span, format!("`mulh` does not apply to {ty}"));
                 }
                 let b = one_arg(self, &ty)?;
                 let r = self.emit(
@@ -6648,7 +6655,7 @@ impl Fn<'_> {
 
             "wrapping_add" | "wrapping_sub" | "wrapping_mul" => {
                 if !ty.is_arithmetic() {
-                    return err(line, format!("`{name}` does not apply to {ty}"));
+                    return err(span, format!("`{name}` does not apply to {ty}"));
                 }
                 let b = one_arg(self, &ty)?;
                 let op = match name {
@@ -6676,7 +6683,7 @@ impl Fn<'_> {
             "saturating_add" | "saturating_sub" | "saturating_mul" | "overflowing_add"
             | "overflowing_sub" | "overflowing_mul" => {
                 if !ty.is_arithmetic() {
-                    return err(line, format!("`{name}` does not apply to {ty}"));
+                    return err(span, format!("`{name}` does not apply to {ty}"));
                 }
                 let b = one_arg(self, &ty)?;
                 let op = match name.rsplit('_').next().expect("a suffix") {
@@ -6733,8 +6740,8 @@ impl Fn<'_> {
                 let result = Ty::Tuple(vec![ty.clone(), Ty::Bool]);
                 let slot = self.temp_slot(&result);
                 let fields = self.types.fields(&result);
-                self.store_at(&slot, fields[0].2, &ty, value, line)?;
-                self.store_at(&slot, fields[1].2, &Ty::Bool, overflowed, line)?;
+                self.store_at(&slot, fields[0].2, &ty, value, span)?;
+                self.store_at(&slot, fields[1].2, &Ty::Bool, overflowed, span)?;
                 Ok((Operand::Value(slot), result))
             }
 
@@ -6743,58 +6750,58 @@ impl Fn<'_> {
             // that pushes n elements is entitled to know it did O(n) work in
             // total, and the amortized argument is a property of the factor.
             "push" => {
-                let elem = vec_elem(&ty, "push", line)?;
+                let elem = vec_elem(&ty, "push", span)?;
                 let x = one_arg(self, &elem)?;
-                self.vec_push(v, &elem, x, line)?;
+                self.vec_push(v, &elem, x, span)?;
                 Ok((unit(), Ty::Unit))
             }
 
             // `v.pop()` — Ch. 5 §2.6.
             "pop" => {
-                let elem = vec_elem(&ty, "pop", line)?;
+                let elem = vec_elem(&ty, "pop", span)?;
                 if !args.is_empty() {
-                    return err(line, "`pop` takes no arguments");
+                    return err(span, "`pop` takes no arguments");
                 }
-                self.vec_pop(v, &elem, line)
+                self.vec_pop(v, &elem, span)
             }
 
             // `v.clear()` — the elements go, the allocation stays.
             "clear" if matches!(peel(&ty), Ty::VecOf(_)) => {
-                let elem = vec_elem(&ty, "clear", line)?;
+                let elem = vec_elem(&ty, "clear", span)?;
                 if !args.is_empty() {
-                    return err(line, "`clear` takes no arguments");
+                    return err(span, "`clear` takes no arguments");
                 }
-                self.vec_clear(v, &elem, line)?;
+                self.vec_clear(v, &elem, span)?;
                 Ok((unit(), Ty::Unit))
             }
 
             // `v.reserve(n)` — room for `n` more.
             // `v.insert(i, x)` and `v.remove(i)` — Ch. 5 §2.6.
             "insert" if matches!(peel(&ty), Ty::VecOf(_)) => {
-                let elem = vec_elem(&ty, "insert", line)?;
+                let elem = vec_elem(&ty, "insert", span)?;
                 let [at, x] = args else {
-                    return err(line, "`insert` takes an index and a value");
+                    return err(span, "`insert` takes an index and a value");
                 };
                 let (at, _) = self.expr(at, Some(&Ty::TAddr))?;
                 let (x, xt) = self.expr(x, Some(&elem))?;
-                self.check(&xt, &elem, line, "`insert`'s value")?;
-                self.vec_insert(v, &elem, at, x, line)?;
+                self.check(&xt, &elem, span, "`insert`'s value")?;
+                self.vec_insert(v, &elem, at, x, span)?;
                 Ok((unit(), Ty::Unit))
             }
 
             "remove" if matches!(peel(&ty), Ty::VecOf(_)) => {
-                let elem = vec_elem(&ty, "remove", line)?;
+                let elem = vec_elem(&ty, "remove", span)?;
                 let [at] = args else {
-                    return err(line, "`remove` takes an index");
+                    return err(span, "`remove` takes an index");
                 };
                 let (at, _) = self.expr(at, Some(&Ty::TAddr))?;
-                self.vec_remove(v, &elem, at, line)
+                self.vec_remove(v, &elem, at, span)
             }
 
             "reserve" => {
-                let elem = vec_elem(&ty, "reserve", line)?;
+                let elem = vec_elem(&ty, "reserve", span)?;
                 let n = one_arg(self, &Ty::TAddr)?;
-                self.vec_reserve(v, &elem, n, line)?;
+                self.vec_reserve(v, &elem, n, span)?;
                 Ok((unit(), Ty::Unit))
             }
 
@@ -6802,7 +6809,7 @@ impl Fn<'_> {
             // see the room beyond the length.
             "capacity" if matches!(peel(&ty), Ty::VecOf(_)) => {
                 if !args.is_empty() {
-                    return err(line, "`capacity` takes no arguments");
+                    return err(span, "`capacity` takes no arguments");
                 }
                 let at = self.offset(v, 6);
                 Ok((self.load_from(at, &Ty::TAddr), Ty::TAddr))
@@ -6811,7 +6818,7 @@ impl Fn<'_> {
             // `v.is_empty()` — `len() == 0`, said once.
             "is_empty" if matches!(peel(&ty), Ty::VecOf(_)) => {
                 if !args.is_empty() {
-                    return err(line, "`is_empty` takes no arguments");
+                    return err(span, "`is_empty` takes no arguments");
                 }
                 let at = self.offset(v, 3);
                 let len = self.load_from(at, &Ty::TAddr);
@@ -6843,7 +6850,7 @@ impl Fn<'_> {
             // reference; an array's is in its type.
             "len" => {
                 if !args.is_empty() {
-                    return err(line, "`len` takes no arguments");
+                    return err(span, "`len` takes no arguments");
                 }
                 match &ty {
                     Ty::Array(_, n) => {
@@ -6869,7 +6876,7 @@ impl Fn<'_> {
                         Ok((Operand::Const(Type::Int(27), Bt::from_i128(*n)), Ty::TAddr))
                     }
                     other => err(
-                        line,
+                        span,
                         format!("`len` applies to a slice or an array, not {other}"),
                     ),
                 }
@@ -6881,7 +6888,7 @@ impl Fn<'_> {
             // second computation and no comparison against a bound.
             "checked_add" | "checked_sub" | "checked_mul" => {
                 if !ty.is_arithmetic() {
-                    return err(line, format!("`{name}` does not apply to {ty}"));
+                    return err(span, format!("`{name}` does not apply to {ty}"));
                 }
                 let b = one_arg(self, &ty)?;
                 let op = match name.rsplit('_').next().expect("a suffix") {
@@ -6904,15 +6911,15 @@ impl Fn<'_> {
 
                 let opt = self
                     .types
-                    .instantiate("Option", std::slice::from_ref(&ty), line)?;
+                    .instantiate("Option", std::slice::from_ref(&ty), span)?;
                 let ename = nominal_name(&opt).expect("an instantiation is nominal");
                 let (some, none) = (
                     self.types
                         .variant(&ename, "Some")
-                        .ok_or_else(|| one_err(line, "`Option` has no `Some`".into()))?,
+                        .ok_or_else(|| one_err(span, "`Option` has no `Some`".into()))?,
                     self.types
                         .variant(&ename, "None")
-                        .ok_or_else(|| one_err(line, "`Option` has no `None`".into()))?,
+                        .ok_or_else(|| one_err(span, "`Option` has no `None`".into()))?,
                 );
                 let slot = self.temp_slot(&opt);
                 let (fits, over, join) = (
@@ -6926,18 +6933,18 @@ impl Fn<'_> {
 
                 self.start(fits);
                 let payload = [("0".to_string(), Operand::Value(value))];
-                self.build_variant_into(&slot, &ename, some, &payload, line)?;
+                self.build_variant_into(&slot, &ename, some, &payload, span)?;
                 self.jump(&join);
 
                 self.start(over);
-                self.build_variant_into(&slot, &ename, none, &[], line)?;
+                self.build_variant_into(&slot, &ename, none, &[], span)?;
                 self.jump(&join);
 
                 self.start(join);
                 Ok((Operand::Value(slot), opt))
             }
 
-            other => err(line, format!("`{other}` is not a method in this milestone")),
+            other => err(span, format!("`{other}` is not a method in this milestone")),
         }
     }
 
@@ -6955,19 +6962,19 @@ impl Fn<'_> {
         &mut self,
         inner: &ast::Expr,
         expected: Option<&Ty>,
-        line: Line,
+        span: Span,
     ) -> R<(Operand, Ty)> {
         let (v, ty) = self.expr(inner, None)?;
         let Some((kind, args)) = self.carrier(&ty) else {
             return err(
-                line,
+                span,
                 format!("`?` applies to `Result` and `Option`, not to {ty} (Ch. 5 §4.1)"),
             );
         };
         let ret = self.ret.clone();
         let Some((rkind, rargs)) = self.carrier(&ret) else {
             return err(
-                line,
+                span,
                 format!(
                     "`?` needs a function that returns `Result` or `Option`, and this one \
                      returns {ret} (Ch. 5 §4.1)"
@@ -6976,7 +6983,7 @@ impl Fn<'_> {
         };
         if kind != rkind {
             return err(
-                line,
+                span,
                 format!(
                     "`?` on a `{kind}` in a function returning `{rkind}` does not convert \
                      between them: write `ok_or(…)` or `ok()` where it happens \
@@ -6988,10 +6995,10 @@ impl Fn<'_> {
         // The value is matched twice over — once per arm — so it is bound
         // first and the arms name the binding.
         let Operand::Value(slot) = v else {
-            return err(line, "`?` needs a place to match");
+            return err(span, "`?` needs a place to match");
         };
         let bound = self.bind_existing(slot, ty.clone());
-        let scrutinee = ast::Expr::Path(bound, line);
+        let scrutinee = ast::Expr::Path(bound, span);
         let ok_bind = format!("#q{}", self.counter);
         let bad_bind = format!("#r{}", self.counter);
 
@@ -7000,25 +7007,25 @@ impl Fn<'_> {
                 ast::Path {
                     segments: vec![kind.to_string(), name.to_string()],
                     targs: Vec::new(),
-                    line,
+                    span,
                 },
                 payload,
-                line,
+                span,
             )],
             guard: None,
             body,
-            line,
+            span,
         };
-        let path = |n: &str| ast::Expr::Path(n.to_string(), line);
+        let path = |n: &str| ast::Expr::Path(n.to_string(), span);
         let variant = |name: &str, fields: Vec<(String, ast::Expr)>| {
             ast::Expr::Aggregate(
                 ast::Path {
                     segments: vec![kind.to_string(), name.to_string()],
                     targs: Vec::new(),
-                    line,
+                    span,
                 },
                 fields,
-                line,
+                span,
             )
         };
 
@@ -7026,13 +7033,13 @@ impl Fn<'_> {
             vec![
                 arm(
                     "Some",
-                    vec![("0".into(), ast::Pattern::Bind(ok_bind.clone(), line))],
+                    vec![("0".into(), ast::Pattern::Bind(ok_bind.clone(), span))],
                     path(&ok_bind),
                 ),
                 arm(
                     "None",
                     Vec::new(),
-                    ast::Expr::Return(Some(Box::new(variant("None", Vec::new()))), line),
+                    ast::Expr::Return(Some(Box::new(variant("None", Vec::new()))), span),
                 ),
             ]
         } else {
@@ -7044,7 +7051,7 @@ impl Fn<'_> {
             } else {
                 let Some(name) = nominal_name(&to_ty) else {
                     return err(
-                        line,
+                        span,
                         format!("`?` cannot convert {from_ty} into {to_ty} (Ch. 5 §4.1)"),
                     );
                 };
@@ -7052,29 +7059,29 @@ impl Fn<'_> {
                     ast::Path {
                         segments: vec![name, "from".to_string()],
                         targs: Vec::new(),
-                        line,
+                        span,
                     },
                     vec![("0".to_string(), path(&bad_bind))],
-                    line,
+                    span,
                 )
             };
             vec![
                 arm(
                     "Ok",
-                    vec![("0".into(), ast::Pattern::Bind(ok_bind.clone(), line))],
+                    vec![("0".into(), ast::Pattern::Bind(ok_bind.clone(), span))],
                     path(&ok_bind),
                 ),
                 arm(
                     "Err",
-                    vec![("0".into(), ast::Pattern::Bind(bad_bind.clone(), line))],
+                    vec![("0".into(), ast::Pattern::Bind(bad_bind.clone(), span))],
                     ast::Expr::Return(
                         Some(Box::new(variant("Err", vec![("0".to_string(), converted)]))),
-                        line,
+                        span,
                     ),
                 ),
             ]
         };
-        self.match_expr(&scrutinee, &arms, expected, line)
+        self.match_expr(&scrutinee, &arms, expected, span)
     }
 
     /// Whether a type is one of the two `?` carries, and its arguments.
@@ -7099,7 +7106,7 @@ impl Fn<'_> {
     ///
     /// There is no `realloc`: growth allocates, copies and frees, which is
     /// what Ch. 5 §7 reserves the third target function for.
-    fn vec_push(&mut self, at: Operand, elem: &Ty, x: Operand, line: Line) -> R<()> {
+    fn vec_push(&mut self, at: Operand, elem: &Ty, x: Operand, span: Span) -> R<()> {
         let l = self.types.layout(elem);
         let (size, align) = (l.size as i128, l.align as i128);
         self.needs_heap.set(true);
@@ -7125,7 +7132,7 @@ impl Fn<'_> {
 
         self.start(grow);
         // Four, or twice what there was.
-        let doubled = self.apply_binary("*", cap.clone(), konst_addr(2), &Ty::TAddr, line)?;
+        let doubled = self.apply_binary("*", cap.clone(), konst_addr(2), &Ty::TAddr, span)?;
         let want = self.emit(
             "n",
             Type::Int(27),
@@ -7144,16 +7151,16 @@ impl Fn<'_> {
             len.clone(),
             cap,
             want,
-            line,
+            span,
         )?;
         self.jump(&ready);
 
         self.start(ready);
         let base = self.load_ptr(ptr_at);
-        let off = self.apply_binary("*", len.clone(), konst_addr(size), &Ty::TAddr, line)?;
+        let off = self.apply_binary("*", len.clone(), konst_addr(size), &Ty::TAddr, span)?;
         let slot = self.emit("e", Type::Ptr, InstKind::Offset { p: base, d: off });
         if elem.is_aggregate() {
-            self.copy_typed(slot, x, elem, line)?;
+            self.copy_typed(slot, x, elem, span)?;
         } else {
             self.push(Inst {
                 results: Vec::new(),
@@ -7164,8 +7171,8 @@ impl Fn<'_> {
                 },
             });
         }
-        let next = self.apply_binary("+", len, konst_addr(1), &Ty::TAddr, line)?;
-        self.store_at_operand(len_at, &Ty::TAddr, next, line)?;
+        let next = self.apply_binary("+", len, konst_addr(1), &Ty::TAddr, span)?;
+        self.store_at_operand(len_at, &Ty::TAddr, next, span)?;
         Ok(())
     }
 
@@ -7186,9 +7193,9 @@ impl Fn<'_> {
         len: Operand,
         cap: Operand,
         want: Operand,
-        line: Line,
+        span: Span,
     ) -> R<()> {
-        let bytes = self.apply_binary("*", want.clone(), konst_addr(size), &Ty::TAddr, line)?;
+        let bytes = self.apply_binary("*", want.clone(), konst_addr(size), &Ty::TAddr, span)?;
         let fresh = self.emit(
             "p",
             Type::Ptr,
@@ -7202,12 +7209,12 @@ impl Fn<'_> {
         // layout calls it: TIR has no int-to-pointer cast, so an address that
         // is going to be offset has to have been a `ptr` all along (TIR §5).
         let old = self.load_ptr(ptr_at.clone());
-        let copied = self.apply_binary("*", len, konst_addr(size), &Ty::TAddr, line)?;
-        self.copy_n_trytes(fresh.clone(), old.clone(), copied, line)?;
-        let oldcap = self.apply_binary("*", cap, konst_addr(size), &Ty::TAddr, line)?;
+        let copied = self.apply_binary("*", len, konst_addr(size), &Ty::TAddr, span)?;
+        self.copy_n_trytes(fresh.clone(), old.clone(), copied, span)?;
+        let oldcap = self.apply_binary("*", cap, konst_addr(size), &Ty::TAddr, span)?;
         self.free_if_any(old, oldcap, align);
         self.store_ptr(ptr_at, fresh);
-        self.store_at_operand(cap_at, &Ty::TAddr, want, line)?;
+        self.store_at_operand(cap_at, &Ty::TAddr, want, span)?;
         Ok(())
     }
 
@@ -7215,7 +7222,7 @@ impl Fn<'_> {
     ///
     /// Exactly `len + n`, not the doubling `push` uses: a program that says
     /// how much it wants has said something `push`'s guess cannot improve on.
-    fn vec_reserve(&mut self, at: Operand, elem: &Ty, n: Operand, line: Line) -> R<()> {
+    fn vec_reserve(&mut self, at: Operand, elem: &Ty, n: Operand, span: Span) -> R<()> {
         let l = self.types.layout(elem);
         let (size, align) = (l.size as i128, l.align as i128);
         self.needs_heap.set(true);
@@ -7224,7 +7231,7 @@ impl Fn<'_> {
         let cap_at = self.offset(at.clone(), 6);
         let len = self.load_from(len_at, &Ty::TAddr);
         let cap = self.load_from(cap_at.clone(), &Ty::TAddr);
-        let want = self.apply_binary("+", len.clone(), n, &Ty::TAddr, line)?;
+        let want = self.apply_binary("+", len.clone(), n, &Ty::TAddr, span)?;
 
         let (grow, ready) = (self.fresh("res.grow"), self.fresh("res.ready"));
         let c = self.emit(
@@ -7240,7 +7247,7 @@ impl Fn<'_> {
         // is already there is not an error, it is nothing.
         self.br3(c, &ready, &ready, &grow);
         self.start(grow);
-        self.vec_realloc(at, cap_at, size, align, len, cap, want, line)?;
+        self.vec_realloc(at, cap_at, size, align, len, cap, want, span)?;
         self.jump(&ready);
         self.start(ready);
         Ok(())
@@ -7253,7 +7260,7 @@ impl Fn<'_> {
         from: Operand,
         to: Operand,
         elem: &Ty,
-        line: Line,
+        span: Span,
         depth: u32,
     ) -> R<()> {
         if !self.types.needs_drop(elem) {
@@ -7261,7 +7268,7 @@ impl Fn<'_> {
         }
         let size = self.types.layout(elem).size as i128;
         let i = self.temp_slot(&Ty::TAddr);
-        self.store_at(&i, 0, &Ty::TAddr, from, line)?;
+        self.store_at(&i, 0, &Ty::TAddr, from, span)?;
         let (head, body, out) = (
             self.fresh("vdrop.head"),
             self.fresh("vdrop.body"),
@@ -7281,11 +7288,11 @@ impl Fn<'_> {
         );
         self.br3(c, &body, &out, &out);
         self.start(body);
-        let off = self.apply_binary("*", at.clone(), konst_addr(size), &Ty::TAddr, line)?;
+        let off = self.apply_binary("*", at.clone(), konst_addr(size), &Ty::TAddr, span)?;
         let e = self.emit("e", Type::Ptr, InstKind::Offset { p: base, d: off });
-        self.drop_at(e, elem, line, depth + 1)?;
-        let next = self.apply_binary("+", at, konst_addr(1), &Ty::TAddr, line)?;
-        self.store_at(&i, 0, &Ty::TAddr, next, line)?;
+        self.drop_at(e, elem, span, depth + 1)?;
+        let next = self.apply_binary("+", at, konst_addr(1), &Ty::TAddr, span)?;
+        self.store_at(&i, 0, &Ty::TAddr, next, span)?;
         self.jump(&head);
         self.start(out);
         Ok(())
@@ -7297,9 +7304,9 @@ impl Fn<'_> {
     /// `copy_n_trytes` walks up and would overwrite what it has yet to read.
     /// Which direction is safe is a property of which way the block moves,
     /// and `Vec::insert` moves one up.
-    fn copy_n_trytes_back(&mut self, dst: Operand, src: Operand, n: Operand, line: Line) -> R<()> {
+    fn copy_n_trytes_back(&mut self, dst: Operand, src: Operand, n: Operand, span: Span) -> R<()> {
         let i = self.temp_slot(&Ty::TAddr);
-        self.store_at(&i, 0, &Ty::TAddr, n, line)?;
+        self.store_at(&i, 0, &Ty::TAddr, n, span)?;
         let (head, body, done) = (
             self.fresh("cpb.head"),
             self.fresh("cpb.body"),
@@ -7319,8 +7326,8 @@ impl Fn<'_> {
         );
         self.br3(c, &done, &done, &body);
         self.start(body);
-        let at = self.apply_binary("-", at, konst_addr(1), &Ty::TAddr, line)?;
-        self.store_at(&i, 0, &Ty::TAddr, at.clone(), line)?;
+        let at = self.apply_binary("-", at, konst_addr(1), &Ty::TAddr, span)?;
+        self.store_at(&i, 0, &Ty::TAddr, at.clone(), span)?;
         let from = self.emit(
             "e",
             Type::Ptr,
@@ -7345,8 +7352,8 @@ impl Fn<'_> {
     }
 
     /// The element count times the element size, as trytes.
-    fn elems_in_trytes(&mut self, n: Operand, size: i128, line: Line) -> R<Operand> {
-        self.apply_binary("*", n, konst_addr(size), &Ty::TAddr, line)
+    fn elems_in_trytes(&mut self, n: Operand, size: i128, span: Span) -> R<Operand> {
+        self.apply_binary("*", n, konst_addr(size), &Ty::TAddr, span)
     }
 
     /// `v.insert(i, x)` and `v.remove(i)` — Ch. 5 §2.6.
@@ -7355,22 +7362,22 @@ impl Fn<'_> {
     /// and therefore a move of every element in it (Ch. 3 §1.2). The shift is
     /// tryte-wise, so an element holding a reference loses its provenance in
     /// the interpreter for the reason an enum's payload does — G6.7.
-    fn vec_insert(&mut self, at: Operand, elem: &Ty, i: Operand, x: Operand, line: Line) -> R<()> {
+    fn vec_insert(&mut self, at: Operand, elem: &Ty, i: Operand, x: Operand, span: Span) -> R<()> {
         let size = self.types.layout(elem).size as i128;
         let len_at = self.offset(at.clone(), 3);
         let len = self.load_from(len_at.clone(), &Ty::TAddr);
         // `i == len` is `push`, and is the one index past the end that is
         // not an error.
-        self.bounds_check(i.clone(), len.clone(), true, line)?;
+        self.bounds_check(i.clone(), len.clone(), true, span)?;
 
         // Make room, which may move the allocation — so the base is read
         // after, not before.
-        self.vec_reserve(at.clone(), elem, konst_addr(1), line)?;
+        self.vec_reserve(at.clone(), elem, konst_addr(1), span)?;
         let len = self.load_from(len_at.clone(), &Ty::TAddr);
         let base = self.load_ptr(at.clone());
-        let moved = self.apply_binary("-", len.clone(), i.clone(), &Ty::TAddr, line)?;
-        let bytes = self.elems_in_trytes(moved, size, line)?;
-        let from_off = self.elems_in_trytes(i.clone(), size, line)?;
+        let moved = self.apply_binary("-", len.clone(), i.clone(), &Ty::TAddr, span)?;
+        let bytes = self.elems_in_trytes(moved, size, span)?;
+        let from_off = self.elems_in_trytes(i.clone(), size, span)?;
         let src = self.emit(
             "e",
             Type::Ptr,
@@ -7379,14 +7386,14 @@ impl Fn<'_> {
                 d: from_off,
             },
         );
-        let to_off = self.apply_binary("+", i.clone(), konst_addr(1), &Ty::TAddr, line)?;
-        let to_off = self.elems_in_trytes(to_off, size, line)?;
+        let to_off = self.apply_binary("+", i.clone(), konst_addr(1), &Ty::TAddr, span)?;
+        let to_off = self.elems_in_trytes(to_off, size, span)?;
         let dst = self.emit("e", Type::Ptr, InstKind::Offset { p: base, d: to_off });
-        self.copy_n_trytes_back(dst, src, bytes, line)?;
+        self.copy_n_trytes_back(dst, src, bytes, span)?;
 
-        let slot = self.vec_elem_addr(at.clone(), i, size, line)?;
+        let slot = self.vec_elem_addr(at.clone(), i, size, span)?;
         if elem.is_aggregate() {
-            self.copy_typed(slot, x, elem, line)?;
+            self.copy_typed(slot, x, elem, span)?;
         } else {
             self.push(Inst {
                 results: Vec::new(),
@@ -7397,33 +7404,33 @@ impl Fn<'_> {
                 },
             });
         }
-        let next = self.apply_binary("+", len, konst_addr(1), &Ty::TAddr, line)?;
-        self.store_at_operand(len_at, &Ty::TAddr, next, line)
+        let next = self.apply_binary("+", len, konst_addr(1), &Ty::TAddr, span)?;
+        self.store_at_operand(len_at, &Ty::TAddr, next, span)
     }
 
-    fn vec_remove(&mut self, at: Operand, elem: &Ty, i: Operand, line: Line) -> R<(Operand, Ty)> {
+    fn vec_remove(&mut self, at: Operand, elem: &Ty, i: Operand, span: Span) -> R<(Operand, Ty)> {
         let size = self.types.layout(elem).size as i128;
         let len_at = self.offset(at.clone(), 3);
         let len = self.load_from(len_at.clone(), &Ty::TAddr);
-        self.bounds_check(i.clone(), len.clone(), false, line)?;
+        self.bounds_check(i.clone(), len.clone(), false, span)?;
 
         // The element leaves the `Vec`, so it is read before the shift and
         // is not dropped by it.
-        let e = self.vec_elem_addr(at.clone(), i.clone(), size, line)?;
+        let e = self.vec_elem_addr(at.clone(), i.clone(), size, span)?;
         let out = if elem.is_aggregate() {
             let tmp = self.temp_slot(elem);
-            self.copy_typed(Operand::Value(tmp.clone()), e, elem, line)?;
+            self.copy_typed(Operand::Value(tmp.clone()), e, elem, span)?;
             Operand::Value(tmp)
         } else {
             self.load_from(e, elem)
         };
 
         let base = self.load_ptr(at.clone());
-        let after = self.apply_binary("-", len.clone(), i.clone(), &Ty::TAddr, line)?;
-        let after = self.apply_binary("-", after, konst_addr(1), &Ty::TAddr, line)?;
-        let bytes = self.elems_in_trytes(after, size, line)?;
-        let from_off = self.apply_binary("+", i.clone(), konst_addr(1), &Ty::TAddr, line)?;
-        let from_off = self.elems_in_trytes(from_off, size, line)?;
+        let after = self.apply_binary("-", len.clone(), i.clone(), &Ty::TAddr, span)?;
+        let after = self.apply_binary("-", after, konst_addr(1), &Ty::TAddr, span)?;
+        let bytes = self.elems_in_trytes(after, size, span)?;
+        let from_off = self.apply_binary("+", i.clone(), konst_addr(1), &Ty::TAddr, span)?;
+        let from_off = self.elems_in_trytes(from_off, size, span)?;
         let src = self.emit(
             "e",
             Type::Ptr,
@@ -7432,17 +7439,17 @@ impl Fn<'_> {
                 d: from_off,
             },
         );
-        let to_off = self.elems_in_trytes(i, size, line)?;
+        let to_off = self.elems_in_trytes(i, size, span)?;
         let dst = self.emit("e", Type::Ptr, InstKind::Offset { p: base, d: to_off });
-        self.copy_n_trytes(dst, src, bytes, line)?;
+        self.copy_n_trytes(dst, src, bytes, span)?;
 
-        let next = self.apply_binary("-", len, konst_addr(1), &Ty::TAddr, line)?;
-        self.store_at_operand(len_at, &Ty::TAddr, next, line)?;
+        let next = self.apply_binary("-", len, konst_addr(1), &Ty::TAddr, span)?;
+        self.store_at_operand(len_at, &Ty::TAddr, next, span)?;
         Ok((out, elem.clone()))
     }
 
     /// Trap unless `0 <= i < limit`, or `<=` when the end is allowed.
-    fn bounds_check(&mut self, i: Operand, limit: Operand, inclusive: bool, _line: Line) -> R<()> {
+    fn bounds_check(&mut self, i: Operand, limit: Operand, inclusive: bool, _line: Span) -> R<()> {
         let (bad, lo, ok) = (
             self.fresh("ins.fault"),
             self.fresh("ins.lo"),
@@ -7486,20 +7493,20 @@ impl Fn<'_> {
     ///
     /// The allocation stays, which is the whole difference between this and
     /// dropping the `Vec`: a cleared `Vec` has kept its room.
-    fn vec_clear(&mut self, at: Operand, elem: &Ty, line: Line) -> R<()> {
+    fn vec_clear(&mut self, at: Operand, elem: &Ty, span: Span) -> R<()> {
         let len_at = self.offset(at.clone(), 3);
         if self.types.needs_drop(elem) {
             let len = self.load_from(len_at.clone(), &Ty::TAddr);
             let base = self.load_ptr(at);
-            self.vec_drop_range(base, konst_addr(0), len, elem, line, 0)?;
+            self.vec_drop_range(base, konst_addr(0), len, elem, span, 0)?;
         }
-        self.store_at_operand(len_at, &Ty::TAddr, konst_addr(0), line)
+        self.store_at_operand(len_at, &Ty::TAddr, konst_addr(0), span)
     }
 
     /// The address of element `i` of the `Vec` at `at`.
-    fn vec_elem_addr(&mut self, at: Operand, i: Operand, size: i128, line: Line) -> R<Operand> {
+    fn vec_elem_addr(&mut self, at: Operand, i: Operand, size: i128, span: Span) -> R<Operand> {
         let base = self.load_ptr(at);
-        let off = self.apply_binary("*", i, konst_addr(size), &Ty::TAddr, line)?;
+        let off = self.apply_binary("*", i, konst_addr(size), &Ty::TAddr, span)?;
         Ok(self.emit("e", Type::Ptr, InstKind::Offset { p: base, d: off }))
     }
 
@@ -7507,19 +7514,19 @@ impl Fn<'_> {
     ///
     /// The element is *moved out*: the length comes down first, so what is
     /// returned is no longer inside the `Vec` and will not be dropped twice.
-    fn vec_pop(&mut self, at: Operand, elem: &Ty, line: Line) -> R<(Operand, Ty)> {
+    fn vec_pop(&mut self, at: Operand, elem: &Ty, span: Span) -> R<(Operand, Ty)> {
         let size = self.types.layout(elem).size as i128;
         let opt = self
             .types
-            .instantiate("Option", std::slice::from_ref(elem), line)?;
+            .instantiate("Option", std::slice::from_ref(elem), span)?;
         let ename = nominal_name(&opt).expect("an instantiation is nominal");
         let (some, none) = (
             self.types
                 .variant(&ename, "Some")
-                .ok_or_else(|| one_err(line, "`Option` has no `Some`".into()))?,
+                .ok_or_else(|| one_err(span, "`Option` has no `Some`".into()))?,
             self.types
                 .variant(&ename, "None")
-                .ok_or_else(|| one_err(line, "`Option` has no `None`".into()))?,
+                .ok_or_else(|| one_err(span, "`Option` has no `None`".into()))?,
         );
         let slot = self.temp_slot(&opt);
         let len_at = self.offset(at.clone(), 3);
@@ -7541,21 +7548,21 @@ impl Fn<'_> {
         self.br3(c, &empty, &empty, &full);
 
         self.start(full);
-        let last = self.apply_binary("-", len, konst_addr(1), &Ty::TAddr, line)?;
-        self.store_at_operand(len_at, &Ty::TAddr, last.clone(), line)?;
-        let e = self.vec_elem_addr(at, last, size, line)?;
+        let last = self.apply_binary("-", len, konst_addr(1), &Ty::TAddr, span)?;
+        self.store_at_operand(len_at, &Ty::TAddr, last.clone(), span)?;
+        let e = self.vec_elem_addr(at, last, size, span)?;
         let v = if elem.is_aggregate() {
             let tmp = self.temp_slot(elem);
-            self.copy_typed(Operand::Value(tmp.clone()), e, elem, line)?;
+            self.copy_typed(Operand::Value(tmp.clone()), e, elem, span)?;
             Operand::Value(tmp)
         } else {
             self.load_from(e, elem)
         };
-        self.build_variant_into(&slot, &ename, some, &[("0".to_string(), v)], line)?;
+        self.build_variant_into(&slot, &ename, some, &[("0".to_string(), v)], span)?;
         self.jump(&join);
 
         self.start(empty);
-        self.build_variant_into(&slot, &ename, none, &[], line)?;
+        self.build_variant_into(&slot, &ename, none, &[], span)?;
         self.jump(&join);
 
         self.start(join);
@@ -7563,7 +7570,7 @@ impl Fn<'_> {
     }
 
     /// Store a scalar at an address that is already an operand.
-    fn store_at_operand(&mut self, at: Operand, ty: &Ty, v: Operand, _line: Line) -> R<()> {
+    fn store_at_operand(&mut self, at: Operand, ty: &Ty, v: Operand, _line: Span) -> R<()> {
         self.push(Inst {
             results: Vec::new(),
             kind: InstKind::Store {
@@ -7579,14 +7586,14 @@ impl Fn<'_> {
     ///
     /// The other `copy_trytes` unrolls a size known at compile time; a
     /// `Vec`'s growth does not know one.
-    fn copy_n_trytes(&mut self, dst: Operand, src: Operand, n: Operand, line: Line) -> R<()> {
+    fn copy_n_trytes(&mut self, dst: Operand, src: Operand, n: Operand, span: Span) -> R<()> {
         let i = self.temp_slot(&Ty::TAddr);
         self.store_at(
             &i,
             0,
             &Ty::TAddr,
             Operand::Const(Type::Int(27), Bt::ZERO),
-            line,
+            span,
         )?;
         let (head, body, done) = (
             self.fresh("cp.head"),
@@ -7632,8 +7639,8 @@ impl Fn<'_> {
                 p: to,
             },
         });
-        let next = self.apply_binary("+", at, konst_addr(1), &Ty::TAddr, line)?;
-        self.store_at(&i, 0, &Ty::TAddr, next, line)?;
+        let next = self.apply_binary("+", at, konst_addr(1), &Ty::TAddr, span)?;
+        self.store_at(&i, 0, &Ty::TAddr, next, span)?;
         self.jump(&head);
         self.start(done);
         Ok(())
@@ -7678,9 +7685,9 @@ impl Fn<'_> {
     /// (Ch. 5 §2.1). That is the whole of why `Box` is a language item: every
     /// other part of it — owning, moving, dropping, dereferencing — is what
     /// Ch. 3 already does to any value.
-    fn box_new(&mut self, arg: &ast::Expr, fallible: bool, line: Line) -> R<(Operand, Ty)> {
+    fn box_new(&mut self, arg: &ast::Expr, fallible: bool, span: Span) -> R<(Operand, Ty)> {
         let (v, inner) = self.expr(arg, None)?;
-        check_sized(&inner, line, "a `Box`'s contents")?;
+        check_sized(&inner, span, "a `Box`'s contents")?;
         let l = self.types.layout(&inner);
         let size = Operand::Const(Type::Int(27), Bt::from_i128(l.size as i128));
         let align = Operand::Const(Type::Int(27), Bt::from_i128(l.align as i128));
@@ -7707,7 +7714,7 @@ impl Fn<'_> {
         let out = if fallible {
             let opt = self
                 .types
-                .instantiate("Option", std::slice::from_ref(&boxed), line)?;
+                .instantiate("Option", std::slice::from_ref(&boxed), span)?;
             Some((self.temp_slot(&opt), opt))
         } else {
             None
@@ -7733,7 +7740,7 @@ impl Fn<'_> {
         // An aggregate's value *is* an address, so it is copied; a scalar is
         // stored (Ch. 2 §1).
         if inner.is_aggregate() {
-            self.copy_typed(p.clone(), v, &inner, line)?;
+            self.copy_typed(p.clone(), v, &inner, span)?;
         } else {
             self.push(Inst {
                 results: Vec::new(),
@@ -7750,9 +7757,9 @@ impl Fn<'_> {
                 let some = self
                     .types
                     .variant(&ename, "Some")
-                    .ok_or_else(|| one_err(line, "`Option` has no `Some`".into()))?;
+                    .ok_or_else(|| one_err(span, "`Option` has no `Some`".into()))?;
                 let slot = slot.clone();
-                self.build_variant_into(&slot, &ename, some, &[("0".into(), p.clone())], line)?;
+                self.build_variant_into(&slot, &ename, some, &[("0".into(), p.clone())], span)?;
                 self.jump(&join);
             }
             None => self.jump(&join),
@@ -7765,9 +7772,9 @@ impl Fn<'_> {
                 let none = self
                     .types
                     .variant(&ename, "None")
-                    .ok_or_else(|| one_err(line, "`Option` has no `None`".into()))?;
+                    .ok_or_else(|| one_err(span, "`Option` has no `None`".into()))?;
                 let slot = slot.clone();
-                self.build_variant_into(&slot, &ename, none, &[], line)?;
+                self.build_variant_into(&slot, &ename, none, &[], span)?;
                 self.jump(&join);
             }
             None => self.finish(Terminator::Trap(FaultCode::Trap)),
@@ -7786,16 +7793,16 @@ impl Fn<'_> {
     /// non-negative, no greater than U+10FFFF, and outside the surrogate
     /// range — those are reserved for UTF-16 and are not characters
     /// (Ch. 5 §1.2).
-    fn char_try_from(&mut self, v: Operand, line: Line) -> R<(Operand, Ty)> {
-        let opt = self.types.instantiate("Option", &[Ty::Char], line)?;
+    fn char_try_from(&mut self, v: Operand, span: Span) -> R<(Operand, Ty)> {
+        let opt = self.types.instantiate("Option", &[Ty::Char], span)?;
         let ename = nominal_name(&opt).expect("an instantiation is nominal");
         let (some, none) = (
             self.types
                 .variant(&ename, "Some")
-                .ok_or_else(|| one_err(line, "`Option` has no `Some`".into()))?,
+                .ok_or_else(|| one_err(span, "`Option` has no `Some`".into()))?,
             self.types
                 .variant(&ename, "None")
-                .ok_or_else(|| one_err(line, "`Option` has no `None`".into()))?,
+                .ok_or_else(|| one_err(span, "`Option` has no `None`".into()))?,
         );
         let slot = self.temp_slot(&opt);
         let (good, bad, join) = (
@@ -7840,11 +7847,11 @@ impl Fn<'_> {
 
         self.start(good);
         let payload = [("0".to_string(), v)];
-        self.build_variant_into(&slot, &ename, some, &payload, line)?;
+        self.build_variant_into(&slot, &ename, some, &payload, span)?;
         self.jump(&join);
 
         self.start(bad);
-        self.build_variant_into(&slot, &ename, none, &[], line)?;
+        self.build_variant_into(&slot, &ename, none, &[], span)?;
         self.jump(&join);
 
         self.start(join);
@@ -7864,7 +7871,7 @@ impl Fn<'_> {
         path: &ast::Path,
         fields: &[(String, ast::Expr)],
         expected: Option<&Ty>,
-        line: Line,
+        span: Span,
     ) -> R<String> {
         let head = path.segments[0].clone();
         // A type parameter in scope stands for a concrete type here, exactly
@@ -7883,7 +7890,7 @@ impl Fn<'_> {
                 .iter()
                 .map(|t| self.resolve(t))
                 .collect::<R<_>>()?;
-            let ty = self.types.instantiate(&head, &args, line)?;
+            let ty = self.types.instantiate(&head, &args, span)?;
             return Ok(nominal_name(&ty).expect("an instantiation is nominal"));
         }
         // `Vec` is a language item and has no declaration to read fields
@@ -7912,7 +7919,7 @@ impl Fn<'_> {
                 Some(e) => {
                     let variant = path.segments.get(1).cloned().unwrap_or_default();
                     let Some(v) = e.variants.iter().find(|v| v.name == variant) else {
-                        return err(line, format!("`{head}` has no variant `{variant}`"));
+                        return err(span, format!("`{head}` has no variant `{variant}`"));
                     };
                     (e.generics.clone(), v.fields.clone())
                 }
@@ -7954,7 +7961,7 @@ impl Fn<'_> {
                 Some(t) => args.push(t.clone()),
                 None => {
                     return err(
-                        line,
+                        span,
                         format!(
                             "cannot tell what `{}` is here; write the type of this value \
                              (Ch. 4 §2.3)",
@@ -7964,7 +7971,7 @@ impl Fn<'_> {
                 }
             }
         }
-        let ty = self.types.instantiate(&head, &args, line)?;
+        let ty = self.types.instantiate(&head, &args, span)?;
         Ok(nominal_name(&ty).expect("an instantiation is nominal"))
     }
 
@@ -7994,13 +8001,13 @@ impl Fn<'_> {
             // a generic one works its arguments out from the fields it was
             // given, which is what lets `f(Wrapper { inner: x })` infer both
             // `f`'s parameter and `Wrapper`'s (Ch. 4 §2.3).
-            E::Aggregate(path, fields, line) => {
+            E::Aggregate(path, fields, span) => {
                 // A peek that cannot tell says so; it must never be the thing
                 // that reports an inference failure, because the caller has
                 // other ways to find the answer. `Option::None` on its own is
                 // the case: nothing in the literal says what `T` is, and the
                 // expected type at the *call* does.
-                match self.instantiate_head(path, fields, None, *line) {
+                match self.instantiate_head(path, fields, None, *span) {
                     Ok(head) if self.types.structs.borrow().contains_key(&head) => {
                         Some(Ty::Struct(head))
                     }
@@ -8063,7 +8070,7 @@ impl Fn<'_> {
         name: &str,
         va: Operand,
         vb: Operand,
-        line: Line,
+        span: Span,
     ) -> R<(Operand, Ty)> {
         let (trait_name, method) = match op {
             "==" | "!=" => ("Eq", "eq"),
@@ -8072,7 +8079,7 @@ impl Fn<'_> {
         let key = format!("{name}.{method}");
         if !self.sigs.borrow().contains_key(&key) {
             return err(
-                line,
+                span,
                 format!(
                     "`{op}` on {name} needs `{trait_name}`, which it does not implement; \
                      write `impl {trait_name} for {name}` or `#[derive({trait_name})]` \
@@ -8147,15 +8154,15 @@ impl Fn<'_> {
         env: &HashMap<String, Ty>,
         callee: &str,
         param: &str,
-        line: Line,
+        span: Span,
     ) -> R<()> {
         let (kind, want_params, want_ret) = self.fn_bounds[key].clone();
         let Some(name) = nominal_name(ty) else {
-            return err(line, format!("`{ty}` is not a closure"));
+            return err(span, format!("`{ty}` is not a closure"));
         };
         let Some(info) = self.types.closures.borrow().get(&name).cloned() else {
             return err(
-                line,
+                span,
                 format!(
                     "`{ty}` is not a closure, and `{callee}` wants one for `{param}`; \
                      a named type implementing `{}` is Ch. 4 §4.3, not implemented",
@@ -8172,7 +8179,7 @@ impl Fn<'_> {
         };
         if rank(info.kind) > rank(kind) {
             return err(
-                line,
+                span,
                 format!(
                     "this closure is `{}` because it writes a capture, and `{callee}` \
                      wants `{}` for `{param}` (Ch. 4 §4.3)",
@@ -8195,7 +8202,7 @@ impl Fn<'_> {
         };
         if info.params != want_params || info.ret != want_ret {
             return err(
-                line,
+                span,
                 format!(
                     "this closure does not have the signature `{callee}` wants for \
                      `{param}` (Ch. 4 §4.3)"
@@ -8258,7 +8265,7 @@ impl Fn<'_> {
         ret: &Option<ast::Ty>,
         body: &ast::Expr,
         hint: Option<(Vec<Ty>, Option<Ty>)>,
-        line: Line,
+        span: Span,
     ) -> R<(Operand, Ty)> {
         // The free names that are locals here are the captures (§4.4).
         let mut bound: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
@@ -8292,7 +8299,7 @@ impl Fn<'_> {
                 (None, Some(h)) => param_tys.push(h.clone()),
                 (None, None) => {
                     return err(
-                        line,
+                        span,
                         format!(
                             "the type of `{n}` cannot be told from here; write it, as \
                              `|{n}: t27|` (Ch. 4 §4.1)"
@@ -8320,7 +8327,7 @@ impl Fn<'_> {
                     Some(t) => t,
                     None => {
                         return err(
-                            line,
+                            span,
                             "the result type of this closure cannot be told from here; \
                              write it, as `|x: t27| -> t27 { … }` (Ch. 4 §4.1)",
                         );
@@ -8333,7 +8340,7 @@ impl Fn<'_> {
         let ps: Vec<(String, ast::Ty)> = params
             .iter()
             .zip(&param_tys)
-            .map(|((n, _), t)| (n.clone(), ast::Ty::Name(t.to_string(), line)))
+            .map(|((n, _), t)| (n.clone(), ast::Ty::Name(t.to_string(), span)))
             .collect();
 
         self.counter += 1;
@@ -8355,7 +8362,7 @@ impl Fn<'_> {
         rewrite_captures(&mut body, &capture_names);
         let mut call_params = vec![(
             "self".to_string(),
-            ast::Ty::Ref(Box::new(ast::Ty::Name(name.clone(), line)), false, line),
+            ast::Ty::Ref(Box::new(ast::Ty::Name(name.clone(), span)), false, span),
         )];
         call_params.extend(ps.clone());
         let call = format!("{name}.call");
@@ -8364,13 +8371,13 @@ impl Fn<'_> {
             name: call.clone(),
             generics: Vec::new(),
             params: call_params,
-            ret: Some(ast::Ty::Name(ret_ty.to_string(), line)),
+            ret: Some(ast::Ty::Name(ret_ty.to_string(), span)),
             body: Some(ast::Block {
                 stmts: Vec::new(),
                 tail: Some(Box::new(body)),
-                line,
+                span,
             }),
-            line,
+            span,
         };
 
         let mut sig_params = vec![Ty::Ref(Box::new(ty.clone()), false)];
@@ -8392,18 +8399,18 @@ impl Fn<'_> {
         // The value: a struct of borrows of the captured places.
         let slot = self.temp_slot(&ty);
         for ((n, _, mutable), (_, ft, off)) in captures.iter().zip(self.types.fields(&ty)) {
-            let place = ast::Expr::Path(n.clone(), line);
+            let place = ast::Expr::Path(n.clone(), span);
             if let Some(path) = self.path_of(&place) {
-                self.check_access(&path, Access::Borrow(*mutable), line)?;
+                self.check_access(&path, Access::Borrow(*mutable), span)?;
                 // The loan lives as long as the closure does, which for a
                 // closure that cannot escape is the rest of the scope.
                 // The loan lives as long as the closure does. A closure used
                 // as an argument dies with the statement; one bound by `let`
                 // is extended to its last use, below.
-                self.add_loan(path, *mutable, line);
+                self.add_loan(path, *mutable, span);
             }
-            let (addr, _) = self.place(&place, line)?;
-            self.store_at(&slot, off, &ft, addr, line)?;
+            let (addr, _) = self.place(&place, span)?;
+            self.store_at(&slot, off, &ft, addr, span)?;
         }
         Ok((Operand::Value(slot), ty))
     }
@@ -8415,15 +8422,15 @@ impl Fn<'_> {
         trait_name: &str,
         name: &str,
         args: &[ast::Expr],
-        line: Line,
+        span: Span,
     ) -> R<(Operand, Ty)> {
         if !self.traits.contains_key(trait_name) {
-            return err(line, format!("`{trait_name}` is not a trait in scope"));
+            return err(span, format!("`{trait_name}` is not a trait in scope"));
         }
         let methods = object_methods(self.traits, trait_name, &mut Vec::new());
         let Some(index) = methods.iter().position(|m| m.name == name) else {
             return err(
-                line,
+                span,
                 format!(
                     "`dyn {trait_name}` has no method `{name}`; only the trait's are \
                          reachable through an object (Ch. 4 §3.1)"
@@ -8444,7 +8451,7 @@ impl Fn<'_> {
         };
         if params.len() != args.len() {
             return err(
-                line,
+                span,
                 format!(
                     "`{trait_name}::{name}` takes {} argument(s), {} given",
                     params.len(),
@@ -8468,7 +8475,7 @@ impl Fn<'_> {
         }
         for (arg, want) in args.iter().zip(&params) {
             let (v, got) = self.expr(arg, Some(want))?;
-            self.check(&got, want, arg.line(), "argument")?;
+            self.check(&got, want, arg.span(), "argument")?;
             values.push(v);
         }
         let kind = InstKind::Call {
@@ -8538,9 +8545,9 @@ impl Fn<'_> {
     /// `Box<dyn Trait>` needs them to free what it points at, and adding a
     /// slot later would change the layout of something programs will have
     /// been written against.
-    fn vtable_for(&mut self, concrete: &Ty, trait_name: &str, line: Line) -> R<String> {
+    fn vtable_for(&mut self, concrete: &Ty, trait_name: &str, span: Span) -> R<String> {
         let name = nominal_name(concrete)
-            .ok_or_else(|| one_err(line, format!("{concrete} cannot be a trait object")))?;
+            .ok_or_else(|| one_err(span, format!("{concrete} cannot be a trait object")))?;
         let symbol = format!("vt.{name}.{trait_name}");
         if self
             .vtables
@@ -8551,7 +8558,7 @@ impl Fn<'_> {
             return Ok(symbol);
         }
         let Some(decl) = self.traits.get(trait_name).cloned() else {
-            return err(line, format!("`{trait_name}` is not a trait in scope"));
+            return err(span, format!("`{trait_name}` is not a trait in scope"));
         };
         let _ = &decl;
         if !self
@@ -8560,7 +8567,7 @@ impl Fn<'_> {
             .contains(&(name.clone(), trait_name.to_string()))
         {
             return err(
-                line,
+                span,
                 format!(
                     "`{name}` does not implement `{trait_name}`, so it is not a `dyn {trait_name}`"
                 ),
@@ -8613,7 +8620,7 @@ impl Fn<'_> {
         v: Operand,
         from: &Ty,
         to: &Ty,
-        line: Line,
+        span: Span,
     ) -> R<Option<(Operand, Ty)>> {
         let (Ty::Ref(have, m), Ty::Ref(want, wm)) = (from, to) else {
             return Ok(None);
@@ -8630,7 +8637,7 @@ impl Fn<'_> {
         self.store_ptr(Operand::Value(slot.clone()), p);
         let len_at = self.offset(v, 3);
         let len = self.load_from(len_at, &Ty::TAddr);
-        self.store_at(&slot, 3, &Ty::TAddr, len, line)?;
+        self.store_at(&slot, 3, &Ty::TAddr, len, span)?;
         Ok(Some((Operand::Value(slot), fat)))
     }
 
@@ -8639,7 +8646,7 @@ impl Fn<'_> {
         v: Operand,
         from: &Ty,
         to: &Ty,
-        line: Line,
+        span: Span,
     ) -> R<Option<(Operand, Ty)>> {
         let (Ty::Ref(target, m), Ty::Ref(want, _)) = (from, to) else {
             return Ok(None);
@@ -8650,7 +8657,7 @@ impl Fn<'_> {
         if target.is_unsized() {
             return Ok(None);
         }
-        let symbol = self.vtable_for(target, trait_name, line)?;
+        let symbol = self.vtable_for(target, trait_name, span)?;
         let fat = Ty::Ref(Box::new(Ty::Dyn(trait_name.clone())), *m);
         let slot = self.temp_slot(&fat);
         let at = Operand::Value(slot.clone());
@@ -8683,7 +8690,7 @@ impl Fn<'_> {
         recv_ty: &Ty,
         method: &str,
         expected: Option<&Ty>,
-        line: Line,
+        span: Span,
     ) -> R<Option<String>> {
         let rules: Vec<Blanket> = self
             .impls
@@ -8708,7 +8715,7 @@ impl Fn<'_> {
             // nothing about this call.
             if def.generics.iter().any(|p| !env.contains_key(p.name())) {
                 why.push(SyntaxError {
-                    line,
+                    span,
                     message: format!(
                         "`{}` applies to `{recv_ty}` only where the result type is \
                          known; write it (Ch. 4 §5.6)",
@@ -8728,7 +8735,7 @@ impl Fn<'_> {
                 };
                 let ty = env[pname].clone();
                 for b in bounds {
-                    if let Err(e) = self.check_bound_in(&ty, b, &env, &rule.trait_name, pname, line)
+                    if let Err(e) = self.check_bound_in(&ty, b, &env, &rule.trait_name, pname, span)
                     {
                         why.push(e);
                         ok = false;
@@ -8740,7 +8747,7 @@ impl Fn<'_> {
                 }
             }
             if ok {
-                found.push(self.instantiate_with(&key, env, line)?);
+                found.push(self.instantiate_with(&key, env, span)?);
             }
         }
         match found.len() {
@@ -8750,7 +8757,7 @@ impl Fn<'_> {
             },
             1 => Ok(Some(found.remove(0))),
             _ => err(
-                line,
+                span,
                 format!("more than one rule gives `{recv_ty}` a `{method}` (Ch. 4 §1.8)"),
             ),
         }
@@ -8770,7 +8777,7 @@ impl Fn<'_> {
         type_name: &str,
         method: &str,
         args: &[ast::Expr],
-        line: Line,
+        span: Span,
     ) -> R<Option<String>> {
         let Some(keys) = self
             .impls
@@ -8808,7 +8815,7 @@ impl Fn<'_> {
         match fits.len() {
             1 => Ok(Some(fits[0].clone())),
             0 => err(
-                line,
+                span,
                 format!(
                     "no implementation of `{method}` for `{type_name}` takes these \
                      arguments; there {} (Ch. 4 §1.7)",
@@ -8816,7 +8823,7 @@ impl Fn<'_> {
                 ),
             ),
             _ => err(
-                line,
+                span,
                 format!(
                     "which `{type_name}::{method}` is meant is not decided by these \
                      arguments; there {} (Ch. 4 §1.7)",
@@ -8826,7 +8833,7 @@ impl Fn<'_> {
         }
     }
 
-    fn method_key(&mut self, type_name: &str, name: &str, line: Line) -> R<String> {
+    fn method_key(&mut self, type_name: &str, name: &str, span: Span) -> R<String> {
         let concrete = format!("{type_name}.{name}");
         if self.sigs.borrow().contains_key(&concrete) {
             return Ok(concrete);
@@ -8840,7 +8847,7 @@ impl Fn<'_> {
         };
         if def.generics.len() < args.len() {
             return err(
-                line,
+                span,
                 format!("`{base}::{name}` does not apply to `{type_name}`"),
             );
         }
@@ -8874,7 +8881,7 @@ impl Fn<'_> {
             own.push(p.clone());
         }
         if own.is_empty() {
-            return self.instantiate_with(&generic, env, line);
+            return self.instantiate_with(&generic, env, span);
         }
         // Two stages, because instantiation is one step and this needs two:
         // the impl's half is settled here and the method goes back into the
@@ -8966,7 +8973,7 @@ impl Fn<'_> {
         name: &str,
         args: &[ast::Expr],
         expected: Option<&Ty>,
-        line: Line,
+        span: Span,
     ) -> R<(Operand, Ty)> {
         // A place receiver keeps its identity, so `&mut self` writes through
         // to the caller's value rather than to a copy.
@@ -8983,7 +8990,7 @@ impl Fn<'_> {
                 let (v, ty) = self.expr(&recv, None)?;
                 if let Operand::Value(slot) = v {
                     let bound = self.bind_existing(slot, ty.clone());
-                    recv = ast::Expr::Path(bound, line);
+                    recv = ast::Expr::Path(bound, span);
                 }
                 (ty, false)
             }
@@ -8997,7 +9004,7 @@ impl Fn<'_> {
         {
             let trait_name = trait_name.clone();
             let (fat, _) = self.expr(recv, None)?;
-            return self.dyn_call(fat, &trait_name, name, args, line);
+            return self.dyn_call(fat, &trait_name, name, args, span);
         }
 
         let mut base = recv_ty.clone();
@@ -9017,13 +9024,13 @@ impl Fn<'_> {
             Ty::Ref(inner, _) => nominal_name(inner),
             _ => None,
         }) else {
-            return err(line, format!("{base} has no methods"));
+            return err(span, format!("{base} has no methods"));
         };
-        let mut key = self.method_key(&type_name, name, line)?;
+        let mut key = self.method_key(&type_name, name, span)?;
         // A rule that holds for every type satisfying a bound is the last
         // thing tried, so a type's own method always wins (Ch. 4 §5.6).
         if !self.sigs.borrow().contains_key(&key)
-            && let Some(k) = self.blanket_method(&base, name, expected, line)?
+            && let Some(k) = self.blanket_method(&base, name, expected, span)?
         {
             key = k;
         }
@@ -9046,13 +9053,13 @@ impl Fn<'_> {
             Some((vec![recv], Ty::Unit))
         }) else {
             return err(
-                line,
+                span,
                 format!("{base} has no method `{name}`, and neither does Ch. 1"),
             );
         };
         let Some(self_ty) = params.first().cloned() else {
             return err(
-                line,
+                span,
                 format!(
                     "`{type_name}::{name}` takes no `self`, so it is called \
                      `{type_name}::{name}(…)` and not on a receiver (Ch. 4 §1.4)"
@@ -9071,7 +9078,7 @@ impl Fn<'_> {
             let arg = match &self_ty {
                 Ty::Ref(..) if !base.is_aggregate() => {
                     let slot = self.temp_slot(&base);
-                    self.store_at(&slot, 0, &base, v, line)?;
+                    self.store_at(&slot, 0, &base, v, span)?;
                     (Operand::Value(slot), self_ty.clone())
                 }
                 // An aggregate is already an address, which is what a
@@ -9088,43 +9095,43 @@ impl Fn<'_> {
             // holds the value.
             if generic.is_some() {
                 let Operand::Value(slot) = arg.0 else {
-                    return err(line, "a receiver must have a slot");
+                    return err(span, "a receiver must have a slot");
                 };
                 let bound = self.bind_existing(slot, base.clone());
-                let named = ast::Expr::Path(bound, line);
+                let named = ast::Expr::Path(bound, span);
                 let receiver = match &self_ty {
-                    Ty::Ref(_, mutable) => ast::Expr::Borrow(Box::new(named), *mutable, line),
+                    Ty::Ref(_, mutable) => ast::Expr::Borrow(Box::new(named), *mutable, span),
                     _ => named,
                 };
                 let mut full = vec![receiver];
                 full.extend(args.iter().cloned());
-                let (k, full) = self.instantiate_fn(&key, &[], &full, expected, line)?;
-                return self.call_key(&k, Vec::new(), &full, line);
+                let (k, full) = self.instantiate_fn(&key, &[], &full, expected, span)?;
+                return self.call_key(&k, Vec::new(), &full, span);
             }
-            return self.call_key(&key, vec![arg], args, line);
+            return self.call_key(&key, vec![arg], args, span);
         }
 
         let mut receiver = recv.clone();
         for _ in 0..derefs {
-            receiver = ast::Expr::Deref(Box::new(receiver), line);
+            receiver = ast::Expr::Deref(Box::new(receiver), span);
         }
         let receiver = match &self_ty {
             Ty::Ref(..) if by_reference => receiver,
-            Ty::Ref(_, mutable) => ast::Expr::Borrow(Box::new(receiver), *mutable, line),
+            Ty::Ref(_, mutable) => ast::Expr::Borrow(Box::new(receiver), *mutable, span),
             _ => receiver,
         };
         let mut full = vec![receiver];
         full.extend(args.iter().cloned());
         if generic.is_some() {
-            let (k, full) = self.instantiate_fn(&key, &[], &full, expected, line)?;
-            return self.call_key(&k, Vec::new(), &full, line);
+            let (k, full) = self.instantiate_fn(&key, &[], &full, expected, span)?;
+            return self.call_key(&k, Vec::new(), &full, span);
         }
-        self.call_key(&key, Vec::new(), &full, line)
+        self.call_key(&key, Vec::new(), &full, span)
     }
 
     /// The address of a place, and its type (Ch. 3 §1.3). A place is a local,
     /// a field of a place, an element of a place, or a dereference.
-    fn place(&mut self, e: &ast::Expr, line: Line) -> R<(Operand, Ty)> {
+    fn place(&mut self, e: &ast::Expr, span: Span) -> R<(Operand, Ty)> {
         match e {
             ast::Expr::Path(name, l) => {
                 if let Some(local) = self.lookup(name) {
@@ -9199,14 +9206,14 @@ impl Fn<'_> {
                 Ok((v, *target))
             }
 
-            _ => err(line, "this expression is not a place"),
+            _ => err(span, "this expression is not a place"),
         }
     }
 
     /// A place, dereferencing automatically through a reference — which is
     /// what makes `r.x` mean `(*r).x` (Ch. 3 §2.3).
-    fn place_or_deref(&mut self, e: &ast::Expr, line: Line) -> R<(Operand, Ty)> {
-        let (mut addr, mut ty) = self.place(e, line)?;
+    fn place_or_deref(&mut self, e: &ast::Expr, span: Span) -> R<(Operand, Ty)> {
+        let (mut addr, mut ty) = self.place(e, span)?;
         while let Ty::Ref(target, _) | Ty::Boxed(target) = ty.clone() {
             if target.is_unsized() {
                 break; // a fat reference is indexed, not dereferenced
@@ -9228,7 +9235,7 @@ impl Fn<'_> {
         idx: Operand,
         len: Operand,
         elem: &Ty,
-        line: Line,
+        span: Span,
     ) -> R<Operand> {
         let word = Type::Int(27);
         let zero = Operand::Const(word, Bt::ZERO);
@@ -9274,7 +9281,7 @@ impl Fn<'_> {
                 b: Operand::Const(word, Bt::from_i128(size)),
             },
         );
-        let _ = line;
+        let _ = span;
         Ok(self.emit("p", Type::Ptr, InstKind::Offset { p: base, d: scale }))
     }
 
@@ -9316,10 +9323,10 @@ impl Fn<'_> {
     }
 
     /// Write a value into `slot + off`. An aggregate is copied.
-    fn store_at(&mut self, slot: &str, off: i128, ty: &Ty, v: Operand, line: Line) -> R<()> {
+    fn store_at(&mut self, slot: &str, off: i128, ty: &Ty, v: Operand, span: Span) -> R<()> {
         let dst = self.offset(Operand::Value(slot.to_string()), off);
         if ty.is_aggregate() {
-            self.copy_typed(dst, v, ty, line)?;
+            self.copy_typed(dst, v, ty, span)?;
         } else {
             self.push(Inst {
                 results: Vec::new(),
@@ -9339,7 +9346,7 @@ impl Fn<'_> {
     /// number: it carries provenance (TIR §5), and a byte-wise copy would
     /// deliver the address without it. The type says where the pointers are,
     /// so the copy follows the type.
-    fn copy_typed(&mut self, dst: Operand, src: Operand, ty: &Ty, line: Line) -> R<()> {
+    fn copy_typed(&mut self, dst: Operand, src: Operand, ty: &Ty, span: Span) -> R<()> {
         match ty {
             // A thin reference is a pointer, and is copied as one.
             Ty::Ref(t, _) if !t.is_unsized() => {
@@ -9365,7 +9372,7 @@ impl Fn<'_> {
                 for i in 0..n {
                     let from = self.offset(src.clone(), i * size);
                     let to = self.offset(dst.clone(), i * size);
-                    self.copy_typed(to, from, &elem, line)?;
+                    self.copy_typed(to, from, &elem, span)?;
                 }
                 Ok(())
             }
@@ -9392,7 +9399,7 @@ impl Fn<'_> {
                 for (_, ft, off) in self.types.fields(ty) {
                     let from = self.offset(src.clone(), off);
                     let to = self.offset(dst.clone(), off);
-                    self.copy_typed(to, from, &ft, line)?;
+                    self.copy_typed(to, from, &ft, span)?;
                 }
                 Ok(())
             }
@@ -9402,7 +9409,7 @@ impl Fn<'_> {
             // provenance in the interpreter — see docs/spec-gaps.md G6.7.
             Ty::Enum(_) => {
                 let l = self.types.layout(ty);
-                self.copy_trytes(dst, src, l.size as i128, l.align as i128, line)
+                self.copy_trytes(dst, src, l.size as i128, l.align as i128, span)
             }
 
             _ => {
@@ -9436,11 +9443,11 @@ impl Fn<'_> {
         src: Operand,
         size: i128,
         align: i128,
-        line: Line,
+        span: Span,
     ) -> R<()> {
         if size > 243 {
             return err(
-                line,
+                span,
                 "this milestone copies aggregates of at most 243 trytes",
             );
         }
@@ -9502,7 +9509,7 @@ impl Fn<'_> {
         path: &ast::Path,
         fields: &[(String, ast::Expr)],
         expected: Option<&Ty>,
-        line: Line,
+        span: Span,
     ) -> R<(Operand, Ty)> {
         // A closure has no type until it is lowered, so a generic literal
         // holding one cannot infer that parameter from a peek. Lower it here
@@ -9521,7 +9528,7 @@ impl Fn<'_> {
                 };
                 let (v, got) = self.closure(&cps, &cret, &body, None, cline)?;
                 let Operand::Value(slot) = v else {
-                    return err(line, "a closure must have a slot");
+                    return err(span, "a closure must have a slot");
                 };
                 let bound = self.bind_existing(slot, got);
                 *e = ast::Expr::Path(bound, cline);
@@ -9530,14 +9537,14 @@ impl Fn<'_> {
         } else {
             fields
         };
-        let head = self.instantiate_head(path, fields, expected, line)?;
+        let head = self.instantiate_head(path, fields, expected, span)?;
 
         // `Type::NAME` — an associated constant, which is a constant under a
         // qualified name (Ch. 4 §1.7).
         if path.segments.len() == 2 && fields.is_empty() {
             let key = format!("{head}.{}", path.segments[1]);
             if self.globals.contains_key(&key) {
-                return self.expr(&ast::Expr::Path(key, line), None);
+                return self.expr(&ast::Expr::Path(key, span), None);
             }
         }
 
@@ -9553,14 +9560,14 @@ impl Fn<'_> {
             && path.segments[1] == "with_capacity"
         {
             let [(_, arg)] = fields else {
-                return err(line, "`with_capacity` takes one argument");
+                return err(span, "`with_capacity` takes one argument");
             };
             let elem = match expected {
                 Some(Ty::VecOf(e)) => (**e).clone(),
                 _ if head == "String" => Ty::Char,
                 _ => {
                     return err(
-                        line,
+                        span,
                         "cannot tell what `Vec::with_capacity` holds; write the type of \
                          this value (Ch. 4 §2.3)",
                     );
@@ -9574,11 +9581,11 @@ impl Fn<'_> {
                     off,
                     &Ty::TAddr,
                     Operand::Const(Type::Int(27), Bt::ZERO),
-                    line,
+                    span,
                 )?;
             }
             let (n, _) = self.expr(arg, Some(&Ty::TAddr))?;
-            self.vec_reserve(Operand::Value(slot.clone()), &elem, n, line)?;
+            self.vec_reserve(Operand::Value(slot.clone()), &elem, n, span)?;
             return Ok((Operand::Value(slot), ty));
         }
 
@@ -9587,7 +9594,7 @@ impl Fn<'_> {
             && path.segments[1] == "new"
         {
             if !fields.is_empty() {
-                return err(line, "`Vec::new` takes no arguments");
+                return err(span, "`Vec::new` takes no arguments");
             }
             // `String::new` needs no annotation: `String` *is* `Vec<char>`,
             // so the element type is in the name.
@@ -9596,7 +9603,7 @@ impl Fn<'_> {
                 _ if head == "String" => Box::new(Ty::Char),
                 _ => {
                     return err(
-                        line,
+                        span,
                         "cannot tell what `Vec::new` holds; write the type of this value \
                          (Ch. 4 §2.3)",
                     );
@@ -9610,7 +9617,7 @@ impl Fn<'_> {
                     off,
                     &Ty::TAddr,
                     Operand::Const(Type::Int(27), Bt::ZERO),
-                    line,
+                    span,
                 )?;
             }
             return Ok((Operand::Value(slot), ty));
@@ -9627,12 +9634,12 @@ impl Fn<'_> {
         {
             let [(_, arg)] = fields else {
                 return err(
-                    line,
+                    span,
                     format!("`Box::{}` takes one argument", path.segments[1]),
                 );
             };
             let fallible = path.segments[1] == "try_new";
-            return self.box_new(arg, fallible, line);
+            return self.box_new(arg, fallible, span);
         }
 
         // `char::try_from(x)` — the one conversion into `char`, and the one
@@ -9641,11 +9648,11 @@ impl Fn<'_> {
         // produce a `char` from a word, which is exactly what no `as` does.
         if path.segments.len() == 2 && head == "char" && path.segments[1] == "try_from" {
             let [(_, arg)] = fields else {
-                return err(line, "`char::try_from` takes one argument");
+                return err(span, "`char::try_from` takes one argument");
             };
             let (v, vt) = self.expr(arg, Some(&Ty::T27))?;
-            self.check(&vt, &Ty::T27, line, "`char::try_from`'s argument")?;
-            return self.char_try_from(v, line);
+            self.check(&vt, &Ty::T27, span, "`char::try_from`'s argument")?;
+            return self.char_try_from(v, span);
         }
 
         // `Type::function(args)` — an associated function, which is written
@@ -9654,30 +9661,30 @@ impl Fn<'_> {
             let key = format!("{head}.{}", path.segments[1]);
             if self.sigs.borrow().contains_key(&key) {
                 let args: Vec<ast::Expr> = fields.iter().map(|(_, e)| e.clone()).collect();
-                return self.call_key(&key, Vec::new(), &args, line);
+                return self.call_key(&key, Vec::new(), &args, span);
             }
             // A method of a trait that takes arguments is not under
             // `Type.method`: there may be several, and which one is meant is
             // decided by the arguments given (Ch. 4 §1.7).
             let args: Vec<ast::Expr> = fields.iter().map(|(_, e)| e.clone()).collect();
-            if let Some(key) = self.trait_method(&head, &path.segments[1], &args, line)? {
-                return self.call_key(&key, Vec::new(), &args, line);
+            if let Some(key) = self.trait_method(&head, &path.segments[1], &args, span)? {
+                return self.call_key(&key, Vec::new(), &args, span);
             }
             // An associated function of a *generic* type. The head is already
             // the instantiation's mangled name — the context said which one —
             // and its methods live under the base name until one is asked
             // for, which is what `method_key` asks (Ch. 4 §§1.4, 2.7).
             if self.types.instantiations.borrow().contains_key(&head) {
-                let key = self.method_key(&head, &path.segments[1], line)?;
+                let key = self.method_key(&head, &path.segments[1], span)?;
                 if self.sigs.borrow().contains_key(&key) {
-                    return self.call_key(&key, Vec::new(), &args, line);
+                    return self.call_key(&key, Vec::new(), &args, span);
                 }
                 // A method that still has parameters of its own goes through
                 // the ordinary generic path, which is where the call's
                 // arguments settle them (Ch. 4 §2.7).
                 if self.generic_fns.contains_key(&key) || self.specials.borrow().contains_key(&key)
                 {
-                    return self.call(&key, &[], &args, expected, line);
+                    return self.call(&key, &[], &args, expected, span);
                 }
             }
         }
@@ -9686,23 +9693,23 @@ impl Fn<'_> {
         if path.segments.len() == 2 {
             let (enum_name, variant) = (head, path.segments[1].clone());
             if !self.types.enums.borrow().contains_key(&enum_name) {
-                return err(line, format!("`{enum_name}` is not an enum in scope"));
+                return err(span, format!("`{enum_name}` is not an enum in scope"));
             }
             let Some(index) = self.types.variant(&enum_name, &variant) else {
-                return err(line, format!("`{enum_name}` has no variant `{variant}`"));
+                return err(span, format!("`{enum_name}` has no variant `{variant}`"));
             };
-            return self.build_variant(&enum_name, index, fields, line);
+            return self.build_variant(&enum_name, index, fields, span);
         }
 
         // A struct literal.
         if !self.types.structs.borrow().contains_key(&head) {
-            return err(line, format!("`{head}` is not a struct in scope"));
+            return err(span, format!("`{head}` is not a struct in scope"));
         }
         let ty = Ty::Struct(head.clone());
         let declared = self.types.fields(&ty);
         if declared.len() != fields.len() {
             return err(
-                line,
+                span,
                 format!(
                     "`{head}` has {} field(s), {} given",
                     declared.len(),
@@ -9713,11 +9720,11 @@ impl Fn<'_> {
         let slot = self.dest_or_temp(&ty);
         for (name, value) in fields {
             let Some((_, ft, off)) = declared.iter().find(|(n, _, _)| n == name).cloned() else {
-                return err(line, format!("`{head}` has no field `{name}`"));
+                return err(span, format!("`{head}` has no field `{name}`"));
             };
             let (v, vt) = self.expr(value, Some(&ft))?;
-            self.check(&vt, &ft, value.line(), "field")?;
-            self.store_at(&slot, off, &ft, v, line)?;
+            self.check(&vt, &ft, value.span(), "field")?;
+            self.store_at(&slot, off, &ft, v, span)?;
         }
         Ok((Operand::Value(slot), ty))
     }
@@ -9729,13 +9736,13 @@ impl Fn<'_> {
         enum_name: &str,
         index: usize,
         fields: &[(String, ast::Expr)],
-        line: Line,
+        span: Span,
     ) -> R<(Operand, Ty)> {
         let ty = Ty::Enum(enum_name.to_string());
         let declared = self.types.variant_fields(enum_name, index);
         if declared.len() != fields.len() {
             return err(
-                line,
+                span,
                 format!(
                     "this variant has {} field(s), {} given",
                     declared.len(),
@@ -9748,13 +9755,13 @@ impl Fn<'_> {
         let mut values = Vec::new();
         for (name, value) in fields {
             let Some((_, ft, _)) = declared.iter().find(|(n, _, _)| n == name).cloned() else {
-                return err(line, format!("this variant has no field `{name}`"));
+                return err(span, format!("this variant has no field `{name}`"));
             };
             let (v, vt) = self.expr(value, Some(&ft))?;
-            self.check(&vt, &ft, value.line(), "field")?;
+            self.check(&vt, &ft, value.span(), "field")?;
             values.push((name.clone(), v));
         }
-        self.build_variant_into(&slot, enum_name, index, &values, line)?;
+        self.build_variant_into(&slot, enum_name, index, &values, span)?;
         Ok((Operand::Value(slot), ty))
     }
 
@@ -9778,7 +9785,7 @@ impl Fn<'_> {
         enum_name: &str,
         index: usize,
         fields: &[(String, Operand)],
-        line: Line,
+        span: Span,
     ) -> R<()> {
         let ty = Ty::Enum(enum_name.to_string());
         let l = self.types.layout(&ty);
@@ -9793,16 +9800,16 @@ impl Fn<'_> {
         // construction of every variant. `Option<t27>` paid six.
         for (name, v) in fields {
             let Some((_, ft, off)) = declared.iter().find(|(n, _, _)| n == name).cloned() else {
-                return err(line, format!("this variant has no field `{name}`"));
+                return err(span, format!("this variant has no field `{name}`"));
             };
-            self.store_at(&slot, off, &ft, v.clone(), line)?;
+            self.store_at(&slot, off, &ft, v.clone(), span)?;
         }
 
-        self.write_tag(&slot, &e, index, line)
+        self.write_tag(&slot, &e, index, span)
     }
 
     /// Store the discriminant of variant `index`.
-    fn write_tag(&mut self, slot: &str, e: &layout::EnumLayout, index: usize, line: Line) -> R<()> {
+    fn write_tag(&mut self, slot: &str, e: &layout::EnumLayout, index: usize, span: Span) -> R<()> {
         match &e.tag {
             layout::Tag::None => Ok(()),
 
@@ -9847,7 +9854,7 @@ impl Fn<'_> {
                     .position(|i| i == index)
                     .expect("a tagged variant") as u128;
                 let Some(value) = spot.nth(which) else {
-                    return err(line, "this enum has more variants than niches");
+                    return err(span, "this enum has more variants than niches");
                 };
                 let tir = Type::Int(spot.trits);
                 let p = self.offset(Operand::Value(slot.to_string()), *offset as i128);
@@ -9913,11 +9920,14 @@ impl Fn<'_> {
     /// Write a value into a join slot. An aggregate is copied: the arms
     /// produce addresses, and the join needs one storage location they all
     /// agree on.
-    fn store_slot(&mut self, slot: &str, ty: &Ty, v: Operand) {
+    ///
+    /// `span` is only ever reached by the aggregate path, and a drop flag is a
+    /// `bool`, which is why the three that write one pass `Span::NONE`.
+    fn store_slot(&mut self, slot: &str, ty: &Ty, v: Operand, span: Span) {
         if ty.is_aggregate() {
             let dst = Operand::Value(slot.to_string());
             let ty = ty.clone();
-            let _ = self.copy_typed(dst, v, &ty, 0);
+            let _ = self.copy_typed(dst, v, &ty, span);
             return;
         }
         self.push(Inst {
@@ -9951,7 +9961,7 @@ impl Fn<'_> {
         then: &ast::Block,
         els: Option<&ast::Expr>,
         expected: Option<&Ty>,
-        line: Line,
+        span: Span,
     ) -> R<(Operand, Ty)> {
         // Where this `if`'s value is going, if it was told. Both arms are
         // given it, so each may build its value there rather than somewhere
@@ -9960,7 +9970,7 @@ impl Fn<'_> {
         // The condition is a `bool`, not a `trit`, and not "anything
         // nonzero" (Ch. 1 §2).
         let (c, ct) = self.expr(cond, Some(&Ty::Bool))?;
-        self.check(&ct, &Ty::Bool, line, "condition")?;
+        self.check(&ct, &Ty::Bool, span, "condition")?;
 
         let (then_l, else_l, join_l) = (self.fresh("then"), self.fresh("else"), self.fresh("join"));
         self.br3(c, &else_l, &else_l, &then_l);
@@ -9981,7 +9991,7 @@ impl Fn<'_> {
             };
             // A value that was built in the join slot is already there.
             if tv != Operand::Value(slot.clone()) {
-                self.store_slot(&slot, &tt, tv);
+                self.store_slot(&slot, &tt, tv, span);
             }
             result = Some((slot, tt.clone()));
         }
@@ -10000,9 +10010,9 @@ impl Fn<'_> {
                     && et != Ty::Never
                 {
                     let (slot, ty) = (slot.clone(), ty.clone());
-                    self.check(&et, &ty, line, "`else` branch")?;
+                    self.check(&et, &ty, span, "`else` branch")?;
                     if ev != Operand::Value(slot.clone()) {
-                        self.store_slot(&slot, &ty, ev);
+                        self.store_slot(&slot, &ty, ev, span);
                     }
                 }
                 et
@@ -10020,7 +10030,7 @@ impl Fn<'_> {
                 Ok((v, ty))
             }
             Some((_, ty)) if ty != Ty::Unit && expected.is_some_and(|e| *e != Ty::Unit) => {
-                err(line, "an `if` used for its value needs an `else` branch")
+                err(span, "an `if` used for its value needs an `else` branch")
             }
             _ => {
                 if tt == Ty::Never && et == Ty::Never {
@@ -10032,7 +10042,7 @@ impl Fn<'_> {
         }
     }
 
-    fn while_expr(&mut self, cond: &ast::Expr, body: &ast::Block, line: Line) -> R<(Operand, Ty)> {
+    fn while_expr(&mut self, cond: &ast::Expr, body: &ast::Block, span: Span) -> R<(Operand, Ty)> {
         let (head, body_l, exit) = (self.fresh("while"), self.fresh("body"), self.fresh("done"));
         // The **body first**, and the test after it.
         //
@@ -10056,12 +10066,12 @@ impl Fn<'_> {
         });
         self.block(body, None)?;
         self.loops.pop();
-        self.check_no_move_in_loop(&before, line)?;
+        self.check_no_move_in_loop(&before, span)?;
         self.jump(&head);
 
         self.start(head);
         let (c, ct) = self.expr(cond, Some(&Ty::Bool))?;
-        self.check(&ct, &Ty::Bool, line, "condition")?;
+        self.check(&ct, &Ty::Bool, span, "condition")?;
         self.br3(c, &exit, &exit, &body_l);
 
         self.start(exit);
@@ -10072,7 +10082,7 @@ impl Fn<'_> {
         &mut self,
         body: &ast::Block,
         expected: Option<&Ty>,
-        _line: Line,
+        _line: Span,
     ) -> R<(Operand, Ty)> {
         let (head, exit) = (self.fresh("loop"), self.fresh("done"));
         // A `loop` yields a value only if something expects one; `break expr`
@@ -10120,7 +10130,7 @@ impl Fn<'_> {
         scrutinee: &ast::Expr,
         arms: &[ast::Arm],
         expected: Option<&Ty>,
-        line: Line,
+        span: Span,
     ) -> R<(Operand, Ty)> {
         let dest = self.dest.take();
         let (mut v, mut ty) = self.expr(scrutinee, None)?;
@@ -10148,12 +10158,12 @@ impl Fn<'_> {
             ty = *target;
         }
         if let Ty::Enum(name) = ty.clone() {
-            return self.match_enum(&name, v, arms, expected, borrowed, dest, line);
+            return self.match_enum(&name, v, arms, expected, borrowed, dest, span);
         }
         if !ty.is_scalar() {
-            return err(line, format!("cannot match on {ty}"));
+            return err(span, format!("cannot match on {ty}"));
         }
-        check_exhaustive(&ty, arms, line)?;
+        check_exhaustive(&ty, arms, span)?;
 
         let join = self.fresh("match.join");
         let mut result: Option<(String, Ty)> = None;
@@ -10174,7 +10184,7 @@ impl Fn<'_> {
             for (arm, label) in arms.iter().zip(&labels) {
                 self.owned = before.clone();
                 self.start(label.clone());
-                self.arm_body(arm, expected, &mut result, &join, line, None, &dest)?;
+                self.arm_body(arm, expected, &mut result, &join, span, None, &dest)?;
                 merged = Some(self.join_arm(merged));
             }
             if let Some(m) = merged {
@@ -10192,9 +10202,9 @@ impl Fn<'_> {
             let next = self.fresh("arm.next");
             let body = self.fresh("arm");
             self.owned = before.clone();
-            let unconditional = self.arm_test(arm, &v, &ty, &body, &next, line)?;
+            let unconditional = self.arm_test(arm, &v, &ty, &body, &next, span)?;
             self.start(body);
-            self.arm_body(arm, expected, &mut result, &join, line, None, &dest)?;
+            self.arm_body(arm, expected, &mut result, &join, span, None, &dest)?;
             merged = Some(self.join_arm(merged));
             if unconditional {
                 // A wildcard or binding matches everything, so no later arm
@@ -10229,7 +10239,7 @@ impl Fn<'_> {
         expected: Option<&Ty>,
         borrowed: bool,
         dest: Option<String>,
-        line: Line,
+        span: Span,
     ) -> R<(Operand, Ty)> {
         let ty = Ty::Enum(name.to_string());
         let l = self.types.layout(&ty);
@@ -10240,10 +10250,10 @@ impl Fn<'_> {
         let mut selects: Vec<Option<usize>> = Vec::new();
         for arm in arms {
             if arm.guard.is_some() {
-                return err(arm.line, "match guards are not lowered yet");
+                return err(arm.span, "match guards are not lowered yet");
             }
             if arm.patterns.len() != 1 {
-                return err(arm.line, "or-patterns over an enum are not lowered yet");
+                return err(arm.span, "or-patterns over an enum are not lowered yet");
             }
             selects.push(match &arm.patterns[0] {
                 ast::Pattern::Wild(_) | ast::Pattern::Bind(..) => None,
@@ -10265,7 +10275,7 @@ impl Fn<'_> {
                 }
                 other => {
                     return err(
-                        other.line(),
+                        other.span(),
                         format!("this pattern does not match `{name}`"),
                     );
                 }
@@ -10276,7 +10286,7 @@ impl Fn<'_> {
         let catchall = selects.iter().any(Option::is_none);
         if !catchall && covered.len() < variants.len() {
             return err(
-                line,
+                span,
                 format!(
                     "this `match` is not exhaustive: `{name}` has {} variant(s), {} covered",
                     variants.len(),
@@ -10311,7 +10321,7 @@ impl Fn<'_> {
                     &mut result,
                     &join,
                     borrowed,
-                    line,
+                    span,
                     &dest,
                 )?;
                 merged = Some(self.join_arm(merged));
@@ -10372,7 +10382,7 @@ impl Fn<'_> {
                 &mut result,
                 &join,
                 borrowed,
-                line,
+                span,
                 &dest,
             )?;
             merged = Some(self.join_arm(merged));
@@ -10393,7 +10403,7 @@ impl Fn<'_> {
                     &mut result,
                     &join,
                     borrowed,
-                    line,
+                    span,
                     &dest,
                 )?;
                 merged = Some(self.join_arm(merged));
@@ -10420,7 +10430,7 @@ impl Fn<'_> {
         result: &mut Option<(String, Ty)>,
         join: &str,
         borrowed: bool,
-        line: Line,
+        span: Span,
         dest: &Option<String>,
     ) -> R<()> {
         let depth = self.scopes.len();
@@ -10433,14 +10443,14 @@ impl Fn<'_> {
             } else {
                 self.declare(name, ty.clone(), false)
             };
-            self.store_at(&local.slot, 0, &ty, addr.clone(), line)?;
+            self.store_at(&local.slot, 0, &ty, addr.clone(), span)?;
         }
         if let (Some(index), ast::Pattern::Aggregate(_, fields, _)) = (variant, &arm.patterns[0]) {
             let declared = self.types.variant_fields(enum_name, index);
             if !fields.is_empty() && fields.len() != declared.len() {
                 self.scopes.pop();
                 return err(
-                    arm.line,
+                    arm.span,
                     format!(
                         "this variant has {} field(s), the pattern names {}",
                         declared.len(),
@@ -10452,11 +10462,11 @@ impl Fn<'_> {
                 let Some((_, ft, off)) = declared.iter().find(|(n, _, _)| n == name).cloned()
                 else {
                     self.scopes.pop();
-                    return err(arm.line, format!("this variant has no field `{name}`"));
+                    return err(arm.span, format!("this variant has no field `{name}`"));
                 };
                 let ast::Pattern::Bind(bound, _) = pat else {
                     self.scopes.pop();
-                    return err(arm.line, "nested patterns are not lowered yet");
+                    return err(arm.span, "nested patterns are not lowered yet");
                 };
                 let p = self.offset(addr.clone(), off);
                 let v = self.load_from(p, &ft);
@@ -10468,11 +10478,11 @@ impl Fn<'_> {
                 } else {
                     self.declare(bound, ft.clone(), false)
                 };
-                self.store_at(&local.slot, 0, &ft, v, arm.line)?;
+                self.store_at(&local.slot, 0, &ft, v, arm.span)?;
             }
         }
 
-        let r = self.arm_body(arm, expected, result, join, line, Some(depth), dest);
+        let r = self.arm_body(arm, expected, result, join, span, Some(depth), dest);
         self.scopes.pop();
         r
     }
@@ -10520,7 +10530,7 @@ impl Fn<'_> {
         expected: Option<&Ty>,
         result: &mut Option<(String, Ty)>,
         join: &str,
-        line: Line,
+        span: Span,
         scope: Option<usize>,
         dest: &Option<String>,
     ) -> R<()> {
@@ -10536,14 +10546,14 @@ impl Fn<'_> {
                 *result = Some((slot, ty.clone()));
             }
             let (slot, want) = result.clone().expect("just set");
-            self.check(&ty, &want, line, "match arm")?;
+            self.check(&ty, &want, span, "match arm")?;
             // A value built in the join slot is already there.
             if v != Operand::Value(slot.clone()) {
-                self.store_slot(&slot, &want, v);
+                self.store_slot(&slot, &want, v, span);
             }
         }
         if let Some(depth) = scope {
-            self.drop_scope(depth, arm.line)?;
+            self.drop_scope(depth, arm.span)?;
         }
         self.jump(join);
         Ok(())
@@ -10558,10 +10568,10 @@ impl Fn<'_> {
         ty: &Ty,
         body: &str,
         next: &str,
-        line: Line,
+        span: Span,
     ) -> R<bool> {
         if arm.guard.is_some() {
-            return err(line, "match guards are not lowered yet");
+            return err(span, "match guards are not lowered yet");
         }
         // A wildcard or binding matches everything.
         if arm
@@ -10574,7 +10584,7 @@ impl Fn<'_> {
         }
         let mut remaining = arm.patterns.len();
         for p in &arm.patterns {
-            let value = pattern_value(p, ty, line)?;
+            let value = pattern_value(p, ty, span)?;
             let k = Operand::Const(ty.tir(), value);
             let c = self.emit(
                 "c",
@@ -10736,7 +10746,7 @@ fn unit() -> Operand {
     Operand::Const(Type::Int(27), Bt::ZERO)
 }
 
-fn pattern_value(p: &ast::Pattern, ty: &Ty, line: Line) -> R<Bt> {
+fn pattern_value(p: &ast::Pattern, ty: &Ty, span: Span) -> R<Bt> {
     match p {
         ast::Pattern::Int(v, l) => {
             if !ty.is_arithmetic() {
@@ -10762,7 +10772,7 @@ fn pattern_value(p: &ast::Pattern, ty: &Ty, line: Line) -> R<Bt> {
             }
             Ok(Bt::from_i128(*v))
         }
-        _ => err(line, "unsupported pattern"),
+        _ => err(span, "unsupported pattern"),
     }
 }
 
@@ -10823,7 +10833,7 @@ fn trit_dispatch(arms: &[ast::Arm]) -> Option<[Option<usize>; 3]> {
 
 /// A `match` must be exhaustive (Ch. 2 §5). Over a `trit` that means three
 /// arms or a wildcard; over `bool`, two; over an integer, a wildcard.
-fn check_exhaustive(ty: &Ty, arms: &[ast::Arm], line: Line) -> R<()> {
+fn check_exhaustive(ty: &Ty, arms: &[ast::Arm], span: Span) -> R<()> {
     let mut seen: Vec<Bt> = Vec::new();
     for arm in arms {
         if arm.guard.is_some() {
@@ -10833,7 +10843,7 @@ fn check_exhaustive(ty: &Ty, arms: &[ast::Arm], line: Line) -> R<()> {
             match p {
                 ast::Pattern::Wild(_) | ast::Pattern::Bind(..) => return Ok(()),
                 _ => {
-                    let v = pattern_value(p, ty, line)?;
+                    let v = pattern_value(p, ty, span)?;
                     if !seen.contains(&v) {
                         seen.push(v);
                     }
@@ -10850,7 +10860,7 @@ fn check_exhaustive(ty: &Ty, arms: &[ast::Arm], line: Line) -> R<()> {
         Ok(())
     } else {
         err(
-            line,
+            span,
             format!(
                 "this `match` is not exhaustive: {ty} needs {} more case(s) or a `_` arm",
                 if needed == usize::MAX {

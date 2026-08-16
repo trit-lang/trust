@@ -127,7 +127,8 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6). **83 M instructions/second**, 32× what it was (G8.15) |
 | `trust` driver | compile and run in one command, nothing on the disk (G0.4); `trust check` reports diagnostics and stops |
-| `trust-lsp` | diagnostics over stdio, from the compiler itself — no second implementation of the language. Whole-line ranges, because a diagnostic carries a line and nothing narrower (G0.5) |
+| `trust-lsp` | diagnostics over stdio, from the compiler itself — no second implementation of the language. Ranges are the expression that is wrong, in the protocol's UTF-16 columns (G0.5) |
+| spans | every token, AST node and error carries one: the line, and the characters it covers. `LineMap` turns an offset into a column for a terminal or a code-unit offset for an editor |
 
 **447 tests, zero clippy warnings, 95 commits.** `scripts/stats.sh`.
 
