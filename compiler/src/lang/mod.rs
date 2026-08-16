@@ -696,15 +696,7 @@ pub struct Analysis {
 /// own file, so its spans are offsets into *it* and would be read as places
 /// in this one. `Noted` says the rest of what bounds it.
 pub fn analyze(src: &str) -> Analysis {
-    let user = match parse::parse(src) {
-        Ok(f) => f,
-        Err(e) => {
-            return Analysis {
-                errors: vec![e],
-                types: lower::Noted::default(),
-            };
-        }
-    };
+    let (user, syntax) = parse::parse_recovering(src);
     let mine: std::collections::HashSet<String> = user
         .items
         .iter()
@@ -713,11 +705,16 @@ pub fn analyze(src: &str) -> Analysis {
         .collect();
     let file = merged(&user);
     let noted = std::cell::RefCell::new(lower::Noted::default());
-    let errors = lower::lower_noting(&file, &mine, Some(&noted))
+    let found = lower::lower_noting(&file, &mine, Some(&noted))
         .err()
         .unwrap_or_default();
     Analysis {
-        errors,
+        // A file that does not parse is not type-checked. What lowering
+        // would say about the part that did parse is mostly about the part
+        // that did not — every call to the function being typed is "not a
+        // function in scope" — and a list of consequences buries the cause.
+        // The types are kept, because a type is not a complaint.
+        errors: if syntax.is_empty() { found } else { syntax },
         types: noted.into_inner(),
     }
 }

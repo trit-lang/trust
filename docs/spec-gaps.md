@@ -3151,10 +3151,37 @@ It costs one `Option` test per expression when nobody asked, so `trustc` and
 `trust` pay nothing. `analyze` on the largest example here (HPL.tr, a
 thousand lines) takes **4.7 ms**, which is a hover's budget many times over.
 
-*What is still not there.* **Member completion.** The receiver's type is now
-knowable, but which fields and methods a type has lives in lowering's own
-tables, which `analyze` does not keep — so after a `.` the server still
-offers nothing.
+*A file being typed into is a file with a syntax error in it.* Stopping at
+the first one meant the other twenty functions had no outline, no hover and
+no completion — the editor went blank exactly when it was being used. So
+`parse_recovering` skips an item that does not parse and reads the rest.
+
+Recovery is at **item** level and nowhere finer: inside an item the parser
+knows too much about what it expected to guess well, and half an item is
+worse than none. It counts braces on the way out, so a `fn` inside the body
+of the item that failed is not mistaken for the next one. A *lexical* error
+still stops everything, because there is nothing to skip to — an unterminated
+string swallows the rest of the file by definition.
+
+A file that does not parse is **not type-checked**. What lowering would say
+about the part that parsed is mostly about the part that did not — every
+call to the function being typed is "not a function in scope" — and a list
+of consequences buries the cause. The types are still kept, because a type
+is not a complaint.
+
+    fn broken( -> t27 { 1 }        one diagnostic, on that line
+    outline                        helper, main
+    hover on `total`               let total // t27
+    go to `helper`                 line 1
+    completion                     total, helper, main, Option, …
+
+*What is still not there.* **Member completion.** Two things, and the second
+is the harder one. Which fields and methods a type has lives in lowering's
+tables, which `analyze` does not keep — that is plumbing. But `p.` with
+nothing after it is not an expression, so *the statement it is in* does not
+parse, and item-level recovery does not go inside an item. Offering members
+means the parser has to make something of a half-written expression, which
+is a different kind of tolerance from skipping an item.
 
 *The other half of an editor is a second grammar.* Zed's highlighting is
 **tree-sitter only**, so `editors/tree-sitter-trust` exists, and it is a

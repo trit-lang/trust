@@ -232,13 +232,12 @@ impl Server {
 
     /// The index of whatever file a request is about.
     ///
-    /// A parse error means there is nothing to index — but the diagnostics
-    /// already said so, so this answers with nothing and does not complain
-    /// twice.
+    /// Parsed with recovery, because the file is being typed into: an item
+    /// that does not parse yet costs its own outline entry and nothing else.
     fn indexed(&self, m: &Json) -> Option<(lang::LineMap, lang::index::Index, String)> {
         let uri = m.str_at(&["params", "textDocument", "uri"])?;
         let src = self.open.get(uri)?;
-        let file = lang::parse::parse(src).ok()?;
+        let (file, _) = lang::parse::parse_recovering(src);
         Some((
             lang::LineMap::new(src),
             lang::index::Index::new(&file),
@@ -263,7 +262,7 @@ impl Server {
         if after_a_dot(&chars, at) {
             return Some("{\"isIncomplete\":false,\"items\":[]}".to_string());
         }
-        let file = lang::parse::parse(src).ok()?;
+        let (file, _) = lang::parse::parse_recovering(src);
         let index = lang::index::Index::new(&file);
 
         let mut items: Vec<String> = Vec::new();
@@ -292,10 +291,7 @@ impl Server {
         let Some(src) = self.open.get(uri) else {
             return;
         };
-        let found = match lang::compile(src) {
-            Ok(_) => Vec::new(),
-            Err(errs) => errs,
-        };
+        let found = lang::analyze(src).errors;
         let map = lang::LineMap::new(src);
         let diagnostics: Vec<Diagnostic<'_>> = found.iter().map(|e| at(&map, e)).collect();
         publish(uri, &diagnostics);

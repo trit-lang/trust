@@ -24,6 +24,50 @@ pub fn parse(src: &str) -> R<File> {
     Ok(file)
 }
 
+/// Parse a file, keeping going past an item that does not parse.
+///
+/// An editor asks about a file that is being typed into, which is a file with
+/// a syntax error in it most of the time. Stopping at the first one means the
+/// other twenty functions have no outline, no hover and no completion —
+/// which is to say the editor goes blank exactly when it is being used.
+///
+/// So an item that fails is skipped, up to the next token that could start
+/// one, and the rest of the file is parsed. Recovery is at **item** level and
+/// nowhere finer: inside an item the parser knows too much about what it
+/// expected to guess well, and half an item is worse than none.
+///
+/// A lexical error stops everything, because there is nothing to skip *to* —
+/// an unterminated string swallows the rest of the file by definition.
+pub fn parse_recovering(src: &str) -> (File, Vec<SyntaxError>) {
+    let toks = match lex(src) {
+        Ok(t) => t,
+        Err(e) => return (File::default(), vec![e]),
+    };
+    let mut p = Parser {
+        counter: 0,
+        toks,
+        pos: 0,
+        no_struct: false,
+    };
+    let (mut file, mut errs) = (File::default(), Vec::new());
+    while !p.at(&Tok::Eof) {
+        let start = p.pos;
+        match p.item() {
+            Ok(item) => file.items.push(item),
+            Err(e) => {
+                errs.push(e);
+                // Always move: an item that failed on its very first token
+                // would otherwise fail on it again forever.
+                if p.pos == start {
+                    p.bump();
+                }
+                p.skip_to_item();
+            }
+        }
+    }
+    (file, errs)
+}
+
 struct Parser {
     toks: Vec<(Tok, Span)>,
     pos: usize,
@@ -130,6 +174,36 @@ impl Parser {
             true
         } else {
             false
+        }
+    }
+
+    /// Skip to where an item could begin, for recovery.
+    ///
+    /// Braces are counted, so a `fn` written inside the body of the item that
+    /// failed is not mistaken for the next one — the failure is usually
+    /// *before* the body, and its `{ … }` is still there to step over.
+    fn skip_to_item(&mut self) {
+        let mut depth = 0i32;
+        while !self.at(&Tok::Eof) {
+            match self.peek() {
+                Tok::Op("{") => depth += 1,
+                Tok::Op("}") => {
+                    depth -= 1;
+                    // The brace that closed the item that failed: what
+                    // follows it starts the next one.
+                    if depth <= 0 {
+                        self.bump();
+                        return;
+                    }
+                }
+                Tok::Kw("fn" | "struct" | "enum" | "trait" | "impl" | "const") | Tok::Op("#")
+                    if depth <= 0 =>
+                {
+                    return;
+                }
+                _ => {}
+            }
+            self.bump();
         }
     }
 
@@ -2065,6 +2139,55 @@ mod tests {
         // diagnostic about the call underlines one, a rename changes the
         // other.
         assert_eq!(text(src, at), "max");
+    }
+
+    #[test]
+    fn a_broken_item_does_not_take_the_rest_of_the_file_with_it() {
+        let src = "fn a() -> t27 { 1 }\n                   fn b( -> t27 { 2 }\n                   fn c() -> t27 { 3 }\n                   struct P { x: t27 }\n";
+        let (file, errs) = parse_recovering(src);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        let names: Vec<&str> = file
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Fn(f) => Some(f.name.as_str()),
+                Item::Struct(s) => Some(s.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["a", "c", "P"], "the broken one, and only it");
+    }
+
+    #[test]
+    fn recovery_steps_over_the_body_of_what_failed() {
+        // The failure is in the signature, and the body's own `fn`-looking
+        // insides must not be read as the next item.
+        let src = "fn bad(x: ) -> t27 {\n    let f = 1;\n    f\n}\n                   fn good() -> t27 { 7 }\n";
+        let (file, errs) = parse_recovering(src);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert_eq!(file.items.len(), 1);
+        let Item::Fn(f) = &file.items[0] else {
+            panic!("a function")
+        };
+        assert_eq!(f.name, "good");
+    }
+
+    #[test]
+    fn a_file_that_parses_recovers_into_exactly_what_it_parsed() {
+        let src = "struct P { x: t27 }\nfn f(p: P) -> t27 { p.x }\n";
+        let (file, errs) = parse_recovering(src);
+        assert!(errs.is_empty(), "{errs:?}");
+        assert_eq!(file, parse(src).expect("parses"));
+    }
+
+    #[test]
+    fn an_unterminated_string_stops_rather_than_recovers() {
+        // There is nothing to skip to: the quote swallows the rest by
+        // definition, so what follows is not the file anyone wrote.
+        let (file, errs) = parse_recovering("fn f() { \"oops }\nfn g() {}\n");
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("unterminated"), "{errs:?}");
+        assert!(file.items.is_empty());
     }
 
     #[test]

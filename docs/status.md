@@ -130,6 +130,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | `trust-lsp` | diagnostics over stdio, from the compiler itself — no second implementation of the language. Ranges are the expression that is wrong, in the protocol's UTF-16 columns (G0.19) |
 | `editors/` | a tree-sitter grammar (a second parser, held to the first by `scripts/grammar.sh`) and a Zed extension. G0.19 |
 | `lang::index` | an outline, go-to-definition, hover, find-references, rename and completion, from the AST alone — so both work on a file that does not compile. Names resolve by scope and spelling; what needs a type is left unanswered rather than guessed (G0.19) |
+| `parse_recovering` | an item that does not parse is skipped and the rest of the file is read, because an editor is asked about a file that is being typed into (G0.19) |
 | `lang::analyze` | lowering's own answers, kept: the type of each expression by where it was written, so a hover can say what `let n = 1` is (G0.19) |
 | spans | every token, AST node and error carries one: the line, and the characters it covers. `LineMap` turns an offset into a column for a terminal or a code-unit offset for an editor |
 
