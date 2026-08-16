@@ -2,3 +2,6 @@
 
 # The Zed extension is its own workspace, with its own build directory.
 editors/zed/target/
+
+# Zed clones the grammar repository here when it builds a dev extension.
+editors/zed/grammars/
