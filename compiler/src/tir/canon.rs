@@ -80,8 +80,13 @@ pub fn canonicalize_module(m: &Module) -> Module {
         crate::tir::mem2reg::promote(f);
         fold_constants(f);
         elide_sign_checks(f);
-        elide_dominated_checks(f);
+        // After the branch is on the comparison rather than on a `bool` made
+        // of it. Until then a loop's condition is a `select3` and a two-way
+        // branch whose three targets are *exit, exit, body*, and the operand
+        // is the `select3` — so no fact is read off it at all. Measured: the
+        // loop header's fact was simply absent before this line moved.
         branch_through_select(f);
+        elide_dominated_checks(f);
         remove_dead(f);
     }
     out

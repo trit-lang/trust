@@ -2891,10 +2891,40 @@ copy it is collected and in scope, and the fold still does not happen, so
 there the equivalence is what fails.
 
 Two different causes wearing the same symptom, and neither is the one the
-escape test addresses. The next step is to find out why a header's fact goes
-uncollected — the edge test requires the taken target to have exactly one
-predecessor, and something about the shape after `elide_sign_checks` may
-break that — rather than to write more analysis on top.
+escape test addresses.
+
+*The first is found and fixed.* `elide_dominated_checks` ran **before**
+`branch_through_select`, and until that pass a loop's condition is a `select3`
+and a two-way branch whose three targets are *exit, exit, body* — with the
+`select3`, not the comparison, as the branch's operand. So the header's fact
+was not merely on the wrong edge, it was never read at all. One line moved,
+and the diagnostic goes from
+
+```text
+DBG idx.lo.20 facts=["idx.ok.23"]
+```
+
+to
+
+```text
+DBG idx.lo.20 facts=["body.8<", "idx.ok.23<"]
+```
+
+*The second is not.* With the fact present, the fold still does not happen,
+and the state is now known exactly:
+
+```text
+fact@body.8 settled=false bases=Some({"a.slot.1"})
+   a=%i  b=%v.12    (the header's length)
+   x2=%i y2=%v.17   (the check's length)
+```
+
+The index matches by name, the base resolves to a slot that does not escape,
+and `settled` is false — yet re-running the same clobber test by hand names
+**no block that clobbers**. Something between computing `settled` and reading
+it disagrees with itself, and finding out which needs an afternoon rather than
+another guess. The escape analysis is written and correct as far as it goes;
+it is not committed, because it moves no number until this is resolved.
 
 *Kept as a method note.* Three times in this session a change that looked
 obviously right measured nothing or worse: CSE (G8.18), the inliner's
