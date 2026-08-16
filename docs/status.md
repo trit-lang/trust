@@ -415,8 +415,13 @@ And then hoisting, which turned out not to need interval analysis at all:
 check is a *branch*, the existing fact machinery reads it. HPL's four hot
 functions gained one clause each: **2 743 146 → 2 552 691**.
 
-Across the whole route: **3 233 721 → 2 552 691, −21.1%**, against a floor of
-2 249 471 measured by deleting the checks outright — **69% recovered**.
+And a loop may call something and still know its own slice's length: a slot
+whose address never leaves the function cannot be written by a callee, nor by
+a store through any other pointer (G8.22).
+
+Across the whole route: **3 233 721 → 2 315 340, −28.4%**, against a floor of
+2 249 471 measured by deleting the checks outright — **93% recovered**, with
+66 000 instructions of genuinely undecidable checks left.
 
 What is left is discharging a predicate at the *call site* rather than
 trapping in the callee, which needs a proof language and is reserved in §2.8.

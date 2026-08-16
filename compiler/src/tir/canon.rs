@@ -551,6 +551,7 @@ pub fn elide_dominated_checks(f: &mut Function) {
     // does not reach the use cannot have happened yet, and the code that
     // drops a `Vec` after a loop is exactly that.
     let reach = reachability(f);
+    let base_of = slot_bases(f);
 
     let mut rewrite: Vec<(usize, Target)> = Vec::new();
     for (bi, b) in f.blocks.iter().enumerate() {
@@ -567,17 +568,21 @@ pub fn elide_dominated_checks(f: &mut Function) {
         let Some(above) = doms.get(b.label.as_str()) else {
             continue;
         };
-        let here: Vec<Fact> =
-            facts
-                .iter()
-                .filter(|fact| above.contains(fact.at.as_str()))
-                .map(|fact| Fact {
-                    settled: !f.blocks.iter().enumerate().any(|(wi, w)| {
-                        writes(w) && reach.at(&fact.at, wi) && reach.to(wi, &b.label)
-                    }),
-                    ..fact.clone()
-                })
-                .collect();
+        let here: Vec<Fact> = facts
+            .iter()
+            .filter(|fact| above.contains(fact.at.as_str()))
+            .map(|fact| Fact {
+                settled: {
+                    let bases = fact_bases(fact, &def, &base_of);
+                    !f.blocks.iter().enumerate().any(|(wi, w)| {
+                        clobbers(w, bases.as_ref(), &base_of)
+                            && reach.at(&fact.at, wi)
+                            && reach.to(wi, &b.label)
+                    })
+                },
+                ..fact.clone()
+            })
+            .collect();
         let here: Vec<&Fact> = here.iter().collect();
         if entails_less(x2, y2, &here, &def) {
             rewrite.push((bi, neg.clone()));
@@ -705,6 +710,123 @@ fn no_larger(z: &Operand, y: &Operand, def: &BTreeMap<String, InstKind>, clean: 
         return a <= b;
     }
     false
+}
+
+/// Whether a block can write the memory these slots hold.
+///
+/// A slot whose address never leaves the function cannot be written by a
+/// **call** — the callee has no way to name it — nor by a store through any
+/// *other* pointer, because the only addresses into it are the ones derived
+/// from it here. So only a store whose base is one of them clobbers, and a
+/// loop that calls something still knows its own slice's length.
+fn clobbers(
+    b: &Block,
+    bases: Option<&BTreeSet<String>>,
+    base_of: &BTreeMap<String, String>,
+) -> bool {
+    let Some(bases) = bases else { return writes(b) };
+    b.insts.iter().any(|i| match &i.kind {
+        InstKind::Store {
+            p: Operand::Value(p),
+            ..
+        } => base_of.get(p).is_some_and(|s| bases.contains(s)),
+        _ => false,
+    })
+}
+
+/// For every value that is an address into a slot, which slot — provided the
+/// slot's address never escapes. A use anywhere but the *pointer* position of
+/// a load, a store or an offset is an escape.
+fn slot_bases(f: &Function) -> BTreeMap<String, String> {
+    let mut base: BTreeMap<String, String> = BTreeMap::new();
+    for b in &f.blocks {
+        for inst in &b.insts {
+            match (&inst.kind, &inst.results[..]) {
+                (InstKind::Slot { .. }, [r]) => {
+                    base.insert(r.clone(), r.clone());
+                }
+                (
+                    InstKind::Offset {
+                        p: Operand::Value(p),
+                        ..
+                    },
+                    [r],
+                ) => {
+                    if let Some(s) = base.get(p).cloned() {
+                        base.insert(r.clone(), s);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut escaped: BTreeSet<String> = BTreeSet::new();
+    let note = |o: &Operand, base: &BTreeMap<String, String>, out: &mut BTreeSet<String>| {
+        if let Operand::Value(v) = o
+            && let Some(s) = base.get(v)
+        {
+            out.insert(s.clone());
+        }
+    };
+    for b in &f.blocks {
+        for inst in &b.insts {
+            match &inst.kind {
+                InstKind::Load { .. } => {}
+                InstKind::Store { v, .. } => note(v, &base, &mut escaped),
+                InstKind::Offset { d, .. } => note(d, &base, &mut escaped),
+                other => {
+                    let mut k = other.clone();
+                    map_operands(&mut k, &mut |o| note(o, &base, &mut escaped));
+                }
+            }
+        }
+        let mut t = b.term.clone();
+        map_terminator(&mut t, &mut |o| note(o, &base, &mut escaped));
+    }
+    base.retain(|_, s| !escaped.contains(s));
+    base
+}
+
+/// The slots a fact's operands read, or `None` if any read is from somewhere
+/// this cannot name.
+fn fact_bases(
+    fact: &Fact,
+    def: &BTreeMap<String, InstKind>,
+    base_of: &BTreeMap<String, String>,
+) -> Option<BTreeSet<String>> {
+    let mut out = BTreeSet::new();
+    for o in [&fact.a, &fact.b] {
+        collect_bases(o, def, base_of, &mut out, 0)?;
+    }
+    Some(out)
+}
+
+fn collect_bases(
+    o: &Operand,
+    def: &BTreeMap<String, InstKind>,
+    base_of: &BTreeMap<String, String>,
+    out: &mut BTreeSet<String>,
+    depth: u32,
+) -> Option<()> {
+    if depth > 4 {
+        return None;
+    }
+    let Operand::Value(v) = o else {
+        return Some(());
+    };
+    match def.get(v) {
+        None => Some(()),
+        Some(InstKind::Load { p, .. }) => {
+            let Operand::Value(a) = p else { return None };
+            out.insert(base_of.get(a)?.clone());
+            Some(())
+        }
+        Some(InstKind::Flavored { a, b, .. } | InstKind::Plain { a, b, .. }) => {
+            collect_bases(a, def, base_of, out, depth + 1)?;
+            collect_bases(b, def, base_of, out, depth + 1)
+        }
+        Some(_) => Some(()),
+    }
 }
 
 /// Whether a block writes anything a later read could see.

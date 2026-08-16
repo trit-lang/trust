@@ -2910,21 +2910,33 @@ to
 DBG idx.lo.20 facts=["body.8<", "idx.ok.23<"]
 ```
 
-*The second is not.* With the fact present, the fold still does not happen,
-and the state is now known exactly:
+*The second is the rule that any call clobbers, and it is fixed.* A slot whose
+address never leaves the function cannot be written by a **call** — the callee
+has no way to name it — nor by a store through any *other* pointer, because
+the only addresses into it are the ones derived from it here. So only a store
+whose base is one of them clobbers, and a loop may call anything and still
+know its own slice's length.
+
+**HPL: 2 552 691 → 2 315 340, −9.3%.** Across the whole of G8.19 and G8.21:
+**3 233 721 → 2 315 340, −28.4%**, against a floor of 2 249 471 measured by
+deleting every check outright — **93% of what bounds checking cost is
+recovered**, and what remains is 66 000 instructions of checks that are
+genuinely undecidable.
+
+*The three rounds this took are the entry's real content.* The escape analysis
+was written, measured at zero, and reverted; then written again, measured at
+zero again, and reverted again. Both times the number was right and the reason
+was wrong: a `str.replace` with no assertion had silently matched nothing, so
+`settled` was still being computed by the rule the new code existed to
+replace. Two diagnostics in the same build disagreed —
 
 ```text
-fact@body.8 settled=false bases=Some({"a.slot.1"})
-   a=%i  b=%v.12    (the header's length)
-   x2=%i y2=%v.17   (the check's length)
+bases=Some({"a.slot.1"}) clobbered_by=[] settled=false
 ```
 
-The index matches by name, the base resolves to a slot that does not escape,
-and `settled` is false — yet re-running the same clobber test by hand names
-**no block that clobbers**. Something between computing `settled` and reading
-it disagrees with itself, and finding out which needs an afternoon rather than
-another guess. The escape analysis is written and correct as far as it goes;
-it is not committed, because it moves no number until this is resolved.
+— and *that* is the shape of an edit that did not happen, not of an analysis
+that is wrong. Every other edit in this session asserted on its match; this
+one did not, and it cost three rounds and two correct reverts.
 
 *Kept as a method note.* Three times in this session a change that looked
 obviously right measured nothing or worse: CSE (G8.18), the inliner's

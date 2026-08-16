@@ -4535,3 +4535,21 @@ fn a_violated_precondition_faults_on_entry() {
          fn main() -> t27 { let x: [t27; 4] = [1, 2, 3, 4]; total(&x, 9) }",
     );
 }
+
+#[test]
+fn a_loop_that_calls_something_keeps_what_it_knows() {
+    // A slot whose address never leaves the function cannot be written by a
+    // callee — it has no way to name it — nor by a store through any other
+    // pointer, since the only addresses into it are the ones derived from it
+    // here. So a loop may call anything and still know its own slice's
+    // length has not changed, and its bounds check follows from its own
+    // condition (TIR §6).
+    let (_, out) = run("fn putchar(c: t9); \
+         fn emit(a: &[t9]) -> t27 { \
+             let mut i: taddr = 0; \
+             while i < a.len() { putchar(a[i]); i += 1; } \
+             (i as t27) \
+         } \
+         fn main() -> t27 { let b: [t9; 3] = [65, 66, 10]; emit(&b) }");
+    assert_eq!(out, "AB\n");
+}
