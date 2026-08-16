@@ -232,8 +232,8 @@ impl std::error::Error for SyntaxError {}
 /// The keywords of §1.3.
 pub const KEYWORDS: &[&str] = &[
     "as", "break", "const", "continue", "dyn", "else", "enum", "false", "fn", "for", "if", "impl",
-    "in", "let", "loop", "match", "mod", "mut", "pub", "return", "self", "Self", "struct", "trait",
-    "true", "type", "use", "where", "while",
+    "in", "let", "loop", "macro", "match", "mod", "mut", "pub", "return", "self", "Self", "struct",
+    "trait", "true", "type", "use", "where", "while",
 ];
 
 /// Reserved by §1.3 and claimed by Ch. 4, which is written but not
@@ -251,7 +251,7 @@ pub const RESERVED: &[&str] = &["crate", "move", "ref", "static", "union", "unsa
 const OPERATORS: &[&str] = &[
     "<<=", ">>=", "<=>", "..=", "..", "==", "!=", "<=", ">=", "&&", "||", "->", "=>", "::", "+=",
     "-=", "*=", "/=", "%=", "<<", ">>", "(", ")", "[", "]", "{", "}", ",", ";", ":", ".", "#", "=",
-    "<", ">", "+", "-", "*", "/", "%", "!", "&", "|", "@", "_", "?",
+    "<", ">", "+", "-", "*", "/", "%", "!", "&", "|", "@", "_", "?", "$",
 ];
 
 /// Tokenize a source file.

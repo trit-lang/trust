@@ -33,6 +33,10 @@
 (variant name: (identifier) @constructor)
 (attribute (identifier) @attribute)
 (mod_item name: (identifier) @module)
+(macro_item name: (identifier) @function.macro)
+(macro_call macro: (identifier) @function.macro)
+(macro_parameter (identifier) @variable.parameter)
+(macro_repetition (identifier) @variable.parameter)
 (module_path (identifier) @module)
 
 (const_item name: (identifier) @constant)
@@ -79,6 +83,7 @@
   "in"
   "let"
   "loop"
+  "macro"
   "match"
   "mod"
   "mut"

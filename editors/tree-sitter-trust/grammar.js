@@ -84,6 +84,7 @@ module.exports = grammar({
       choice(
         $.mod_item,
         $.use_item,
+        $.macro_item,
         $.function_item,
         $.struct_item,
         $.enum_item,
@@ -91,6 +92,32 @@ module.exports = grammar({
         $.trait_item,
         $.impl_item,
       ),
+
+    /// `macro name($a, $($x),*) { … }` (Ch. 7 §6).
+    macro_item: ($) =>
+      seq(
+        optional('pub'),
+        'macro',
+        field('name', $.identifier),
+        '(',
+        commaSep(choice($.macro_repetition, $.macro_parameter)),
+        ')',
+        field('body', $.block),
+      ),
+
+    macro_parameter: ($) => seq('$', $.identifier),
+
+    macro_repetition: ($) => seq('$', '(', '$', $.identifier, ')', ',', '*'),
+
+    /// `name!(args)` (Ch. 7 §6).
+    macro_call: ($) =>
+      prec(
+        PREC.postfix + 2,
+        seq(field('macro', $.identifier), '!', field('arguments', $.arguments)),
+      ),
+
+    /// `$( … )*` inside a body, which holds statements and stands as one.
+    macro_repeat: ($) => seq('$', '(', repeat($._statement), ')', '*'),
 
     /// `mod name;` — a module, which is a file (Ch. 6 §1.2).
     mod_item: ($) => seq(optional('pub'), 'mod', field('name', $.identifier), ';'),
@@ -334,6 +361,8 @@ module.exports = grammar({
         $.cast_expression,
         $.range_expression,
         $.closure_expression,
+        $.macro_call,
+        $.macro_parameter,
         $.break_expression,
         $.continue_expression,
         $.return_expression,
@@ -342,7 +371,16 @@ module.exports = grammar({
 
     /// The five written with braces, which may stand as statements.
     _block_expression: ($) =>
-      choice($.block, $.if_expression, $.match_expression, $.loop_expression, $.while_expression, $.for_expression),
+      choice(
+        $.block,
+        $.if_expression,
+        $.match_expression,
+        $.loop_expression,
+        $.while_expression,
+        $.for_expression,
+        // `$( … )*` ends at its `*`, so it stands as a statement (§3).
+        $.macro_repeat,
+      ),
 
     self_expression: (_) => 'self',
     unit_expression: (_) => prec(1, seq('(', ')')),

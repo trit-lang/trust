@@ -1,0 +1,61 @@
+// Macros (Ch. 7): a name for a call whose number of arguments is not fixed.
+//
+// A function takes the arguments its type says and no others, so `vec!` and
+// `say!` below cannot be functions. `swap!` could be — `fn swap(a: &mut T,
+// b: &mut T)` is writable — and is here for what it shows about hygiene.
+
+/// Build a vector from however many values are written.
+macro vec($($x),*) {
+    {
+        let mut v: Vec<t27> = Vec::new();
+        $( v.push($x); )*
+        v
+    }
+}
+
+/// Print each argument, then a newline.
+macro say($($x),*) {
+    {
+        $( print($x); )*
+        println("");
+    }
+}
+
+/// Exchange two places.
+///
+/// The body writes `tmp`, and so does `main` below. They are different
+/// bindings: a name a macro's body binds is a new name (Ch. 7 §4), so this
+/// swaps what the caller meant rather than what the macro happened to
+/// shadow. That is the whole reason the chapter chose hygiene.
+macro swap($a, $b) {
+    { let tmp = $a; $a = $b; $b = tmp; }
+}
+
+/// An argument is substituted as an *expression* and evaluated where it is
+/// written (§2.1), so this calls whatever it is given twice.
+macro twice($x) { $x + $x }
+
+fn main() -> t27 {
+    let v = vec!(3, 1, 4, 1, 5);
+    say!("the vector holds ");
+    let mut i: taddr = 0;
+    while i < v.len() {
+        print_int(v[i]);
+        print(" ");
+        i += 1;
+    }
+    println("");
+
+    let mut tmp = 1;
+    let mut x = 2;
+    swap!(tmp, x);
+    say!("after swap, tmp and x are swapped");
+
+    // 5 + 5 = 10, and `twice!` wrote `$x + $x`.
+    let ten = twice!(v.len() as t27);
+
+    // An empty repetition is a repetition: zero turns.
+    say!();
+
+    ten + tmp * 10 + x
+}

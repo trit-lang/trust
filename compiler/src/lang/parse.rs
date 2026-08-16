@@ -21,6 +21,7 @@ pub fn parse_in(src: &str, file: SourceFile) -> R<File> {
         toks: lex_in(src, file)?,
         pos: 0,
         no_struct: false,
+        in_macro: false,
     };
     let mut file = File::default();
     while !p.at(&Tok::Eof) {
@@ -58,6 +59,7 @@ pub fn parse_recovering_in(src: &str, file: SourceFile) -> (File, Vec<SyntaxErro
         toks,
         pos: 0,
         no_struct: false,
+        in_macro: false,
     };
     let (mut file, mut errs) = (File::default(), Vec::new());
     while !p.at(&Tok::Eof) {
@@ -81,6 +83,8 @@ pub fn parse_recovering_in(src: &str, file: SourceFile) -> (File, Vec<SyntaxErro
 struct Parser {
     toks: Vec<(Tok, Span)>,
     pos: usize,
+    /// Set while reading a macro's body, where `$` means something.
+    in_macro: bool,
     /// Set while parsing a condition, where a struct literal's `{` would be
     /// read as the block that follows (§2.8).
     no_struct: bool,
@@ -354,6 +358,9 @@ impl Parser {
             }
             return Ok(Item::Use(self.use_item()?));
         }
+        if self.at_kw("macro") {
+            return Ok(Item::Macro(self.macro_item(public)?));
+        }
         if self.at_kw("type") {
             return Ok(Item::Alias(self.alias_item(public)?));
         }
@@ -385,6 +392,60 @@ impl Parser {
             return Ok(Item::Impl(self.impl_item()?));
         }
         self.err(format!("expected an item, found {}", self.peek()))
+    }
+
+    /// `macro name($a, $($x),*) { body }` (Ch. 7 §6).
+    fn macro_item(&mut self, public: bool) -> R<MacroItem> {
+        let span = self.span();
+        self.bump(); // macro
+        let (name, name_span) = self.expect_ident_at()?;
+        self.expect_op("(")?;
+        let (mut params, mut rest) = (Vec::new(), None);
+        while !self.eat_op(")") {
+            if self.at(&Tok::Eof) {
+                return self.err("unterminated macro parameter list");
+            }
+            if rest.is_some() {
+                return self.err("a macro has at most one repetition and it is last (Ch. 7 §2)");
+            }
+            self.expect_op("$")?;
+            // `$($x),*` — the repetition.
+            if self.eat_op("(") {
+                self.expect_op("$")?;
+                let (r, _) = self.expect_ident_at()?;
+                self.expect_op(")")?;
+                self.expect_op(",")?;
+                self.expect_op("*")?;
+                rest = Some(r);
+            } else {
+                let (p, at) = self.expect_ident_at()?;
+                if params.contains(&p) {
+                    return Err(SyntaxError {
+                        span: at,
+                        message: format!("`${p}` is a parameter of this macro twice (Ch. 7 §2)"),
+                    });
+                }
+                params.push(p);
+            }
+            if !self.eat_op(",") && !self.at_op(")") {
+                return self.err("expected `,` or `)` in a macro's parameters");
+            }
+        }
+        if rest.as_ref().is_some_and(|r| params.contains(r)) {
+            return self.err("a macro's repetition may not repeat a fixed parameter's name");
+        }
+        let was = std::mem::replace(&mut self.in_macro, true);
+        let body = self.block();
+        self.in_macro = was;
+        Ok(MacroItem {
+            name,
+            name_span,
+            public,
+            params,
+            rest,
+            body: body?,
+            span,
+        })
     }
 
     /// `type Name = T;` — another name for a type (Ch. 0 §3.6).
@@ -1807,6 +1868,17 @@ impl Parser {
         Ok(Expr::Path(path.segments[0].clone(), span))
     }
 
+    /// One statement inside a `$( … )*` group, which is a body like any
+    /// other and so may hold a `let` or an expression.
+    fn repeat_stmt(&mut self) -> R<Vec<Stmt>> {
+        if self.at_kw("let") {
+            return self.let_stmt();
+        }
+        let e = self.expr()?;
+        let _ = self.eat_op(";");
+        Ok(vec![Stmt::Expr(e)])
+    }
+
     fn args(&mut self) -> R<Vec<Expr>> {
         self.expect_op("(")?;
         let mut args = Vec::new();
@@ -1836,6 +1908,28 @@ impl Parser {
     }
 
     fn primary_inner(&mut self) -> R<Expr> {
+        // `$name` and `$( … )*` are only a macro body's (Ch. 7 §6).
+        if self.at_op("$") {
+            let span = self.span();
+            if !self.in_macro {
+                return self.err("`$` appears only in a macro (Ch. 7 §6)");
+            }
+            self.bump();
+            if self.eat_op("(") {
+                let mut stmts = Vec::new();
+                while !self.eat_op(")") {
+                    if self.at(&Tok::Eof) {
+                        return self.err("unterminated `$( … )*`");
+                    }
+                    stmts.extend(self.repeat_stmt()?);
+                }
+                self.expect_op("*")?;
+                return Ok(Expr::MacroRepeat(stmts, span));
+            }
+            let (name, _) = self.expect_ident_at()?;
+            return Ok(Expr::MacroParam(name, span));
+        }
+
         let span = self.span();
         match self.peek().clone() {
             Tok::Int(v) => {
@@ -1891,6 +1985,15 @@ impl Parser {
             }
             Tok::Ident(name) => {
                 self.bump();
+                // `name!(args)` is a macro invocation (Ch. 7 §6). It is read
+                // here rather than in `postfix` because `!` is prefix
+                // negation everywhere else, and the two never meet: a `!`
+                // *after* a name is nothing else in this language.
+                if self.at_op("!") && matches!(self.peek_at(1), Tok::Op("(")) {
+                    self.bump();
+                    let args = self.args()?;
+                    return Ok(Expr::MacroCall(name, args, span));
+                }
                 self.path_expr(name, span)
             }
             Tok::Op("(") => {
@@ -2212,7 +2315,14 @@ impl Parser {
 fn block_like(e: &Expr) -> bool {
     matches!(
         e,
-        Expr::Block(_) | Expr::If(..) | Expr::Match(..) | Expr::Loop(..) | Expr::While(..)
+        Expr::Block(_)
+            | Expr::If(..)
+            | Expr::Match(..)
+            | Expr::Loop(..)
+            | Expr::While(..)
+            // `$( … )*` ends at its `*` and holds statements of its own, so
+            // it stands as one without a terminator (Ch. 7 §3).
+            | Expr::MacroRepeat(..)
     )
 }
 

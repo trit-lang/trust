@@ -55,6 +55,8 @@ pub enum SymbolKind {
     Module,
     /// A type alias (Ch. 0 §3.6).
     Alias,
+    /// A macro (Ch. 7 §1).
+    Macro,
     /// A `let` binding or a pattern binding.
     Local,
     /// A function's parameter.
@@ -532,6 +534,14 @@ impl Builder {
                     let label = format!("type {} = {}", a.name, type_name(&a.ty));
                     self.define_item(&a.name, a.name_span, SymbolKind::Alias, label);
                 }
+                Item::Macro(m) => {
+                    let mut ps: Vec<String> = m.params.iter().map(|p| format!("${p}")).collect();
+                    if let Some(r) = &m.rest {
+                        ps.push(format!("$(${r}),*"));
+                    }
+                    let label = format!("macro {}({})", m.name, ps.join(", "));
+                    self.define_item(&m.name, m.name_span, SymbolKind::Macro, label);
+                }
                 // A `use` binds a name for something defined elsewhere, so
                 // the definition it names is not in this file to point at.
                 Item::Use(_) => {}
@@ -750,6 +760,14 @@ impl Builder {
                 children: Vec::new(),
             }),
             Item::Use(_) => None,
+            Item::Macro(m) => Some(Symbol {
+                name: m.name.clone(),
+                kind: SymbolKind::Macro,
+                detail: String::new(),
+                span: m.span,
+                name_span: m.name_span,
+                children: Vec::new(),
+            }),
             Item::Alias(a) => {
                 self.ty(&a.ty);
                 Some(Symbol {
@@ -990,11 +1008,27 @@ impl Builder {
                     self.expr(v);
                 }
             }
+            // A macro call is an ordinary call for an editor's sake: the
+            // name resolves and the arguments are expressions.
+            Expr::MacroCall(name, args, at) => {
+                self.use_name(name, *at);
+                for a in args {
+                    self.expr(a);
+                }
+            }
+            Expr::MacroRepeat(stmts, _) => {
+                for s in stmts {
+                    if let Stmt::Expr(e) = s {
+                        self.expr(e);
+                    }
+                }
+            }
             Expr::Int(..)
             | Expr::Trit(..)
             | Expr::Char(..)
             | Expr::Str(..)
             | Expr::Bool(..)
+            | Expr::MacroParam(..)
             | Expr::Unit(_)
             | Expr::Continue(_) => {}
         }

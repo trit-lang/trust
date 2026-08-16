@@ -10,6 +10,7 @@ pub mod ast;
 pub mod index;
 pub mod lex;
 pub mod lower;
+pub mod macros;
 pub mod modules;
 pub mod parse;
 
@@ -960,7 +961,8 @@ pub fn analyze(src: &str) -> Analysis {
         .map(str::to_string)
         .collect();
     let mut file = merged(&user, 1);
-    let alias = expand_aliases(&mut file).err().unwrap_or_default();
+    let mut alias = macros::expand(&mut file).err().unwrap_or_default();
+    alias.extend(expand_aliases(&mut file).err().unwrap_or_default());
     let noted = std::cell::RefCell::new(lower::Noted::default());
     let found = lower::lower_noting(&file, &mine, Some(&noted))
         .err()
@@ -1052,6 +1054,15 @@ fn finish(program: modules::Program) -> Build {
         };
     }
     let mut file = merged(&user, program.sources.len() as lex::File);
+    // Macros first, then aliases: a body may expand to a use of one
+    // (Ch. 7 §5).
+    if let Err(errors) = macros::expand(&mut file) {
+        return Build {
+            program,
+            module: None,
+            errors,
+        };
+    }
     if let Err(errors) = expand_aliases(&mut file) {
         return Build {
             program,
@@ -1104,6 +1115,7 @@ fn finish(program: modules::Program) -> Build {
 pub fn compile(src: &str) -> Result<crate::tir::Module, Vec<SyntaxError>> {
     let user = parse::parse(src).map_err(|e| vec![e])?;
     let mut file = merged(&user, 1);
+    macros::expand(&mut file)?;
     expand_aliases(&mut file)?;
     let module = lower::lower(&file)?;
 
@@ -1204,6 +1216,7 @@ fn item_name(i: &ast::Item) -> Option<&str> {
         ast::Item::Trait(t) => Some(&t.name),
         ast::Item::Const(c) => Some(&c.name),
         ast::Item::Alias(a) => Some(&a.name),
+        ast::Item::Macro(m) => Some(&m.name),
         // An `impl` defines none: it adds methods to a type, and two impls
         // of different traits for one type are not a collision. A `mod` and
         // a `use` define a name in their own module and are resolved away

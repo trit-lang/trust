@@ -423,6 +423,7 @@ fn completion_kind(k: lang::index::SymbolKind) -> u32 {
         Field => 5,
         Module => 9,
         Alias => 25,
+        Macro => 3,
         Trait => 8,
         Impl => 7,
         Const => 21,
@@ -497,6 +498,8 @@ fn kind(k: lang::index::SymbolKind) -> u32 {
         Module => 2,
         // The protocol has no alias; a type alias is a type.
         Alias => 26,
+        // The protocol has no macro kind either; both are Function-ish.
+        Macro => 12,
         Trait => 11,
         Impl => 5,
         Const => 14,

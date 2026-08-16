@@ -33,6 +33,27 @@ pub enum Item {
     Use(UseItem),
     /// `type Name = T;` — another name for a type (Ch. 0 §3.6).
     Alias(AliasItem),
+    /// `macro name($a, $b) { … }` (Ch. 7 §1).
+    Macro(MacroItem),
+}
+
+/// `macro name($a, $($x),*) { body }` (Ch. 7).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MacroItem {
+    /// Its name.
+    pub name: String,
+    /// Where the name was written.
+    pub name_span: Span,
+    /// Whether it is visible outside the module defining it (Ch. 6 §2).
+    pub public: bool,
+    /// The fixed parameters, in order, without their `$`.
+    pub params: Vec<String>,
+    /// The trailing repetition's parameter, if it has one (§2).
+    pub rest: Option<String>,
+    /// The body, which is a block and expands to one (§3).
+    pub body: Block,
+    /// Where it was written.
+    pub span: Span,
 }
 
 /// `type Name = T;`.
@@ -93,6 +114,7 @@ impl Item {
             Item::Mod(m) => m.span,
             Item::Use(u) => u.span,
             Item::Alias(a) => a.span,
+            Item::Macro(m) => m.span,
         }
     }
 
@@ -109,6 +131,7 @@ impl Item {
             Item::Mod(m) => m.name_span,
             Item::Use(u) => u.name_span,
             Item::Alias(a) => a.name_span,
+            Item::Macro(m) => m.name_span,
         }
     }
 
@@ -124,6 +147,7 @@ impl Item {
             Item::Mod(m) => m.span = span,
             Item::Use(u) => u.span = span,
             Item::Alias(a) => a.span = span,
+            Item::Macro(m) => m.span = span,
         }
         self
     }
@@ -601,6 +625,15 @@ pub enum Expr {
     Return(Option<Box<Expr>>, Span),
     /// `|x| body` or `|x: T| -> R { body }` (Ch. 4 §4.1).
     Closure(Vec<(String, Option<Ty>)>, Option<Ty>, Box<Expr>, Span),
+    /// `name!(args)` — a macro invocation, which expands to an expression
+    /// before anything else reads the program (Ch. 7 §5). Nothing below the
+    /// frontend's expansion pass ever sees one.
+    MacroCall(String, Vec<Expr>, Span),
+    /// `$name` inside a macro body — a parameter, substituted at expansion.
+    MacroParam(String, Span),
+    /// `$( … )*` inside a macro body — repeated once per argument the
+    /// repetition bound (Ch. 7 §3).
+    MacroRepeat(Vec<Stmt>, Span),
 }
 
 impl Expr {
@@ -638,7 +671,10 @@ impl Expr {
             | Break(_, l)
             | Continue(l)
             | Return(_, l)
-            | Closure(_, _, _, l) => *l,
+            | Closure(_, _, _, l)
+            | MacroCall(_, _, l)
+            | MacroParam(_, l)
+            | MacroRepeat(_, l) => *l,
             Block(b) => b.span,
         }
     }
@@ -683,6 +719,7 @@ impl Expr {
             | Continue(l)
             | Return(_, l)
             | Closure(_, _, _, l) => *l = span,
+            MacroCall(_, _, l) | MacroParam(_, l) | MacroRepeat(_, l) => *l = span,
             Block(b) => b.span = span,
         }
         self
@@ -818,7 +855,9 @@ pub fn for_each_ty(file: &mut File, f: &mut impl FnMut(&mut Ty)) {
                     fn_tys(m, f);
                 }
             }
-            Item::Mod(_) | Item::Use(_) => {}
+            // A macro's body is not a program until it is expanded, and it
+            // is expanded before this runs (Ch. 7 §5).
+            Item::Macro(_) | Item::Mod(_) | Item::Use(_) => {}
         }
     }
 }
@@ -974,5 +1013,112 @@ fn ty(t: &mut Ty, f: &mut impl FnMut(&mut Ty)) {
             }
         }
         _ => {}
+    }
+}
+
+/// Visit an expression's immediate sub-expressions.
+///
+/// The AST knows its own shape, so the walk lives here. It descends into a
+/// `$( … )*` group's statements too: a group is part of the expression it
+/// sits in, and something renaming or substituting has to reach inside it.
+pub fn for_each_child_mut(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
+    match e {
+        Expr::Unary(_, a, _)
+        | Expr::Borrow(a, _, _)
+        | Expr::Deref(a, _)
+        | Expr::Try(a, _)
+        | Expr::Field(a, _, _)
+        | Expr::Cast(a, _, _) => f(a),
+        Expr::Binary(_, a, b, _)
+        | Expr::Assign(_, a, b, _)
+        | Expr::Index(a, b, _)
+        | Expr::Repeat(a, b, _) => {
+            f(a);
+            f(b);
+        }
+        Expr::Call(_, _, _, args, _) | Expr::Array(args, _) | Expr::Tuple(args, _) => {
+            for a in args {
+                f(a);
+            }
+        }
+        Expr::MacroCall(_, args, _) => {
+            for a in args {
+                f(a);
+            }
+        }
+        Expr::Method(r, _, _, args, _) => {
+            f(r);
+            for a in args {
+                f(a);
+            }
+        }
+        Expr::CallExpr(c, args, _) => {
+            f(c);
+            for a in args {
+                f(a);
+            }
+        }
+        Expr::Aggregate(_, fields, _) => {
+            for (_, v) in fields {
+                f(v);
+            }
+        }
+        Expr::Closure(_, _, body, _) => f(body),
+        Expr::Block(b) => block_children(b, f),
+        Expr::If(c, then, other, _) => {
+            f(c);
+            block_children(then, f);
+            if let Some(o) = other {
+                f(o);
+            }
+        }
+        Expr::Match(v, arms, _) => {
+            f(v);
+            for a in arms {
+                if let Some(g) = &mut a.guard {
+                    f(g);
+                }
+                f(&mut a.body);
+            }
+        }
+        Expr::While(c, b, _) => {
+            f(c);
+            block_children(b, f);
+        }
+        Expr::Loop(b, _) => block_children(b, f),
+        Expr::Break(v, _) | Expr::Return(v, _) => {
+            if let Some(v) = v {
+                f(v);
+            }
+        }
+        Expr::MacroRepeat(stmts, _) => {
+            for s in stmts {
+                match s {
+                    Stmt::Let { value, .. } => f(value),
+                    Stmt::Expr(e) => f(e),
+                }
+            }
+        }
+        Expr::Int(..)
+        | Expr::Trit(..)
+        | Expr::Char(..)
+        | Expr::Str(..)
+        | Expr::Bool(..)
+        | Expr::Unit(_)
+        | Expr::Path(..)
+        | Expr::Continue(_)
+        | Expr::MacroParam(..) => {}
+    }
+}
+
+fn block_children(b: &mut Block, f: &mut impl FnMut(&mut Expr)) {
+    for s in &mut b.stmts {
+        match s {
+            Stmt::Let { value, .. } => f(value),
+            Stmt::Expr(e) => f(e),
+        }
+    }
+    if let Some(t) = &mut b.tail {
+        f(t);
     }
 }

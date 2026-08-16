@@ -283,6 +283,7 @@ fn defines(i: &Item) -> Option<&str> {
         Item::Trait(t) => Some(&t.name),
         Item::Const(c) => Some(&c.name),
         Item::Alias(a) => Some(&a.name),
+        Item::Macro(m) => Some(&m.name),
         Item::Impl(_) | Item::Mod(_) | Item::Use(_) => None,
     }
 }
@@ -295,6 +296,7 @@ fn is_public(i: &Item) -> bool {
         Item::Trait(t) => t.public,
         Item::Const(c) => c.public,
         Item::Alias(a) => a.public,
+        Item::Macro(m) => m.public,
         Item::Impl(_) | Item::Mod(_) | Item::Use(_) => false,
     }
 }
@@ -370,6 +372,8 @@ enum Kind {
     Const,
     /// A struct, enum or trait.
     Type,
+    /// A macro, which is invoked and never named on its own (Ch. 7 §1).
+    Macro,
 }
 
 /// Whether module `here` is `at` or inside it.
@@ -389,6 +393,7 @@ fn rename_item(item: &mut Item, here: &[String]) {
         Item::Trait(t) => t.name = join(here, &t.name),
         Item::Const(c) => c.name = join(here, &c.name),
         Item::Alias(a) => a.name = join(here, &a.name),
+        Item::Macro(m) => m.name = join(here, &m.name),
         Item::Impl(_) | Item::Mod(_) | Item::Use(_) => {}
     }
 }
@@ -449,6 +454,7 @@ impl Rewriter<'_> {
 fn kind_of(i: &Item) -> Kind {
     match i {
         Item::Fn(_) => Kind::Fn,
+        Item::Macro(_) => Kind::Macro,
         Item::Const(_) => Kind::Const,
         _ => Kind::Type,
     }
@@ -505,6 +511,13 @@ impl Rewriter<'_> {
                 }
             }
             Item::Alias(a) => self.ty(&mut a.ty),
+            // A macro's body is rewritten like any other code: the names it
+            // uses are resolved where it was written (Ch. 7 §4.1).
+            Item::Macro(m) => {
+                let mut b = m.body.clone();
+                self.block(&mut b);
+                m.body = b;
+            }
             Item::Mod(_) | Item::Use(_) => {}
         }
     }
@@ -681,11 +694,27 @@ impl Rewriter<'_> {
                     self.expr(v);
                 }
             }
+            // A macro's arguments are the caller's expressions and are
+            // rewritten like any others; `$x` is neither a name nor a place.
+            Expr::MacroCall(_, args, _) => {
+                for a in args {
+                    self.expr(a);
+                }
+            }
+            Expr::MacroRepeat(stmts, _) => {
+                for s in stmts {
+                    match s {
+                        Stmt::Let { value, .. } => self.expr(value),
+                        Stmt::Expr(e) => self.expr(e),
+                    }
+                }
+            }
             Expr::Int(..)
             | Expr::Trit(..)
             | Expr::Char(..)
             | Expr::Str(..)
             | Expr::Bool(..)
+            | Expr::MacroParam(..)
             | Expr::Unit(_)
             | Expr::Continue(_) => {}
         }

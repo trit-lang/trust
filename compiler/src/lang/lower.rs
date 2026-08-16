@@ -1262,6 +1262,9 @@ fn free_names(e: &ast::Expr, bound: &mut Vec<String>, out: &mut Vec<String>) {
     };
     match e {
         Char(..) | Str(..) => {}
+        // Macros are expanded before lowering (Ch. 7 §5), so none of
+        // these can be here.
+        MacroCall(..) | MacroParam(..) | MacroRepeat(..) => {}
         Try(a, _) => free_names(a, bound, out),
         CallExpr(f, args, _) => {
             free_names(f, bound, out);
@@ -1396,6 +1399,9 @@ fn for_each_child(e: &ast::Expr, f: &mut impl FnMut(&ast::Expr)) {
     use ast::Expr::*;
     match e {
         Char(..) | Str(..) => {}
+        // Macros are expanded before lowering (Ch. 7 §5), so none of
+        // these can be here.
+        MacroCall(..) | MacroParam(..) | MacroRepeat(..) => {}
         Try(a, _) => f(a),
         CallExpr(c, args, _) => {
             f(c);
@@ -1483,6 +1489,9 @@ fn for_each_child_mut(e: &mut ast::Expr, f: &mut impl FnMut(&mut ast::Expr)) {
     use ast::Expr::*;
     match e {
         Char(..) | Str(..) => {}
+        // Macros are expanded before lowering (Ch. 7 §5), so none of
+        // these can be here.
+        MacroCall(..) | MacroParam(..) | MacroRepeat(..) => {}
         Try(a, _) => f(a),
         CallExpr(c, args, _) => {
             f(c);
@@ -1993,6 +2002,9 @@ fn subst_expr(e: &mut ast::Expr, self_ty: &SelfTy) {
     let mut kids: Vec<&mut ast::Expr> = Vec::new();
     match e {
         Char(..) | Str(..) => {}
+        // Macros are expanded before lowering (Ch. 7 §5), so none of
+        // these can be here.
+        MacroCall(..) | MacroParam(..) | MacroRepeat(..) => {}
         Try(a, _) => subst_expr(a, self_ty),
         CallExpr(c, args, _) => {
             subst_expr(c, self_ty);
@@ -5229,6 +5241,21 @@ impl Fn<'_> {
         // the ones that say so put it back.
         let dest = self.dest.take();
         match e {
+            // Macros are expanded before anything else reads the program
+            // (Ch. 7 §5), so one reaching here is this compiler's fault.
+            E::MacroCall(name, _, span) => err(
+                *span,
+                format!("`{name}!` was not expanded, which is a fault in this compiler"),
+            ),
+            E::MacroParam(name, span) => err(
+                *span,
+                format!("`${name}` is a macro parameter and means nothing outside one (Ch. 7 §6)"),
+            ),
+            E::MacroRepeat(_, span) => err(
+                *span,
+                "`$( … )*` is a macro repetition and means nothing outside one (Ch. 7 §3)",
+            ),
+
             // A character literal is a `char` and nothing else: unlike an
             // integer literal it takes no type from context, because there
             // is only one type it could have (Ch. 5 §1.2).
@@ -11282,6 +11309,9 @@ fn walk_expr(e: &ast::Expr, index: &mut u32, out: &mut HashMap<String, u32>) {
     let go = |x: &ast::Expr, i: &mut u32, o: &mut HashMap<String, u32>| walk_expr(x, i, o);
     match e {
         E::Char(..) | E::Str(..) => {}
+        // Macros are expanded before lowering (Ch. 7 §5), so none of
+        // these can be here.
+        E::MacroCall(..) | E::MacroParam(..) | E::MacroRepeat(..) => {}
         E::Try(a, _) => go(a, index, out),
         E::CallExpr(c, args, _) => {
             go(c, index, out);
