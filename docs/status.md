@@ -410,8 +410,16 @@ Both halves are in G8.19: a counter that starts at zero needs no lower check
 loop condition decides its own upper check (an equivalence oracle, which
 rewrites nothing and so extends no live range).
 
-What is left of the old route C: **hoisting** a check out of a loop, which
-needs the interval reasoning this compiler still has none of.
+And then hoisting, which turned out not to need interval analysis at all:
+`where n <= a.len()` (Ch. 4 §2.8) is checked once on entry, and since the
+check is a *branch*, the existing fact machinery reads it. HPL's four hot
+functions gained one clause each: **2 743 146 → 2 552 691**.
+
+Across the whole route: **3 233 721 → 2 552 691, −21.1%**, against a floor of
+2 249 471 measured by deleting the checks outright — **69% recovered**.
+
+What is left is discharging a predicate at the *call site* rather than
+trapping in the callee, which needs a proof language and is reserved in §2.8.
 
 *The route as it was written, before it was done:* Branches and
 comparisons are 36% of everything HPL executes, and in an indexed loop the two

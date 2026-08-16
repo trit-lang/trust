@@ -3923,6 +3923,20 @@ fn function(
         fx.store_at(&slot, 0, ty, incoming, f.line)?;
     }
 
+    // What the caller was required to have established, checked once here
+    // (Ch. 4 §2.8). The check is a branch, so the body inherits it as a
+    // *fact* — which is the whole point: a precondition tested once is a
+    // bounds check not tested at all, every iteration of every loop below.
+    for pred in &f.requires {
+        let (c, ct) = fx.expr(pred, Some(&Ty::Bool))?;
+        fx.check(&ct, &Ty::Bool, pred.line(), "a `where` predicate")?;
+        let (ok, bad) = (fx.fresh("req.ok"), fx.fresh("req.no"));
+        fx.br3(c, &bad, &bad, &ok);
+        fx.start(bad);
+        fx.finish(Terminator::Trap(FaultCode::Trap));
+        fx.start(ok);
+    }
+
     if let Some(tail) = &body.tail {
         fx.check_return_root(tail, &ret, body.line)?;
     }
@@ -4659,6 +4673,7 @@ impl Fn<'_> {
             .borrow_mut()
             .insert(key.clone(), (vec![ty.clone()], Ty::Unit));
         self.extra_fns.borrow_mut().push(ast::FnItem {
+            requires: Vec::new(),
             name: key,
             generics: Vec::new(),
             params: vec![("self".into(), ast::Ty::Name(name.to_string(), 0))],
@@ -8345,6 +8360,7 @@ impl Fn<'_> {
         call_params.extend(ps.clone());
         let call = format!("{name}.call");
         let item = ast::FnItem {
+            requires: Vec::new(),
             name: call.clone(),
             generics: Vec::new(),
             params: call_params,

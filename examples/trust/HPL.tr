@@ -344,7 +344,9 @@ fn sigma(i: taddr, n: taddr) -> taddr {
 // and the factorization has to hunt down all N of them. `main` checks that it
 // found exactly the permutation planted here, which is a sharper question
 // than the residual asks.
-fn generate(a: &mut [[t27; NMAX]], b: &mut [t27], n: taddr, rng: &mut Rng) {
+fn generate(a: &mut [[t27; NMAX]], b: &mut [t27], n: taddr, rng: &mut Rng)
+    where n <= a.len(), n <= b.len(), n <= NMAX
+{
     let mut i: taddr = 0;
     while i < n {
         let mut j: taddr = 0;
@@ -363,7 +365,9 @@ fn generate(a: &mut [[t27; NMAX]], b: &mut [t27], n: taddr, rng: &mut Rng) {
 // LU with partial pivoting, in place. `perm[i]` is the original row now
 // sitting at row i. Returns the number of row exchanges, or `None` if a pivot
 // column was entirely zero.
-fn factor(a: &mut [[t27; NMAX]], perm: &mut [taddr], n: taddr) -> Option<t27> {
+fn factor(a: &mut [[t27; NMAX]], perm: &mut [taddr], n: taddr) -> Option<t27>
+    where n <= a.len(), n <= perm.len(), n <= NMAX
+{
     let mut swaps: t27 = 0;
     let mut k: taddr = 0;
     while k < n {
@@ -413,7 +417,9 @@ fn factor(a: &mut [[t27; NMAX]], perm: &mut [taddr], n: taddr) -> Option<t27> {
 
 // Forward then back substitution — the 2·N² — with L's unit diagonal implied
 // and `perm` putting the right-hand side in the order the rows ended up in.
-fn solve(a: &[[t27; NMAX]], perm: &[taddr], b: &[t27], x: &mut [t27], n: taddr) {
+fn solve(a: &[[t27; NMAX]], perm: &[taddr], b: &[t27], x: &mut [t27], n: taddr)
+    where n <= a.len(), n <= perm.len(), n <= b.len(), n <= x.len(), n <= NMAX
+{
     let mut i: taddr = 0;
     while i < n {
         let mut sum = b[perm[i]];
@@ -439,7 +445,9 @@ fn solve(a: &[[t27; NMAX]], perm: &[taddr], b: &[t27], x: &mut [t27], n: taddr) 
 }
 
 // ‖Ax − b‖∞, against the system as it stood before the factorization ate it.
-fn residual_inf(a0: &[[t27; NMAX]], x: &[t27], b0: &[t27], n: taddr) -> t27 {
+fn residual_inf(a0: &[[t27; NMAX]], x: &[t27], b0: &[t27], n: taddr) -> t27
+    where n <= a0.len(), n <= x.len(), n <= b0.len(), n <= NMAX
+{
     let mut worst: t27 = 0;
     let mut i: taddr = 0;
     while i < n {

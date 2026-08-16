@@ -234,6 +234,9 @@ pub struct FnItem {
     /// The body, or `None` for a declaration — a signature whose body is
     /// external, exactly as in TIR §1.
     pub body: Option<Block>,
+    /// What the caller must have established, written in the same `where`
+    /// clause as the type bounds and checked once on entry (Ch. 4 §2.8).
+    pub requires: Vec<Expr>,
     /// Where it was written.
     pub line: Line,
 }

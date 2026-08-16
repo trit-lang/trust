@@ -409,6 +409,46 @@ is at the end of §2 rather than the start.
 
 ---
 
+### 2.8 `where` on a value
+
+A `where` clause carries two different things:
+
+```
+fn total(a: &[t27], n: taddr) -> t27 where n <= a.len() { … }
+fn largest<T>(xs: &[T]) -> &T where T: Ord { … }
+```
+
+`T: Ord` constrains a **type**; `n <= a.len()` constrains a **value**. They are
+told apart by the `:` — a value predicate is an expression and has none.
+
+A value predicate is a **precondition**: it is checked once when the function
+is entered, and a call that violates it faults there rather than proceeding.
+It is not checked at the call site, so the caller is not obliged to *prove* it;
+what the clause buys is that the check happens **once per call instead of once
+per use**.
+
+That is the whole of its purpose. A precondition is a fact the body may rely
+on, and the facts a body relies on are what let a bounds check inside a loop be
+decided before the loop runs:
+
+```
+fn total(a: &[t27], n: taddr) -> t27 where n <= a.len() {
+    let mut i: taddr = 0;
+    while i < n { … a[i] … }      // `i < n <= a.len()`: no check here
+}
+```
+
+A predicate is an ordinary expression of type `bool`, evaluated in the
+function's parameters. It may not have effects that outlive it — it is
+evaluated exactly once, on entry, and a program may not depend on when.
+
+> **Reserved: discharging it at the call site.** A caller that can *prove* the
+> predicate should not pay the check either, and a compiler that could see the
+> proof would say so at compile time rather than trapping at run time. That
+> needs a proof language and is not defined here; the runtime check is the
+> conservative reading of the same clause, and a later revision that adds the
+> proof does not change what any existing program means.
+
 ## 3. Trait objects
 
 ### 3.1 `dyn Trait`

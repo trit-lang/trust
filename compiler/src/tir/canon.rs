@@ -505,7 +505,7 @@ pub fn elide_dominated_checks(f: &mut Function) {
     // never reached the body. What makes an edge's fact sound in a block is
     // that every path there goes down it — which holds when the taken target
     // has one predecessor and dominates the block.
-    let mut facts: Vec<(String, Operand, Operand)> = Vec::new();
+    let mut facts: Vec<Fact> = Vec::new();
     for d in &f.blocks {
         let Terminator::Br3 {
             t, neg, zero, pos, ..
@@ -513,37 +513,39 @@ pub fn elide_dominated_checks(f: &mut Function) {
         else {
             continue;
         };
-        if neg.label == zero.label || neg.label == pos.label {
-            continue;
-        }
-        if preds.get(&neg.label).is_none_or(|ps| ps.len() != 1) {
-            continue;
-        }
         let Operand::Value(c) = t else { continue };
         let Some(InstKind::Cmp { a, b, .. }) = def.get(c) else {
             continue;
         };
-        facts.push((neg.label.clone(), a.clone(), b.clone()));
+        // Which edge, and therefore which relation. `x < y` is the edge
+        // taken when the comparison is negative and no other; `x <= y` is
+        // the one taken when it is negative *or* zero, which is the shape a
+        // written `<=` becomes.
+        let (target, strict) = if neg.label != zero.label && neg.label != pos.label {
+            (neg, true)
+        } else if neg.label == zero.label && neg.label != pos.label {
+            (neg, false)
+        } else {
+            continue;
+        };
+        if preds.get(&target.label).is_none_or(|ps| ps.len() != 1) {
+            continue;
+        }
+        facts.push(Fact {
+            at: target.label.clone(),
+            a: a.clone(),
+            b: b.clone(),
+            strict,
+            settled: false,
+        });
     }
 
     // Whether a fact, once true, can still be compared *by structure*: two
-    // loads are the same value only if nothing wrote after the fact was
-    // established. Anything the fact's block dominates counts, which
-    // over-approximates the paths that actually reach a use and is sound for
-    // that reason.
-    let mut settled: BTreeMap<String, bool> = BTreeMap::new();
-    for (at, _, _) in &facts {
-        if settled.contains_key(at) {
-            continue;
-        }
-        let quiet = !f.blocks.iter().any(|d| {
-            writes(d)
-                && doms
-                    .get(d.label.as_str())
-                    .is_some_and(|s| s.contains(at.as_str()))
-        });
-        settled.insert(at.clone(), quiet);
-    }
+    // loads are the same value only if nothing wrote between the fact and
+    // the use. "Between" is what it says — a write the fact reaches but which
+    // does not reach the use cannot have happened yet, and the code that
+    // drops a `Vec` after a loop is exactly that.
+    let reach = reachability(f);
 
     let mut rewrite: Vec<(usize, Target)> = Vec::new();
     for (bi, b) in f.blocks.iter().enumerate() {
@@ -560,11 +562,18 @@ pub fn elide_dominated_checks(f: &mut Function) {
         let Some(above) = doms.get(b.label.as_str()) else {
             continue;
         };
-        let here: Vec<(Operand, Operand, bool)> = facts
-            .iter()
-            .filter(|(at, _, _)| above.contains(at.as_str()))
-            .map(|(at, a, b)| (a.clone(), b.clone(), settled[at]))
-            .collect();
+        let here: Vec<Fact> =
+            facts
+                .iter()
+                .filter(|fact| above.contains(fact.at.as_str()))
+                .map(|fact| Fact {
+                    settled: !f.blocks.iter().enumerate().any(|(wi, w)| {
+                        writes(w) && reach.at(&fact.at, wi) && reach.to(wi, &b.label)
+                    }),
+                    ..fact.clone()
+                })
+                .collect();
+        let here: Vec<&Fact> = here.iter().collect();
         if entails_less(x2, y2, &here, &def) {
             rewrite.push((bi, neg.clone()));
         }
@@ -582,34 +591,96 @@ pub fn elide_dominated_checks(f: &mut Function) {
 /// itself a fact or a constant comparison. One step is enough for what the
 /// language produces — a loop bound and a length — and stopping there keeps
 /// this a decision rather than a search.
+/// Which blocks reach which, by label and by index.
+struct Reach {
+    index: BTreeMap<String, usize>,
+    to: Vec<Vec<bool>>,
+}
+
+impl Reach {
+    fn at(&self, from: &str, w: usize) -> bool {
+        self.index.get(from).is_some_and(|&i| self.to[i][w])
+    }
+    fn to(&self, w: usize, to: &str) -> bool {
+        self.index.get(to).is_some_and(|&j| self.to[w][j])
+    }
+}
+
+/// The transitive closure of the successor relation. A function has few
+/// enough blocks that the square is cheaper than being clever.
+fn reachability(f: &Function) -> Reach {
+    let index: BTreeMap<String, usize> = f
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.label.clone(), i))
+        .collect();
+    let n = f.blocks.len();
+    let mut to = vec![vec![false; n]; n];
+    for (i, b) in f.blocks.iter().enumerate() {
+        to[i][i] = true;
+        for s in successors(&b.term) {
+            if let Some(&j) = index.get(&s) {
+                to[i][j] = true;
+            }
+        }
+    }
+    for k in 0..n {
+        for i in 0..n {
+            if to[i][k] {
+                let row = to[k].clone();
+                for (j, r) in row.iter().enumerate() {
+                    to[i][j] |= *r;
+                }
+            }
+        }
+    }
+    Reach { index, to }
+}
+
+/// A relation a branch decided, and where it became true.
+#[derive(Clone)]
+struct Fact {
+    at: String,
+    a: Operand,
+    b: Operand,
+    /// `a < b` when set, `a <= b` when not.
+    strict: bool,
+    /// Whether nothing has written since, so that two *loads* may still be
+    /// compared by what defines them.
+    settled: bool,
+}
+
 fn entails_less(
     x: &Operand,
     y: &Operand,
-    facts: &[(Operand, Operand, bool)],
+    facts: &[&Fact],
     def: &BTreeMap<String, InstKind>,
 ) -> bool {
-    // `x < y` outright.
-    if facts
-        .iter()
-        .any(|(a, b, c)| equiv(a, x, def, 0, *c) && equiv(b, y, def, 0, *c))
-    {
-        return true;
-    }
-    // `x < z`, and `z` is no larger than `y`.
-    facts.iter().any(|(a, z, c)| {
-        equiv(a, x, def, 0, *c) && (equiv(z, y, def, 0, *c) || no_larger(z, y, facts, def, *c))
+    facts.iter().any(|f1| {
+        if !equiv(&f1.a, x, def, 0, f1.settled) {
+            return false;
+        }
+        // `x < y` outright.
+        if f1.strict && equiv(&f1.b, y, def, 0, f1.settled) {
+            return true;
+        }
+        // Or one step: `x ? z` and `z ? y`, strict at least once —
+        // `x <= z <= y` gives only `x <= y`, which a bounds check cannot use.
+        if f1.strict && no_larger(&f1.b, y, def, f1.settled) {
+            return true;
+        }
+        facts.iter().any(|f2| {
+            (f1.strict || f2.strict)
+                && equiv(&f1.b, &f2.a, def, 0, f1.settled && f2.settled)
+                && equiv(&f2.b, y, def, 0, f2.settled)
+        })
     })
 }
 
 /// Whether `z <= y` is known: the same value, two constants in order, or a
 /// fact `z < y`.
-fn no_larger(
-    z: &Operand,
-    y: &Operand,
-    facts: &[(Operand, Operand, bool)],
-    def: &BTreeMap<String, InstKind>,
-    clean: bool,
-) -> bool {
+fn no_larger(z: &Operand, y: &Operand, def: &BTreeMap<String, InstKind>, clean: bool) -> bool {
     if equiv(z, y, def, 0, clean) {
         return true;
     }
@@ -618,9 +689,7 @@ fn no_larger(
     {
         return a <= b;
     }
-    facts
-        .iter()
-        .any(|(p, q, c)| equiv(p, z, def, 0, clean && *c) && equiv(q, y, def, 0, clean && *c))
+    false
 }
 
 /// Whether a block writes anything a later read could see.

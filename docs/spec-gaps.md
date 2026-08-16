@@ -2828,6 +2828,42 @@ Three things legitimately remove a check, and a build flag is none of them:
 The third is the only route to HPL's remaining 16%, and its price is that the
 program admits what it is doing.
 
+**G8.21 — `where n <= a.len()`, and the last of the bounds checks that can
+go.** Ch. 4 §2.8. A `where` clause already carried type bounds; it carries
+value predicates now, told apart by the `:` a bound has and an expression
+does not.
+
+The mechanism is smaller than it sounds and that is the point. A predicate
+compiles to **one branch on entry** — pass, or trap — and the fact machinery
+of G8.19 does the rest, because a branch is exactly what it reads. Nothing was
+added to it. `i < n` from the loop and `n <= a.len()` from the clause give
+`i < a.len()`, and the check inside the loop is gone.
+
+It is checked in the **callee**, not at the call site, so a caller is not
+obliged to *prove* anything. What the clause buys is one check per call
+instead of one per use — which is the loop-invariant hoisting a compiler would
+otherwise have to synthesize, written by the person who knows why it holds.
+
+`while i < n { … }` in HPL's four hot functions became four `where` clauses.
+**HPL: 2 743 146 → 2 552 691, −6.9%.** Against the start of this thread:
+**3 233 721 → 2 552 691, −21.1%**, and the floor measured by deleting the
+checks outright is 2 249 471 — so **69% of everything bounds checking costs is
+now recovered**, and the rest is the price of the ones that are genuinely
+undecidable.
+
+*Two things it needed that were not obvious.* The facts had to learn `<=`,
+which is the branch shape where the negative and zero edges agree. And
+"nothing wrote in between" had to become **between** — a write the fact
+reaches but which does not reach the use has not happened yet, and the code
+that drops a `Vec` after a loop is exactly that. Asking the coarser question
+made the whole thing do nothing at all.
+
+*Reserved, and stated in §2.8:* discharging the predicate at the **call
+site**, where a caller that can prove it pays nothing and one that cannot is
+told at compile time. That needs a proof language. The runtime check is the
+conservative reading of the same clause, so adding the proof later changes no
+existing program's meaning.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

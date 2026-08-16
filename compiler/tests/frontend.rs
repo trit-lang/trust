@@ -4504,3 +4504,34 @@ fn a_negative_index_still_faults() {
          }",
     );
 }
+
+#[test]
+fn a_where_predicate_is_checked_once_and_believed_after() {
+    // Ch. 4 §2.8. A value predicate is a precondition: checked when the
+    // function is entered, and a *fact* its body may rely on — which is what
+    // lets `i < n <= a.len()` decide a bounds check before the loop runs.
+    assert_eq!(
+        run("fn total(a: &[t27], n: taddr) -> t27 where n <= a.len() { \
+                 let mut s: t27 = 0; let mut i: taddr = 0; \
+                 while i < n { s += a[i]; i += 1; } \
+                 s \
+             } \
+             fn main() -> t27 { let x: [t27; 4] = [1, 2, 3, 4]; total(&x, 3) }")
+        .0,
+        6
+    );
+}
+
+#[test]
+fn a_violated_precondition_faults_on_entry() {
+    // Not at the call site, and not later at the index it would have made
+    // wrong: a call that breaks the clause faults where the clause is.
+    must_fault(
+        "fn total(a: &[t27], n: taddr) -> t27 where n <= a.len() { \
+             let mut s: t27 = 0; let mut i: taddr = 0; \
+             while i < n { s += a[i]; i += 1; } \
+             s \
+         } \
+         fn main() -> t27 { let x: [t27; 4] = [1, 2, 3, 4]; total(&x, 9) }",
+    );
+}

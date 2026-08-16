@@ -464,11 +464,38 @@ impl Parser {
 
     /// `where T: Bound, U: Other` — the same bounds, written after the
     /// signature instead of inside the angle brackets (Ch. 4 §2.2).
-    fn where_clause(&mut self, generics: &mut [GenericParam]) -> R<()> {
+    /// The `where` clause, which carries two different things.
+    ///
+    /// `T: Ord` constrains a *type*; `n <= a.len()` constrains a *value*, is
+    /// checked once when the function is entered, and is a fact its body may
+    /// use (Ch. 4 §2.8). They are told apart by the `:` — a value predicate
+    /// is an expression and has none where a bound has one.
+    fn where_clause(&mut self, generics: &mut [GenericParam]) -> R<Vec<Expr>> {
+        let mut requires = Vec::new();
         if !self.eat_kw("where") {
-            return Ok(());
+            return Ok(requires);
         }
         loop {
+            // A predicate rather than a bound: parse it as what it is.
+            let save = self.pos;
+            if !matches!(self.peek(), Tok::Lifetime(_)) {
+                let looks_like_a_bound = self.expect_ident().is_ok() && self.at_op(":");
+                self.pos = save;
+                if !looks_like_a_bound {
+                    // A predicate is followed by the body's `{`, so a struct
+                    // literal is off here for the reason it is off in an
+                    // `if` condition (Ch. 0 §5.3).
+                    let saved = self.no_struct;
+                    self.no_struct = true;
+                    let pred = self.expr();
+                    self.no_struct = saved;
+                    requires.push(pred?);
+                    if self.eat_op(",") {
+                        continue;
+                    }
+                    return Ok(requires);
+                }
+            }
             if let Tok::Lifetime(_) = self.peek() {
                 self.bump();
                 self.expect_op(":")?;
@@ -503,10 +530,10 @@ impl Parser {
                 }
             }
             if !self.eat_op(",") {
-                return Ok(());
+                return Ok(requires);
             }
             if self.at_op("{") {
-                return Ok(());
+                return Ok(requires);
             }
         }
     }
@@ -633,7 +660,7 @@ impl Parser {
         } else {
             (None, Vec::new(), first, first_args)
         };
-        self.where_clause(&mut generics)?;
+        let _ = self.where_clause(&mut generics)?;
         // `impl<T, U: From<T>> Into<U> for T` — the self type is one of the
         // impl's own parameters, so this impl is a *rule* over every type
         // satisfying the bounds rather than one type's (Ch. 4 §5.6).
@@ -836,7 +863,7 @@ impl Parser {
         } else {
             None
         };
-        self.where_clause(&mut generics)?;
+        let requires = self.where_clause(&mut generics)?;
 
         // A function without a body is a declaration (§3.1) — the same rule
         // TIR §1 states for its own.
@@ -851,6 +878,7 @@ impl Parser {
             params,
             ret,
             body,
+            requires,
             line,
         })
     }
