@@ -131,6 +131,8 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | `trust-lsp` | diagnostics over stdio, from the compiler itself — no second implementation of the language. Ranges are the expression that is wrong, in the protocol's UTF-16 columns (G0.19) |
 | `editors/` | a tree-sitter grammar (a second parser, held to the first by `scripts/grammar.sh`) and a Zed extension. G0.19 |
 | `lang::index` | an outline, go-to-definition, hover, find-references, rename and completion, from the AST alone — so both work on a file that does not compile. Names resolve by scope and spelling; what needs a type is left unanswered rather than guessed (G0.19) |
+| `String` | the prelude's name for `Vec<char>` (Ch. 0 §3.6). `&String` is already `&[char]`, `&[char]` is already `&str`, so a `String` is text everywhere text is wanted — `to_string`, `push_str`, `starts_with`, `contains`, `eq`, and `for c in s` |
+| type aliases | `type Name = T;` — only a name, expanded before anything below the frontend hears of it |
 | nested patterns, guards | an arm that matched its head and can still fail falls through to the next (G9.29). Exhaustiveness does not count such an arm |
 | modules | a program is a tree of files (Ch. 6). `mod m;` finds `m.tr`; `pub` is what a safety claim rests on; resolution renames everything to its path and hands lowering one file, which is why nothing below the frontend knows modules exist |
 | `parse_recovering` | an item that does not parse is skipped and the rest of the file is read, because an editor is asked about a file that is being typed into (G0.19) |
@@ -165,7 +167,7 @@ inference and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
 
 | Missing | Why |
 |---|---|
-| `String`, and growable text | `str` and string literals are built (G9.6) and are `&'static`; a growable one needs the heap |
+
 | ranges, so `for i in 0..10` | Ch. 0 §4 reserves range expressions |
 | a type parameterized by a `const` | `const N` works as an array *length* (G8.2); `struct Grid<const N: taddr>` is Ch. 4 §2.4 and unimplemented |
 

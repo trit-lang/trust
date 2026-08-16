@@ -582,6 +582,16 @@ impl str {
 
 // `String`'s one method of its own (Ch. 5 §2.6). An impl for a single
 // instantiation, which is what `String` is: `Vec<char>` and no other.
+// Owned, growable text (Ch. 5 §1).
+//
+// It is a *name* for `Vec<char>` and not a type of its own (Ch. 0 §3.6),
+// which costs nothing and buys everything: `&String` is already `&[char]`,
+// `&[char]` is already `&str`, and a `String` is already something `for c in`
+// walks. A `str` here is one character per word and fixed width (Ch. 5 §1.1),
+// so a `Vec<char>` is exactly the growable form of one — there is no encoding
+// to agree on and no invariant to maintain.
+type String = Vec<char>;
+
 impl Vec<char> {
     fn push_str(&mut self, t: &str) {
         let mut i: taddr = 0;
@@ -589,6 +599,72 @@ impl Vec<char> {
             self.push(t[i]);
             i += 1;
         }
+    }
+}
+
+impl str {
+    /// An owned copy of this text.
+    fn to_string(&self) -> Vec<char> {
+        let mut out: Vec<char> = Vec::new();
+        out.reserve(self.len());
+        out.push_str(self);
+        out
+    }
+
+    /// Whether this text begins with `p`.
+    fn starts_with(&self, p: &str) -> bool {
+        if p.len() > self.len() {
+            return false;
+        }
+        let mut i: taddr = 0;
+        while i < p.len() {
+            if self[i] != p[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    /// Whether `p` appears anywhere in this text.
+    fn contains(&self, p: &str) -> bool {
+        if p.len() > self.len() {
+            return false;
+        }
+        let mut at: taddr = 0;
+        while at + p.len() <= self.len() {
+            let mut i: taddr = 0;
+            let mut same = true;
+            while i < p.len() {
+                if self[at + i] != p[i] {
+                    same = false;
+                }
+                i += 1;
+            }
+            if same {
+                return true;
+            }
+            at += 1;
+        }
+        false
+    }
+
+    /// Whether this text is `other`, character for character.
+    ///
+    /// `==` on two references compares the references (Ch. 3 §2.4), which is
+    /// not the question anyone asks of text.
+    fn eq(&self, other: &str) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        let mut i: taddr = 0;
+        while i < self.len() {
+            if self[i] != other[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
     }
 }
 
@@ -735,7 +811,8 @@ pub fn analyze(src: &str) -> Analysis {
         .filter_map(item_name)
         .map(str::to_string)
         .collect();
-    let file = merged(&user, 1);
+    let mut file = merged(&user, 1);
+    let alias = expand_aliases(&mut file).err().unwrap_or_default();
     let noted = std::cell::RefCell::new(lower::Noted::default());
     let found = lower::lower_noting(&file, &mine, Some(&noted))
         .err()
@@ -746,7 +823,13 @@ pub fn analyze(src: &str) -> Analysis {
         // that did not — every call to the function being typed is "not a
         // function in scope" — and a list of consequences buries the cause.
         // The types are kept, because a type is not a complaint.
-        errors: if syntax.is_empty() { found } else { syntax },
+        errors: if !syntax.is_empty() {
+            syntax
+        } else if !alias.is_empty() {
+            alias
+        } else {
+            found
+        },
         types: noted.into_inner(),
     }
 }
@@ -808,7 +891,14 @@ fn finish(program: modules::Program) -> Build {
             errors,
         };
     }
-    let file = merged(&user, program.sources.len() as lex::File);
+    let mut file = merged(&user, program.sources.len() as lex::File);
+    if let Err(errors) = expand_aliases(&mut file) {
+        return Build {
+            program,
+            module: None,
+            errors,
+        };
+    }
     match lower::lower(&file) {
         Ok(module) => {
             let errs = crate::tir::verify(&module);
@@ -853,7 +943,8 @@ fn finish(program: modules::Program) -> Build {
 /// its own `sum` gets its own `sum`.
 pub fn compile(src: &str) -> Result<crate::tir::Module, Vec<SyntaxError>> {
     let user = parse::parse(src).map_err(|e| vec![e])?;
-    let file = merged(&user, 1);
+    let mut file = merged(&user, 1);
+    expand_aliases(&mut file)?;
     let module = lower::lower(&file)?;
 
     // Verified **before** pruning, and the order is the point. A function
@@ -881,6 +972,67 @@ pub fn compile(src: &str) -> Result<crate::tir::Module, Vec<SyntaxError>> {
     Ok(module)
 }
 
+/// Replace every alias with what it names, and drop the aliases (Ch. 0
+/// §3.6).
+///
+/// An alias is only a name, so this is the whole of what one is: after it,
+/// nothing below the frontend has ever heard of `String`, and a diagnostic
+/// that says `Vec<char>` is saying the same thing.
+fn expand_aliases(file: &mut ast::File) -> Result<(), Vec<SyntaxError>> {
+    let mut aliases: std::collections::HashMap<String, ast::Ty> = std::collections::HashMap::new();
+    for item in &file.items {
+        if let ast::Item::Alias(a) = item {
+            aliases.insert(a.name.clone(), a.ty.clone());
+        }
+    }
+    if aliases.is_empty() {
+        return Ok(());
+    }
+
+    // An alias may name another, so each one is expanded until it names no
+    // alias at all. A definition that reaches itself has no such form, and
+    // saying so is better than not returning.
+    let mut errs = Vec::new();
+    let settled: std::collections::HashMap<String, ast::Ty> = aliases
+        .keys()
+        .map(|name| {
+            let mut t = aliases[name].clone();
+            let mut seen = vec![name.clone()];
+            for _ in 0..aliases.len() {
+                let ast::Ty::Name(n, at) = &t else { break };
+                let Some(next) = aliases.get(n) else { break };
+                if seen.contains(n) {
+                    errs.push(SyntaxError {
+                        span: *at,
+                        message: format!("the type alias `{name}` names itself (Ch. 0 §3.6)"),
+                    });
+                    break;
+                }
+                seen.push(n.clone());
+                t = next.clone();
+            }
+            (name.clone(), t)
+        })
+        .collect();
+    if !errs.is_empty() {
+        return Err(errs);
+    }
+
+    ast::for_each_ty(file, &mut |t| {
+        // Only a bare name is an alias: an alias takes no parameters, so
+        // `String<T>` names nothing and is left for the type checker to
+        // refuse by name.
+        let ast::Ty::Name(n, at) = t else { return };
+        if let Some(to) = settled.get(n) {
+            // The alias's span, not its definition's: a reader who wrote
+            // `String` is asking about where they wrote it.
+            *t = to.clone().spanning(*at);
+        }
+    });
+    file.items.retain(|i| !matches!(i, ast::Item::Alias(_)));
+    Ok(())
+}
+
 /// The name an item defines, for the shadowing rule. An `impl` block defines
 /// none: it adds methods to a type, and two impls of different traits for one
 /// type are not a collision.
@@ -891,6 +1043,7 @@ fn item_name(i: &ast::Item) -> Option<&str> {
         ast::Item::Enum(e) => Some(&e.name),
         ast::Item::Trait(t) => Some(&t.name),
         ast::Item::Const(c) => Some(&c.name),
+        ast::Item::Alias(a) => Some(&a.name),
         // An `impl` defines none: it adds methods to a type, and two impls
         // of different traits for one type are not a collision. A `mod` and
         // a `use` define a name in their own module and are resolved away

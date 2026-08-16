@@ -334,6 +334,30 @@ Name<T>           // reserved: generics are Ch. 4
 `&T` and `Name<T>` are written here so the grammar is complete; their meaning
 is Chapters 3 and 4's, and a draft 0.1 compiler may reject them.
 
+### 3.6 Type aliases
+
+```
+type String = Vec<char>;
+```
+
+A **type alias** is another name for a type. It is an item, and it is only a
+name: `String` and `Vec<char>` are the same type, not two types with a
+conversion between them, and a diagnostic may say either.
+
+An alias takes no parameters in draft 0.1: `type Pair<T> = (T, T)` is
+reserved. An alias whose definition mentions itself, directly or through
+other aliases, is an error.
+
+An alias may be `pub` (Ch. 6 §2.2), and is otherwise visible where any other
+item is.
+
+> **Informative.** An alias is a name and not a type because the alternative
+> — a distinct type with the same representation — is a different feature
+> with different questions attached: which one a method is written on, which
+> one a `match` sees, whether one may be passed where the other is expected.
+> Draft 0.1 wants the short name and none of the questions, so `String` is
+> `Vec<char>` in every sentence about it, including this one.
+
 ---
 
 ## 4. Patterns
@@ -516,7 +540,8 @@ their meaning is not.
 
 ```
 file        := item*
-item        := attr* ( fn | struct | enum | const | trait | impl )
+item        := attr* ( fn | struct | enum | const | trait | impl | alias )
+alias       := 'type' ident '=' type ';'                     -- §3.6
 attr        := '#' '[' ident '(' ident,* ')' ']'
 
 generics    := ( '<' ( lifetime | ident bounds? | 'const' ident ':' type ),* '>' )?

@@ -282,6 +282,7 @@ fn defines(i: &Item) -> Option<&str> {
         Item::Enum(e) => Some(&e.name),
         Item::Trait(t) => Some(&t.name),
         Item::Const(c) => Some(&c.name),
+        Item::Alias(a) => Some(&a.name),
         Item::Impl(_) | Item::Mod(_) | Item::Use(_) => None,
     }
 }
@@ -293,6 +294,7 @@ fn is_public(i: &Item) -> bool {
         Item::Enum(e) => e.public,
         Item::Trait(t) => t.public,
         Item::Const(c) => c.public,
+        Item::Alias(a) => a.public,
         Item::Impl(_) | Item::Mod(_) | Item::Use(_) => false,
     }
 }
@@ -386,6 +388,7 @@ fn rename_item(item: &mut Item, here: &[String]) {
         Item::Enum(e) => e.name = join(here, &e.name),
         Item::Trait(t) => t.name = join(here, &t.name),
         Item::Const(c) => c.name = join(here, &c.name),
+        Item::Alias(a) => a.name = join(here, &a.name),
         Item::Impl(_) | Item::Mod(_) | Item::Use(_) => {}
     }
 }
@@ -501,6 +504,7 @@ impl Rewriter<'_> {
                     self.function(m);
                 }
             }
+            Item::Alias(a) => self.ty(&mut a.ty),
             Item::Mod(_) | Item::Use(_) => {}
         }
     }

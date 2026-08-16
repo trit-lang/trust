@@ -422,6 +422,7 @@ fn completion_kind(k: lang::index::SymbolKind) -> u32 {
         Variant => 20,
         Field => 5,
         Module => 9,
+        Alias => 25,
         Trait => 8,
         Impl => 7,
         Const => 21,
@@ -494,6 +495,8 @@ fn kind(k: lang::index::SymbolKind) -> u32 {
         // list of kinds has to one.
         // The protocol has a Module kind; a Trait is closest to Interface.
         Module => 2,
+        // The protocol has no alias; a type alias is a type.
+        Alias => 26,
         Trait => 11,
         Impl => 5,
         Const => 14,

@@ -53,6 +53,8 @@ pub enum SymbolKind {
     Const,
     /// A `mod` declaration (Ch. 6 §1.2).
     Module,
+    /// A type alias (Ch. 0 §3.6).
+    Alias,
     /// A `let` binding or a pattern binding.
     Local,
     /// A function's parameter.
@@ -529,6 +531,10 @@ impl Builder {
                     let label = format!("mod {}", m.name);
                     self.define_item(&m.name, m.name_span, SymbolKind::Module, label);
                 }
+                Item::Alias(a) => {
+                    let label = format!("type {} = {}", a.name, type_name(&a.ty));
+                    self.define_item(&a.name, a.name_span, SymbolKind::Alias, label);
+                }
                 // A `use` binds a name for something defined elsewhere, so
                 // the definition it names is not in this file to point at.
                 Item::Use(_) => {}
@@ -747,6 +753,17 @@ impl Builder {
                 children: Vec::new(),
             }),
             Item::Use(_) => None,
+            Item::Alias(a) => {
+                self.ty(&a.ty);
+                Some(Symbol {
+                    name: a.name.clone(),
+                    kind: SymbolKind::Alias,
+                    detail: type_name(&a.ty),
+                    span: a.span,
+                    name_span: a.name_span,
+                    children: Vec::new(),
+                })
+            }
             Item::Impl(i) => {
                 let children = i
                     .methods

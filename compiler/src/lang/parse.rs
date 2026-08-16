@@ -354,6 +354,9 @@ impl Parser {
             }
             return Ok(Item::Use(self.use_item()?));
         }
+        if self.at_kw("type") {
+            return Ok(Item::Alias(self.alias_item(public)?));
+        }
         if self.at_kw("fn") {
             return Ok(Item::Fn(self.fn_item(public)?));
         }
@@ -382,6 +385,29 @@ impl Parser {
             return Ok(Item::Impl(self.impl_item()?));
         }
         self.err(format!("expected an item, found {}", self.peek()))
+    }
+
+    /// `type Name = T;` — another name for a type (Ch. 0 §3.6).
+    fn alias_item(&mut self, public: bool) -> R<AliasItem> {
+        let span = self.span();
+        self.bump(); // type
+        let (name, name_span) = self.expect_ident_at()?;
+        if self.at_op("<") {
+            return self.err(
+                "a type alias takes no parameters in draft 0.1 (Ch. 0 §3.6); \
+                 `type Pair<T> = (T, T)` is reserved",
+            );
+        }
+        self.expect_op("=")?;
+        let ty = self.ty()?;
+        self.expect_op(";")?;
+        Ok(AliasItem {
+            name,
+            name_span,
+            public,
+            ty,
+            span,
+        })
     }
 
     /// `mod name;` — a module, which is a file (Ch. 6 §1.2).

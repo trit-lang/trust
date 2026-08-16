@@ -250,8 +250,8 @@ use         := 'use' path ';'
 path        := ident ( '::' ident )*
 ```
 
-and `pub` is admitted before `fn`, `struct`, `enum`, `const`, `trait` and
-before a `struct`'s or a variant's field.
+and `pub` is admitted before `fn`, `struct`, `enum`, `const`, `trait`, a type
+alias (Ch. 0 §3.6) and a `struct`'s or a variant's field.
 
 `impl` takes no `pub`: an `impl` block is as visible as the more private of
 the type and the trait, which is a rule rather than a spelling.

@@ -31,6 +31,26 @@ pub enum Item {
     Mod(ModItem),
     /// `use a::b::c;` — a name for something already visible (Ch. 6 §3.2).
     Use(UseItem),
+    /// `type Name = T;` — another name for a type (Ch. 0 §3.6).
+    Alias(AliasItem),
+}
+
+/// `type Name = T;`.
+///
+/// Only a name: `String` and `Vec<char>` are the same type, and a diagnostic
+/// may say either (Ch. 0 §3.6).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AliasItem {
+    /// Its name.
+    pub name: String,
+    /// Where the name was written.
+    pub name_span: Span,
+    /// Whether it is visible outside the module defining it (Ch. 6 §2).
+    pub public: bool,
+    /// What it names.
+    pub ty: Ty,
+    /// Where it was written.
+    pub span: Span,
 }
 
 /// `mod name;`.
@@ -72,6 +92,7 @@ impl Item {
             Item::Impl(i) => i.span,
             Item::Mod(m) => m.span,
             Item::Use(u) => u.span,
+            Item::Alias(a) => a.span,
         }
     }
 
@@ -87,6 +108,7 @@ impl Item {
             Item::Impl(i) => i.span,
             Item::Mod(m) => m.name_span,
             Item::Use(u) => u.name_span,
+            Item::Alias(a) => a.name_span,
         }
     }
 
@@ -101,6 +123,7 @@ impl Item {
             Item::Impl(i) => i.span = span,
             Item::Mod(m) => m.span = span,
             Item::Use(u) => u.span = span,
+            Item::Alias(a) => a.span = span,
         }
         self
     }
@@ -747,5 +770,209 @@ impl Pattern {
             | Pattern::Tuple(_, l) => *l = span,
         }
         self
+    }
+}
+
+/// Visit every type written in a file.
+///
+/// The AST knows its own shape, so the walk lives here rather than in each
+/// pass that wants one. `f` sees a type before its parts, so a substitution
+/// that replaces a whole type is not then asked about the pieces it replaced.
+pub fn for_each_ty(file: &mut File, f: &mut impl FnMut(&mut Ty)) {
+    for item in &mut file.items {
+        match item {
+            Item::Fn(fun) => fn_tys(fun, f),
+            Item::Const(c) => ty(&mut c.ty, f),
+            Item::Alias(a) => ty(&mut a.ty, f),
+            Item::Struct(s) => {
+                for n in &mut s.fields {
+                    ty(&mut n.ty, f);
+                }
+            }
+            Item::Enum(e) => {
+                for v in &mut e.variants {
+                    for n in &mut v.fields {
+                        ty(&mut n.ty, f);
+                    }
+                }
+            }
+            Item::Trait(t) => {
+                for (_, c) in &mut t.consts {
+                    ty(c, f);
+                }
+                for m in &mut t.methods {
+                    fn_tys(m, f);
+                }
+            }
+            Item::Impl(i) => {
+                for a in i.trait_args.iter_mut().chain(i.self_args.iter_mut()) {
+                    ty(a, f);
+                }
+                for (_, t) in &mut i.assoc {
+                    ty(t, f);
+                }
+                for c in &mut i.consts {
+                    ty(&mut c.ty, f);
+                }
+                for m in &mut i.methods {
+                    fn_tys(m, f);
+                }
+            }
+            Item::Mod(_) | Item::Use(_) => {}
+        }
+    }
+}
+
+/// Every type in one function's signature and body.
+fn fn_tys(fun: &mut FnItem, f: &mut impl FnMut(&mut Ty)) {
+    for g in &mut fun.generics {
+        if let GenericParam::Const { ty: t, .. } = g {
+            ty(t, f);
+        }
+    }
+    for p in &mut fun.params {
+        ty(&mut p.ty, f);
+    }
+    if let Some(r) = &mut fun.ret {
+        ty(r, f);
+    }
+    if let Some(b) = &mut fun.body {
+        block_tys(b, f);
+    }
+}
+
+fn block_tys(b: &mut Block, f: &mut impl FnMut(&mut Ty)) {
+    for s in &mut b.stmts {
+        match s {
+            Stmt::Let { ty: t, value, .. } => {
+                if let Some(t) = t {
+                    ty(t, f);
+                }
+                expr_tys(value, f);
+            }
+            Stmt::Expr(e) => expr_tys(e, f),
+        }
+    }
+    if let Some(t) = &mut b.tail {
+        expr_tys(t, f);
+    }
+}
+
+fn expr_tys(e: &mut Expr, f: &mut impl FnMut(&mut Ty)) {
+    match e {
+        Expr::Cast(v, t, _) => {
+            expr_tys(v, f);
+            ty(t, f);
+        }
+        Expr::Call(_, _, targs, args, _) => {
+            for t in targs {
+                ty(t, f);
+            }
+            for a in args {
+                expr_tys(a, f);
+            }
+        }
+        Expr::Closure(params, ret, body, _) => {
+            for (_, t) in params {
+                if let Some(t) = t {
+                    ty(t, f);
+                }
+            }
+            if let Some(r) = ret {
+                ty(r, f);
+            }
+            expr_tys(body, f);
+        }
+        Expr::Aggregate(path, fields, _) => {
+            for t in &mut path.targs {
+                ty(t, f);
+            }
+            for (_, v) in fields {
+                expr_tys(v, f);
+            }
+        }
+        Expr::Block(b) => block_tys(b, f),
+        Expr::If(c, then, other, _) => {
+            expr_tys(c, f);
+            block_tys(then, f);
+            if let Some(o) = other {
+                expr_tys(o, f);
+            }
+        }
+        Expr::Match(v, arms, _) => {
+            expr_tys(v, f);
+            for a in arms {
+                if let Some(g) = &mut a.guard {
+                    expr_tys(g, f);
+                }
+                expr_tys(&mut a.body, f);
+            }
+        }
+        Expr::While(c, b, _) => {
+            expr_tys(c, f);
+            block_tys(b, f);
+        }
+        Expr::Loop(b, _) => block_tys(b, f),
+        Expr::Method(r, _, _, args, _) => {
+            expr_tys(r, f);
+            for a in args {
+                expr_tys(a, f);
+            }
+        }
+        Expr::CallExpr(g, args, _) => {
+            expr_tys(g, f);
+            for a in args {
+                expr_tys(a, f);
+            }
+        }
+        Expr::Field(v, _, _)
+        | Expr::Unary(_, v, _)
+        | Expr::Borrow(v, _, _)
+        | Expr::Deref(v, _)
+        | Expr::Try(v, _) => expr_tys(v, f),
+        Expr::Repeat(a, b, _)
+        | Expr::Binary(_, a, b, _)
+        | Expr::Assign(_, a, b, _)
+        | Expr::Index(a, b, _) => {
+            expr_tys(a, f);
+            expr_tys(b, f);
+        }
+        Expr::Array(items, _) | Expr::Tuple(items, _) => {
+            for i in items {
+                expr_tys(i, f);
+            }
+        }
+        Expr::Break(v, _) | Expr::Return(v, _) => {
+            if let Some(v) = v {
+                expr_tys(v, f);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// One type, and then its parts.
+fn ty(t: &mut Ty, f: &mut impl FnMut(&mut Ty)) {
+    f(t);
+    match t {
+        Ty::Array(inner, count, _) => {
+            ty(inner, f);
+            expr_tys(count, f);
+        }
+        Ty::Ref(inner, _, _) | Ty::Slice(inner, _) | Ty::Assoc(inner, _, _) => ty(inner, f),
+        Ty::Tuple(items, _) | Ty::App(_, items, _) => {
+            for i in items {
+                ty(i, f);
+            }
+        }
+        Ty::ImplFn(_, args, ret, _) => {
+            for a in args {
+                ty(a, f);
+            }
+            if let Some(r) = ret {
+                ty(r, f);
+            }
+        }
+        _ => {}
     }
 }

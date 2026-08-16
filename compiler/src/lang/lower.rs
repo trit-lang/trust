@@ -9289,6 +9289,19 @@ impl Fn<'_> {
         {
             key = k;
         }
+        // A `Vec<char>` also has `str`'s methods, because `&Vec<T>` is a
+        // `&[T]` wherever one is wanted (Ch. 5 §2.6) and `[char]` is spelled
+        // `str` (Ch. 5 §1.1). Passing one already worked; calling one is the
+        // same coercion asked at the receiver instead of at an argument.
+        if !self.sigs.borrow().contains_key(&key)
+            && self.generic_def(&key).is_none()
+            && matches!(&base, Ty::VecOf(e) if **e == Ty::Char)
+        {
+            let as_text = self.method_key("str", name, span)?;
+            if self.sigs.borrow().contains_key(&as_text) {
+                key = as_text;
+            }
+        }
         // A method with type parameters of its own — one taking `impl Fn(…)`
         // is the common case — is a generic function, and generic functions
         // are instantiated at the call site rather than looked up.
