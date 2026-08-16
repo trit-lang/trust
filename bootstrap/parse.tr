@@ -86,11 +86,30 @@ pub fn postfix(p: &mut Parser) -> Result<Expr, lex::Error> {
     loop {
         let t = peek(p)?;
         let next = t.at;
-        let dot = match t.tok {
-            Tok::Op(o) => o.same("."),
-            _ => false,
+        let op = match t.tok {
+            Tok::Op(o) => o,
+            Tok::Kw(k) => k,
+            _ => return Result::Ok(e),
         };
-        if !dot {
+        if op.same("[") {
+            p.at = next;
+            let at = expr(p)?;
+            expect_op(p, "]")?;
+            e = Expr::Index(Box::new(e), Box::new(at));
+            continue;
+        }
+        if op.same("?") {
+            p.at = next;
+            e = Expr::Try(Box::new(e));
+            continue;
+        }
+        if op.same("as") {
+            p.at = next;
+            let ty = type_name(p)?;
+            e = Expr::Cast(Box::new(e), ty);
+            continue;
+        }
+        if !op.same(".") {
             return Result::Ok(e);
         }
         p.at = next;
@@ -121,6 +140,32 @@ pub fn unary(p: &mut Parser) -> Result<Expr, lex::Error> {
                 p.at = next;
                 let inner = unary(p)?;
                 return Result::Ok(Expr::Unary(o, Box::new(inner)));
+            }
+            if o.same("&") || o.same("&&") {
+                // `&&e` lexes as the logical-and by maximal munch, and only
+                // this position knows it is two borrows. The second `&` is
+                // left for the next turn, exactly as a type does it.
+                if o.same("&&") {
+                    p.at = next - 1;
+                } else {
+                    p.at = next;
+                }
+                let t2 = peek(p)?;
+                let at2 = t2.at;
+                let mutable = match t2.tok {
+                    Tok::Kw(k) => k.same("mut"),
+                    _ => false,
+                };
+                if mutable {
+                    p.at = at2;
+                }
+                let inner = unary(p)?;
+                return Result::Ok(Expr::Borrow(Box::new(inner), mutable));
+            }
+            if o.same("*") {
+                p.at = next;
+                let inner = unary(p)?;
+                return Result::Ok(Expr::Deref(Box::new(inner)));
             }
             postfix(p)
         }
@@ -181,6 +226,14 @@ pub fn primary(p: &mut Parser) -> Result<Expr, lex::Error> {
         p.at = after;
         return Result::Ok(Expr::Name("self".to_string()));
     }
+    if keyword.same("true") {
+        p.at = after;
+        return Result::Ok(Expr::Bool(true));
+    }
+    if keyword.same("false") {
+        p.at = after;
+        return Result::Ok(Expr::Bool(false));
+    }
     let braced = peek(p)?;
     let opens = match braced.tok {
         Tok::Op(o) => o.same("{"),
@@ -197,6 +250,7 @@ pub fn primary(p: &mut Parser) -> Result<Expr, lex::Error> {
         Tok::Int(v) => Result::Ok(Expr::Int(v)),
         Tok::TritLit(v) => Result::Ok(Expr::Int(v)),
         Tok::CharLit(v) => Result::Ok(Expr::Int(v)),
+        Tok::Str(text) => Result::Ok(Expr::Str(text)),
         Tok::Ident(n) => path_expr(p, n),
         Tok::Op(o) => {
             if o.same("(") {
@@ -570,7 +624,20 @@ fn let_stmt(p: &mut Parser) -> Result<ast::Stmt, lex::Error> {
         }
         _ => {}
     }
-    let name = ident(p)?;
+    // `let _ = e;` binds nothing and is how a value is discarded (§5.2).
+    // The wildcard is punctuation, not a name, so it is read here.
+    let t1 = peek(p)?;
+    let at1 = t1.at;
+    let wild = match t1.tok {
+        Tok::Op(o) => o.same("_"),
+        _ => false,
+    };
+    let name = if wild {
+        p.at = at1;
+        "_".to_string()
+    } else {
+        ident(p)?
+    };
     // A written type is read and dropped: nothing here does anything with
     // one, and pretending otherwise would be a second thing to keep right.
     let t2 = peek(p)?;

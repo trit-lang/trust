@@ -19,6 +19,20 @@ pub enum Expr {
     /// a tuple form's fields are its positions written out, and a bare path
     /// to a variant is that shape with no fields at all.
     Aggregate(String, Vec<Field>),
+    /// `"…"` — the characters, as they were written after the escapes.
+    Str(String),
+    /// `true` and `false`.
+    Bool(bool),
+    /// `&e` and `&mut e`; the flag is the `mut` (Ch. 3 §2.1).
+    Borrow(Box<Expr>, bool),
+    /// `*e` (Ch. 3 §2.2).
+    Deref(Box<Expr>),
+    /// `a[i]` (Ch. 3 §5.5).
+    Index(Box<Expr>, Box<Expr>),
+    /// `e as T` (§2.6). The type is the text it was written with.
+    Cast(Box<Expr>, String),
+    /// `e?` (Ch. 5 §6.2).
+    Try(Box<Expr>),
     /// `(e)`, kept so that printing round-trips.
     Group(Box<Expr>),
     /// `x.f` — a field.
@@ -226,6 +240,51 @@ pub fn show(e: &Expr, out: &mut String) {
                 show(&args[i], out);
                 i += 1;
             }
+            out.push_str(")");
+        }
+        Expr::Str(text) => {
+            out.push_str("(str ");
+            out.push_str(&text);
+            out.push_str(")");
+        }
+        Expr::Bool(b) => {
+            if b {
+                out.push_str("true");
+            } else {
+                out.push_str("false");
+            }
+        }
+        Expr::Borrow(inner, mutable) => {
+            if mutable {
+                out.push_str("(&mut ");
+            } else {
+                out.push_str("(& ");
+            }
+            show(&*inner, out);
+            out.push_str(")");
+        }
+        Expr::Deref(inner) => {
+            out.push_str("(* ");
+            show(&*inner, out);
+            out.push_str(")");
+        }
+        Expr::Index(base, at) => {
+            out.push_str("(index ");
+            show(&*base, out);
+            out.push_str(" ");
+            show(&*at, out);
+            out.push_str(")");
+        }
+        Expr::Cast(inner, ty) => {
+            out.push_str("(as ");
+            show(&*inner, out);
+            out.push_str(" ");
+            out.push_str(&ty);
+            out.push_str(")");
+        }
+        Expr::Try(inner) => {
+            out.push_str("(try ");
+            show(&*inner, out);
             out.push_str(")");
         }
         Expr::Aggregate(path, fields) => {

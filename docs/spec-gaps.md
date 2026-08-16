@@ -2592,6 +2592,21 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.43 — two lexers, two strings.** The corpus held no bare `_` and no
+escape inside a string, and both were wrong in the Trust lexer: `_` came
+back as an identifier where Ch. 0 §1.5 makes it punctuation, and a string
+was the raw slice between the quotes — so `"a\nb"` was five characters and
+`"say \""` ended at the escaped quote.
+
+Neither is a decision. Both are the differential invariant doing what it is
+for, and both were invisible until a corpus reached them, which is the
+argument for growing the corpus with the parser rather than after it.
+
+The fix for the second is one function: `escape_at` answers with a value and
+where it ends, and the character literal and the string both call it. Two
+decoders that agreed today would be two decoders that could stop agreeing,
+and there is nothing in the language that could express the difference.
+
 **G9.42 — `pub` on a method of an `impl`.** Ch. 6 §2.2 says a `pub` on a
 trait's method or an enum's variant is an error, and §5 says an `impl` block
 takes no `pub` because it "is as visible as the more private of the type and

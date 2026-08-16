@@ -530,6 +530,41 @@ fn show_expr(e: &lang::ast::Expr, out: &mut String) {
             }
             out.push(')');
         }
+        Expr::Str(text, _) => {
+            out.push_str("(str ");
+            for c in text {
+                out.push(char::from_u32(*c as u32).unwrap_or('?'));
+            }
+            out.push(')');
+        }
+        Expr::Bool(b, _) => out.push_str(if *b { "true" } else { "false" }),
+        Expr::Borrow(inner, mutable, _) => {
+            out.push_str(if *mutable { "(&mut " } else { "(& " });
+            show_expr(inner, out);
+            out.push(')');
+        }
+        Expr::Deref(inner, _) => {
+            out.push_str("(* ");
+            show_expr(inner, out);
+            out.push(')');
+        }
+        Expr::Index(base, at, _) => {
+            out.push_str("(index ");
+            show_expr(base, out);
+            out.push(' ');
+            show_expr(at, out);
+            out.push(')');
+        }
+        Expr::Cast(inner, ty, _) => {
+            out.push_str("(as ");
+            show_expr(inner, out);
+            out.push_str(&format!(" {})", written_ty(ty)));
+        }
+        Expr::Try(inner, _) => {
+            out.push_str("(try ");
+            show_expr(inner, out);
+            out.push(')');
+        }
         Expr::Aggregate(path, fields, _) => {
             out.push_str(&format!("(agg {}", path.segments.join("::")));
             for (name, value) in fields {

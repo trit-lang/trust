@@ -9,3 +9,16 @@ fn text() -> t27 {
     let f = "mixed 中英 text with 🙂 emoji";
     0
 }
+
+// Escapes, which a string and a `char` must decode the same way.
+fn escapes() -> t27 {
+    let a = "a\nb\tc\\d\"e";
+    // A NUL is a `char` and not put in a string here: a shell drops one
+    // from a comparison, and a test whose subject vanishes is no test.
+    let z = '\0';
+    let b = "\u{4e16}\u{1F642}";
+    let c = '\n';
+    let d = '\u{1F642}';
+    let e = "quote \" inside, which does not end it";
+    0
+}

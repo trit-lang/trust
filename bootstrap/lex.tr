@@ -130,6 +130,12 @@ pub fn one(s: &str, from: taddr) -> Result<Taken, Error> {
             i += 1;
         }
         let w = slice(s, start, i);
+        // `_` alone is not a name: it is the wildcard, which is punctuation
+        // (§1.5) and a pattern (§4). Every longer word beginning with one is
+        // an ordinary identifier.
+        if w.same("_") {
+            return Result::Ok(Taken { tok: Tok::Op("_".to_string()), at: i });
+        }
         if is_keyword(&w) {
             return Result::Ok(Taken { tok: Tok::Kw(w), at: i });
         }
@@ -142,16 +148,22 @@ pub fn one(s: &str, from: taddr) -> Result<Taken, Error> {
     if c == '"' {
         let open = i;
         i += 1;
-        let start = i;
+        let mut text: String = Vec::new();
         // A newline inside one ends it: an unclosed quote would otherwise
         // swallow the rest of the file and be reported somewhere unrelated.
         while i < s.len() && s[i] != '"' && s[i] != '\n' {
-            i += 1;
+            if s[i] == '\\' {
+                let e = escape_at(s, i)?;
+                text.push(char::try_from(e.value).unwrap());
+                i = e.at;
+            } else {
+                text.push(s[i]);
+                i += 1;
+            }
         }
         if i >= s.len() || s[i] == '\n' {
             return Result::Err(wrong(open, "unterminated string literal"));
         }
-        let text = slice(s, start, i);
         return Result::Ok(Taken { tok: Tok::Str(text), at: i + 1 });
     }
 
@@ -229,25 +241,41 @@ fn well_formed(text: &str) -> bool {
 
 /// A character literal whose character is written `\\…` (Ch. 5 §1.4).
 fn escape_literal(s: &str, at: taddr) -> Result<Taken, Error> {
-    if at + 2 >= s.len() {
+    let e = escape_at(s, at + 1)?;
+    Result::Ok(Taken { tok: Tok::CharLit(e.value), at: e.at + 1 })
+}
+
+/// One escape and where it ends, counted from its `\`.
+///
+/// A character literal and a string want the same answer, and giving them
+/// one function is the only way the two can be relied on to agree — a string
+/// that decoded its own escapes differently from a `char` would be a
+/// difference nothing in the language could express.
+pub struct Escaped {
+    pub value: t27,
+    pub at: taddr,
+}
+
+fn escape_at(s: &str, at: taddr) -> Result<Escaped, Error> {
+    if at + 1 >= s.len() {
         return Result::Err(wrong(at, "in an escape: the file ends"));
     }
-    let e = s[at + 2];
+    let e = s[at + 1];
     if e == 'u' {
         // `\u{…}`, hexadecimal, because it names a code point in a standard
         // that writes them that way.
-        let mut i = at + 4;
+        let mut i = at + 3;
         let mut v = 0;
         while i < s.len() && s[i] != '}' {
             v = v * 16 + hex(s[i]);
             i += 1;
         }
-        return Result::Ok(Taken { tok: Tok::CharLit(v), at: i + 2 });
+        return Result::Ok(Escaped { value: v, at: i + 1 });
     }
     let known = e == 'n' || e == 'r' || e == 't' || e == '0' || e == '\\'
         || e == '\'' || e == '"';
     if !known {
-        return Result::Err(wrong(at, "in an escape: that is not one"));
+        return Result::Err(wrong(at - 1, "in an escape: that is not one"));
     }
     let v = if e == 'n' {
         10
@@ -260,7 +288,7 @@ fn escape_literal(s: &str, at: taddr) -> Result<Taken, Error> {
     } else {
         e as t27
     };
-    Result::Ok(Taken { tok: Tok::CharLit(v), at: at + 4 })
+    Result::Ok(Escaped { value: v, at: at + 2 })
 }
 
 fn hex(c: char) -> t27 {

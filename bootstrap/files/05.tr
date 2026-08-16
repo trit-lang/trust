@@ -1,0 +1,12 @@
+struct Buf { data: Vec<t27>, at: taddr }
+fn go(b: &mut Buf, k: &&t27) -> t27 {
+    let n = b.data[b.at] as t9;
+    let r = &b.at;
+    let m = &mut b.data;
+    let d = *r;
+    let flag = true;
+    let other = false;
+    print("hello 世界\n");
+    m.push(n as t27 + **k);
+    if flag && !other { b.data[0] } else { 0 - 1 }
+}

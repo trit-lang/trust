@@ -26,3 +26,7 @@ fn awkward<'a, 'b>(p: &'a t27, q: &'b t27) -> t27 {
     let r = -1;
     0
 }
+
+// `_` alone is the wildcard and is punctuation; `_x` and `x_` are names.
+let _ = f(_x, x_, _1, __);
+match v { _ => 0 }
