@@ -2719,6 +2719,43 @@ This is also the third measurement in this log to contradict a change that
 looked obviously good — after the inlining budget, which is worse when raised,
 and constant folding, which was worth 62 instructions.
 
+**G8.19 — how much a bounds check costs, and half of it removed.**
+Compiling HPL with the index checks deleted outright says what they are worth:
+**3 233 721 → 2 249 471, −30.4%.** That is the largest single number left in
+this project, and most of it is not recoverable — HPL indexes `[t27; 35]` with
+a loop bound that is a *runtime* value, so `i < 35` is not provable and the
+check is the price of safety rather than a missing optimization.
+
+The **lower** check is another matter. Every index pays `0 <= i` as well, and
+an index is usually a counter that starts at zero and goes up. After `mem2reg`
+that counter is a block parameter whose incoming values are `const 0` and
+`add.trap %k, 1`:
+
+```text
+br ^loop(const t27 0)
+^loop(%k: t27):
+    %c = cmp t27 %k, const t27 0
+    br3 %c, ^fault, ^ok, ^ok
+```
+
+The proof is a **greatest** fixpoint — assume every value non-negative and
+refute — which is the only way a counter defined in terms of itself is
+provable at all. `.trap` is what makes the arithmetic sound: a `.wrap`
+addition can land below zero and is refuted, as is a subtraction, a load, and
+anything a call returned.
+
+The branch is rewritten only where the other two arms agree, since then
+knowing the first is impossible makes it unconditional and the comparison goes
+with it. That leaves blocks nothing can reach, and an unreachable block is one
+the verifier rejects — so pruning them is part of the transformation, not a
+tidy-up. HPL turned out to contain `if x < 0` on values that cannot be, which
+is where the first unreachable blocks came from.
+
+**HPL: 3 233 721 → 2 965 929, −8.3%**, and the reported Gflops rises with it.
+An indexed loop over an array is −1.4%. Two tests hold the other side down: a
+written negative index and one counted negative through a function that cannot
+see where it came from, both of which still fault.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

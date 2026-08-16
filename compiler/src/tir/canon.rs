@@ -79,6 +79,7 @@ pub fn canonicalize_module(m: &Module) -> Module {
         promote_slots(f);
         crate::tir::mem2reg::promote(f);
         fold_constants(f);
+        elide_sign_checks(f);
         branch_through_select(f);
         remove_dead(f);
     }
@@ -272,6 +273,190 @@ fn folded(k: &InstKind) -> Option<(Type, Bt)> {
             Some((*ty, v))
         }
         _ => None,
+    }
+}
+
+/// Drop a check that a value which cannot be negative is not negative
+/// (TIR §6).
+///
+/// Every index pays two comparisons — `0 <= i` and `i < len` — and the first
+/// is decidable far more often than the second, because an index is usually
+/// a counter that starts at zero and goes up. After `mem2reg` that counter is
+/// a **block parameter** whose incoming values are `const 0` and
+/// `add.trap %k, 1`, which is the textbook shape:
+///
+/// ```text
+/// br ^loop(const t27 0)
+/// ^loop(%k: t27):
+///     %c = cmp t27 %k, const t27 0
+///     br3 %c, ^fault, ^ok, ^ok
+/// ```
+///
+/// The proof is a **greatest** fixpoint: assume every value is non-negative
+/// and refute, which is what lets `%k` depend on itself. `.trap` is what
+/// makes the arithmetic sound — a `.wrap` addition can land below zero and is
+/// refuted, and so is anything read from memory or returned by a call.
+pub fn elide_sign_checks(f: &mut Function) {
+    let ok = non_negative(f);
+    for b in &mut f.blocks {
+        // Only where the other two arms agree: then knowing the first is
+        // impossible makes the branch unconditional, and the comparison goes
+        // with it. Redirecting one arm of a three-way branch would save
+        // nothing.
+        let Terminator::Br3 { t, neg, zero, pos } = &b.term else {
+            continue;
+        };
+        if zero != pos {
+            continue;
+        }
+        let Operand::Value(c) = t else { continue };
+        let against_zero = b.insts.iter().any(|i| {
+            i.results.first().is_some_and(|r| r == c)
+                && matches!(&i.kind, InstKind::Cmp { a: Operand::Value(x), b, .. }
+                    if ok.contains(x) && is_zero(b))
+        });
+        if !against_zero {
+            continue;
+        }
+        let _ = neg;
+        b.term = Terminator::Br(zero.clone());
+    }
+    prune_unreachable(f);
+    remove_dead(f);
+}
+
+/// Drop the blocks nothing can reach.
+///
+/// Proving a branch always goes one way is what makes a block unreachable,
+/// and an unreachable block is one the verifier rejects — so removing it is
+/// part of the transformation and not a tidy-up. It also removes what the
+/// block used, which may be defined somewhere that no longer dominates it.
+pub fn prune_unreachable(f: &mut Function) {
+    let index: BTreeMap<&str, usize> = f
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.label.as_str(), i))
+        .collect();
+    let mut live = vec![false; f.blocks.len()];
+    let mut stack = vec![0usize];
+    live[0] = true;
+    while let Some(b) = stack.pop() {
+        for s in successors(&f.blocks[b].term) {
+            if let Some(&j) = index.get(s.as_str())
+                && !live[j]
+            {
+                live[j] = true;
+                stack.push(j);
+            }
+        }
+    }
+    let mut keep = live.into_iter();
+    f.blocks.retain(|_| keep.next().unwrap_or(true));
+}
+
+fn is_zero(o: &Operand) -> bool {
+    matches!(o, Operand::Const(_, v) if v.to_i128() == Some(0))
+}
+
+/// The values that cannot be negative, by refutation from an optimistic
+/// start — the only way a counter that is defined in terms of itself can be
+/// proved anything at all.
+fn non_negative(f: &Function) -> BTreeSet<String> {
+    let mut ok: BTreeSet<String> = BTreeSet::new();
+    for b in &f.blocks {
+        for (n, _) in &b.params {
+            ok.insert(n.clone());
+        }
+        for inst in &b.insts {
+            for r in &inst.results {
+                ok.insert(r.clone());
+            }
+        }
+    }
+    // A parameter arrives from outside and says nothing about itself.
+    for (n, _) in &f.sig.params {
+        ok.remove(n);
+    }
+
+    // What reaches each block parameter, by position.
+    let mut incoming: BTreeMap<(String, usize), Vec<Operand>> = BTreeMap::new();
+    for b in &f.blocks {
+        for t in targets(&b.term) {
+            for (i, a) in t.args.iter().enumerate() {
+                incoming
+                    .entry((t.label.clone(), i))
+                    .or_default()
+                    .push(a.clone());
+            }
+        }
+    }
+
+    let holds = |o: &Operand, ok: &BTreeSet<String>| match o {
+        Operand::Const(_, v) => v.to_i128().is_some_and(|n| n >= 0),
+        Operand::Value(v) => ok.contains(v),
+        Operand::Global(_) => false,
+    };
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for b in &f.blocks {
+            for (i, (n, _)) in b.params.iter().enumerate() {
+                if !ok.contains(n) {
+                    continue;
+                }
+                let all = incoming
+                    .get(&(b.label.clone(), i))
+                    .is_some_and(|args| !args.is_empty() && args.iter().all(|a| holds(a, &ok)));
+                if !all {
+                    ok.remove(n);
+                    changed = true;
+                }
+            }
+            for inst in &b.insts {
+                let Some(r) = inst.results.first() else {
+                    continue;
+                };
+                if !ok.contains(r) || inst.results.len() != 1 {
+                    if inst.results.len() > 1 {
+                        for r in &inst.results {
+                            if ok.remove(r) {
+                                changed = true;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // `.trap` is the whole of the argument: a wrapping add can
+                // land below zero, and a trapping one faults instead.
+                let sound = match &inst.kind {
+                    InstKind::Flavored {
+                        op: FlavoredOp::Add | FlavoredOp::Mul,
+                        flavor: Flavor::Trap,
+                        a,
+                        b,
+                        ..
+                    } => holds(a, &ok) && holds(b, &ok),
+                    InstKind::Slot { .. } => true,
+                    _ => false,
+                };
+                if !sound {
+                    ok.remove(r);
+                    changed = true;
+                }
+            }
+        }
+    }
+    ok
+}
+
+/// The targets of a terminator, with their arguments.
+fn targets(t: &Terminator) -> Vec<&Target> {
+    match t {
+        Terminator::Br3 { neg, zero, pos, .. } => vec![neg, zero, pos],
+        Terminator::Br(d) => vec![d],
+        Terminator::Ret(_) | Terminator::Trap(_) | Terminator::Unreachable => Vec::new(),
     }
 }
 

@@ -15,7 +15,8 @@ pub mod text;
 pub mod verify;
 
 pub use canon::{
-    branch_through_select, canonicalize_module, fold_constants, promote_slots, remove_dead,
+    branch_through_select, canonicalize_module, elide_sign_checks, fold_constants, promote_slots,
+    remove_dead,
 };
 pub use inline::{drop_uncalled, inline_module};
 pub use interp::{Halt, Interp, Val};
