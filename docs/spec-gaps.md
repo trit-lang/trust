@@ -3008,6 +3008,18 @@ is worth zero on this machine**: `alui.mul` is 14% of HPL, but replacing
 for a one-instruction add. A register-starved machine with no multiply
 penalty gets nothing from the classic transformation.
 
+**G0.6 — the repository is not where Naming §2 says it is.**
+Naming §2 names the monorepo **`trust-lang/trust`**, mirroring `rust-lang`.
+The code is pushed to **`Young-TW/trust-lang`**, and `editors/zed/extension.toml`
+names that one, because Zed fetches the tree-sitter grammar over git and needs
+a URL that resolves today. `Cargo.toml` and Naming §2 still say
+`trust-lang/trust`.
+
+This is a gap in the same sense G0.3a is: the spec states an intent the
+repository has not reached. It is recorded rather than resolved because which
+way it resolves — move the repository under an organisation, or amend §2 — is
+a decision about the project and not about the code.
+
 **G0.5 — an editor can be told what is wrong, and where.**
 `trust check` compiles no further than the frontend and prints one diagnostic
 per line; `trust-lsp` sends the same over stdio, so an editor squiggles as you

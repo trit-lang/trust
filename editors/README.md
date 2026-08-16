@@ -23,34 +23,63 @@ cp target/release/trust-lsp ~/.local/bin/  # anywhere on PATH
 Then Zed → command palette → **zed: install dev extension** → pick
 `editors/zed`.
 
-The grammar is fetched by Zed from the `repository` in
-`editors/zed/extension.toml`, not from your checkout. That URL is where this
-repository will live; until it is pushed there, edit the file to point at your
-own copy:
+Nothing is downloaded for you: `trust-lsp` is found on `PATH`, because an
+extension that fetched a binary would have to know which build matched the
+compiler you are using, and it does not. Rebuild and copy again after changing
+it — Zed runs the copy on `PATH`, not the one in `target/`.
+
+The **grammar** is not read from your checkout either. Zed fetches it from the
+`repository` in `editors/zed/extension.toml` — `git remote add`, `git fetch`,
+`git checkout <rev>` — and then compiles `<path>/src/parser.c` and
+`scanner.c`, which is why both are committed. So `rev` has to be bumped
+whenever the grammar changes, and a grammar change is not visible to Zed until
+it is *pushed*.
+
+That is the whole cost of keeping the grammar in this repository instead of a
+separate one, and it buys `scripts/grammar.sh` being able to check the grammar
+against the examples in the same commit that changes either.
+
+Zed compiles the grammar with its own `clang`, and downloads a wasi-sdk the
+first time it needs one. Extensions installed from Zed's registry arrive
+pre-compiled and never do this; a dev extension always does.
+
+If you are working on the grammar and do not want to push to try it, point
+`repository` at your checkout — git takes a plain absolute path as a remote
+URL, and Zed passes it straight to git:
 
 ```toml
 [grammars.trust]
-repository = "file:///absolute/path/to/trust-lang"
+repository = "/absolute/path/to/trust-lang"
 rev = "<any commit you have>"
 path = "editors/tree-sitter-trust"
 ```
 
-`rev` has to be bumped whenever the grammar changes. That is the whole cost of
-keeping the grammar in this repository instead of a separate one, and it buys
-`scripts/grammar.sh` being able to check the grammar against the examples in
-the same commit that changes either.
+Do not commit that.
 
 ## What is checked here, and what is not
 
-Checked: the grammar parses all ten example programs with no error node, its
-nine corpus cases pass, the highlight queries compile against it, and the Zed
-extension compiles to WebAssembly.
+Checked:
 
-Not checked: Zed loading any of it. That needs Zed, and the discipline this
-repository holds to is that an untested claim is not made — so this is the
-claim: **the pieces are each verified, and their assembly inside the editor is
-not.** If Zed rejects the manifest, the manifest is where to look; the grammar
-and the server are known to work on their own.
+- the grammar parses all ten example programs with no error node and its nine
+  corpus cases pass (`scripts/grammar.sh`);
+- the highlight queries compile against that grammar;
+- the extension compiles to `wasm32-wasip2`;
+- `trust-lsp` answers `initialize`, `documentSymbol`, `definition` and `hover`
+  over real JSON-RPC framing;
+- every field of `extension.toml` against Zed 1.14.2's own
+  `extension_manifest.rs` and `extension_builder.rs`. `[lib]` and `languages`
+  are deliberately absent: `populate_defaults` fills them from `Cargo.toml`
+  and `languages/*/config.toml`, and the versions you see written out in an
+  installed extension's manifest are Zed's, not its author's.
+- the grammar fetch, by doing what `checkout_repo` does — `git remote add`,
+  `git fetch <rev>`, `git checkout` from the public URL with no credentials —
+  and confirming `src/parser.c` and `src/scanner.c` land where `path` says.
+
+Not checked: **Zed loading it**, which needs the GUI (`zed: install dev
+extension`; there is no CLI flag for it), and the wasi-sdk download and wasm
+compile of the grammar that the first dev-extension build does. The discipline
+this repository holds to is that an untested claim is not made, so: everything
+up to the editor's front door is verified, and going through it is not.
 
 ## Other editors
 
