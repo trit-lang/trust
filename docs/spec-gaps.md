@@ -2592,6 +2592,41 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.35 — a branch that returned still moved.** Writing a lexer in Trust hit
+this on its first page:
+
+```
+let w = slice(s, start, i);
+if is_keyword(&w) { return Tok::Kw(w); }
+Tok::Ident(w)
+```
+
+`w` is moved in the branch, and the branch **returns** — so the use after it
+is unreachable from there. The `if` joined both branches' ownership
+regardless, and the second use was told `w` "may have been moved out of on
+some path". There is no such path.
+
+`self.done` was already the flag for a block that diverged; it was read
+*after* the jump to the join, by which time both branches have it. Read
+before, it says which branch reaches the join, and only those are joined.
+That shape — check, return, carry on — is half of what a compiler is written
+in.
+
+**G9.36 — `String` and `&str` cannot be compared without saying so.** A
+`String` is a `Vec<char>` (Ch. 0 §3.6) and has `Eq`'s `eq`, which takes
+another `Vec<char>`; a literal is a `&str`. Both *are* `&str` once borrowed,
+and there is no overloading, so the comparison has to be written where the
+two agree:
+
+```
+fn same(a: &str, b: &str) -> bool { a.eq(b) }
+```
+
+That is one line and it is not wrong, but it is the language being told
+twice what it already knows. What would fix it is `==` coercing its operands
+the way an argument is coerced (Ch. 5 §2.6), which is a decision about
+comparison rather than about text and is not made here.
+
 **G9.33 — four things a sweep found, and one of them was `==`.** Combining
 what had just been built — a `String`, a `HashMap`, generics, `Eq` — turned
 up four separate acceptances of the unacceptable.

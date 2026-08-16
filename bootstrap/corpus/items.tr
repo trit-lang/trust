@@ -1,0 +1,9 @@
+// Items, and the punctuation that separates them.
+pub mod lang;
+use lang::lex::Span;
+pub struct Point { pub x: t27, y: taddr }
+pub enum Kind { Trit, Tryte, Word }
+pub trait Show { fn width(&self) -> taddr; }
+impl Show for Point { fn width(&self) -> taddr { 27 } }
+type Text = Vec<t27>;
+pub const LIMIT: taddr = 1024;

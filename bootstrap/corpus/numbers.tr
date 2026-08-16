@@ -1,0 +1,7 @@
+fn h() -> t27 {
+    let a = 0;
+    let b = 1_000;
+    let c = 42;
+    let d = 999999;
+    a + b + c + d
+}

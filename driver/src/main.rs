@@ -21,6 +21,7 @@ usage:
                                        stdin to stdout
     trust asm <file.tr>                print the assembly it would run
     trust check <file.tr>              report what is wrong with it, and stop
+    trust lex <file.tr>                print its tokens, one per line
 
     --time                             report what each phase of the compile
                                        cost, on stderr
@@ -49,6 +50,21 @@ fn main() -> ExitCode {
     };
     let stats = args.iter().any(|a| a == "--stats");
     let timed = args.iter().any(|a| a == "--time");
+
+    // One token per line, in the form `bootstrap/main.tr` prints — so that
+    // the lexer written in Trust can be held to this one (see
+    // `scripts/bootstrap.sh`). It reads the file and stops: lexing does not
+    // need the program to be a program, and a corpus that exercises the
+    // punctuation is not one.
+    if cmd == "lex" {
+        return match std::fs::read_to_string(path) {
+            Ok(src) => print_tokens(&src),
+            Err(e) => {
+                eprintln!("trust: cannot read `{path}`: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     // A program is a tree of files (Ch. 6 §1), and the one named is its
     // root: what else is compiled is what its `mod` declarations say.
@@ -113,6 +129,38 @@ fn report(build: &lang::Build) {
         let at = maps[e.span.file as usize].pos(e.span.lo);
         println!("{}:{}:{}: {}", src.label(), at.line, at.column, e.message);
     }
+}
+
+/// Every token of a file, one per line.
+fn print_tokens(src: &str) -> ExitCode {
+    use lang::lex::Tok;
+    let toks = match lang::lex::lex(src) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("trust: {}", e.message);
+            return ExitCode::FAILURE;
+        }
+    };
+    for (t, _) in &toks {
+        match t {
+            Tok::Ident(n) => println!("ident {n}"),
+            Tok::Kw(k) => println!("kw {k}"),
+            Tok::Op(o) => println!("op {o}"),
+            Tok::Int(v) => println!("int {v}"),
+            Tok::StrLit(cs) => {
+                let text: String = cs
+                    .iter()
+                    .filter_map(|c| char::from_u32(*c as u32))
+                    .collect();
+                println!("str {text}");
+            }
+            Tok::TritLit(t) => println!("trit {}", t.to_i8()),
+            Tok::CharLit(v) => println!("char {v}"),
+            Tok::Lifetime(l) => println!("lifetime {l}"),
+            Tok::Eof => println!("eof"),
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 /// A frontend module to assembly, by the pipeline TIR §6 describes.

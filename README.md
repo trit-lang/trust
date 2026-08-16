@@ -60,7 +60,7 @@ the ternary one has no use for.
 ## Building
 
 ```
-cargo test          # 302 tests
+cargo test          # 558 tests
 cargo build
 ```
 
@@ -120,10 +120,12 @@ language whose strings are UTF-8. Against a UTF-8 carrier that costs 3× for
 ASCII, 1.5× for Greek, exactly the same for CJK, and *less* above the BMP.
 UTF-8 is what the boundary converts to, and `print` above is the boundary.
 
-There is no `println!` because there is nothing for it to print through, and
-no macros to write it with — `putchar` is *declared* in Trust and *defined* in
-assembly, since TIR §5 has no integer-to-pointer cast and so cannot name a
-device address at all.
+There is a `println` and it is a **function**, not a macro. Macros exist
+(Ch. 7) and a variadic one can print a sequence — but `println!("{} {}", a, b)`
+needs a *format string* taken apart at compile time, which Ch. 5 §7 reserves
+and Ch. 7 §7 does not unreserve. `putchar` is *declared* in Trust and
+*defined* in assembly, since TIR §5 has no integer-to-pointer cast and so
+cannot name a device address at all.
 
 Correctness is held to the TIR spec's own criterion. Every test in
 `compiler/tests/pipeline.rs` runs a function on the TIR interpreter *and*
@@ -231,6 +233,7 @@ vm/          crate tritium: the reference machine and its assembler
 driver/      crate trust: compile a program and run it, in one command
 lsp/         crate trust-lsp: diagnostics for an editor, over stdio
 editors/     a tree-sitter grammar, and the Zed extension that loads it
+bootstrap/   the compiler, in Trust — the lexer so far, held to the Rust one
 targets/     target descriptions (TIR §7)
 examples/    TIR modules and Trust programs that run
 docs/        notes about the spec, including every derived decision

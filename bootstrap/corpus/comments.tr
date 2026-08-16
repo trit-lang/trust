@@ -1,0 +1,8 @@
+// a line comment
+/* a block comment */
+/* one /* two /* three */ two */ one */
+fn g() -> t27 {
+    let s = "text with spaces";
+    // trailing
+    0
+}

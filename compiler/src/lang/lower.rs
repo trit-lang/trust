@@ -10437,6 +10437,17 @@ impl Fn<'_> {
             }
             result = Some((slot, tt.clone()));
         }
+        // Whether the branch *reaches* the join. A branch that returned has
+        // nothing to contribute to what is owned after the `if`, and joining
+        // its state said a value it moved "may have been moved" — for a use
+        // that branch can never reach.
+        //
+        //     if is_keyword(&w) { return Kw(w); }
+        //     Ident(w)
+        //
+        // is the shape, and it is the shape half a compiler is written in
+        // (G9.35).
+        let then_reaches = !self.done;
         self.jump(&join_l);
         let after_then = self.owned_snapshot();
 
@@ -10460,9 +10471,17 @@ impl Fn<'_> {
                 et
             }
         };
+        let else_reaches = !self.done;
         self.jump(&join_l);
         let after_else = self.owned_snapshot();
-        self.owned_join(after_then, after_else);
+        match (then_reaches, else_reaches) {
+            (true, true) => self.owned_join(after_then, after_else),
+            (true, false) => self.owned = after_then,
+            (false, true) => self.owned = after_else,
+            // Neither reaches the join, so nothing after it runs and what is
+            // owned there is not a question anyone asks.
+            (false, false) => self.owned = after_else,
+        }
 
         self.start(join_l);
         match result {

@@ -1,0 +1,13 @@
+fn f(a: t27, b: t27) -> t27 {
+    let mut n = a + b * 2 - 1;
+    n <<= 3;
+    n >>= 1;
+    if a <= b && b >= 0 || a != b {
+        n += 1;
+    }
+    let c = a <=> b;
+    let r = 0..10;
+    while n > 0 { n -= 1; }
+    match c { x => x }
+    n
+}
