@@ -437,6 +437,8 @@ pub enum Stmt {
         mutable: bool,
         /// The bound name.
         name: String,
+        /// Where the name was written, which is where a jump to it lands.
+        name_span: Span,
         /// Its written type, if any.
         ty: Option<Ty>,
         /// Its initializer.

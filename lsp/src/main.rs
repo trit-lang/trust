@@ -1,15 +1,22 @@
 //! `trust-lsp` — a language server for Trust, over stdio.
 //!
-//! It reports diagnostics and nothing else, which is the whole of what this
-//! compiler can currently say about a place in a file: a `SyntaxError` carries
-//! a **line** and a message, and the lexer carries a line per token. There are
-//! no columns and no spans anywhere, so a squiggle is a whole line, and hover,
-//! go-to-definition and completion are not merely unwritten — they have
-//! nothing to be built out of yet. See `docs/status.md`.
+//! Four things, and each is the compiler answering rather than this:
 //!
-//! What it does do is worth having on its own: every error the frontend can
-//! find, as you type, from exactly the compiler that will build the program.
-//! There is no second implementation of the language here to drift.
+//!   * **diagnostics**, from `lang::compile` — every error the frontend can
+//!     find, as you type, from exactly the compiler that will build the
+//!     program. There is no second implementation of the language here to
+//!     drift.
+//!   * **an outline**, **go-to-definition** and **hover**, from `lang::index`
+//!     — which reads the AST, so all three work on a file that does not
+//!     compile, which is the state a file is in while it is being written.
+//!
+//! This crate is the translation and nothing else: character offsets to the
+//! protocol's UTF-16 columns, and structs to JSON.
+//!
+//! What is not here is **completion**, and what it waits on is not effort. A
+//! hover shows a definition *as it was written*, which the AST knows; a
+//! completion has to know what is in scope **and what type it has**, and a
+//! type is what only lowering computes. See `docs/spec-gaps.md` G0.5.
 
 mod json;
 
@@ -55,7 +62,8 @@ impl Server {
                     m.get(&["id"]),
                     "{\"capabilities\":{\"textDocumentSync\":1,\
                        \"documentSymbolProvider\":true,\
-                       \"definitionProvider\":true},\
+                       \"definitionProvider\":true,\
+                       \"hoverProvider\":true},\
                        \"serverInfo\":{\"name\":\"trust-lsp\"}}",
                 );
             }
@@ -64,6 +72,18 @@ impl Server {
                     .indexed(m)
                     .map(|(map, index, _)| symbols(&map, &index.symbols))
                     .unwrap_or_else(|| "[]".to_string());
+                reply(m.get(&["id"]), &out);
+            }
+            "textDocument/hover" => {
+                let out = self
+                    .indexed(m)
+                    .and_then(|(map, index, _)| {
+                        let at = position(m, &map)?;
+                        let (word, to) = index.use_at(at)?;
+                        let def = index.describe(to)?;
+                        Some(hover(&map, word, &def.label))
+                    })
+                    .unwrap_or_else(|| "null".to_string());
                 reply(m.get(&["id"]), &out);
             }
             "textDocument/definition" => {
@@ -183,6 +203,19 @@ fn location(map: &lang::LineMap, uri: &str, span: lang::Span) -> String {
     let mut quoted = String::new();
     json::quote(uri, &mut quoted);
     format!("{{\"uri\":{quoted},\"range\":{}}}", range(map, span))
+}
+
+/// What a name is, shown as the file writes it.
+///
+/// The `range` is the name under the cursor, which is what an editor
+/// underlines while the hover is open.
+fn hover(map: &lang::LineMap, word: lang::Span, label: &str) -> String {
+    let mut text = String::new();
+    json::quote(&format!("```trust\n{label}\n```"), &mut text);
+    format!(
+        "{{\"contents\":{{\"kind\":\"markdown\",\"value\":{text}}},\"range\":{}}}",
+        range(map, word)
+    )
 }
 
 /// An outline, nested as the file is.

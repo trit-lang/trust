@@ -4846,6 +4846,7 @@ impl Fn<'_> {
             ast::Stmt::Let {
                 mutable,
                 name,
+                name_span: _,
                 ty,
                 value,
                 span,

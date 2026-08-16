@@ -129,7 +129,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | `trust` driver | compile and run in one command, nothing on the disk (G0.4); `trust check` reports diagnostics and stops |
 | `trust-lsp` | diagnostics over stdio, from the compiler itself — no second implementation of the language. Ranges are the expression that is wrong, in the protocol's UTF-16 columns (G0.5) |
 | `editors/` | a tree-sitter grammar (a second parser, held to the first by `scripts/grammar.sh`) and a Zed extension. G0.5 |
-| `lang::index` | an outline and go-to-definition, from the AST alone — so both work on a file that does not compile. Names resolve by scope and spelling; what needs a type is left unanswered rather than guessed (G0.5) |
+| `lang::index` | an outline, go-to-definition and hover, from the AST alone — so both work on a file that does not compile. Names resolve by scope and spelling; what needs a type is left unanswered rather than guessed (G0.5) |
 | spans | every token, AST node and error carries one: the line, and the characters it covers. `LineMap` turns an offset into a column for a terminal or a code-unit offset for an editor |
 
 **447 tests, zero clippy warnings, 95 commits.** `scripts/stats.sh`.

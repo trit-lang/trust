@@ -74,6 +74,20 @@ pub struct Symbol {
     pub children: Vec<Symbol>,
 }
 
+/// A definition, written out as the file writes it.
+///
+/// This is what a hover shows, and the rule it follows is exactly that: **the
+/// definition as it was written**. A `let` with no written type has no type
+/// here either, because inferring it is lowering's work and this runs before
+/// and without it. Saying less is the price of never saying something false.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Definition {
+    /// Where the name is.
+    pub at: Span,
+    /// How it reads: `fn f(x: t27) -> t27`, `n: taddr`, `let mut i`.
+    pub label: String,
+}
+
 /// Everything one file says about where things are.
 pub struct Index {
     /// The file's items, in the order written, nested as they are written.
@@ -81,6 +95,8 @@ pub struct Index {
     /// Each name mentioned, and where it was defined. Sorted by the mention,
     /// and non-overlapping, so a cursor lands in at most one.
     uses: Vec<(Span, Span)>,
+    /// Every definition, by where its name is. Sorted.
+    defs: Vec<Definition>,
 }
 
 impl Index {
@@ -89,6 +105,7 @@ impl Index {
         let mut b = Builder {
             symbols: Vec::new(),
             uses: Vec::new(),
+            defs: Vec::new(),
             items: Vec::new(),
             methods: Vec::new(),
             scopes: Vec::new(),
@@ -98,10 +115,31 @@ impl Index {
             b.item(item);
         }
         b.uses.sort_by_key(|(at, _)| (at.lo, at.hi));
+        b.defs.sort_by_key(|d| (d.at.lo, d.at.hi));
+        b.defs.dedup_by_key(|d| (d.at.lo, d.at.hi));
         Index {
             symbols: b.symbols,
             uses: b.uses,
+            defs: b.defs,
         }
+    }
+
+    /// The name at `offset` and where it was defined.
+    pub fn use_at(&self, offset: u32) -> Option<(Span, Span)> {
+        // The last mention starting at or before the offset — the mentions do
+        // not overlap, so there is at most one candidate to check.
+        let i = self.uses.partition_point(|(at, _)| at.lo <= offset);
+        let (at, to) = *self.uses.get(i.checked_sub(1)?)?;
+        (offset < at.hi).then_some((at, to))
+    }
+
+    /// How the definition at `at` was written, for a hover to show.
+    pub fn describe(&self, at: Span) -> Option<&Definition> {
+        let i = self
+            .defs
+            .binary_search_by_key(&(at.lo, at.hi), |d| (d.at.lo, d.at.hi))
+            .ok()?;
+        self.defs.get(i)
     }
 
     /// Where the name at `offset` was defined, if this can tell.
@@ -109,11 +147,7 @@ impl Index {
     /// An offset inside a definition's own name answers with that definition,
     /// which is what an editor wants: asking twice should not walk away.
     pub fn definition_at(&self, offset: u32) -> Option<Span> {
-        // The last mention starting at or before the offset — the mentions do
-        // not overlap, so there is at most one candidate to check.
-        let i = self.uses.partition_point(|(at, _)| at.lo <= offset);
-        let (at, to) = *self.uses.get(i.checked_sub(1)?)?;
-        (offset < at.hi).then_some(to)
+        self.use_at(offset).map(|(_, to)| to)
     }
 
     /// The innermost symbol whose extent contains `offset`.
@@ -137,6 +171,7 @@ struct Binding {
 struct Builder {
     symbols: Vec<Symbol>,
     uses: Vec<(Span, Span)>,
+    defs: Vec<Definition>,
     /// File-level names: functions, types, constants, variants.
     items: Vec<(String, Span)>,
     /// Method names, with how many share each — a name defined twice cannot
@@ -153,29 +188,62 @@ impl Builder {
     fn collect_items(&mut self, file: &File) {
         for item in &file.items {
             match item {
-                Item::Fn(f) => self.items.push((f.name.clone(), f.name_span)),
-                Item::Const(c) => self.items.push((c.name.clone(), c.name_span)),
-                Item::Struct(s) => self.items.push((s.name.clone(), s.name_span)),
+                Item::Fn(f) => self.define_item(&f.name, f.name_span, fn_label(f)),
+                Item::Const(c) => self.define_item(
+                    &c.name,
+                    c.name_span,
+                    format!("const {}: {}", c.name, type_name(&c.ty)),
+                ),
+                Item::Struct(s) => {
+                    self.define_item(&s.name, s.name_span, format!("struct {}", s.name));
+                    for f in &s.fields {
+                        self.define(f.name_span, format!("{}: {}", f.name, type_name(&f.ty)));
+                    }
+                }
                 Item::Trait(t) => {
-                    self.items.push((t.name.clone(), t.name_span));
+                    self.define_item(&t.name, t.name_span, format!("trait {}", t.name));
                     for m in &t.methods {
                         self.methods.push((m.name.clone(), m.name_span));
+                        self.define(m.name_span, fn_label(m));
                     }
                 }
                 Item::Enum(e) => {
-                    self.items.push((e.name.clone(), e.name_span));
+                    self.define_item(&e.name, e.name_span, format!("enum {}", e.name));
                     // A variant is reachable as `Enum::Variant` and, inside a
                     // pattern, often as itself.
                     for v in &e.variants {
-                        self.items.push((v.name.clone(), v.name_span));
+                        self.define_item(&v.name, v.name_span, variant_label(&e.name, v));
+                        for f in &v.fields {
+                            self.define(f.name_span, format!("{}: {}", f.name, type_name(&f.ty)));
+                        }
                     }
                 }
                 Item::Impl(i) => {
                     for m in &i.methods {
                         self.methods.push((m.name.clone(), m.name_span));
+                        self.define(m.name_span, format!("{}\n{}", impl_label(i), fn_label(m)));
                     }
                 }
             }
+        }
+    }
+
+    /// A name visible everywhere, and how it reads.
+    fn define_item(&mut self, name: &str, at: Span, label: String) {
+        self.items.push((name.to_string(), at));
+        self.define(at, label);
+    }
+
+    /// A definition a hover can show, wherever it was written.
+    ///
+    /// A definition is also a place a cursor can be, and asking there should
+    /// answer with itself — hovering `fn area` on the line that declares it
+    /// is the most obvious hover there is, and jumping from a definition
+    /// should stay put rather than go nowhere.
+    fn define(&mut self, at: Span, label: String) {
+        if at.line != 0 {
+            self.defs.push(Definition { at, label });
+            self.uses.push((at, at));
         }
     }
 
@@ -219,11 +287,9 @@ impl Builder {
         });
     }
 
-    /// A binding is also a definition, so a cursor on it stays put.
-    fn bind_and_mark(&mut self, name: &str, at: Span) {
-        if at.line != 0 {
-            self.uses.push((at, at));
-        }
+    /// A binding that is also somewhere to point at.
+    fn bind_and_mark(&mut self, name: &str, at: Span, label: String) {
+        self.define(at, label);
         self.bind(name, at);
     }
 
@@ -352,7 +418,11 @@ impl Builder {
         self.scope(|b| {
             for p in &f.params {
                 b.ty(&p.ty);
-                b.bind_and_mark(&p.name, p.name_span);
+                b.bind_and_mark(
+                    &p.name,
+                    p.name_span,
+                    format!("{}: {}", p.name, type_name(&p.ty)),
+                );
             }
             if let Some(r) = &f.ret {
                 b.ty(r);
@@ -410,11 +480,12 @@ impl Builder {
             for stmt in &b.stmts {
                 match stmt {
                     Stmt::Let {
+                        mutable,
                         name,
+                        name_span,
                         ty,
                         value,
-                        span,
-                        ..
+                        span: _,
                     } => {
                         // The initializer is read before the name is bound,
                         // so `let x = x;` means the outer `x` (§5.2).
@@ -422,7 +493,16 @@ impl Builder {
                         if let Some(t) = ty {
                             s.ty(t);
                         }
-                        s.bind(name, *span);
+                        // A `let` with no written type has none here: what
+                        // it would be is inferred during lowering, which
+                        // this runs before and without.
+                        let m = if *mutable { "mut " } else { "" };
+                        let label = match ty {
+                            Some(t) => format!("let {m}{name}: {}", type_name(t)),
+                            None => format!("let {m}{name}"),
+                        };
+                        s.define(*name_span, label);
+                        s.bind(name, *name_span);
                     }
                     Stmt::Expr(e) => s.expr(e),
                 }
@@ -547,7 +627,9 @@ impl Builder {
 
     fn pattern(&mut self, p: &Pattern) {
         match p {
-            Pattern::Bind(name, at) => self.bind_and_mark(name, *at),
+            // A pattern binding's type is the scrutinee's, which needs a
+            // type this cannot compute; the name is all there is to show.
+            Pattern::Bind(name, at) => self.bind_and_mark(name, *at, name.clone()),
             Pattern::Aggregate(path, fields, _) => {
                 self.use_name(path.last(), path.span);
                 for (_, sub) in fields {
@@ -565,6 +647,38 @@ impl Builder {
             | Pattern::Char(..)
             | Pattern::Bool(..) => {}
         }
+    }
+}
+
+/// A function as it was written: `fn name(params) -> ret`.
+fn fn_label(f: &FnItem) -> String {
+    format!("fn {}{}", f.name, signature(f))
+}
+
+/// A variant as it was written, under the enum that holds it.
+fn variant_label(enum_name: &str, v: &Variant) -> String {
+    if v.fields.is_empty() {
+        return format!("{enum_name}::{}", v.name);
+    }
+    let fields: Vec<String> = v
+        .fields
+        .iter()
+        .map(|f| {
+            if f.name.chars().all(|c| c.is_ascii_digit()) {
+                type_name(&f.ty)
+            } else {
+                format!("{}: {}", f.name, type_name(&f.ty))
+            }
+        })
+        .collect();
+    format!("{enum_name}::{}({})", v.name, fields.join(", "))
+}
+
+/// An impl block's header, so a method hover says which one it came from.
+fn impl_label(i: &ImplItem) -> String {
+    match &i.trait_name {
+        Some(t) => format!("impl {t} for {}", i.self_ty),
+        None => format!("impl {}", i.self_ty),
     }
 }
 
@@ -759,6 +873,92 @@ mod tests {
         let (src, offset) = at(marked);
         let to = index(&src).definition_at(offset).expect("resolves");
         assert_eq!((to.line, to.lo), (2, offset));
+    }
+
+    fn hover(marked: &str) -> Option<String> {
+        let (src, offset) = at(marked);
+        let i = index(&src);
+        let (_, to) = i.use_at(offset)?;
+        Some(i.describe(to)?.label.clone())
+    }
+
+    #[test]
+    fn a_hover_shows_the_definition_as_it_was_written() {
+        assert_eq!(
+            hover("fn add(a: t27, b: t27) -> t27 { a + b }\nfn f() -> t27 { a|dd(1, 2) }\n")
+                .as_deref(),
+            Some("fn add(a: t27, b: t27) -> t27")
+        );
+        assert_eq!(
+            hover("struct Point { x: t27 }\nfn f(p: Poi|nt) {}\n").as_deref(),
+            Some("struct Point")
+        );
+        assert_eq!(
+            hover("const N: taddr = 8;\nfn f() -> taddr { |N }\n").as_deref(),
+            Some("const N: taddr")
+        );
+        assert_eq!(
+            hover("fn f(count: &mut [t27]) { let n = coun|t; }\n").as_deref(),
+            Some("count: &mut [t27]")
+        );
+    }
+
+    #[test]
+    fn a_hover_on_a_variant_names_the_enum_it_belongs_to() {
+        assert_eq!(
+            hover("enum Shape { Dot, Rect(t27, t27) }\nfn f() -> Shape { Re|ct(1, 2) }\n")
+                .as_deref(),
+            Some("Shape::Rect(t27, t27)")
+        );
+    }
+
+    #[test]
+    fn a_hover_on_a_method_says_which_impl_it_came_from() {
+        let text = hover(
+            "struct P;\nimpl Area for P { fn area(&self) -> t27 { 0 } }\n             fn f(p: P) -> t27 { p.ar|ea() }\n",
+        )
+        .expect("resolves");
+        assert_eq!(text, "impl Area for P\nfn area(self) -> t27");
+    }
+
+    #[test]
+    fn a_let_without_a_written_type_does_not_invent_one() {
+        // What it would be is inferred while lowering, which this runs
+        // before and without — so the hover says what the file says.
+        assert_eq!(
+            hover("fn f() -> t27 {\n    let mut n = 1;\n    |n\n}\n").as_deref(),
+            Some("let mut n")
+        );
+        assert_eq!(
+            hover("fn f() -> t27 {\n    let n: t9 = 1;\n    |n as t27\n}\n").as_deref(),
+            Some("let n: t9")
+        );
+    }
+
+    #[test]
+    fn a_hover_on_a_declaration_answers_with_itself() {
+        // The most obvious hover there is, and the one that used to answer
+        // nothing: a definition is a place a cursor can be.
+        assert_eq!(
+            hover("fn ar|ea(s: t27) -> t27 { s }\n").as_deref(),
+            Some("fn area(s: t27) -> t27")
+        );
+        assert_eq!(
+            hover("struct P { wid|th: t27 }\n").as_deref(),
+            Some("width: t27")
+        );
+        assert_eq!(
+            hover("fn f() { let mut n|ext: t9 = 1; }\n").as_deref(),
+            Some("let mut next: t9")
+        );
+    }
+
+    #[test]
+    fn a_jump_from_a_declaration_stays_put() {
+        let marked = "fn f() -> t27 {\n    let tot|al = 1;\n    total\n}\n";
+        let (src, offset) = at(marked);
+        let to = index(&src).definition_at(offset).expect("resolves");
+        assert_eq!((to.line, to.lo <= offset && offset < to.hi), (2, true));
     }
 
     #[test]

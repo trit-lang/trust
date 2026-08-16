@@ -3066,12 +3066,28 @@ landed on its type. They are now a `Named`, which carries a span, and the
 same span is what lets an outline select a field's name rather than the type
 beside it.
 
-*What is still not there.* Hover and completion need what neither the AST nor
-a name table has: **the type of an expression**. That means keeping the
-lowering's answers instead of discarding everything but the module at the end
-of `compile`. It is a larger change than a span was, and a different kind:
-spans were a fact the frontend already knew and threw away, while a type at
-an offset is a fact only lowering computes.
+*A hover shows the definition as it was written.* That is the whole rule, and
+it is why hover needs no types: `fn area(s: Shape) -> t27`, `const ORIGIN:
+t27`, `Shape::Rect(t27, t27)`, `s: Shape`, `let mut total`. A `let` with no
+written type has none in its hover either — what it would be is inferred
+during lowering, which the index runs before and without. Saying less is the
+price of never saying something false.
+
+A definition is also a place a cursor can be, so every one of them resolves
+to itself: hovering `fn area` on the line that declares it is the most
+obvious hover there is.
+
+Making that true finished the same job `Named` started — a `let` binding's
+name had no span either, so its `Stmt::Let` now carries one, and a jump to a
+local lands on the name rather than on the `let` four characters before it.
+
+*What is still not there.* **Completion**, and what it waits on is not
+effort. A hover reads what the file already says; a completion has to know
+what is in scope **and what type each thing has**, and a type is what only
+lowering computes. That means keeping lowering's answers instead of
+discarding everything but the module at the end of `compile` — a different
+kind of change from a span, which was a fact the frontend already knew and
+threw away.
 
 *The other half of an editor is a second grammar.* Zed's highlighting is
 **tree-sitter only**, so `editors/tree-sitter-trust` exists, and it is a

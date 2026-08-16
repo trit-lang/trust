@@ -1149,7 +1149,7 @@ impl Parser {
             return self.let_tuple(span);
         }
         let mutable = self.eat_kw("mut");
-        let name = self.expect_ident()?;
+        let (name, name_span) = self.expect_ident_at()?;
         let ty = if self.eat_op(":") {
             Some(self.ty()?)
         } else {
@@ -1161,6 +1161,7 @@ impl Parser {
         Ok(vec![Stmt::Let {
             mutable,
             name,
+            name_span,
             ty,
             value,
             span,
@@ -1172,7 +1173,8 @@ impl Parser {
         let mut names = Vec::new();
         while !self.eat_op(")") {
             let mutable = self.eat_kw("mut");
-            names.push((mutable, self.expect_ident()?));
+            let (n, at) = self.expect_ident_at()?;
+            names.push((mutable, n, at));
             if !self.eat_op(",") && !self.at_op(")") {
                 return self.err("expected `,` or `)` in a tuple binding");
             }
@@ -1195,15 +1197,19 @@ impl Parser {
         let whole = format!("#t{}", self.counter);
         let mut out = vec![Stmt::Let {
             mutable: false,
+            // The whole-tuple binding is the compiler's, not the file's, so
+            // it points at the `let` that stands for it.
             name: whole.clone(),
+            name_span: span,
             ty,
             value,
             span,
         }];
-        for (i, (mutable, name)) in names.into_iter().enumerate() {
+        for (i, (mutable, name, name_span)) in names.into_iter().enumerate() {
             out.push(Stmt::Let {
                 mutable,
                 name,
+                name_span,
                 ty: None,
                 value: Expr::Field(
                     Box::new(Expr::Path(whole.clone(), span)),
@@ -1417,6 +1423,7 @@ impl Parser {
                 Stmt::Let {
                     mutable: true,
                     name: it,
+                    name_span: span,
                     ty: None,
                     // Ch. 4 §5.7: the loop's expression is turned into an
                     // iterator first, which is what lets `for c in s` walk a
