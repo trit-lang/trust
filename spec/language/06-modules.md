@@ -111,9 +111,21 @@ each variant payload field it should apply to. A `pub struct` with private
 fields is a type others may hold and name and pass, and whose insides are
 this module's business.
 
-A `pub` on a `trait`'s method, or on an `enum`'s variant, is an error: a
-trait's methods are as visible as the trait, and a variant as its enum. There
-is no way to write half an enum.
+A `pub` on a `trait`'s method, on an `enum`'s variant, or on a method of an
+`impl`, is an error: a trait's methods are as visible as the trait, a variant
+as its enum, and an `impl`'s methods as the `impl` (§5). There is no way to
+write half an enum, and no way to write a method more private than the type
+it is on.
+
+> **Informative.** Rust allows `pub fn` in an inherent `impl` and means
+> something by it: a `pub` type may have methods its module keeps to itself.
+> The cost of not having it is a real one — a helper that briefly breaks an
+> invariant is as callable as the type — and it is accepted here because the
+> invariant of §2.3 does not rest on methods. It rests on *fields*, and a
+> method that can only reach them through the same `pub` surface everyone
+> else has is not a way around anything. A private method is an
+> organisational tool, and §2.4 has already said which of those this draft
+> takes.
 
 ### 2.3 What privacy is for
 

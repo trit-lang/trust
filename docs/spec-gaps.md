@@ -2614,17 +2614,17 @@ the trait". Neither sentence covers a method of an *inherent* `impl`, which
 is where Rust does allow `pub` and where it means something: a `pub struct`
 may have methods its module keeps to itself.
 
-The implementation refuses it, which is what §5's rule implies read straight
-through — an impl's methods are as visible as the impl. The cost is that a
-`pub` type has no private helper method; the invariant of Ch. 6 §2.3 is
-still safe, because that rests on the *fields*, and a method that can only
-be reached through `pub` fields it cannot see is not a hole. What is lost is
-a smaller thing: a helper that briefly breaks an invariant is as callable as
-the type.
+Settled by refusing it, which is what §5's rule implies read straight
+through — an impl's methods are as visible as the impl — and §2.2 now says
+so. The cost is that a `pub` type has no private helper method; the
+invariant of Ch. 6 §2.3 is still safe, because that rests on the *fields*,
+and a method that can only reach them through the same `pub` surface
+everyone else has is not a way around anything. What is lost is smaller: a
+helper that briefly breaks an invariant is as callable as the type.
 
-Recorded rather than settled. The alternative — `pub` admitted on a method
-of an inherent `impl` and private by default there — is a strictly larger
-language and can be added without changing any program that compiles today.
+The alternative — `pub` admitted on a method of an inherent `impl`, private
+by default there — is a strictly larger language and can be added later
+without changing any program that compiles today.
 
 **G9.41 — "nothing yet" was the first arm's state.** `join_arm` folds each
 `match` arm's ownership into what the arms before it left, and `None` meant
