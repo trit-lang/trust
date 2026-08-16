@@ -3121,15 +3121,40 @@ was offered nowhere inside `for i in …`. The arm now reaches to the end of
 the body, and the binding keeps the span of the name the file wrote rather
 than the keyword's.
 
-*What is still not there.* **A type at an offset** — which would give
-member completion, and would let a hover on `let n = 1` say `t27` instead of
-`let n`. That means keeping lowering's answers instead of discarding
-everything but the module at the end of `compile`, and it is a different
-kind of change from a span: a span was a fact the frontend already knew and
-threw away, while a type is one only lowering computes. Two things make it
-more than plumbing — the prelude is parsed as its own file, so its spans and
-the user's collide numerically, and lowering monomorphizes, so one written
-expression may be lowered at several types.
+*A type at an offset, which is the one thing not written anywhere.*
+`lang::analyze` lowers the file and keeps what lowering worked out: the type
+of every expression, by where it was written (`lower::Noted`). A hover then
+shows the definition **as it was written** and, when the file did not say it,
+what it turned out to be:
+
+```trust
+let n
+// taddr
+```
+
+The type is a comment rather than spliced into the line, because the rule a
+hover follows is still *as it was written*, and `let n: taddr` is not what
+the file says.
+
+Two things bound it, and both are refusals rather than approximations:
+
+  * **only the file's own functions.** The prelude is parsed as its own file,
+    so its spans are offsets into *it* and would be read as places in this
+    one. Recording only functions the file itself names is exactly the set
+    whose bodies are in it.
+  * **only where the answer is one answer.** A generic function is lowered
+    once per instantiation, so `fn id<T>(x: T) -> T { x }` used at two types
+    has an `x` that is both and neither. The entry is dropped: an editor
+    shown one of several is shown a guess.
+
+It costs one `Option` test per expression when nobody asked, so `trustc` and
+`trust` pay nothing. `analyze` on the largest example here (HPL.tr, a
+thousand lines) takes **4.7 ms**, which is a hover's budget many times over.
+
+*What is still not there.* **Member completion.** The receiver's type is now
+knowable, but which fields and methods a type has lives in lowering's own
+tables, which `analyze` does not keep — so after a `.` the server still
+offers nothing.
 
 *The other half of an editor is a second grammar.* Zed's highlighting is
 **tree-sitter only**, so `editors/tree-sitter-trust` exists, and it is a

@@ -91,7 +91,21 @@ impl Server {
                         let at = position(m, &map)?;
                         let (word, to) = index.use_at(at)?;
                         let def = index.describe(to)?;
-                        Some(hover(&map, word, &def.label))
+                        // The definition as it was written, and then what it
+                        // turned out to be — which is the same thing when the
+                        // file said it, and the interesting part when it did
+                        // not. `let n = 1` reads `let n` and is a `t27`.
+                        let src = self
+                            .open
+                            .get(m.str_at(&["params", "textDocument", "uri"])?)?;
+                        let found = lang::analyze(src).types;
+                        let text = match found.exact(to).or_else(|| found.at(at)) {
+                            Some(ty) if !def.label.ends_with(ty) => {
+                                format!("{}\n// {ty}", def.label)
+                            }
+                            _ => def.label.clone(),
+                        };
+                        Some(hover(&map, word, &text))
                     })
                     .unwrap_or_else(|| "null".to_string());
                 reply(m.get(&["id"]), &out);

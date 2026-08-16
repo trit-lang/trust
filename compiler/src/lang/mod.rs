@@ -676,6 +676,64 @@ fn println_int(value: t27) {
 }
 "#;
 
+/// What one compilation learned about the file it was given.
+///
+/// `compile` answers "is this a program"; this answers "what is this file",
+/// which is a different question and the one an editor asks. It reports
+/// everything rather than the first thing, and it keeps what the frontend
+/// worked out on the way — which is where a type comes from, since a type is
+/// nowhere in the text of `let n = 1;`.
+pub struct Analysis {
+    /// Everything wrong with it.
+    pub errors: Vec<SyntaxError>,
+    /// The type of each expression in the file's own functions.
+    pub types: lower::Noted,
+}
+
+/// Compile for an editor's sake.
+///
+/// Only the file's own functions are recorded: the prelude is parsed as its
+/// own file, so its spans are offsets into *it* and would be read as places
+/// in this one. `Noted` says the rest of what bounds it.
+pub fn analyze(src: &str) -> Analysis {
+    let user = match parse::parse(src) {
+        Ok(f) => f,
+        Err(e) => {
+            return Analysis {
+                errors: vec![e],
+                types: lower::Noted::default(),
+            };
+        }
+    };
+    let mine: std::collections::HashSet<String> = user
+        .items
+        .iter()
+        .filter_map(item_name)
+        .map(str::to_string)
+        .collect();
+    let file = merged(&user);
+    let noted = std::cell::RefCell::new(lower::Noted::default());
+    let errors = lower::lower_noting(&file, &mine, Some(&noted))
+        .err()
+        .unwrap_or_default();
+    Analysis {
+        errors,
+        types: noted.into_inner(),
+    }
+}
+
+/// The prelude with the file written over it: a name the file defines
+/// replaces the prelude's, rather than colliding with it.
+fn merged(user: &ast::File) -> ast::File {
+    let mut file = parse::parse(PRELUDE).expect("the prelude parses");
+    let defined: std::collections::HashSet<&str> =
+        user.items.iter().filter_map(item_name).collect();
+    file.items
+        .retain(|i| item_name(i).is_none_or(|n| !defined.contains(n)));
+    file.items.extend(user.items.iter().cloned());
+    file
+}
+
 /// Compile a source file to a TIR module.
 ///
 /// The prelude is parsed separately from the program rather than pasted in
@@ -686,15 +744,8 @@ fn println_int(value: t27) {
 /// the prelude occupies the only namespace there is. A program that defines
 /// its own `sum` gets its own `sum`.
 pub fn compile(src: &str) -> Result<crate::tir::Module, Vec<SyntaxError>> {
-    let mut file = parse::parse(PRELUDE).expect("the prelude parses");
     let user = parse::parse(src).map_err(|e| vec![e])?;
-
-    let defined: std::collections::HashSet<&str> =
-        user.items.iter().filter_map(item_name).collect();
-    file.items
-        .retain(|i| item_name(i).is_none_or(|n| !defined.contains(n)));
-    file.items.extend(user.items.iter().cloned());
-
+    let file = merged(&user);
     let module = lower::lower(&file)?;
 
     // Verified **before** pruning, and the order is the point. A function
@@ -892,4 +943,84 @@ fn keep_reachable(module: &mut crate::tir::Module, prelude: &std::collections::H
         })
         .collect();
     module.decls.retain(|d| called.contains(&d.name));
+}
+
+#[cfg(test)]
+mod analysis_tests {
+    use super::*;
+
+    /// The type of whatever is at `|` in the source.
+    fn type_at(marked: &str) -> Option<String> {
+        let offset = marked.chars().position(|c| c == '|').expect("a cursor") as u32;
+        let src = marked.replace('|', "");
+        analyze(&src).types.at(offset).map(str::to_string)
+    }
+
+    #[test]
+    fn a_binding_with_no_written_type_has_one_anyway() {
+        // The whole point: nothing in the text says `t27`, and lowering does.
+        assert_eq!(
+            type_at("fn f() -> t27 {\n    let |n = 1;\n    n\n}\n").as_deref(),
+            Some("t27")
+        );
+        assert_eq!(
+            type_at("fn f(a: &[t27]) -> taddr {\n    let |k = a.len();\n    k\n}\n").as_deref(),
+            Some("taddr")
+        );
+    }
+
+    #[test]
+    fn an_expression_has_the_type_it_turned_out_to_be() {
+        assert_eq!(
+            type_at("fn f(a: t9, b: t9) -> t27 { (a as t27) |+ (b as t27) }\n").as_deref(),
+            Some("t27")
+        );
+        // The smallest thing covering the cursor, so `a` and not the sum.
+        assert_eq!(
+            type_at("fn f(a: t9, b: t9) -> t9 { |a + b }\n").as_deref(),
+            Some("t9")
+        );
+    }
+
+    #[test]
+    fn nothing_is_recorded_for_the_prelude() {
+        // Every span here is an offset into *this* file. If the prelude were
+        // recorded too, its spans would be read as places in this one, and
+        // this file is far shorter than the prelude.
+        let src = "fn f() -> t27 { 1 }\n";
+        let types = analyze(src).types;
+        let longest = src.chars().count() as u32;
+        for offset in 0..longest {
+            let _ = types.at(offset);
+        }
+        assert!(!types.is_empty());
+        // `println` is in the prelude and calls things; none of it is here.
+        assert!(types.len() < 20, "{} entries for one function", types.len());
+    }
+
+    #[test]
+    fn a_file_that_does_not_compile_still_says_what_it_can() {
+        // The second function is wrong; the first is not, and an editor asks
+        // about a file in exactly this state all day.
+        let src = "fn ok() -> t27 {\n    let n = 7;\n    n\n}\nfn bad() -> t27 { nope() }\n";
+        let a = analyze(src);
+        assert!(!a.errors.is_empty(), "the second function is wrong");
+        let at = src.find("n = 7").expect("the binding") as u32;
+        assert_eq!(a.types.at(at), Some("t27"));
+    }
+
+    #[test]
+    fn a_generic_body_is_left_alone_rather_than_guessed_at() {
+        // `id` is lowered once per instantiation, so its `x` is a `t9` and a
+        // `t27` and neither. An editor shown one of them is shown a guess.
+        let src = "fn id<T>(x: T) -> T { x }\n\
+                   fn f() -> t27 { let a: t9 = id(1); let b: t27 = id(2); b }\n";
+        let a = analyze(src);
+        assert!(a.errors.is_empty(), "{:?}", a.errors);
+        let at = src.find("x }").expect("the body") as u32;
+        assert_eq!(a.types.at(at), None, "two instantiations, no one answer");
+        // What is not generic is still answered.
+        let at = src.find("b: t27 = id(2)").expect("the binding") as u32;
+        assert_eq!(a.types.at(at), Some("t27"));
+    }
 }

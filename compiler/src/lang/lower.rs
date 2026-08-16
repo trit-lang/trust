@@ -23,7 +23,7 @@ use super::lex::{Span, SyntaxError};
 use crate::layout;
 use crate::tir::ir::{self, *};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use trit_core::{Bt, FaultCode, Flavor};
 
 /// A type-checking error.
@@ -782,7 +782,91 @@ enum Global {
 }
 
 /// Lower a parsed file into a TIR module.
+/// The type of each expression the frontend settled on, by where it was
+/// written.
+///
+/// This is the one thing an editor wants that the AST cannot say, and the
+/// reason is that it is not written anywhere: `let n = 1;` has a type, and
+/// only lowering works out what it is.
+///
+/// Two things bound what is in here, and both are refusals rather than
+/// approximations:
+///
+///   * **only the file's own functions.** The prelude is parsed as its own
+///     file, so its spans are offsets into *it* and would collide with the
+///     user's. Recording only functions the file itself names is exactly the
+///     set whose bodies are in it.
+///   * **only where the answer is one answer.** A generic function is
+///     lowered once per instantiation, so one written expression may be
+///     lowered at several types. Where two disagree the entry is dropped: an
+///     editor shown one of several is shown a guess.
+#[derive(Default, Debug)]
+pub struct Noted {
+    /// By `(lo, hi)`. `None` is a span lowered at more than one type.
+    at: HashMap<(u32, u32), Option<String>>,
+}
+
+impl Noted {
+    /// Record what an expression turned out to be.
+    fn note(&mut self, span: Span, ty: &Ty) {
+        if span.line == 0 {
+            return; // synthesized: it is in no file
+        }
+        let text = ty.to_string();
+        self.at
+            .entry((span.lo, span.hi))
+            .and_modify(|seen| {
+                if seen.as_deref() != Some(text.as_str()) {
+                    *seen = None;
+                }
+            })
+            .or_insert(Some(text));
+    }
+
+    /// The type of the smallest expression covering `offset`.
+    ///
+    /// Smallest, because that is the one the cursor is on. When it was
+    /// lowered at more than one type the answer is nothing, rather than the
+    /// type of whatever contains it.
+    pub fn at(&self, offset: u32) -> Option<&str> {
+        self.at
+            .iter()
+            .filter(|((lo, hi), _)| *lo <= offset && offset < *hi)
+            .min_by_key(|((lo, hi), _)| hi - lo)
+            .and_then(|(_, t)| t.as_deref())
+    }
+
+    /// The type recorded for exactly this span, if there is one.
+    pub fn exact(&self, span: Span) -> Option<&str> {
+        self.at.get(&(span.lo, span.hi))?.as_deref()
+    }
+
+    /// How many expressions were typed. For a test to hold this to its word.
+    pub fn len(&self) -> usize {
+        self.at.len()
+    }
+
+    /// Whether nothing was recorded.
+    pub fn is_empty(&self) -> bool {
+        self.at.is_empty()
+    }
+}
+
+/// Lower a whole file to TIR, recording nothing on the way.
 pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
+    lower_noting(file, &HashSet::new(), None)
+}
+
+/// Lower, and record the type of every expression in a function named by
+/// `record` — which is how an editor learns what `let n = 1` is.
+///
+/// `record` empty and `noted` `None` is the ordinary path, and costs one
+/// `Option` test per expression.
+pub fn lower_noting(
+    file: &ast::File,
+    record: &HashSet<String>,
+    noted: Option<&RefCell<Noted>>,
+) -> Result<Module, Vec<Error>> {
     let mut errs = Vec::new();
     let mut module = Module {
         version: TIR_VERSION.to_string(),
@@ -1034,6 +1118,8 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
     let extra_fns: RefCell<Vec<ast::FnItem>> = RefCell::new(Vec::new());
     let specials: RefCell<HashMap<String, Special>> = RefCell::new(HashMap::new());
     let world = World {
+        record,
+        noted,
         traits: &types.traits.clone(),
         vtables: &vtables,
         data: &data,
@@ -3689,6 +3775,8 @@ fn const_item(c: &ast::ConstItem, module: &mut Module, types: &Types) -> R<Globa
 // --------------------------------------------------------------- lowering
 
 struct Fn<'a> {
+    /// Where to record the type of each expression, if anyone asked.
+    noted: Option<&'a RefCell<Noted>>,
     /// Signatures, shared and mutable: instantiating a generic function adds
     /// one, and the call site that caused it must be able to check its
     /// arguments against it immediately (Ch. 4 §2.7).
@@ -3818,6 +3906,11 @@ struct LoopCtx {
 /// Everything a function body is lowered against, which is the same for
 /// every function in the module and is therefore passed as one thing.
 struct World<'a> {
+    /// Which functions to record expression types for: the file's own, since
+    /// the prelude's spans are offsets into a different file.
+    record: &'a HashSet<String>,
+    /// Where those types go, when anyone asked for them.
+    noted: Option<&'a RefCell<Noted>>,
     /// Trait declarations, for `dyn Trait` (Ch. 4 §3).
     traits: &'a HashMap<String, ast::TraitItem>,
     /// Vtables built so far, keyed by (concrete type, trait), and the
@@ -3866,6 +3959,8 @@ fn function(
     w: &World,
 ) -> R<Function> {
     let World {
+        record,
+        noted,
         traits,
         vtables,
         data,
@@ -3881,9 +3976,14 @@ fn function(
         globals,
         types,
     } = *w;
+    // An instantiation's key is mangled and is not the file's name for
+    // anything, so a generic function's body is not recorded — which is the
+    // same set the "one answer only" rule would have kept anyway.
+    let noted = noted.filter(|_| record.contains(key));
     let (param_tys, ret) = sigs.borrow().get(key).cloned().unwrap();
     let destructor_of = key.strip_prefix("drop.").map(|t| t.to_string());
     let mut fx = Fn {
+        noted,
         dest: None,
         traits,
         vtables,
@@ -4854,7 +4954,7 @@ impl Fn<'_> {
             ast::Stmt::Let {
                 mutable,
                 name,
-                name_span: _,
+                name_span,
                 ty,
                 value,
                 span,
@@ -4886,6 +4986,11 @@ impl Fn<'_> {
                     }
                     None => vt,
                 };
+                // The binding's own type, which is the thing `let n = 1;`
+                // does not say and an editor most wants told.
+                if let Some(sink) = self.noted {
+                    sink.borrow_mut().note(*name_span, &ty);
+                }
                 // Every loan the initializer created is held by this
                 // binding, and lives until its last use (Ch. 3 §4.2). That
                 // covers a borrow written here and a reference returned from
@@ -4937,6 +5042,14 @@ impl Fn<'_> {
 
     fn expr(&mut self, e: &ast::Expr, expected: Option<&Ty>) -> R<(Operand, Ty)> {
         let (v, ty) = self.expr_inner(e, expected)?;
+        // Held apart from `self`, because the coercions below need it
+        // mutably and this only needs the sink.
+        let sink = self.noted;
+        let note = |ty: &Ty| {
+            if let Some(n) = sink {
+                n.borrow_mut().note(e.span(), ty);
+            }
+        };
         // Two implicit conversions, and both convert a *representation*
         // rather than a value: `&Concrete` to `&dyn Trait` (Ch. 4 §3.2) and
         // `&Vec<T>` to `&[T]` (Ch. 5 §2.6). Nothing else in this language is
@@ -4945,12 +5058,15 @@ impl Fn<'_> {
             && ty != *want
         {
             if let Some(fat) = self.coerce_dyn(v.clone(), &ty, want, e.span())? {
+                note(&fat.1);
                 return Ok(fat);
             }
             if let Some(fat) = self.coerce_vec(v.clone(), &ty, want, e.span())? {
+                note(&fat.1);
                 return Ok(fat);
             }
         }
+        note(&ty);
         Ok((v, ty))
     }
 
