@@ -2592,6 +2592,34 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.27 — a move out of a reference was not refused, and the drop ledger
+found it.** `fn take(h: Held)` takes ownership; `fn through(r: &Held) { take(*r) }`
+gave it a value the reference only points at. It compiled, and the value was
+dropped **twice** — a double free in a language whose whole claim is that it
+has none.
+
+The cause is one arm. `E::Field` and `E::Index` both check: reading a place of
+non-copyable type *moves* it (Ch. 3 §1.2), so they call `check_access(Move)`
+and mark the root moved. `E::Deref` beside them loaded and returned. It had
+nothing to mark — the owner is whoever the reference points at — and did the
+only other thing available, which was nothing.
+
+It now refuses, and only for a **reference**. A `Box` is not one: reading
+through it moves the box, which *is* the owner, so there is exactly one drop
+and it happens there. That distinction is what the two tree tests found
+within a minute of the first attempt, which refused both.
+
+*What it reached.* A closure captures by reference (Ch. 4 §4.2), and a
+capture is rewritten to `*self.field`, so `|| take(h)` was this same hole
+wearing a hat: `twice(|| take(h))` dropped one value **three** times — once
+per call and once at the end of the scope that still thought it owned it.
+The same one-arm fix closes it, which is why `docs/status.md` §6's line about
+`FnOnce` needing "a move analysis of the closure body" was describing a
+missing *refusal* rather than a missing feature.
+
+*What found it.* The drop ledger — a type whose destructor prints — which is
+now six for six. Nothing else in this repository has found a drop bug.
+
 **G9.26 — `print_int`, which is not formatting.** Ch. 5 §1.6. The library
 could print a string and then a character and still not a number, and every
 program wrote the same digit loop — HPL's, demo's, `traits.tr`'s, three copies

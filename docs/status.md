@@ -167,7 +167,7 @@ inference and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
 | a type parameterized by a `const` | `const N` works as an array *length* (G8.2); `struct Grid<const N: taddr>` is Ch. 4 §2.4 and unimplemented |
 
 | returning a closure | needs `impl Trait` in return position or `Box<dyn Fn>`; Ch. 4 §4.5 |
-| `FnOnce` | every capture is by reference; needs a move analysis of the closure body |
+| `FnOnce` that moves a capture | every capture is by reference, and moving out of one is now **refused** rather than silently accepted (G9.27). Allowing it needs a move analysis of the closure body |
 | `IntoIterator`, so `for x in xs` over an array | array iterators are the library's; the blanket impl it needs now works (G0.14b) |
 | modules, `use`, `pub`, multiple files | reserved in Ch. 0 §1.3 |
 | `unsafe`, raw pointers | reserved; `?` is built (G9.8) |

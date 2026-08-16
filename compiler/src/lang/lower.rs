@@ -5507,11 +5507,34 @@ impl Fn<'_> {
                 // `*b` on a `Box` reads what it owns, which is the same
                 // operation on the same representation as `*r` on a
                 // reference (Ch. 5 §2.3).
+                let borrowed = matches!(ty, Ty::Ref(..));
                 let (Ty::Ref(target, _) | Ty::Boxed(target)) = ty else {
                     return err(*span, format!("`*` applies to a reference, not {ty}"));
                 };
                 if target.is_unsized() {
                     return err(*span, format!("cannot read a value of type {target}"));
+                }
+                // Reading a place of non-copyable type moves it (Ch. 3
+                // §1.2) — and there is nothing here to move *from*: the
+                // value belongs to whatever the reference points at, which
+                // will drop it whether or not this did.
+                //
+                // `E::Field` and `E::Index` beside this one have always
+                // checked; this arm did not, so `take(*r)` compiled and the
+                // value was dropped twice. The drop ledger found it.
+                //
+                // A `Box` is not a reference: reading through one moves the
+                // box itself, which is the owner, so there is exactly one
+                // drop and it happens here.
+                if borrowed && !self.types.is_copyable(&target) {
+                    return err(
+                        *span,
+                        format!(
+                            "cannot move out of a reference: reading a {target} moves it, \
+                             and this one belongs to whatever the reference points at, which \
+                             will drop it either way (Ch. 3 §1.2)"
+                        ),
+                    );
                 }
                 Ok((self.load_from(v, &target), *target))
             }
