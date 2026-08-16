@@ -429,6 +429,17 @@ words to its frame and read 31 940 back. A load from a slot that never escapes
 cannot fault, so an unused one is removable (G8.23). **2 315 340 → 2 059 024,
 −11.1%**, and frame traffic from 7.9% to 2.6%.
 
+And then the jumps those loops ended with. A `while` emits its **body before
+its test** now, so the back edge is a fall-through rather than an instruction
+(G8.24): **2 059 024 → 1 985 745**, and unconditional jumps from 104 944 to
+31 593. Four lines in the frontend.
+
+**HPL is 1 985 745 instructions, from 3 661 618 when this began: −45.8%.**
+Two things were ruled out on the way by measuring them: block layout already
+elides a jump to the next block, and strength reduction is worth *zero* here,
+because trading `base + i·size` for an incrementing pointer swaps a
+one-instruction multiply for a one-instruction add.
+
 What is left is discharging a predicate at the *call site* rather than
 trapping in the callee, which needs a proof language and is reserved in §2.8.
 
