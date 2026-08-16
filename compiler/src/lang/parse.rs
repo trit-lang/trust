@@ -1393,6 +1393,7 @@ impl Parser {
         let next = Expr::Method(
             Box::new(Expr::Path(it.clone(), span)),
             "next".to_string(),
+            span,
             Vec::new(),
             span,
         );
@@ -1428,7 +1429,13 @@ impl Parser {
                     // Ch. 4 §5.7: the loop's expression is turned into an
                     // iterator first, which is what lets `for c in s` walk a
                     // string and not only something that is already one.
-                    value: Expr::Method(Box::new(iter), "into_iter".to_string(), Vec::new(), span),
+                    value: Expr::Method(
+                        Box::new(iter),
+                        "into_iter".to_string(),
+                        span,
+                        Vec::new(),
+                        span,
+                    ),
                     span,
                 },
                 Stmt::Expr(Expr::Loop(
@@ -1489,13 +1496,14 @@ impl Parser {
                 if let Tok::Int(v) = self.peek().clone() {
                     self.bump();
                     let index = v.to_i128().unwrap_or(-1);
-                    e = Expr::Field(Box::new(e), index.to_string(), span).spanning(self.since(start));
+                    e = Expr::Field(Box::new(e), index.to_string(), span)
+                        .spanning(self.since(start));
                     continue;
                 }
-                let name = self.expect_ident()?;
+                let (name, at) = self.expect_ident_at()?;
                 if self.at_op("(") {
                     let args = self.args()?;
-                    e = Expr::Method(Box::new(e), name, args, span).spanning(self.since(start));
+                    e = Expr::Method(Box::new(e), name, at, args, span).spanning(self.since(start));
                 } else {
                     e = Expr::Field(Box::new(e), name, span).spanning(self.since(start));
                 }
@@ -1530,7 +1538,9 @@ impl Parser {
 
     /// The tail of a path expression, after its first segment.
     fn path_expr(&mut self, first: String, span: Span) -> R<Expr> {
-        Ok(self.path_expr_inner(first, span)?.spanning(self.since(span)))
+        Ok(self
+            .path_expr_inner(first, span)?
+            .spanning(self.since(span)))
     }
 
     fn path_expr_inner(&mut self, first: String, span: Span) -> R<Expr> {
@@ -1557,7 +1567,13 @@ impl Parser {
         if self.at_op("(") {
             let args = self.args()?;
             if path.segments.len() == 1 {
-                return Ok(Expr::Call(path.segments[0].clone(), path.targs, args, span));
+                return Ok(Expr::Call(
+                    path.segments[0].clone(),
+                    path.span,
+                    path.targs,
+                    args,
+                    span,
+                ));
             }
             let fields = args
                 .into_iter()
@@ -2026,12 +2042,28 @@ mod tests {
         let src = "fn f() -> t27 { xs[0].len().max(y) }";
         let (e, whole) = tail(src);
         assert_eq!(whole, "xs[0].len().max(y)");
-        let Expr::Method(recv, name, args, _) = e else {
+        let Expr::Method(recv, name, at, args, _) = e else {
             panic!("a method call")
         };
         assert_eq!(name, "max");
         assert_eq!(text(src, recv.span()), "xs[0].len()");
         assert_eq!(text(src, args[0].span()), "y");
+        // The call covers the whole chain and the name covers the name: a
+        // diagnostic about the call underlines one, a rename changes the
+        // other.
+        assert_eq!(text(src, at), "max");
+    }
+
+    #[test]
+    fn a_call_knows_both_its_extent_and_its_callee() {
+        let src = "fn f() -> t27 { helper(1, 2) }";
+        let (e, whole) = tail(src);
+        assert_eq!(whole, "helper(1, 2)");
+        let Expr::Call(name, at, _, _, _) = e else {
+            panic!("a call")
+        };
+        assert_eq!(name, "helper");
+        assert_eq!(text(src, at), "helper");
     }
 
     #[test]

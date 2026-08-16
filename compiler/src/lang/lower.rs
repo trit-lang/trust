@@ -1228,10 +1228,10 @@ fn free_names(e: &ast::Expr, bound: &mut Vec<String>, out: &mut Vec<String>) {
             free_names(a, bound, out);
             free_names(b, bound, out);
         }
-        Call(_, _, args, _) | Array(args, _) | Tuple(args, _) => {
+        Call(_, _, _, args, _) | Array(args, _) | Tuple(args, _) => {
             args.iter().for_each(|a| free_names(a, bound, out))
         }
-        Method(r, _, args, _) => {
+        Method(r, _, _, args, _) => {
             free_names(r, bound, out);
             args.iter().for_each(|a| free_names(a, bound, out));
         }
@@ -1289,7 +1289,7 @@ fn writes_name(e: &ast::Expr, name: &str) -> bool {
         Borrow(inner, true, _) => root(inner).as_deref() == Some(name),
         // A method call may need `&mut`; assume it does, which costs a
         // closure the `Fn` bound but never accepts a wrong program.
-        Method(recv, _, _, _) => root(recv).as_deref() == Some(name),
+        Method(recv, _, _, _, _) => root(recv).as_deref() == Some(name),
         _ => false,
     };
     if here {
@@ -1324,9 +1324,9 @@ fn for_each_child(e: &ast::Expr, f: &mut impl FnMut(&ast::Expr)) {
             f(a);
             f(b);
         }
-        Call(_, _, args, _) | Array(args, _) | Tuple(args, _) => args.iter().for_each(f),
+        Call(_, _, _, args, _) | Array(args, _) | Tuple(args, _) => args.iter().for_each(f),
         Aggregate(_, fields, _) => fields.iter().for_each(|(_, v)| f(v)),
-        Method(r, _, args, _) => {
+        Method(r, _, _, args, _) => {
             f(r);
             args.iter().for_each(f);
         }
@@ -1411,9 +1411,9 @@ fn for_each_child_mut(e: &mut ast::Expr, f: &mut impl FnMut(&mut ast::Expr)) {
             f(a);
             f(b);
         }
-        Call(_, _, args, _) | Array(args, _) | Tuple(args, _) => args.iter_mut().for_each(f),
+        Call(_, _, _, args, _) | Array(args, _) | Tuple(args, _) => args.iter_mut().for_each(f),
         Aggregate(_, fields, _) => fields.iter_mut().for_each(|(_, v)| f(v)),
-        Method(r, _, args, _) => {
+        Method(r, _, _, args, _) => {
             f(r);
             args.iter_mut().for_each(f);
         }
@@ -1805,8 +1805,8 @@ fn subst_expr(e: &mut ast::Expr, self_ty: &SelfTy) {
             kids.push(a);
             kids.push(b);
         }
-        Call(_, _, args, _) | Array(args, _) | Tuple(args, _) => kids.extend(args.iter_mut()),
-        Method(r, _, args, _) => {
+        Call(_, _, _, args, _) | Array(args, _) | Tuple(args, _) => kids.extend(args.iter_mut()),
+        Method(r, _, _, args, _) => {
             kids.push(r);
             kids.extend(args.iter_mut());
         }
@@ -2496,7 +2496,12 @@ fn check_trait_impl(
         if want.params.len() != m.params.len() || !same_ret {
             mismatch()?;
         }
-        for (a, b) in want.params.iter().zip(&m.params).map(|(a, b)| (&a.ty, &b.ty)) {
+        for (a, b) in want
+            .params
+            .iter()
+            .zip(&m.params)
+            .map(|(a, b)| (&a.ty, &b.ty))
+        {
             // `self` is the one parameter whose written form differs by
             // design: the trait writes `Self` and the impl its own type.
             let (a, b) = (subst_self_ty(a, self_repr), subst_self_ty(b, self_repr));
@@ -4687,7 +4692,10 @@ impl Fn<'_> {
             name: key,
             name_span: span,
             generics: Vec::new(),
-            params: vec![ast::Named::new("self", ast::Ty::Name(name.to_string(), span))],
+            params: vec![ast::Named::new(
+                "self",
+                ast::Ty::Name(name.to_string(), span),
+            )],
             ret: None,
             body: Some(ast::Block {
                 stmts: Vec::new(),
@@ -5102,11 +5110,11 @@ impl Fn<'_> {
             E::Cast(inner, ty, span) => self.cast(inner, ty, *span),
             // A call *writes* its aggregate result, so it consumes a
             // destination rather than passing one on.
-            E::Call(name, targs, args, span) => {
+            E::Call(name, _, targs, args, span) => {
                 self.dest = dest;
                 self.call(name, targs, args, expected, *span)
             }
-            E::Method(recv, name, args, span) => {
+            E::Method(recv, name, _, args, span) => {
                 self.dest = dest;
                 self.method(recv, name, args, expected, *span)
             }
@@ -6149,8 +6157,7 @@ impl Fn<'_> {
             None => Ty::Unit,
             Some(t) => resolve_ty_env(t, self.types, &env)?,
         };
-        let self_ref =
-            matches!(def.params.first(), Some(p) if p.name == "self" && matches!(p.ty, ast::Ty::Ref(..)));
+        let self_ref = matches!(def.params.first(), Some(p) if p.name == "self" && matches!(p.ty, ast::Ty::Ref(..)));
         check_returned_reference(&params, &ret, self_ref, span)?;
         self.sigs
             .borrow_mut()
@@ -8030,7 +8037,7 @@ impl Fn<'_> {
                 self.peek_ty(inner)?.map(|t| Ty::Ref(Box::new(t), *mutable))
             }
             E::Cast(_, t, _) => Some(self.resolve(t)?),
-            E::Call(name, _, _, _) => self.sigs.borrow().get(name).map(|(_, r)| r.clone()),
+            E::Call(name, _, _, _, _) => self.sigs.borrow().get(name).map(|(_, r)| r.clone()),
             // Arithmetic keeps its operands' type; a comparison answers a
             // bool, and `<=>` a trit (Ch. 1 §5).
             E::Binary(op, a, b, _) => match *op {
@@ -8056,8 +8063,10 @@ impl Fn<'_> {
             // the receiver is. `len` is the one that matters: `0..v.len()`
             // would otherwise let the literal pin the range's parameter to
             // `t27` and then fail against a `taddr` end.
-            E::Method(_, name, args, _) if name == "len" && args.is_empty() => Some(Ty::TAddr),
-            E::Method(_, name, args, _) if name == "capacity" && args.is_empty() => Some(Ty::TAddr),
+            E::Method(_, name, _, args, _) if name == "len" && args.is_empty() => Some(Ty::TAddr),
+            E::Method(_, name, _, args, _) if name == "capacity" && args.is_empty() => {
+                Some(Ty::TAddr)
+            }
             E::Method(..) => None,
             _ => None,
         })
@@ -10702,12 +10711,12 @@ fn walk_expr(e: &ast::Expr, index: &mut u32, out: &mut HashMap<String, u32>) {
         | E::Field(a, _, _)
         | E::Borrow(a, _, _)
         | E::Deref(a, _) => go(a, index, out),
-        E::Call(_, _, args, _) => {
+        E::Call(_, _, _, args, _) => {
             for a in args {
                 go(a, index, out);
             }
         }
-        E::Method(recv, _, args, _) => {
+        E::Method(recv, _, _, args, _) => {
             go(recv, index, out);
             for a in args {
                 go(a, index, out);

@@ -138,26 +138,6 @@ impl LineMap {
         }
         Some(at)
     }
-
-    /// How many characters the 1-based `line` holds, not counting its newline.
-    ///
-    /// A diagnostic that has no span to point at underlines the whole line,
-    /// and this is how wide that is.
-    pub fn width(&self, line: Line) -> Pos {
-        let idx = (line.max(1) - 1) as usize;
-        if idx >= self.starts.len() {
-            return Pos {
-                line,
-                column: 1,
-                utf16: 0,
-            };
-        }
-        let end = self
-            .starts
-            .get(idx + 1)
-            .map_or(self.chars.len() as u32, |s| s - 1);
-        self.pos(end)
-    }
 }
 
 /// One token.
@@ -441,7 +421,11 @@ pub fn lex(src: &str) -> Result<Vec<(Tok, Span)>, SyntaxError> {
 /// A newline inside one is an error rather than a continuation: an unclosed
 /// quote would otherwise swallow the rest of the file and report its error
 /// somewhere unrelated.
-fn string_literal(chars: &[char], at: usize, open: Span) -> Result<(Vec<i128>, usize), SyntaxError> {
+fn string_literal(
+    chars: &[char],
+    at: usize,
+    open: Span,
+) -> Result<(Vec<i128>, usize), SyntaxError> {
     let mut out = Vec::new();
     let mut i = at + 1;
     loop {

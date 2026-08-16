@@ -84,8 +84,48 @@ pub struct Symbol {
 pub struct Definition {
     /// Where the name is.
     pub at: Span,
+    /// The name itself.
+    pub name: String,
     /// How it reads: `fn f(x: t27) -> t27`, `n: taddr`, `let mut i`.
     pub label: String,
+    /// Whether this is a method, which is resolved by spelling alone and so
+    /// cannot be renamed — see `NoRename::Method`.
+    pub method: bool,
+}
+
+/// Why a rename will not be done.
+///
+/// Each of these is a case where the set of names to change cannot be known
+/// from this file, and a rename that changes some of them is worse than one
+/// that changes none.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum NoRename {
+    /// The cursor is not on a name this file defines.
+    NotAName,
+    /// A method. It resolves by spelling, and the prelude — which this index
+    /// never sees — defines methods of its own, so the calls found here may
+    /// not be the calls that mean this one.
+    Method,
+    /// Something of that name is already written where this one is used, so
+    /// the rename would shadow or be shadowed rather than rename.
+    Taken(String),
+    /// The new text is not a name (Ch. 0 §1.3).
+    NotAnIdentifier,
+}
+
+impl std::fmt::Display for NoRename {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NoRename::NotAName => f.write_str("there is no name here to rename"),
+            NoRename::Method => f.write_str(
+                "a method is found by its spelling, and the prelude has methods this                  file cannot see, so renaming one here might rename only some of it",
+            ),
+            NoRename::Taken(n) => write!(f, "`{n}` is already written where this is used"),
+            NoRename::NotAnIdentifier => f.write_str(
+                "a name is a letter or `_` followed by letters, digits or `_` (Ch. 0 §1.3)",
+            ),
+        }
+    }
 }
 
 /// Everything one file says about where things are.
@@ -131,6 +171,59 @@ impl Index {
         let i = self.uses.partition_point(|(at, _)| at.lo <= offset);
         let (at, to) = *self.uses.get(i.checked_sub(1)?)?;
         (offset < at.hi).then_some((at, to))
+    }
+
+    /// Every place that means the definition at `at`, including its own
+    /// name. In the order they are written.
+    ///
+    /// This is exact rather than textual: a different `n` in another function
+    /// is a different definition and is not here.
+    pub fn references(&self, at: Span) -> Vec<Span> {
+        self.uses
+            .iter()
+            .filter(|(_, to)| to.lo == at.lo && to.hi == at.hi)
+            .map(|(from, _)| *from)
+            .collect()
+    }
+
+    /// Every place a rename at `offset` would have to change, or why it will
+    /// not be done.
+    pub fn rename(&self, offset: u32, new: &str) -> Result<Vec<Span>, NoRename> {
+        if !is_identifier(new) {
+            return Err(NoRename::NotAnIdentifier);
+        }
+        let (_, at) = self.use_at(offset).ok_or(NoRename::NotAName)?;
+        let def = self.describe(at).ok_or(NoRename::NotAName)?;
+        if def.method {
+            return Err(NoRename::Method);
+        }
+        if let Some(taken) = self.taken(new, at) {
+            return Err(NoRename::Taken(taken));
+        }
+        Ok(self.references(at))
+    }
+
+    /// Whether `new` is already written somewhere that would collide with a
+    /// definition at `at`.
+    ///
+    /// Shadowing happens inside an item, so that is the region searched —
+    /// plus the file's own top-level names, which every item can see. A local
+    /// called `i` in another function is not a collision and is not refused.
+    fn taken(&self, new: &str, at: Span) -> Option<String> {
+        if self.symbols.iter().any(|s| s.name == new) {
+            return Some(new.to_string());
+        }
+        let region = self.symbol_at(at.lo).map(|s| s.span);
+        let inside = |d: &Definition| match region {
+            Some(r) => r.lo <= d.at.lo && d.at.hi <= r.hi,
+            // A definition outside every item is a top-level one, already
+            // checked above.
+            None => true,
+        };
+        self.defs
+            .iter()
+            .find(|d| d.name == new && inside(d))
+            .map(|d| d.name.clone())
     }
 
     /// How the definition at `at` was written, for a hover to show.
@@ -197,14 +290,15 @@ impl Builder {
                 Item::Struct(s) => {
                     self.define_item(&s.name, s.name_span, format!("struct {}", s.name));
                     for f in &s.fields {
-                        self.define(f.name_span, format!("{}: {}", f.name, type_name(&f.ty)));
+                        let label = format!("{}: {}", f.name, type_name(&f.ty));
+                        self.define(f.name_span, &f.name, label);
                     }
                 }
                 Item::Trait(t) => {
                     self.define_item(&t.name, t.name_span, format!("trait {}", t.name));
                     for m in &t.methods {
                         self.methods.push((m.name.clone(), m.name_span));
-                        self.define(m.name_span, fn_label(m));
+                        self.define_method(m.name_span, &m.name, fn_label(m));
                     }
                 }
                 Item::Enum(e) => {
@@ -214,14 +308,16 @@ impl Builder {
                     for v in &e.variants {
                         self.define_item(&v.name, v.name_span, variant_label(&e.name, v));
                         for f in &v.fields {
-                            self.define(f.name_span, format!("{}: {}", f.name, type_name(&f.ty)));
+                            let label = format!("{}: {}", f.name, type_name(&f.ty));
+                            self.define(f.name_span, &f.name, label);
                         }
                     }
                 }
                 Item::Impl(i) => {
                     for m in &i.methods {
                         self.methods.push((m.name.clone(), m.name_span));
-                        self.define(m.name_span, format!("{}\n{}", impl_label(i), fn_label(m)));
+                        let label = format!("{}\n{}", impl_label(i), fn_label(m));
+                        self.define_method(m.name_span, &m.name, label);
                     }
                 }
             }
@@ -231,7 +327,7 @@ impl Builder {
     /// A name visible everywhere, and how it reads.
     fn define_item(&mut self, name: &str, at: Span, label: String) {
         self.items.push((name.to_string(), at));
-        self.define(at, label);
+        self.define(at, name, label);
     }
 
     /// A definition a hover can show, wherever it was written.
@@ -240,10 +336,24 @@ impl Builder {
     /// answer with itself — hovering `fn area` on the line that declares it
     /// is the most obvious hover there is, and jumping from a definition
     /// should stay put rather than go nowhere.
-    fn define(&mut self, at: Span, label: String) {
+    fn define(&mut self, at: Span, name: &str, label: String) {
         if at.line != 0 {
-            self.defs.push(Definition { at, label });
+            self.defs.push(Definition {
+                at,
+                name: name.to_string(),
+                label,
+                method: false,
+            });
             self.uses.push((at, at));
+        }
+    }
+
+    /// A method, which a rename must refuse: it is found by its spelling, and
+    /// the prelude has methods this index never sees.
+    fn define_method(&mut self, at: Span, name: &str, label: String) {
+        self.define(at, name, label);
+        if let Some(d) = self.defs.last_mut() {
+            d.method = true;
         }
     }
 
@@ -289,7 +399,7 @@ impl Builder {
 
     /// A binding that is also somewhere to point at.
     fn bind_and_mark(&mut self, name: &str, at: Span, label: String) {
-        self.define(at, label);
+        self.define(at, name, label);
         self.bind(name, at);
     }
 
@@ -501,7 +611,7 @@ impl Builder {
                             Some(t) => format!("let {m}{name}: {}", type_name(t)),
                             None => format!("let {m}{name}"),
                         };
-                        s.define(*name_span, label);
+                        s.define(*name_span, name, label);
                         s.bind(name, *name_span);
                     }
                     Stmt::Expr(e) => s.expr(e),
@@ -516,7 +626,9 @@ impl Builder {
     fn expr(&mut self, e: &Expr) {
         match e {
             Expr::Path(name, at) => self.use_name(name, *at),
-            Expr::Call(name, targs, args, at) => {
+            // The name, not the whole call: what a rename changes is
+            // `helper`, and what it must not touch is `helper()`.
+            Expr::Call(name, at, targs, args, _) => {
                 self.use_name(name, *at);
                 for t in targs {
                     self.ty(t);
@@ -525,7 +637,7 @@ impl Builder {
                     self.expr(a);
                 }
             }
-            Expr::Method(recv, name, args, at) => {
+            Expr::Method(recv, name, at, args, _) => {
                 self.expr(recv);
                 self.use_method(name, *at);
                 for a in args {
@@ -650,6 +762,17 @@ impl Builder {
     }
 }
 
+/// Ch. 0 §1.3: a letter or `_`, then letters, digits or `_`.
+fn is_identifier(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !super::lex::KEYWORDS.contains(&text)
+        && !super::lex::RESERVED.contains(&text)
+}
+
 /// A function as it was written: `fn name(params) -> ret`.
 fn fn_label(f: &FnItem) -> String {
     format!("fn {}{}", f.name, signature(f))
@@ -767,8 +890,11 @@ mod tests {
              enum E { A, B(t9) }\n\
              impl P { fn get(&self) -> t27 { self.x } }\n",
         );
-        let names: Vec<(&str, SymbolKind)> =
-            i.symbols.iter().map(|s| (s.name.as_str(), s.kind)).collect();
+        let names: Vec<(&str, SymbolKind)> = i
+            .symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.kind))
+            .collect();
         assert_eq!(
             names,
             vec![
@@ -959,6 +1085,80 @@ mod tests {
         let (src, offset) = at(marked);
         let to = index(&src).definition_at(offset).expect("resolves");
         assert_eq!((to.line, to.lo <= offset && offset < to.hi), (2, true));
+    }
+
+    /// The text each returned span covers, in order.
+    fn spans_text(src: &str, spans: &[Span]) -> Vec<String> {
+        spans
+            .iter()
+            .map(|s| {
+                src.chars()
+                    .skip(s.lo as usize)
+                    .take((s.hi - s.lo) as usize)
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn references_are_exact_and_not_textual() {
+        // Two locals called `n` in two functions. Asking about one finds
+        // three places, not six.
+        let src = "fn a() -> t27 {\n    let n = 1;\n    n + n\n}\n                   fn b() -> t27 {\n    let n = 2;\n    n\n}\n";
+        let i = index(src);
+        let at = i.definition_at(src.find("n + n").unwrap() as u32).unwrap();
+        let refs = i.references(at);
+        assert_eq!(spans_text(src, &refs), vec!["n", "n", "n"]);
+        assert!(refs.iter().all(|s| s.line <= 3), "{refs:?}");
+    }
+
+    #[test]
+    fn a_rename_lists_the_definition_and_every_use() {
+        let src = "fn helper() -> t27 { 1 }\nfn main() -> t27 { helper() + helper() }\n";
+        let at = src.find("helper() +").unwrap() as u32;
+        let spans = index(src).rename(at, "worker").expect("renames");
+        assert_eq!(spans_text(src, &spans), vec!["helper"; 3]);
+    }
+
+    #[test]
+    fn a_rename_refuses_a_method_because_the_prelude_is_not_here() {
+        let src = "struct P;\nimpl P { fn go(&self) {} }\nfn f(p: P) { p.go() }\n";
+        let at = src.find("p.go()").unwrap() as u32 + 2;
+        assert_eq!(index(src).rename(at, "run"), Err(NoRename::Method));
+    }
+
+    #[test]
+    fn a_rename_refuses_a_name_that_is_already_written_where_it_would_go() {
+        // `a` to `b` would capture the `b` beside it.
+        let src = "fn f(a: t27) -> t27 {\n    let b = 1;\n    a + b\n}\n";
+        let at = src.find("a + b").unwrap() as u32;
+        assert_eq!(
+            index(src).rename(at, "b"),
+            Err(NoRename::Taken("b".to_string()))
+        );
+        // A local of that name in *another* function is not a collision.
+        let src = "fn f(a: t27) -> t27 { a }\nfn g() -> t27 {\n    let b = 1;\n    b\n}\n";
+        let at = src.find("{ a }").unwrap() as u32 + 2;
+        assert!(index(src).rename(at, "b").is_ok());
+    }
+
+    #[test]
+    fn a_rename_refuses_what_is_not_a_name() {
+        let src = "fn f(a: t27) -> t27 { a }\n";
+        let at = src.find("{ a }").unwrap() as u32 + 2;
+        let i = index(src);
+        assert_eq!(i.rename(at, "2fast"), Err(NoRename::NotAnIdentifier));
+        assert_eq!(i.rename(at, ""), Err(NoRename::NotAnIdentifier));
+        // A keyword is not a name either (Ch. 0 §1.3).
+        assert_eq!(i.rename(at, "match"), Err(NoRename::NotAnIdentifier));
+        assert_eq!(i.rename(at, "unsafe"), Err(NoRename::NotAnIdentifier));
+    }
+
+    #[test]
+    fn a_rename_refuses_where_there_is_no_name() {
+        let src = "fn f() -> t27 { 1 + 2 }\n";
+        let at = src.find("+").unwrap() as u32;
+        assert_eq!(index(src).rename(at, "x"), Err(NoRename::NotAName));
     }
 
     #[test]

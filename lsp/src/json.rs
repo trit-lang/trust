@@ -265,7 +265,10 @@ mod tests {
         assert_eq!(s, "a\"b\\c\nd世🙂");
         let mut out = String::new();
         quote(s, &mut out);
-        assert_eq!(parse(&format!("{{\"t\":{out}}}")).unwrap().str_at(&["t"]), Some(s));
+        assert_eq!(
+            parse(&format!("{{\"t\":{out}}}")).unwrap().str_at(&["t"]),
+            Some(s)
+        );
     }
 
     #[test]

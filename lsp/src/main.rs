@@ -1,17 +1,21 @@
 //! `trust-lsp` — a language server for Trust, over stdio.
 //!
-//! Four things, and each is the compiler answering rather than this:
+//! Everything it answers is the compiler answering, not this:
 //!
 //!   * **diagnostics**, from `lang::compile` — every error the frontend can
 //!     find, as you type, from exactly the compiler that will build the
 //!     program. There is no second implementation of the language here to
 //!     drift.
-//!   * **an outline**, **go-to-definition** and **hover**, from `lang::index`
-//!     — which reads the AST, so all three work on a file that does not
-//!     compile, which is the state a file is in while it is being written.
+//!   * **an outline**, **go-to-definition**, **hover**, **find references**
+//!     and **rename**, from `lang::index` — which reads the AST, so all of
+//!     them work on a file that does not compile, which is the state a file
+//!     is in while it is being written.
 //!
 //! This crate is the translation and nothing else: character offsets to the
 //! protocol's UTF-16 columns, and structs to JSON.
+//!
+//! A rename that cannot be trusted is refused with its reason rather than
+//! done partly — `NoRename` lists the three ways that happens.
 //!
 //! What is not here is **completion**, and what it waits on is not effort. A
 //! hover shows a definition *as it was written*, which the AST knows; a
@@ -63,7 +67,9 @@ impl Server {
                     "{\"capabilities\":{\"textDocumentSync\":1,\
                        \"documentSymbolProvider\":true,\
                        \"definitionProvider\":true,\
-                       \"hoverProvider\":true},\
+                       \"hoverProvider\":true,\
+                       \"referencesProvider\":true,\
+                       \"renameProvider\":{\"prepareProvider\":true}},\
                        \"serverInfo\":{\"name\":\"trust-lsp\"}}",
                 );
             }
@@ -85,6 +91,67 @@ impl Server {
                     })
                     .unwrap_or_else(|| "null".to_string());
                 reply(m.get(&["id"]), &out);
+            }
+            "textDocument/references" => {
+                let out = self
+                    .indexed(m)
+                    .and_then(|(map, index, uri)| {
+                        let at = position(m, &map)?;
+                        let to = index.definition_at(at)?;
+                        let places = index.references(to);
+                        Some(list(places.iter().map(|s| location(&map, &uri, *s))))
+                    })
+                    .unwrap_or_else(|| "[]".to_string());
+                reply(m.get(&["id"]), &out);
+            }
+            "textDocument/prepareRename" => {
+                // The name under the cursor, if renaming it is something
+                // this can do. A null answer is how an editor is told to say
+                // "cannot rename here" before asking for a new name.
+                let out = self
+                    .indexed(m)
+                    .and_then(|(map, index, _)| {
+                        let at = position(m, &map)?;
+                        let (word, _) = index.use_at(at)?;
+                        // Any name will do to find out whether the *place*
+                        // can be renamed; the real one is checked later.
+                        match index.rename(at, "x") {
+                            Err(
+                                lang::index::NoRename::Method | lang::index::NoRename::NotAName,
+                            ) => None,
+                            _ => Some(range(&map, word)),
+                        }
+                    })
+                    .unwrap_or_else(|| "null".to_string());
+                reply(m.get(&["id"]), &out);
+            }
+            "textDocument/rename" => {
+                let new = m.str_at(&["params", "newName"]).unwrap_or_default();
+                match self.indexed(m) {
+                    Some((map, index, uri)) => {
+                        let places = position(m, &map).ok_or(lang::index::NoRename::NotAName);
+                        match places.and_then(|at| index.rename(at, new)) {
+                            Ok(spans) => {
+                                let edits = list(spans.iter().map(|s| {
+                                    let mut text = String::new();
+                                    json::quote(new, &mut text);
+                                    format!("{{\"range\":{},\"newText\":{text}}}", range(&map, *s))
+                                }));
+                                let mut quoted = String::new();
+                                json::quote(&uri, &mut quoted);
+                                reply(
+                                    m.get(&["id"]),
+                                    &format!("{{\"changes\":{{{quoted}:{edits}}}}}"),
+                                );
+                            }
+                            // A refusal is an error and not an empty edit:
+                            // an editor that is told "nothing changed" says
+                            // nothing, and the reason is the useful part.
+                            Err(why) => fail(m.get(&["id"]), &why.to_string()),
+                        }
+                    }
+                    None => fail(m.get(&["id"]), "this file does not parse"),
+                }
             }
             "textDocument/definition" => {
                 let out = self
@@ -157,7 +224,9 @@ impl Server {
 
     /// Compile what is open at `uri` and publish what is wrong with it.
     fn check(&self, uri: &str) {
-        let Some(src) = self.open.get(uri) else { return };
+        let Some(src) = self.open.get(uri) else {
+            return;
+        };
         let found = match lang::compile(src) {
             Ok(_) => Vec::new(),
             Err(errs) => errs,
@@ -203,6 +272,19 @@ fn location(map: &lang::LineMap, uri: &str, span: lang::Span) -> String {
     let mut quoted = String::new();
     json::quote(uri, &mut quoted);
     format!("{{\"uri\":{quoted},\"range\":{}}}", range(map, span))
+}
+
+/// A JSON array of already-rendered items.
+fn list(items: impl Iterator<Item = String>) -> String {
+    let mut out = String::from("[");
+    for (i, item) in items.enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&item);
+    }
+    out.push(']');
+    out
 }
 
 /// What a name is, shown as the file writes it.
@@ -261,8 +343,26 @@ fn kind(k: lang::index::SymbolKind) -> u32 {
     }
 }
 
+/// Tell the client a request could not be done, and why.
+///
+/// `-32803` is `RequestFailed`, which is what the protocol reserves for a
+/// request that was understood and refused.
+fn fail(id: Option<&Json>, message: &str) {
+    let mut text = String::new();
+    json::quote(message, &mut text);
+    reply_raw(
+        id,
+        &format!("\"error\":{{\"code\":-32803,\"message\":{text}}}"),
+    );
+}
+
 /// Send a reply to a request that had an id.
 fn reply(id: Option<&Json>, result: &str) {
+    reply_raw(id, &format!("\"result\":{result}"));
+}
+
+/// One reply, with whatever `result` or `error` member it carries.
+fn reply_raw(id: Option<&Json>, body: &str) {
     let id = match id {
         Some(Json::Num(n)) => format!("{}", *n as i64),
         Some(Json::Str(s)) => {
@@ -272,9 +372,7 @@ fn reply(id: Option<&Json>, result: &str) {
         }
         _ => return,
     };
-    send(&format!(
-        "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{result}}}"
-    ));
+    send(&format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},{body}}}"));
 }
 
 /// One diagnostic, in the protocol's coordinates: 0-based lines, and columns

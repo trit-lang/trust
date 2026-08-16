@@ -3081,6 +3081,27 @@ Making that true finished the same job `Named` started — a `let` binding's
 name had no span either, so its `Stmt::Let` now carries one, and a jump to a
 local lands on the name rather than on the `let` four characters before it.
 
+*Find references and rename are exact, or refused.* The index knows which
+definition each name means, so references are the places that **mean** this
+one — a different `n` in another function is not among them, which a search
+for the text `n` could not say. Rename is that set plus the definition, and
+it refuses rather than half-does it in three cases:
+
+  * a **method**, because it is found by spelling and the prelude — which the
+    index never sees — has methods of its own, so the calls found here may
+    not be the calls that mean this one;
+  * a **name already written where this one is used**, which would shadow
+    rather than rename. The region searched is the enclosing item, since that
+    is where shadowing happens, plus the file's top-level names; a local
+    called `i` in another function is not a collision and is not refused;
+  * anything that is **not a name** (Ch. 0 §1.3), keywords included.
+
+Getting the spans right cost one more AST change, of the same kind as the
+last two: `Expr::Call` and `Expr::Method` covered their whole call, which is
+right for a diagnostic and wrong for a rename — `helper()` is what a
+diagnostic underlines and `helper` is what a rename changes. Both now carry
+**two** spans, and a test holds each to its job.
+
 *What is still not there.* **Completion**, and what it waits on is not
 effort. A hover reads what the file already says; a completion has to know
 what is in scope **and what type each thing has**, and a type is what only

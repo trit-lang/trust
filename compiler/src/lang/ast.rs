@@ -487,10 +487,17 @@ pub enum Expr {
     /// `x as T`.
     Cast(Box<Expr>, Ty, Span),
     /// `f(args)`, with any type arguments written `f::<T>(args)`.
-    Call(String, Vec<Ty>, Vec<Expr>, Span),
+    ///
+    /// Two spans, because two questions have different answers: the last is
+    /// the whole call, which is what a diagnostic about it underlines, and
+    /// the first is the callee's name, which is what a rename changes and
+    /// what a hover is about.
+    Call(String, Span, Vec<Ty>, Vec<Expr>, Span),
     /// `receiver.method(args)` — how the trit-wise operations are spelled
     /// (Ch. 1 §4, Ch. 0 §2.5).
-    Method(Box<Expr>, String, Vec<Expr>, Span),
+    /// The spans are the method's name and then the whole call, for the
+    /// reason `Call` gives.
+    Method(Box<Expr>, String, Span, Vec<Expr>, Span),
     /// `base[index]`.
     Index(Box<Expr>, Box<Expr>, Span),
     /// `x.field` or `x.0`.
@@ -543,8 +550,8 @@ impl Expr {
             | Binary(_, _, _, l)
             | Assign(_, _, _, l)
             | Cast(_, _, l)
-            | Call(_, _, _, l)
-            | Method(_, _, _, l)
+            | Call(_, _, _, _, l)
+            | Method(_, _, _, _, l)
             | Index(_, _, l)
             | Field(_, _, l)
             | Borrow(_, _, l)
@@ -587,8 +594,8 @@ impl Expr {
             | Binary(_, _, _, l)
             | Assign(_, _, _, l)
             | Cast(_, _, l)
-            | Call(_, _, _, l)
-            | Method(_, _, _, l)
+            | Call(_, _, _, _, l)
+            | Method(_, _, _, _, l)
             | Index(_, _, l)
             | Field(_, _, l)
             | Borrow(_, _, l)
