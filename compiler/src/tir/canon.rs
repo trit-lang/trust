@@ -496,12 +496,54 @@ pub fn elide_dominated_checks(f: &mut Function) {
         })
         .collect();
     let preds = predecessors_by_label(f);
-    let index: BTreeMap<String, usize> = f
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.label.clone(), i))
-        .collect();
+    let doms = crate::tir::verify::dominators(f);
+
+    // Every fact a branch decides, and the block it becomes true in.
+    //
+    // The walk is over *dominators*, not over sole predecessors: a loop
+    // header has two of the latter, so a fact established before the loop
+    // never reached the body. What makes an edge's fact sound in a block is
+    // that every path there goes down it — which holds when the taken target
+    // has one predecessor and dominates the block.
+    let mut facts: Vec<(String, Operand, Operand)> = Vec::new();
+    for d in &f.blocks {
+        let Terminator::Br3 {
+            t, neg, zero, pos, ..
+        } = &d.term
+        else {
+            continue;
+        };
+        if neg.label == zero.label || neg.label == pos.label {
+            continue;
+        }
+        if preds.get(&neg.label).is_none_or(|ps| ps.len() != 1) {
+            continue;
+        }
+        let Operand::Value(c) = t else { continue };
+        let Some(InstKind::Cmp { a, b, .. }) = def.get(c) else {
+            continue;
+        };
+        facts.push((neg.label.clone(), a.clone(), b.clone()));
+    }
+
+    // Whether a fact, once true, can still be compared *by structure*: two
+    // loads are the same value only if nothing wrote after the fact was
+    // established. Anything the fact's block dominates counts, which
+    // over-approximates the paths that actually reach a use and is sound for
+    // that reason.
+    let mut settled: BTreeMap<String, bool> = BTreeMap::new();
+    for (at, _, _) in &facts {
+        if settled.contains_key(at) {
+            continue;
+        }
+        let quiet = !f.blocks.iter().any(|d| {
+            writes(d)
+                && doms
+                    .get(d.label.as_str())
+                    .is_some_and(|s| s.contains(at.as_str()))
+        });
+        settled.insert(at.clone(), quiet);
+    }
 
     let mut rewrite: Vec<(usize, Target)> = Vec::new();
     for (bi, b) in f.blocks.iter().enumerate() {
@@ -515,40 +557,15 @@ pub fn elide_dominated_checks(f: &mut Function) {
         let Some(InstKind::Cmp { a: x2, b: y2, .. }) = def.get(c2) else {
             continue;
         };
-
-        // Everything a branch above decided, gathered walking up the chain of
-        // sole predecessors and giving up at a write.
-        let mut facts: Vec<(Operand, Operand)> = Vec::new();
-        let mut at = bi;
-        let mut clean = !writes(&f.blocks[bi]);
-        for _ in 0..64 {
-            if !clean {
-                break;
-            }
-            let label = &f.blocks[at].label;
-            let Some(ps) = preds.get(label) else { break };
-            let [p] = &ps[..] else { break };
-            let Some(&pi) = index.get(p) else { break };
-            let d = &f.blocks[pi];
-            if let Terminator::Br3 {
-                t: dc,
-                neg: dn,
-                zero: dz,
-                pos: dp,
-            } = &d.term
-                && dn.label == *label
-                && dz.label != *label
-                && dp.label != *label
-                && let Operand::Value(c1) = dc
-                && let Some(InstKind::Cmp { a: x1, b: y1, .. }) = def.get(c1)
-            {
-                facts.push((x1.clone(), y1.clone()));
-            }
-            clean &= !writes(d);
-            at = pi;
-        }
-
-        if entails_less(x2, y2, &facts, &def) {
+        let Some(above) = doms.get(b.label.as_str()) else {
+            continue;
+        };
+        let here: Vec<(Operand, Operand, bool)> = facts
+            .iter()
+            .filter(|(at, _, _)| above.contains(at.as_str()))
+            .map(|(at, a, b)| (a.clone(), b.clone(), settled[at]))
+            .collect();
+        if entails_less(x2, y2, &here, &def) {
             rewrite.push((bi, neg.clone()));
         }
     }
@@ -568,20 +585,20 @@ pub fn elide_dominated_checks(f: &mut Function) {
 fn entails_less(
     x: &Operand,
     y: &Operand,
-    facts: &[(Operand, Operand)],
+    facts: &[(Operand, Operand, bool)],
     def: &BTreeMap<String, InstKind>,
 ) -> bool {
     // `x < y` outright.
     if facts
         .iter()
-        .any(|(a, b)| equiv(a, x, def, 0) && equiv(b, y, def, 0))
+        .any(|(a, b, c)| equiv(a, x, def, 0, *c) && equiv(b, y, def, 0, *c))
     {
         return true;
     }
     // `x < z`, and `z` is no larger than `y`.
-    facts
-        .iter()
-        .any(|(a, z)| equiv(a, x, def, 0) && (equiv(z, y, def, 0) || no_larger(z, y, facts, def)))
+    facts.iter().any(|(a, z, c)| {
+        equiv(a, x, def, 0, *c) && (equiv(z, y, def, 0, *c) || no_larger(z, y, facts, def, *c))
+    })
 }
 
 /// Whether `z <= y` is known: the same value, two constants in order, or a
@@ -589,10 +606,11 @@ fn entails_less(
 fn no_larger(
     z: &Operand,
     y: &Operand,
-    facts: &[(Operand, Operand)],
+    facts: &[(Operand, Operand, bool)],
     def: &BTreeMap<String, InstKind>,
+    clean: bool,
 ) -> bool {
-    if equiv(z, y, def, 0) {
+    if equiv(z, y, def, 0, clean) {
         return true;
     }
     if let (Operand::Const(_, a), Operand::Const(_, b)) = (z, y)
@@ -602,7 +620,7 @@ fn no_larger(
     }
     facts
         .iter()
-        .any(|(p, q)| equiv(p, z, def, 0) && equiv(q, y, def, 0))
+        .any(|(p, q, c)| equiv(p, z, def, 0, clean && *c) && equiv(q, y, def, 0, clean && *c))
 }
 
 /// Whether a block writes anything a later read could see.
@@ -627,7 +645,14 @@ fn predecessors_by_label(f: &Function) -> BTreeMap<String, Vec<String>> {
 
 /// Whether two operands must hold the same value — by what defines them, not
 /// by what they are called.
-fn equiv(a: &Operand, b: &Operand, def: &BTreeMap<String, InstKind>, depth: u32) -> bool {
+fn equiv(
+    a: &Operand,
+    b: &Operand,
+    def: &BTreeMap<String, InstKind>,
+    depth: u32,
+    clean: bool,
+) -> bool {
+    // The same name is the same value, whatever happened in between.
     if a == b {
         return true;
     }
@@ -642,10 +667,10 @@ fn equiv(a: &Operand, b: &Operand, def: &BTreeMap<String, InstKind>, depth: u32)
     };
     match (dx, dy) {
         (InstKind::Load { ty: t1, p: p1 }, InstKind::Load { ty: t2, p: p2 }) => {
-            t1 == t2 && equiv(p1, p2, def, depth + 1)
+            clean && t1 == t2 && equiv(p1, p2, def, depth + 1, clean)
         }
         (InstKind::Offset { p: p1, d: d1 }, InstKind::Offset { p: p2, d: d2 }) => {
-            equiv(p1, p2, def, depth + 1) && equiv(d1, d2, def, depth + 1)
+            equiv(p1, p2, def, depth + 1, clean) && equiv(d1, d2, def, depth + 1, clean)
         }
         (
             InstKind::Flavored {
@@ -666,8 +691,8 @@ fn equiv(a: &Operand, b: &Operand, def: &BTreeMap<String, InstKind>, depth: u32)
             o1 == o2
                 && f1 == f2
                 && t1 == t2
-                && equiv(a1, a2, def, depth + 1)
-                && equiv(b1, b2, def, depth + 1)
+                && equiv(a1, a2, def, depth + 1, clean)
+                && equiv(b1, b2, def, depth + 1, clean)
         }
         _ => false,
     }

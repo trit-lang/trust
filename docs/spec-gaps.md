@@ -2781,9 +2781,23 @@ and one that outruns a `Vec`. All three still fault.
 it". What the walk collects now is every `x < y` a taken edge decided, and a
 query is answered directly or through **one** transitive step — `i < j` and
 `j <= n` gives `i < n`. One step is what the language produces, a loop bound
-and a length; stopping there keeps this a decision rather than a search. It
-changes no measurement yet, because the fact HPL needs is not on any branch:
-see G8.21.
+and a length; stopping there keeps this a decision rather than a search. 
+*And the walk is over dominators.* It was over **sole predecessors**, which
+breaks at a loop header — that has two, the entry and the back edge — so a
+fact established before a loop never reached its body. What makes an edge's
+fact sound in a block is that every path there goes down it, and that holds
+when the taken target has one predecessor and dominates the block. HPL's
+inner loops are inside outer ones, and the outer condition now reaches them:
+**2 762 032 → 2 743 146**.
+
+The condition "nothing wrote in between" moved with it, and had to become
+finer in two directions at once. It gates only the comparison of two
+**loads** — comparing by *name* needs no such condition, and that is worth
+knowing, because a length the frontend loaded once is worth more than one it
+reloads. And it is asked per *fact*: what matters is whether anything wrote
+after that fact became true, not whether anything wrote in the whole function.
+Asking the coarse question undid both earlier wins while gaining HPL's; asking
+the fine one keeps all three.
 
 **G8.20 — no, a release mode will not remove the bounds checks.** Asked once
 and worth answering here, because a 30% number invites it.
