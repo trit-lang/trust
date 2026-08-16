@@ -625,7 +625,7 @@ fn reachability(f: &Function) -> Reach {
     let n = f.blocks.len();
     let words = n.div_ceil(64).max(1);
     let mut to = vec![0u64; n * words];
-    let mut set = |to: &mut Vec<u64>, i: usize, j: usize| {
+    let set = |to: &mut Vec<u64>, i: usize, j: usize| {
         to[i * words + j / 64] |= 1 << (j % 64);
     };
     for (i, b) in f.blocks.iter().enumerate() {
