@@ -1,0 +1,11 @@
+// Text that is not ASCII, which is where a decoder earns its keep.
+fn text() -> t27 {
+    let a = "三進位";
+    let b = "hello, 世界";
+    let c = "🙂 above the basic plane";
+    let d = '世';
+    let e = '🙂';
+    // 中文註解，裡面有 // 和 /* 這些東西
+    let f = "mixed 中英 text with 🙂 emoji";
+    0
+}

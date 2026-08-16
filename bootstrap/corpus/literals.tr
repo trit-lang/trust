@@ -1,0 +1,17 @@
+// Every literal form §1.4 defines.
+fn f<'a>(s: &'a str) -> t27 {
+    let dec = 1_000;
+    let ter = 0t1T0;
+    let hept = 0hJ;
+    let neg = 0h0J;
+    let deep = 0h00J;
+    let t0 = 0t;
+    let t1 = 1t;
+    let c = 'a';
+    let nl = '\n';
+    let tab = '\t';
+    let zero = '\0';
+    let esc = '\'';
+    let u = '\u{4e16}';
+    dec + ter + hept + neg + deep
+}

@@ -13,6 +13,12 @@ pub enum Tok {
     Kw(String),
     Op(String),
     Str(String),
+    /// A `trit` literal: `-1t`, `0t`, `1t` (§1.4).
+    TritLit(t27),
+    /// A character literal, as its scalar value (Ch. 5 §1.4).
+    CharLit(t27),
+    /// `'a` — a lifetime, without its quote (Ch. 3 §3.2).
+    Lifetime(String),
     Eof,
 }
 
@@ -71,11 +77,35 @@ pub fn one(s: &str, from: taddr) -> Taken {
     let c = s[i];
 
     if is_digit(c) {
+        // One run of digits and letters, exactly as §1.4 reads it, and then
+        // what it means is decided from the run — which is what makes `0t`
+        // a trit literal and `0t1T0` an integer by maximal munch alone.
         let start = i;
         while i < s.len() && is_alnum(s[i]) {
             i += 1;
         }
-        return Taken { tok: Tok::Int(number(s, start, i)), at: i };
+        let text = slice(s, start, i);
+        if trit_literal(&text) {
+            return Taken { tok: Tok::TritLit(trit_value(&text)), at: i };
+        }
+        return Taken { tok: Tok::Int(number(&text)), at: i };
+    }
+
+    // A lifetime and a character literal both open with `'`, and are told
+    // apart by the third character: `'a'` closes and `'a` does not (§1.4).
+    if c == '\'' {
+        if i + 2 < s.len() && s[i + 2] == '\'' && s[i + 1] != '\\' {
+            return Taken { tok: Tok::CharLit(s[i + 1] as t27), at: i + 3 };
+        }
+        if i + 1 < s.len() && s[i + 1] == '\\' {
+            return escape_literal(s, i);
+        }
+        let start = i + 1;
+        let mut j = start;
+        while j < s.len() && is_alnum(s[j]) {
+            j += 1;
+        }
+        return Taken { tok: Tok::Lifetime(slice(s, start, j)), at: j };
     }
 
     if is_alpha(c) {
@@ -115,6 +145,44 @@ pub fn one(s: &str, from: taddr) -> Taken {
     }
     let one = slice(s, i, i + 1);
     Taken { tok: Tok::Op(one), at: i + 1 }
+}
+
+/// A character literal whose character is written `\\…` (Ch. 5 §1.4).
+fn escape_literal(s: &str, at: taddr) -> Taken {
+    let e = s[at + 2];
+    if e == 'u' {
+        // `\u{…}`, hexadecimal, because it names a code point in a standard
+        // that writes them that way.
+        let mut i = at + 4;
+        let mut v = 0;
+        while i < s.len() && s[i] != '}' {
+            v = v * 16 + hex(s[i]);
+            i += 1;
+        }
+        return Taken { tok: Tok::CharLit(v), at: i + 2 };
+    }
+    let v = if e == 'n' {
+        10
+    } else if e == 'r' {
+        13
+    } else if e == 't' {
+        9
+    } else if e == '0' {
+        0
+    } else {
+        e as t27
+    };
+    Taken { tok: Tok::CharLit(v), at: at + 4 }
+}
+
+fn hex(c: char) -> t27 {
+    if is_digit(c) {
+        (c as t27) - ('0' as t27)
+    } else if c >= 'a' && c <= 'f' {
+        (c as t27) - ('a' as t27) + 10
+    } else {
+        (c as t27) - ('A' as t27) + 10
+    }
 }
 
 fn min(a: taddr, b: taddr) -> taddr {
@@ -169,13 +237,74 @@ fn block_comment(s: &str, from: taddr) -> taddr {
     i
 }
 
-/// The value of a numeric literal, decimal only for now.
-fn number(s: &str, from: taddr, to: taddr) -> t27 {
+/// Whether a run of digits and letters is a `trit` literal (§1.4).
+///
+/// `0t`, `1t` and nothing else: `0t1T0` is an integer, and the two are told
+/// apart by there being anything after the `t`.
+fn trit_literal(text: &str) -> bool {
+    text.len() == 2 && (text[0] == '0' || text[0] == '1') && text[1] == 't'
+}
+
+fn trit_value(text: &str) -> t27 {
+    if text[0] == '1' { 1 } else { 0 }
+}
+
+/// The value of a numeric literal, in any of the three radices (§1.4).
+fn number(text: &str) -> t27 {
+    if text.len() > 2 && text[0] == '0' && (text[1] == 't' || text[1] == 'T') {
+        return ternary(text);
+    }
+    if text.len() > 2 && text[0] == '0' && (text[1] == 'h' || text[1] == 'H') {
+        return hept(text);
+    }
     let mut v = 0;
-    let mut i = from;
-    while i < to {
-        if s[i] != '_' {
-            v = v * 10 + ((s[i] as t27) - ('0' as t27));
+    let mut i: taddr = 0;
+    while i < text.len() {
+        if text[i] != '_' {
+            v = v * 10 + ((text[i] as t27) - ('0' as t27));
+        }
+        i += 1;
+    }
+    v
+}
+
+/// `0t1T0` — balanced ternary, where `T` is −1 (Naming §3).
+fn ternary(text: &str) -> t27 {
+    let mut v = 0;
+    let mut i: taddr = 2;
+    while i < text.len() {
+        let c = text[i];
+        if c != '_' {
+            let d = if c == 'T' || c == 't' {
+                0 - 1
+            } else if c == '1' {
+                1
+            } else {
+                0
+            };
+            v = v * 3 + d;
+        }
+        i += 1;
+    }
+    v
+}
+
+/// `0hJ` — heptavintimal, whose digits are **balanced** and whose zero is
+/// written `D` (Ch. 1 §3.1). A leading `0` is not neutral: it is −13.
+fn hept(text: &str) -> t27 {
+    let mut v = 0;
+    let mut i: taddr = 2;
+    while i < text.len() {
+        let c = text[i];
+        if c != '_' {
+            let d = if is_digit(c) {
+                (c as t27) - ('0' as t27) - 13
+            } else if c >= 'A' && c <= 'Q' {
+                (c as t27) - ('A' as t27) - 3
+            } else {
+                (c as t27) - ('a' as t27) - 3
+            };
+            v = v * 27 + d;
         }
         i += 1;
     }

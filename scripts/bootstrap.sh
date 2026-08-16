@@ -11,10 +11,16 @@
 # it to the first, so this runs both over every file in `bootstrap/corpus/`
 # and compares them character for character.
 #
-# **What the corpus covers is the contract.** The Trust lexer does not read a
-# character literal, a trit literal, a lifetime, or a non-decimal radix
-# (Ch. 0 §1.4), so the corpus does not hold one — and that list is the list
-# of what is left to write.
+# **What the corpus covers is the contract.** It now holds every literal form
+# §1.4 defines — all three radices, trit literals, character literals with
+# their escapes, lifetimes — and the places two lexers stop agreeing:
+# maximal munch, a string holding what looks like a comment, a comment
+# holding what looks like a comment, and text above the basic plane.
+#
+# What is *not* covered, and so is not claimed: the lexical **errors**. The
+# Rust lexer refuses `crate`, `^`, `~`, an unterminated string and a bad
+# escape by name (Ch. 0 §1.3, §2.5); the Trust one does not refuse anything
+# yet, so the corpus holds nothing it would have to refuse.
 set -eu
 
 cd "$(dirname "$0")/.."

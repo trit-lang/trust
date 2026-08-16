@@ -1,0 +1,20 @@
+// Attributes and macros, which are where `#`, `!` and `$` appear.
+#[derive(Eq, Ord, Clone)]
+#[repr(linear)]
+pub struct P { pub a: t27, b: t9 }
+
+macro vec($($x),*) {
+    {
+        let mut v: Vec<t27> = Vec::new();
+        $( v.push($x); )*
+        v
+    }
+}
+
+fn use_them() -> t27 {
+    let v = vec!(1, 2, 3);
+    let n = !true;
+    let m = v.len() as t27;
+    let q = m?;
+    m
+}

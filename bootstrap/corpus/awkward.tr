@@ -1,0 +1,28 @@
+// Inputs chosen because they are where two lexers stop agreeing.
+fn awkward<'a, 'b>(p: &'a t27, q: &'b t27) -> t27 {
+    // Maximal munch: the longest operator wins, every time (§1.5).
+    let a = 1 <<= 2;
+    let b = 1 << 2;
+    let c = 1 < 2;
+    let d = 1 <=> 2;
+    let e = 1 <= 2;
+    let f = 0..10;
+    let g = 0..=10;
+    let h = a::b::c;
+    // A trit literal and an integer that share a prefix.
+    let i = 0t;
+    let j = 0t1T0;
+    let k = 1t;
+    let l = 1;
+    // A character literal beside a lifetime beside a character literal.
+    let m = 'x';
+    let n = 'y';
+    // A string that holds what would otherwise be a comment.
+    let o = "// not a comment";
+    let q2 = "/* not one either */";
+    // A block comment that holds what would otherwise be a line comment.
+    /* // still a block comment
+       /* and it nests */ still */
+    let r = -1;
+    0
+}
