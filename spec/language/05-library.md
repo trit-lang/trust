@@ -544,6 +544,36 @@ type is for. This needed Ch. 4 §1.7 either way.
 `Vec<T>` implements it, and `String` therefore does. `Option<Vec<T>>` — how a
 sequence of fallible steps collects into one result — is **not** implemented.
 
+### 3.4 `Range`
+
+```
+struct Range<T> { start: T, end: T }
+
+impl<T> Iterator for Range<T> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        if self.start < self.end {
+            let v = self.start;
+            self.start += 1;
+            Option::Some(v)
+        } else {
+            Option::None
+        }
+    }
+}
+```
+
+That is the whole of it, and it is what `a..b` means (Ch. 0 §5.5). It needs no
+bound: `<` and `+= 1` are Ch. 1's on every type that has them, and a `Range`
+of anything else does not compile at the point it is used.
+
+**What it costs.** `for i in 0..n` is measurably dearer than the `while` and
+an index it replaces — 54 085 instructions against 7 010 for a thousand
+iterations, at the time of writing. The reason is not the range: it is that
+`next` returns an `Option<T>`, an `Option<t27>` has no niche and so is two
+words, and two words go through memory. Every iterator pays this per item;
+the range is only where it is easiest to see.
+
 ---
 
 ## 4. Errors

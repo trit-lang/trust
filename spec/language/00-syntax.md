@@ -465,8 +465,22 @@ break;    break expr;      // `break` with a value applies to `loop`
 continue;
 ```
 
-`for` is reserved: iteration is a trait, and traits are Ch. 4. Until then a
-loop over an array is a `while` and an index, which is also what it lowers to.
+```
+for x in e { … }           // Ch. 4 §5.7 defines this
+for i in a..b { … }        // over a half-open range
+```
+
+`for` is iteration through a trait, and the trait is Ch. 4 §5.7's.
+
+**`a..b` is a half-open range**, `a` included and `b` excluded, and it is
+**sugar**: `Range { start: a, end: b }`, a struct in the library with an
+ordinary `Iterator` (Ch. 5 §3.4). The range is not a language feature; only
+its spelling is. It binds looser than every operator but assignment, so
+`0..n + 1` is `0..(n + 1)`.
+
+`..=` is **reserved**. An inclusive range cannot express an empty one and
+cannot reach the top of its type without wrapping, and neither of those is
+decided here; `a..b + 1` says the same thing where it is wanted.
 
 ### 5.6 There is no three-way conditional
 

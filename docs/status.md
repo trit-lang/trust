@@ -450,6 +450,13 @@ reference's impls are found under its referent — so `Iterator` is an
 `IntoIterator` by the blanket impl §5.7 specifies, and `fn f<T: IntoIterator>`
 accepts both an iterator and a `&str`.
 
+`a..b` is a half-open range (G9.25), which is a struct in the library and a
+spelling in the grammar and nothing else — `for i in 0..v.len()` works. It
+costs more than the `while` and an index it replaces, and measuring why found
+that every enum construction zeroed its whole storage first for a determinism
+Ch. 2 §1 does not ask for: the range loop is 18% cheaper without it, and an
+adaptor chain 14%.
+
 What is left of Ch. 5 is `Cell`/`RefCell` (§5), `expect`, formatting, maps and
 sets, sorting and `Rc` — all of §7, all reserved. Ch. 4's list is now empty
 but for what the specification itself reserves: binding by reference in a

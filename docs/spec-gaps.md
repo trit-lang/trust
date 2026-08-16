@@ -2488,6 +2488,46 @@ exactly those programs: the shadowing rule is about *named* items, and an impl
 has no name. Extending shadowing to cover impls is what that needs, and it is
 a question about coherence rather than about conversion.
 
+**G9.25 — `a..b`, and what an iterator costs per item.** Ch. 0 §5.5 and
+Ch. 5 §3.4. The range is a struct in the library with an ordinary `Iterator`
+and needs no bound — `<` and `+= 1` are Ch. 1's, resolved at instantiation —
+so `for i in 0..n` works for `t27` and `taddr` alike from one definition.
+Only the spelling is a language feature. `..=` is reserved: an inclusive
+range cannot express an empty one and cannot reach the top of its type
+without wrapping.
+
+**A literal no longer pins a type parameter a neighbour determines.** `0..n`
+with `n: taddr` was a `Range<t27>` whose end did not fit, because a struct
+literal's inference asked the fields in order and an unsuffixed integer
+defaults to `t27` (Ch. 1 §3). A default should be the last thing consulted,
+not the first, so literals are asked in a second pass. `0..v.len()` needed one
+thing more: `peek_ty` now knows that `len` and `capacity` are `taddr`
+whatever the receiver is, which is the only case where a method's result is
+fixed without resolving it.
+
+*What it cost, and a fix that came out of measuring it.* `for i in 0..1000`
+was **66 097** instructions against **7 010** for the `while` and an index it
+replaces. Reading the emitted TIR, `Range::next` is 117 instructions for four
+lines of source, and the reason is `build_variant_into`: it **zeroed the whole
+enum, tryte by tryte, before writing the payload**, on every construction of
+every variant. `Option<t27>` paid six stores each time. The comment said this
+made padding "deterministic" — but Ch. 2 §1 says padding trytes have
+unspecified contents and G7.4 reads that as every pattern being acceptable, so
+it was buying something the specification does not ask for.
+
+Removing it: the range loop is **54 085** (−18%), an adaptor chain is −14%,
+and HPL is −150, because HPL constructs no enums in its hot loops. Two tests
+failed and neither was about meaning: both had an SSA *number* baked into an
+assertion about a *layout*, so deleting six instructions elsewhere broke a
+test about `slot tryte[3]`. They assert the size now.
+
+*Still 7.7× the `while` loop, and the range is not why.* `next` returns an
+`Option<T>`, an `Option<t27>` has no niche and so is two words, and two words
+go through memory — built into one temporary, copied to a second, copied to
+the caller's. Every iterator pays that per item; the range is only where it is
+easiest to see. Building a variant directly into its destination is the next
+thing worth doing, and it is worth more than any pass left in §8.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

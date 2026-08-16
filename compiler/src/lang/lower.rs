@@ -7783,14 +7783,24 @@ impl Fn<'_> {
             return Ok(name);
         }
 
-        // Otherwise, match the written field types against what was given.
+        // Otherwise, match the written field types against what was given —
+        // and consult the *literals* last. An unsuffixed integer literal
+        // defaults to `t27` (Ch. 1 §3), and a default that goes first pins a
+        // type parameter another field would have determined: `0..n` with an
+        // `n: taddr` is a `Range<t27>` whose end does not fit.
         let mut env: HashMap<String, Ty> = HashMap::new();
-        for (fname, fty) in &decl {
-            let Some((_, e)) = fields.iter().find(|(n, _)| n == fname) else {
-                continue;
-            };
-            if let Some(got) = self.peek_ty(e)? {
-                unify(fty, &got, &params, &mut env);
+        let literal = |e: &ast::Expr| matches!(e, ast::Expr::Int(..));
+        for pass in [false, true] {
+            for (fname, fty) in &decl {
+                let Some((_, e)) = fields.iter().find(|(n, _)| n == fname) else {
+                    continue;
+                };
+                if literal(e) != pass {
+                    continue;
+                }
+                if let Some(got) = self.peek_ty(e)? {
+                    unify(fty, &got, &params, &mut env);
+                }
             }
         }
         let mut args = Vec::new();
@@ -7880,6 +7890,13 @@ impl Fn<'_> {
                 Some(t) => self.peek_ty(t)?,
                 None => Some(Ty::Unit),
             },
+            // A method's result needs resolution to know, and resolution is
+            // lowering — except where Ch. 1 and Ch. 5 fix the answer whatever
+            // the receiver is. `len` is the one that matters: `0..v.len()`
+            // would otherwise let the literal pin the range's parameter to
+            // `t27` and then fail against a `taddr` end.
+            E::Method(_, name, args, _) if name == "len" && args.is_empty() => Some(Ty::TAddr),
+            E::Method(_, name, args, _) if name == "capacity" && args.is_empty() => Some(Ty::TAddr),
             E::Method(..) => None,
             _ => None,
         })
@@ -9575,20 +9592,11 @@ impl Fn<'_> {
         let declared = self.types.variant_fields(enum_name, index);
         let slot = slot.to_string();
 
-        // Zero the storage first, so padding and unwritten payload trytes are
-        // deterministic.
-        for i in 0..l.size as i128 {
-            let p = self.offset(Operand::Value(slot.clone()), i);
-            self.push(Inst {
-                results: Vec::new(),
-                kind: InstKind::Store {
-                    ty: Type::Int(9),
-                    v: Operand::Const(Type::Int(9), Bt::ZERO),
-                    p,
-                },
-            });
-        }
-
+        // The storage is *not* zeroed first. Ch. 2 §1 says padding trytes have
+        // unspecified contents, and G7.4 reads that as every pattern being
+        // acceptable — so zeroing bought a determinism the specification does
+        // not ask for, at one store per tryte of the whole enum, on every
+        // construction of every variant. `Option<t27>` paid six.
         for (name, v) in fields {
             let Some((_, ft, off)) = declared.iter().find(|(n, _, _)| n == name).cloned() else {
                 return err(line, format!("this variant has no field `{name}`"));

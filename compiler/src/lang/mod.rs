@@ -296,6 +296,24 @@ fn fold<I: Iterator<Item = t27>>(it: I, init: t27, f: impl Fn(t27, t27) -> t27) 
     acc
 }
 
+// `a..b` — the half-open range, which is what `a..b` is sugar for. It is an
+// ordinary struct with an ordinary `Iterator`: the range is not a language
+// feature, only its spelling is (Ch. 5 §3.4).
+struct Range<T> { start: T, end: T }
+
+impl<T> Iterator for Range<T> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        if self.start < self.end {
+            let v = self.start;
+            self.start += 1;
+            Option::Some(v)
+        } else {
+            Option::None
+        }
+    }
+}
+
 // What a `for` loop takes (Ch. 4 §5.7). An iterator is one of these by the
 // blanket impl below, and so is anything that can produce one.
 trait IntoIterator {

@@ -1130,7 +1130,7 @@ impl Parser {
     /// The whole expression grammar, loosest first: assignment.
     pub fn expr(&mut self) -> R<Expr> {
         let line = self.line();
-        let lhs = self.binary(0)?;
+        let lhs = self.range()?;
         if let Tok::Op(op) = self.peek()
             && ASSIGNMENTS.contains(op)
         {
@@ -1144,6 +1144,37 @@ impl Parser {
 
     /// The left-associative levels, plus the two non-associative comparison
     /// levels wedged between `&&` and the shifts.
+    /// `a..b` — the half-open range, and the loosest thing that is not an
+    /// assignment (Ch. 0 §5.6).
+    ///
+    /// It is sugar: `Range { start: a, end: b }`, so the type is the
+    /// library's and the loop is `for` over an iterator like any other.
+    /// `..=` is reserved — an inclusive range cannot express an empty one
+    /// and cannot reach the top of its type, and neither is decided here.
+    fn range(&mut self) -> R<Expr> {
+        let line = self.line();
+        let lhs = self.binary(0)?;
+        if self.at_op("..=") {
+            return self.err(
+                "`..=` is reserved; write `a..b + 1`, or `a..b` if the end was meant \
+                 to be excluded (Ch. 0 §5.6)",
+            );
+        }
+        if !self.eat_op("..") {
+            return Ok(lhs);
+        }
+        let rhs = self.binary(0)?;
+        Ok(Expr::Aggregate(
+            Path {
+                segments: vec!["Range".to_string()],
+                targs: Vec::new(),
+                line,
+            },
+            vec![("start".to_string(), lhs), ("end".to_string(), rhs)],
+            line,
+        ))
+    }
+
     fn binary(&mut self, level: usize) -> R<Expr> {
         if level == COMPARE_LEVEL {
             return self.comparison();

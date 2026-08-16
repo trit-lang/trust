@@ -1136,7 +1136,16 @@ fn a_generic_enum_keeps_chapter_twos_niche_promise() {
          }",
     );
     let printed = tir::print_module(&m);
-    for want in ["%a.slot.4 = slot tryte[3]", "tryte[6]", "tryte[1]"] {
+    // The sizes are the claim; the SSA numbers are not, and used to be baked
+    // in here — so removing six instructions elsewhere failed a test about
+    // layout.
+    assert!(
+        printed
+            .lines()
+            .any(|l| l.contains("a.slot") && l.contains("slot tryte[3]")),
+        "{printed}"
+    );
+    for want in ["tryte[6]", "tryte[1]"] {
         assert!(printed.contains(want), "{want} missing from\n{printed}");
     }
     // `Opt<&t27>` is one word, because every non-positive value is a
@@ -1639,7 +1648,12 @@ fn option_and_result_are_the_languages_own() {
          }",
     );
     let printed = tir::print_module(&m);
-    assert!(printed.contains("%a.slot.4 = slot tryte[3]"), "{printed}");
+    assert!(
+        printed
+            .lines()
+            .any(|l| l.contains("a.slot") && l.contains("slot tryte[3]")),
+        "{printed}"
+    );
     // `Result` too, and it is not special either.
     assert_eq!(
         run("fn f(n: t27) -> Result<t27, t9> { if n > 0 { Result::Ok(n) } else { Result::Err(1) } } \
@@ -4223,4 +4237,48 @@ fn one_impl_serves_every_instantiation_of_the_trait() {
         .0,
         13
     );
+}
+
+#[test]
+fn a_range_is_a_struct_and_a_dot_dot_is_sugar() {
+    // Ch. 0 §5.5 and Ch. 5 §3.4: `a..b` is `Range { start: a, end: b }`, and
+    // the range is not a language feature — only its spelling is.
+    assert_eq!(
+        run("fn main() -> t27 { \
+                 let mut s: t27 = 0; \
+                 for i in 1..5 { s += i; } \
+                 let n: taddr = 3; \
+                 let mut m: taddr = 0; \
+                 for j in 0..n { m += j; } \
+                 s * 10 + (m as t27) \
+             }")
+        .0,
+        // 1+2+3+4 over a `t27` range, 0+1+2 over a `taddr` one: the same
+        // struct, and no bound was needed to say so.
+        10 * 10 + 3
+    );
+}
+
+#[test]
+fn a_literal_does_not_pin_a_type_parameter_a_neighbour_determines() {
+    // An unsuffixed integer literal defaults to `t27` (Ch. 1 §3), and a
+    // default that goes first pins a parameter another field would have
+    // settled: `0..v.len()` was a `Range<t27>` whose end did not fit.
+    assert_eq!(
+        run("fn main() -> t27 { \
+                 let mut v: Vec<t27> = Vec::new(); \
+                 v.push(4); v.push(5); v.push(6); \
+                 let mut s: t27 = 0; \
+                 for i in 0..v.len() { s += v[i]; } \
+                 s \
+             }")
+        .0,
+        15
+    );
+}
+
+#[test]
+fn an_inclusive_range_says_it_is_reserved() {
+    let msg = error("fn main() -> t27 { for i in 0..=3 { } 0 }");
+    assert!(msg.contains("reserved"), "{msg}");
 }
