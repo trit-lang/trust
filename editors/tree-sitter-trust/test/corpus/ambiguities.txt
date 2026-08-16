@@ -1,0 +1,258 @@
+================================================================
+a brace after a condition opens a block, not a struct literal
+================================================================
+
+fn f() -> t27 {
+    if p { 0 } else { 1 }
+}
+
+----------------------------------------------------------------
+
+(source_file
+  (function_item
+    name: (identifier)
+    (parameters)
+    return_type: (primitive_type)
+    body: (block
+      (expression_statement
+        (if_expression
+          condition: (identifier)
+          consequence: (block
+            (integer_literal))
+          alternative: (block
+            (integer_literal)))))))
+
+================================================================
+and everywhere else it is a struct literal
+================================================================
+
+fn f() -> P {
+    P { x: 1, y }
+}
+
+----------------------------------------------------------------
+
+(source_file
+  (function_item
+    name: (identifier)
+    (parameters)
+    return_type: (identifier)
+    body: (block
+      (struct_expression
+        name: (identifier)
+        (field_initializers
+          (field_initializer
+            name: (identifier)
+            value: (integer_literal))
+          (field_initializer
+            name: (identifier)))))))
+
+================================================================
+block comments nest
+================================================================
+
+/* one /* two */ still a comment */
+fn f() {}
+
+----------------------------------------------------------------
+
+(source_file
+  (block_comment)
+  (function_item
+    name: (identifier)
+    (parameters)
+    body: (block)))
+
+================================================================
+a lifetime and a character literal both open with a quote
+================================================================
+
+fn f<'a>(s: &'a t27, c: char) -> char {
+    'x'
+}
+
+----------------------------------------------------------------
+
+(source_file
+  (function_item
+    name: (identifier)
+    (generic_parameters
+      (lifetime))
+    (parameters
+      (parameter
+        name: (identifier)
+        type: (reference_type
+          (lifetime)
+          type: (primitive_type)))
+      (parameter
+        name: (identifier)
+        type: (primitive_type)))
+    return_type: (primitive_type)
+    body: (block
+      (char_literal))))
+
+================================================================
+the three-way comparison is one token and not two
+================================================================
+
+fn f() -> t27 {
+    match a <=> b {
+        -1t => 0,
+        0t => 1,
+        1t => 2,
+    }
+}
+
+----------------------------------------------------------------
+
+(source_file
+  (function_item
+    name: (identifier)
+    (parameters)
+    return_type: (primitive_type)
+    body: (block
+      (expression_statement
+        (match_expression
+          value: (binary_expression
+            left: (identifier)
+            right: (identifier))
+          (match_arm
+            pattern: (match_pattern
+              (negative_literal
+                (integer_literal)))
+            value: (integer_literal))
+          (match_arm
+            pattern: (match_pattern
+              (integer_literal))
+            value: (integer_literal))
+          (match_arm
+            pattern: (match_pattern
+              (integer_literal))
+            value: (integer_literal)))))))
+
+================================================================
+a where clause holds bounds and predicates, and its comma may trail
+================================================================
+
+fn f<T>(a: [t27], n: taddr) -> t27
+where
+    T: Area,
+    n <= a.len(),
+{
+    0
+}
+
+----------------------------------------------------------------
+
+(source_file
+  (function_item
+    name: (identifier)
+    (generic_parameters
+      (type_parameter
+        (identifier)))
+    (parameters
+      (parameter
+        name: (identifier)
+        type: (array_type
+          (primitive_type)))
+      (parameter
+        name: (identifier)
+        type: (primitive_type)))
+    return_type: (primitive_type)
+    (where_clause
+      (where_bound
+        (identifier)
+        (bounds
+          (bound
+            (identifier))))
+      predicate: (binary_expression
+        left: (identifier)
+        right: (method_call_expression
+          receiver: (identifier)
+          method: (identifier)
+          arguments: (arguments))))
+    body: (block
+      (integer_literal))))
+
+================================================================
+the arrow of an impl Fn bound belongs to the bound
+================================================================
+
+fn map(f: impl Fn(t27) -> t27) {}
+
+----------------------------------------------------------------
+
+(source_file
+  (function_item
+    name: (identifier)
+    (parameters
+      (parameter
+        name: (identifier)
+        type: (impl_fn_type
+          trait: (identifier)
+          (primitive_type)
+          (primitive_type))))
+    body: (block)))
+
+================================================================
+a generic argument list is not a comparison
+================================================================
+
+fn f(v: Vec<Pair<t9, t27>>) -> t27 {
+    v.len() < 3
+}
+
+----------------------------------------------------------------
+
+(source_file
+  (function_item
+    name: (identifier)
+    (parameters
+      (parameter
+        name: (identifier)
+        type: (generic_type
+          name: (identifier)
+          (type_arguments
+            (generic_type
+              name: (identifier)
+              (type_arguments
+                (primitive_type)
+                (primitive_type)))))))
+    return_type: (primitive_type)
+    body: (block
+      (binary_expression
+        left: (method_call_expression
+          receiver: (identifier)
+          method: (identifier)
+          arguments: (arguments))
+        right: (integer_literal)))))
+
+================================================================
+a number is one token in each of the three radices
+================================================================
+
+const A: t27 = 1_000;
+const B: t27 = 0t1T0;
+const C: t27 = 0hDDE;
+const D: trit = -1t;
+
+----------------------------------------------------------------
+
+(source_file
+  (const_item
+    name: (identifier)
+    type: (primitive_type)
+    value: (integer_literal))
+  (const_item
+    name: (identifier)
+    type: (primitive_type)
+    value: (integer_literal))
+  (const_item
+    name: (identifier)
+    type: (primitive_type)
+    value: (integer_literal))
+  (const_item
+    name: (identifier)
+    type: (primitive_type)
+    value: (unary_expression
+      (integer_literal))))

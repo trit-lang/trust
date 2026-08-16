@@ -1,0 +1,19 @@
+{
+  "grammars": [
+    {
+      "name": "trust",
+      "camelcase": "Trust",
+      "scope": "source.trust",
+      "path": ".",
+      "file-types": ["tr"],
+      "highlights": ["queries/highlights.scm"],
+      "injection-regex": "^trust$"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "AGPL-3.0-only",
+    "description": "Trust grammar for tree-sitter",
+    "authors": [{ "name": "the Trust authors" }]
+  }
+}
