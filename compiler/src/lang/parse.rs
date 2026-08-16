@@ -174,6 +174,12 @@ impl Parser {
         }
     }
 
+    /// A name, and where it was written.
+    fn expect_ident_at(&mut self) -> R<(String, Span)> {
+        let span = self.span();
+        Ok((self.expect_ident()?, span))
+    }
+
     fn expect_ident(&mut self) -> R<String> {
         match self.peek().clone() {
             Tok::Ident(n) => {
@@ -187,6 +193,11 @@ impl Parser {
     // ------------------------------------------------------------- items
 
     fn item(&mut self) -> R<Item> {
+        let start = self.span();
+        Ok(self.item_inner()?.spanning(self.since(start)))
+    }
+
+    fn item_inner(&mut self) -> R<Item> {
         // Attributes attach to the item that follows (§3.4). Draft 0.1
         // defines exactly one, `repr`, taking `lang` or `linear`.
         let mut repr = Repr::Lang;
@@ -273,7 +284,7 @@ impl Parser {
     fn struct_item(&mut self, repr: Repr, derives: Vec<String>) -> R<StructItem> {
         let span = self.span();
         self.bump(); // struct
-        let name = self.expect_ident()?;
+        let (name, name_span) = self.expect_ident_at()?;
         let generics = self.generic_params()?;
         let fields = if self.at_op("{") {
             self.named_fields()?
@@ -282,7 +293,7 @@ impl Parser {
             self.expect_op(";")?;
             tys.into_iter()
                 .enumerate()
-                .map(|(i, t)| (i.to_string(), t))
+                .map(|(i, t)| Named::new(i.to_string(), t))
                 .collect()
         } else {
             self.expect_op(";")?;
@@ -290,6 +301,7 @@ impl Parser {
         };
         Ok(StructItem {
             name,
+            name_span,
             generics,
             derives,
             repr,
@@ -301,7 +313,7 @@ impl Parser {
     fn enum_item(&mut self, repr: Repr, derives: Vec<String>) -> R<EnumItem> {
         let span = self.span();
         self.bump(); // enum
-        let name = self.expect_ident()?;
+        let (name, name_span) = self.expect_ident_at()?;
         let generics = self.generic_params()?;
         self.expect_op("{")?;
         let mut variants = Vec::new();
@@ -310,14 +322,14 @@ impl Parser {
                 return self.err("unterminated enum");
             }
             let vline = self.span();
-            let vname = self.expect_ident()?;
+            let (vname, vname_span) = self.expect_ident_at()?;
             let fields = if self.at_op("{") {
                 self.named_fields()?
             } else if self.at_op("(") {
                 self.type_list("(", ")")?
                     .into_iter()
                     .enumerate()
-                    .map(|(i, t)| (i.to_string(), t))
+                    .map(|(i, t)| Named::new(i.to_string(), t))
                     .collect()
             } else {
                 Vec::new()
@@ -340,6 +352,7 @@ impl Parser {
             };
             variants.push(Variant {
                 name: vname,
+                name_span: vname_span,
                 fields,
                 discriminant,
                 span: vline,
@@ -350,6 +363,7 @@ impl Parser {
         }
         Ok(EnumItem {
             name,
+            name_span,
             generics,
             derives,
             repr,
@@ -554,16 +568,20 @@ impl Parser {
         }
     }
 
-    fn named_fields(&mut self) -> R<Vec<(String, Ty)>> {
+    fn named_fields(&mut self) -> R<Vec<Named>> {
         self.expect_op("{")?;
         let mut fields = Vec::new();
         while !self.eat_op("}") {
             if self.at(&Tok::Eof) {
                 return self.err("unterminated field list");
             }
-            let name = self.expect_ident()?;
+            let (name, name_span) = self.expect_ident_at()?;
             self.expect_op(":")?;
-            fields.push((name, self.ty()?));
+            fields.push(Named {
+                name,
+                name_span,
+                ty: self.ty()?,
+            });
             if !self.eat_op(",") && !self.at_op("}") {
                 return self.err("expected `,` between fields");
             }
@@ -590,7 +608,7 @@ impl Parser {
     fn trait_item(&mut self) -> R<TraitItem> {
         let span = self.span();
         self.bump(); // trait
-        let name = self.expect_ident()?;
+        let (name, name_span) = self.expect_ident_at()?;
         // A trait's parameters are chosen by whoever implements it, once per
         // implementation, which is what lets one type implement it many
         // times (Ch. 4 §1.7).
@@ -643,6 +661,7 @@ impl Parser {
         }
         Ok(TraitItem {
             name,
+            name_span,
             params,
             supertraits,
             methods,
@@ -713,8 +732,12 @@ impl Parser {
         let mut given = Vec::new();
         for (name, ty, v) in consts {
             match v {
+                // A trait's default value for an associated constant: the
+                // name was read as part of the declaration list, and the
+                // whole clause is as narrow a place as there is to point at.
                 Some(value) => given.push(ConstItem {
                     name,
+                    name_span: span,
                     ty,
                     value,
                     span,
@@ -807,7 +830,7 @@ impl Parser {
     /// One of §1.4's four shortened receiver forms, if that is what comes
     /// next. Restores the position when it is not, since `&mut x: T` and
     /// `&mut self` share a prefix.
-    fn self_param(&mut self) -> Option<(String, Ty)> {
+    fn self_param(&mut self) -> Option<Named> {
         let start = self.pos;
         let span = self.span();
         if self.at_kw("self") {
@@ -818,7 +841,11 @@ impl Parser {
                 self.pos = start;
                 return None;
             }
-            return Some(("self".to_string(), Ty::SelfTy(span)));
+            return Some(Named {
+                name: "self".to_string(),
+                name_span: span,
+                ty: Ty::SelfTy(span),
+            });
         }
         if self.eat_op("&") {
             if let Tok::Lifetime(_) = self.peek() {
@@ -827,10 +854,11 @@ impl Parser {
             let mutable = self.eat_kw("mut");
             if self.at_kw("self") {
                 self.bump();
-                return Some((
-                    "self".to_string(),
-                    Ty::Ref(Box::new(Ty::SelfTy(span)), mutable, span),
-                ));
+                return Some(Named {
+                    name: "self".to_string(),
+                    name_span: span,
+                    ty: Ty::Ref(Box::new(Ty::SelfTy(span)), mutable, span),
+                });
             }
         }
         self.pos = start;
@@ -840,7 +868,7 @@ impl Parser {
     fn fn_item(&mut self) -> R<FnItem> {
         let span = self.span();
         self.bump(); // fn
-        let name = self.expect_ident()?;
+        let (name, name_span) = self.expect_ident_at()?;
         let mut generics = self.generic_params()?;
         self.expect_op("(")?;
         let mut params = Vec::new();
@@ -857,13 +885,18 @@ impl Parser {
                     self.expect_op(")")?;
                     break;
                 }
+                let pspan = self.span();
                 let pname = if self.eat_kw("self") {
                     "self".to_string()
                 } else {
                     self.expect_ident()?
                 };
                 self.expect_op(":")?;
-                params.push((pname, self.ty()?));
+                params.push(Named {
+                    name: pname,
+                    name_span: pspan,
+                    ty: self.ty()?,
+                });
                 if self.eat_op(",") {
                     if self.eat_op(")") {
                         break;
@@ -890,6 +923,7 @@ impl Parser {
         };
         Ok(FnItem {
             name,
+            name_span,
             generics,
             params,
             ret,
@@ -902,7 +936,7 @@ impl Parser {
     fn const_item(&mut self) -> R<ConstItem> {
         let span = self.span();
         self.bump(); // const
-        let name = self.expect_ident()?;
+        let (name, name_span) = self.expect_ident_at()?;
         self.expect_op(":")?;
         let ty = self.ty()?;
         self.expect_op("=")?;
@@ -910,6 +944,7 @@ impl Parser {
         self.expect_op(";")?;
         Ok(ConstItem {
             name,
+            name_span,
             ty,
             value,
             span,

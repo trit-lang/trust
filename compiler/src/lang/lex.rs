@@ -116,6 +116,29 @@ impl LineMap {
         }
     }
 
+    /// The character offset of a 1-based `line` and a 0-based offset into it
+    /// in UTF-16 code units — `pos` run backwards.
+    ///
+    /// The line is walked rather than added to, because a code unit and a
+    /// character are the same width only until they are not. A column past
+    /// the end of the line answers with the end of the line: an editor may
+    /// send one, and the alternative is refusing to answer a question about
+    /// a place that exists.
+    pub fn offset_of(&self, line: Line, utf16: u32) -> Option<u32> {
+        let &start = self.starts.get(line.checked_sub(1)? as usize)?;
+        let end = self
+            .starts
+            .get(line as usize)
+            .map_or(self.chars.len() as u32, |s| s - 1);
+        let mut at = start;
+        let mut seen = 0;
+        while at < end && seen < utf16 {
+            seen += self.chars[at as usize].len_utf16() as u32;
+            at += 1;
+        }
+        Some(at)
+    }
+
     /// How many characters the 1-based `line` holds, not counting its newline.
     ///
     /// A diagnostic that has no span to point at underlines the whole line,

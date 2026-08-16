@@ -3042,10 +3042,36 @@ allowed by a test: for every token of a file, the line in the span is the
 line `LineMap` finds. It is kept because most diagnostics are printed by
 something holding a line and no source text to count newlines in.
 
-*What is still not there.* Hover, go-to-definition and completion need more
-than a position: they need the compiler to answer *what is at this offset*,
-which means keeping the lowered result and an index from span to meaning
-rather than throwing both away at the end of `compile`.
+*An outline and a jump, from the AST alone.* `lang::index` answers the two
+questions an editor asks that a compiler does not — *what is in this file*
+and *where was this defined* — and answers them without types or lowering, so
+they work on a file that does not compile, which is the state a file is in
+while it is being written. `trust-lsp` serves them as `documentSymbol` and
+`definition`.
+
+A name resolves by **scope and spelling**. That is enough for locals,
+parameters, functions, types, constants and variants, and it is not enough
+for two things, neither of which is guessed at:
+
+  * `x.f` — which field that is depends on the type of `x`.
+  * `x.m()` — likewise, *except* when the file defines exactly one method
+    called `m`, when there is nothing to be wrong about.
+
+Unresolved means absent. An editor that jumps to the wrong place is worse
+than one that does not jump.
+
+Making that true cost a change to the AST: a parameter and a field were
+`(String, Ty)` — a name with **no place in the file** — so a jump to one
+landed on its type. They are now a `Named`, which carries a span, and the
+same span is what lets an outline select a field's name rather than the type
+beside it.
+
+*What is still not there.* Hover and completion need what neither the AST nor
+a name table has: **the type of an expression**. That means keeping the
+lowering's answers instead of discarding everything but the module at the end
+of `compile`. It is a larger change than a span was, and a different kind:
+spans were a fact the frontend already knew and threw away, while a type at
+an offset is a fact only lowering computes.
 
 *The other half of an editor is a second grammar.* Zed's highlighting is
 **tree-sitter only**, so `editors/tree-sitter-trust` exists, and it is a

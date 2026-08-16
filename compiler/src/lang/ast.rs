@@ -29,6 +29,46 @@ pub enum Item {
     Impl(ImplItem),
 }
 
+impl Item {
+    /// Where it was written, from its first keyword to its closing brace.
+    pub fn span(&self) -> Span {
+        match self {
+            Item::Fn(f) => f.span,
+            Item::Const(c) => c.span,
+            Item::Struct(s) => s.span,
+            Item::Enum(e) => e.span,
+            Item::Trait(t) => t.span,
+            Item::Impl(i) => i.span,
+        }
+    }
+
+    /// Where its name was written — an `impl` has none, and answers with the
+    /// `impl` keyword, which is what a reader points at when they mean it.
+    pub fn name_span(&self) -> Span {
+        match self {
+            Item::Fn(f) => f.name_span,
+            Item::Const(c) => c.name_span,
+            Item::Struct(s) => s.name_span,
+            Item::Enum(e) => e.name_span,
+            Item::Trait(t) => t.name_span,
+            Item::Impl(i) => i.span,
+        }
+    }
+
+    /// The same item, told how far it reaches (see `Expr::spanning`).
+    pub fn spanning(mut self, span: Span) -> Item {
+        match &mut self {
+            Item::Fn(f) => f.span = span,
+            Item::Const(c) => c.span = span,
+            Item::Struct(s) => s.span = span,
+            Item::Enum(e) => e.span = span,
+            Item::Trait(t) => t.span = span,
+            Item::Impl(i) => i.span = span,
+        }
+        self
+    }
+}
+
 /// Which of §4.3's three traits a closure bound names.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FnKind {
@@ -80,6 +120,33 @@ impl GenericParam {
     }
 }
 
+/// A name with a type: a function's parameter, or a struct or variant's
+/// field.
+///
+/// It is a struct and not a `(String, Ty)` because a name written in a file
+/// has a place in it, and something that wants to point at `x` in
+/// `fn f(x: t27)` cannot point at `t27` instead.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Named {
+    /// Its name. A tuple struct's fields are named `0`, `1`, ….
+    pub name: String,
+    /// Where the name was written.
+    pub name_span: Span,
+    /// Its type.
+    pub ty: Ty,
+}
+
+impl Named {
+    /// A name and a type, for the places the compiler invents one.
+    pub fn new(name: impl Into<String>, ty: Ty) -> Named {
+        Named {
+            name: name.into(),
+            name_span: ty.span(),
+            ty,
+        }
+    }
+}
+
 /// A trait declaration (Ch. 4 §1.1).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TraitItem {
@@ -97,6 +164,9 @@ pub struct TraitItem {
     pub assoc: Vec<String>,
     /// Its associated constants: name and type (Ch. 4 §1.7).
     pub consts: Vec<(String, Ty)>,
+    /// Where its name was written, which is where a reader means
+    /// when they point at the item.
+    pub name_span: Span,
     /// Where it was written.
     pub span: Span,
 }
@@ -185,7 +255,10 @@ pub struct StructItem {
     pub repr: Repr,
     /// Fields in declaration order. A tuple struct's fields are named `0`,
     /// `1`, …; a unit struct has none.
-    pub fields: Vec<(String, Ty)>,
+    pub fields: Vec<Named>,
+    /// Where its name was written, which is where a reader means
+    /// when they point at the item.
+    pub name_span: Span,
     /// Where it was written.
     pub span: Span,
 }
@@ -203,6 +276,9 @@ pub struct EnumItem {
     pub repr: Repr,
     /// Its variants, in declaration order.
     pub variants: Vec<Variant>,
+    /// Where its name was written, which is where a reader means
+    /// when they point at the item.
+    pub name_span: Span,
     /// Where it was written.
     pub span: Span,
 }
@@ -213,9 +289,12 @@ pub struct Variant {
     /// Its name.
     pub name: String,
     /// Its payload fields; empty for a fieldless variant.
-    pub fields: Vec<(String, Ty)>,
+    pub fields: Vec<Named>,
     /// An explicit discriminant, which may be negative (Ch. 2 §5.1).
     pub discriminant: Option<i128>,
+    /// Where its name was written, which is where a reader means
+    /// when they point at the item.
+    pub name_span: Span,
     /// Where it was written.
     pub span: Span,
 }
@@ -228,7 +307,7 @@ pub struct FnItem {
     /// Its generic parameters (Ch. 4 §2.1).
     pub generics: Vec<GenericParam>,
     /// Its parameters.
-    pub params: Vec<(String, Ty)>,
+    pub params: Vec<Named>,
     /// Its return type; `None` means `()`.
     pub ret: Option<Ty>,
     /// The body, or `None` for a declaration — a signature whose body is
@@ -237,6 +316,9 @@ pub struct FnItem {
     /// What the caller must have established, written in the same `where`
     /// clause as the type bounds and checked once on entry (Ch. 4 §2.8).
     pub requires: Vec<Expr>,
+    /// Where its name was written, which is where a reader means
+    /// when they point at the item.
+    pub name_span: Span,
     /// Where it was written.
     pub span: Span,
 }
@@ -250,6 +332,9 @@ pub struct ConstItem {
     pub ty: Ty,
     /// Its value.
     pub value: Expr,
+    /// Where its name was written, which is where a reader means
+    /// when they point at the item.
+    pub name_span: Span,
     /// Where it was written.
     pub span: Span,
 }

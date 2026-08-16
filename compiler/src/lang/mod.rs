@@ -7,6 +7,7 @@
 //! the library chapter.
 
 pub mod ast;
+pub mod index;
 pub mod lex;
 pub mod lower;
 pub mod parse;

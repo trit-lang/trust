@@ -703,10 +703,10 @@ impl Types {
             let fields: Vec<(String, Ty)> = def
                 .fields
                 .iter()
-                .map(|(n, t)| {
-                    let ty = resolve_ty_env(t, self, &env)?;
-                    check_sized(&ty, t.span(), &format!("the field `{n}`"))?;
-                    Ok((n.clone(), ty))
+                .map(|f| {
+                    let ty = resolve_ty_env(&f.ty, self, &env)?;
+                    check_sized(&ty, f.ty.span(), &format!("the field `{}`", f.name))?;
+                    Ok((f.name.clone(), ty))
                 })
                 .collect::<R<_>>()?;
             self.db.borrow_mut().struct_(
@@ -727,7 +727,7 @@ impl Types {
                 let fields: Vec<(String, Ty)> = v
                     .fields
                     .iter()
-                    .map(|(n, t)| Ok((n.clone(), resolve_ty_env(t, self, &env)?)))
+                    .map(|f| Ok((f.name.clone(), resolve_ty_env(&f.ty, self, &env)?)))
                     .collect::<R<_>>()?;
                 variants.push(layout::Variant {
                     name: v.name.clone(),
@@ -851,7 +851,8 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
         .into_iter()
         .map(|mut f| {
             let mut i = 0;
-            for (_, t) in &mut f.params {
+            for p in &mut f.params {
+                let t = &mut p.ty;
                 let ast::Ty::ImplFn(kind, ps, r, span) = t.clone() else {
                     continue;
                 };
@@ -923,9 +924,9 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
             let params: Result<Vec<Ty>, Error> = f
                 .params
                 .iter()
-                .map(|(n, t)| {
-                    let ty = resolve_ty(t, &types)?;
-                    check_sized(&ty, t.span(), &format!("the parameter `{n}`"))?;
+                .map(|p| {
+                    let ty = resolve_ty(&p.ty, &types)?;
+                    check_sized(&ty, p.ty.span(), &format!("the parameter `{}`", p.name))?;
                     Ok(ty)
                 })
                 .collect();
@@ -935,7 +936,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
             };
             let self_ref = matches!(
                 f.params.first(),
-                Some((n, ast::Ty::Ref(..))) if n == "self"
+                Some(p) if p.name == "self" && matches!(p.ty, ast::Ty::Ref(..))
             );
             if let (Ok(p), Ok(r)) = (&params, &ret)
                 && let Err(e) = check_returned_reference(p, r, self_ref, f.span)
@@ -974,6 +975,7 @@ pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
                     subst_expr(&mut value, &self_repr);
                     consts.push(ast::ConstItem {
                         name: format!("{}.{}", imp.self_ty, c.name),
+                        name_span: c.name_span,
                         ty: subst_self_ty(&c.ty, &self_repr),
                         value,
                         span: c.span,
@@ -1499,10 +1501,10 @@ fn object_safe(m: &ast::FnItem, trait_name: &str) -> R<()> {
         return complaint("it has type parameters of its own");
     }
     match m.params.first() {
-        Some((n, _)) if n == "self" => {}
+        Some(p) if p.name == "self" => {}
         _ => return complaint("it takes no `self`"),
     }
-    for (i, (_, t)) in m.params.iter().enumerate() {
+    for (i, t) in m.params.iter().map(|p| &p.ty).enumerate() {
         if i > 0 && mentions_self(t) {
             return complaint("a parameter mentions `Self`");
         }
@@ -1606,7 +1608,10 @@ const FREE: &str = "free";
 /// every type may have one and they would otherwise collide.
 fn fn_key(f: &ast::FnItem) -> String {
     match (&f.name[..], f.params.first()) {
-        ("drop", Some((p, ast::Ty::Name(ty, _)))) if p == "self" => format!("drop.{ty}"),
+        ("drop", Some(p)) if p.name == "self" => match &p.ty {
+            ast::Ty::Name(ty, _) => format!("drop.{ty}"),
+            _ => f.name.clone(),
+        },
         _ => f.name.clone(),
     }
 }
@@ -1697,8 +1702,8 @@ fn nominal_name(ty: &Ty) -> Option<String> {
 /// and in path position, so that nothing downstream ever sees `Self`.
 fn subst_self(f: &ast::FnItem, self_ty: &SelfTy) -> ast::FnItem {
     let mut f = f.clone();
-    for (_, t) in &mut f.params {
-        subst_ty(t, self_ty);
+    for p in &mut f.params {
+        subst_ty(&mut p.ty, self_ty);
     }
     // Bounds too. `fn map<B, F: Fn(Self::Item) -> B>` writes `Self` where the
     // method's *constraints* are, not where its types are, and a `Self` that
@@ -2373,7 +2378,7 @@ fn blanket_impl(
                 .params
                 .iter()
                 .zip(&got.params)
-                .all(|((_, a), (_, b))| same_ast_ty(a, b))
+                .all(|(a, b)| same_ast_ty(&a.ty, &b.ty))
         {
             return err(
                 m.span,
@@ -2425,7 +2430,7 @@ fn check_drop_impl(imp: &ast::ImplItem) -> R<()> {
         return bad(m.span);
     }
     match m.params.as_slice() {
-        [(n, ast::Ty::SelfTy(_))] if n == "self" => Ok(()),
+        [p] if p.name == "self" && matches!(p.ty, ast::Ty::SelfTy(_)) => Ok(()),
         _ => err(
             m.span,
             "a destructor takes `self` by value, so that dropping its fields is not \
@@ -2491,7 +2496,7 @@ fn check_trait_impl(
         if want.params.len() != m.params.len() || !same_ret {
             mismatch()?;
         }
-        for ((_, a), (_, b)) in want.params.iter().zip(&m.params) {
+        for (a, b) in want.params.iter().zip(&m.params).map(|(a, b)| (&a.ty, &b.ty)) {
             // `self` is the one parameter whose written form differs by
             // design: the trait writes `Self` and the impl its own type.
             let (a, b) = (subst_self_ty(a, self_repr), subst_self_ty(b, self_repr));
@@ -2602,8 +2607,8 @@ fn subst_assoc_fn(f: &ast::FnItem, chosen: &[(String, ast::Ty)]) -> ast::FnItem 
         return f.clone();
     }
     let mut f = f.clone();
-    for (_, t) in &mut f.params {
-        *t = subst_assoc(t, chosen);
+    for p in &mut f.params {
+        p.ty = subst_assoc(&p.ty, chosen);
     }
     if let Some(r) = &mut f.ret {
         *r = subst_assoc(r, chosen);
@@ -2651,8 +2656,8 @@ fn subst_trait_params_fn(f: &ast::FnItem, params: &[String], args: &[ast::Ty]) -
         return f.clone();
     }
     let mut f = f.clone();
-    for (_, t) in &mut f.params {
-        *t = subst_trait_params(t, params, args);
+    for p in &mut f.params {
+        p.ty = subst_trait_params(&p.ty, params, args);
     }
     if let Some(r) = &mut f.ret {
         *r = subst_trait_params(r, params, args);
@@ -2716,7 +2721,7 @@ fn signature_of(
         f.params
             .iter()
             .zip(&params)
-            .map(|((n, _), t)| (n.clone(), t.tir())),
+            .map(|(p, t)| (p.name.clone(), t.tir())),
     );
 
     Signature {
@@ -3193,10 +3198,10 @@ fn build_types(file: &ast::File) -> R<Types> {
                 let fields: Vec<(String, Ty)> = st
                     .fields
                     .iter()
-                    .map(|(n, t)| {
-                        let ty = resolve_ty(t, &types)?;
-                        check_sized(&ty, t.span(), &format!("the field `{n}`"))?;
-                        Ok((n.clone(), ty))
+                    .map(|f| {
+                        let ty = resolve_ty(&f.ty, &types)?;
+                        check_sized(&ty, f.ty.span(), &format!("the field `{}`", f.name))?;
+                        Ok((f.name.clone(), ty))
                     })
                     .collect::<R<_>>()?;
                 types.db.borrow_mut().struct_(
@@ -3216,7 +3221,7 @@ fn build_types(file: &ast::File) -> R<Types> {
                     let fields: Vec<(String, Ty)> = v
                         .fields
                         .iter()
-                        .map(|(n, t)| Ok((n.clone(), resolve_ty(t, &types)?)))
+                        .map(|f| Ok((f.name.clone(), resolve_ty(&f.ty, &types)?)))
                         .collect::<R<_>>()?;
                     variants.push(layout::Variant {
                         name: v.name.clone(),
@@ -3276,9 +3281,10 @@ fn build_types(file: &ast::File) -> R<Types> {
         if f.name != "drop" {
             continue;
         }
-        let [(param, ty)] = &f.params[..] else {
+        let [only] = &f.params[..] else {
             return err(f.span, "`drop` takes exactly one parameter, named `self`");
         };
+        let (param, ty) = (&only.name, &only.ty);
         if param != "self" {
             return err(f.span, "a destructor's parameter must be named `self`");
         }
@@ -3902,10 +3908,10 @@ fn function(
         stmt: 0,
         stmt_index: 0,
         last_use: last_use_of(body),
-        params: f.params.iter().map(|(n, _)| n.clone()).collect(),
+        params: f.params.iter().map(|p| p.name.clone()).collect(),
         self_lends: matches!(
             f.params.first(),
-            Some((n, ast::Ty::Ref(..))) if n == "self"
+            Some(p) if p.name == "self" && matches!(p.ty, ast::Ty::Ref(..))
         ),
         destructor_of,
         counter: 0,
@@ -3914,7 +3920,7 @@ fn function(
 
     // Parameters arrive as SSA values and are spilled into slots at once, so
     // that they read and write like any other local.
-    for ((name, _), ty) in f.params.iter().zip(&param_tys) {
+    for (name, ty) in f.params.iter().map(|p| &p.name).zip(&param_tys) {
         // The parameter arrives as an SSA value; give the local its own
         // storage so that writing to it is local, and copy an aggregate in.
         let incoming = Operand::Value(name.clone());
@@ -4679,8 +4685,9 @@ impl Fn<'_> {
         self.extra_fns.borrow_mut().push(ast::FnItem {
             requires: Vec::new(),
             name: key,
+            name_span: span,
             generics: Vec::new(),
-            params: vec![("self".into(), ast::Ty::Name(name.to_string(), span))],
+            params: vec![ast::Named::new("self", ast::Ty::Name(name.to_string(), span))],
             ret: None,
             body: Some(ast::Block {
                 stmts: Vec::new(),
@@ -6013,7 +6020,7 @@ impl Fn<'_> {
             unify(ret, want, &def.generics, &mut env);
         }
         let mut args = args.to_vec();
-        for ((_, want), arg) in def.params.iter().zip(&mut args) {
+        for (want, arg) in def.params.iter().map(|p| &p.ty).zip(&mut args) {
             if let Some(got) = self.peek_ty(arg)? {
                 unify(want, &got, &def.generics, &mut env);
                 continue;
@@ -6131,9 +6138,9 @@ impl Fn<'_> {
         let params: Vec<Ty> = def
             .params
             .iter()
-            .map(|(n, t)| {
-                let ty = resolve_ty_env(t, self.types, &env)?;
-                check_sized(&ty, t.span(), &format!("the parameter `{n}`"))?;
+            .map(|p| {
+                let ty = resolve_ty_env(&p.ty, self.types, &env)?;
+                check_sized(&ty, p.ty.span(), &format!("the parameter `{}`", p.name))?;
                 Ok(ty)
             })
             .collect::<R<_>>()?;
@@ -6141,7 +6148,8 @@ impl Fn<'_> {
             None => Ty::Unit,
             Some(t) => resolve_ty_env(t, self.types, &env)?,
         };
-        let self_ref = matches!(def.params.first(), Some((n, ast::Ty::Ref(..))) if n == "self");
+        let self_ref =
+            matches!(def.params.first(), Some(p) if p.name == "self" && matches!(p.ty, ast::Ty::Ref(..)));
         check_returned_reference(&params, &ret, self_ref, span)?;
         self.sigs
             .borrow_mut()
@@ -7910,7 +7918,7 @@ impl Fn<'_> {
             (
                 s.generics.clone(),
                 s.fields.clone(),
-                s.fields.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+                s.fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
             )
         });
         let (params, decl) = match generic {
@@ -7943,7 +7951,7 @@ impl Fn<'_> {
         let mut env: HashMap<String, Ty> = HashMap::new();
         let literal = |e: &ast::Expr| matches!(e, ast::Expr::Int(..));
         for pass in [false, true] {
-            for (fname, fty) in &decl {
+            for (fname, fty) in decl.iter().map(|f| (&f.name, &f.ty)) {
                 let Some((_, e)) = fields.iter().find(|(n, _)| n == fname) else {
                     continue;
                 };
@@ -8337,10 +8345,10 @@ impl Fn<'_> {
         };
         // Written back out, because the synthesized function is an ordinary
         // one and its parameters are written types like any other.
-        let ps: Vec<(String, ast::Ty)> = params
+        let ps: Vec<ast::Named> = params
             .iter()
             .zip(&param_tys)
-            .map(|((n, _), t)| (n.clone(), ast::Ty::Name(t.to_string(), span)))
+            .map(|((n, _), t)| ast::Named::new(n.clone(), ast::Ty::Name(t.to_string(), span)))
             .collect();
 
         self.counter += 1;
@@ -8360,8 +8368,8 @@ impl Fn<'_> {
         let mut body = body.clone();
         let capture_names: Vec<String> = captures.iter().map(|(n, ..)| n.clone()).collect();
         rewrite_captures(&mut body, &capture_names);
-        let mut call_params = vec![(
-            "self".to_string(),
+        let mut call_params = vec![ast::Named::new(
+            "self",
             ast::Ty::Ref(Box::new(ast::Ty::Name(name.clone(), span)), false, span),
         )];
         call_params.extend(ps.clone());
@@ -8369,6 +8377,7 @@ impl Fn<'_> {
         let item = ast::FnItem {
             requires: Vec::new(),
             name: call.clone(),
+            name_span: span,
             generics: Vec::new(),
             params: call_params,
             ret: Some(ast::Ty::Name(ret_ty.to_string(), span)),
@@ -8443,7 +8452,7 @@ impl Fn<'_> {
         // The signature, with `Self` erased to the data pointer.
         let params: Vec<Ty> = m.params[1..]
             .iter()
-            .map(|(_, t)| self.resolve(t))
+            .map(|p| self.resolve(&p.ty))
             .collect::<R<_>>()?;
         let ret = match &m.ret {
             None => Ty::Unit,
@@ -9048,7 +9057,7 @@ impl Fn<'_> {
             // parameters — `impl Fn(…)` becomes one — which nothing can
             // resolve until the call site says what they are.
             let def = generic.as_ref()?;
-            let (_, written) = def.params.first()?;
+            let written = &def.params.first()?.ty;
             let recv = resolve_ty_env(written, self.types, &scope).ok()?;
             Some((vec![recv], Ty::Unit))
         }) else {

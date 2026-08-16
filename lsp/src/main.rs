@@ -53,9 +53,29 @@ impl Server {
                 // no gain.
                 reply(
                     m.get(&["id"]),
-                    "{\"capabilities\":{\"textDocumentSync\":1},\
+                    "{\"capabilities\":{\"textDocumentSync\":1,\
+                       \"documentSymbolProvider\":true,\
+                       \"definitionProvider\":true},\
                        \"serverInfo\":{\"name\":\"trust-lsp\"}}",
                 );
+            }
+            "textDocument/documentSymbol" => {
+                let out = self
+                    .indexed(m)
+                    .map(|(map, index, _)| symbols(&map, &index.symbols))
+                    .unwrap_or_else(|| "[]".to_string());
+                reply(m.get(&["id"]), &out);
+            }
+            "textDocument/definition" => {
+                let out = self
+                    .indexed(m)
+                    .and_then(|(map, index, uri)| {
+                        let at = position(m, &map)?;
+                        let to = index.definition_at(at)?;
+                        Some(location(&map, &uri, to))
+                    })
+                    .unwrap_or_else(|| "null".to_string());
+                reply(m.get(&["id"]), &out);
             }
             "shutdown" => reply(m.get(&["id"]), "null"),
             "exit" => return true,
@@ -99,6 +119,22 @@ impl Server {
         false
     }
 
+    /// The index of whatever file a request is about.
+    ///
+    /// A parse error means there is nothing to index — but the diagnostics
+    /// already said so, so this answers with nothing and does not complain
+    /// twice.
+    fn indexed(&self, m: &Json) -> Option<(lang::LineMap, lang::index::Index, String)> {
+        let uri = m.str_at(&["params", "textDocument", "uri"])?;
+        let src = self.open.get(uri)?;
+        let file = lang::parse::parse(src).ok()?;
+        Some((
+            lang::LineMap::new(src),
+            lang::index::Index::new(&file),
+            uri.to_string(),
+        ))
+    }
+
     /// Compile what is open at `uri` and publish what is wrong with it.
     fn check(&self, uri: &str) {
         let Some(src) = self.open.get(uri) else { return };
@@ -109,6 +145,86 @@ impl Server {
         let map = lang::LineMap::new(src);
         let diagnostics: Vec<Diagnostic<'_>> = found.iter().map(|e| at(&map, e)).collect();
         publish(uri, &diagnostics);
+    }
+}
+
+/// The character offset a request's `position` names.
+///
+/// The protocol counts a column in UTF-16 code units and this compiler counts
+/// characters, so the line is walked rather than added to.
+fn position(m: &Json, map: &lang::LineMap) -> Option<u32> {
+    let line = match m.get(&["params", "position", "line"])? {
+        json::Json::Num(n) => *n as u32 + 1,
+        _ => return None,
+    };
+    let utf16 = match m.get(&["params", "position", "character"])? {
+        json::Json::Num(n) => *n as u32,
+        _ => return None,
+    };
+    map.offset_of(line, utf16)
+}
+
+/// A span, as a range in the protocol's coordinates.
+fn range(map: &lang::LineMap, span: lang::Span) -> String {
+    let lo = map.pos(span.lo);
+    let hi = map.pos(span.hi);
+    format!(
+        "{{\"start\":{{\"line\":{},\"character\":{}}},\
+           \"end\":{{\"line\":{},\"character\":{}}}}}",
+        lo.line - 1,
+        lo.utf16,
+        hi.line - 1,
+        hi.utf16
+    )
+}
+
+/// One place in one file.
+fn location(map: &lang::LineMap, uri: &str, span: lang::Span) -> String {
+    let mut quoted = String::new();
+    json::quote(uri, &mut quoted);
+    format!("{{\"uri\":{quoted},\"range\":{}}}", range(map, span))
+}
+
+/// An outline, nested as the file is.
+fn symbols(map: &lang::LineMap, list: &[lang::index::Symbol]) -> String {
+    let mut out = String::from("[");
+    for (i, s) in list.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let (mut name, mut detail) = (String::new(), String::new());
+        json::quote(&s.name, &mut name);
+        json::quote(&s.detail, &mut detail);
+        out.push_str(&format!(
+            "{{\"name\":{name},\"detail\":{detail},\"kind\":{},\
+               \"range\":{},\"selectionRange\":{},\"children\":{}}}",
+            kind(s.kind),
+            range(map, s.span),
+            // The protocol requires the selection to sit inside the range,
+            // and an `impl` has no name, so it selects its own first token.
+            range(map, s.name_span),
+            symbols(map, &s.children),
+        ));
+    }
+    out.push(']');
+    out
+}
+
+/// The protocol's numbering for what kind of thing a symbol is.
+fn kind(k: lang::index::SymbolKind) -> u32 {
+    use lang::index::SymbolKind::*;
+    match k {
+        Function => 12,
+        Method => 6,
+        Struct => 23,
+        Enum => 10,
+        Variant => 22,
+        Field => 8,
+        // A trait is an interface, which is the closest thing the protocol's
+        // list of kinds has to one.
+        Trait => 11,
+        Impl => 5,
+        Const => 14,
     }
 }
 
