@@ -1602,6 +1602,27 @@ fn object_safe(m: &ast::FnItem, trait_name: &str) -> R<()> {
     Ok(())
 }
 
+/// Whether anything *inside* a pattern can fail to match.
+///
+/// The head is tested by the dispatch; this asks about the rest. A binding
+/// and a wildcard match whatever is there, and everything else insists.
+fn refutable_inside(p: &ast::Pattern) -> bool {
+    match p {
+        ast::Pattern::Aggregate(_, fields, _) => fields.iter().any(|(_, f)| refutable(f)),
+        ast::Pattern::Tuple(items, _) => items.iter().any(refutable),
+        _ => false,
+    }
+}
+
+/// Whether a pattern can fail to match a value of its type.
+fn refutable(p: &ast::Pattern) -> bool {
+    match p {
+        ast::Pattern::Wild(_) | ast::Pattern::Bind(..) => false,
+        ast::Pattern::Tuple(items, _) => items.iter().any(refutable),
+        _ => true,
+    }
+}
+
 fn mentions_self(t: &ast::Ty) -> bool {
     match t {
         ast::Ty::SelfTy(_) => true,
@@ -10492,11 +10513,18 @@ impl Fn<'_> {
         let variants = self.types.enums.borrow()[name].clone();
 
         // Which variant each arm selects, and whether an arm catches all.
+        //
+        // An arm is **certain** when matching its head is the whole of
+        // matching it: no guard, and nothing nested that can fail. Only a
+        // certain arm covers its variant, because §5.4 says a guarded arm
+        // never counts and a nested pattern that can fail is the same thing
+        // written differently.
         let mut selects: Vec<Option<usize>> = Vec::new();
+        let certain: Vec<bool> = arms
+            .iter()
+            .map(|a| a.guard.is_none() && !refutable_inside(&a.patterns[0]))
+            .collect();
         for arm in arms {
-            if arm.guard.is_some() {
-                return err(arm.span, "match guards are not lowered yet");
-            }
             if arm.patterns.len() != 1 {
                 return err(arm.span, "or-patterns over an enum are not lowered yet");
             }
@@ -10527,15 +10555,36 @@ impl Fn<'_> {
             });
         }
 
-        let covered: Vec<usize> = selects.iter().flatten().copied().collect();
-        let catchall = selects.iter().any(Option::is_none);
+        let covered: Vec<usize> = selects
+            .iter()
+            .zip(&certain)
+            .filter(|(_, sure)| **sure)
+            .filter_map(|(s, _)| *s)
+            .collect();
+        let catchall = selects
+            .iter()
+            .zip(&certain)
+            .any(|(s, sure)| s.is_none() && *sure);
         if !catchall && covered.len() < variants.len() {
+            // An arm that can still fail after its discriminant matched does
+            // not cover its variant. Whether several such arms *together*
+            // cover it is a question about nested patterns that draft 0.1
+            // does not answer, so it is not assumed: a `_` arm says what
+            // happens when none of them matched.
+            let hedged = certain.iter().any(|c| !c);
             return err(
                 span,
                 format!(
-                    "this `match` is not exhaustive: `{name}` has {} variant(s), {} covered",
+                    "this `match` is not exhaustive: `{name}` has {} variant(s), {} covered{}",
                     variants.len(),
-                    covered.len()
+                    covered.len(),
+                    if hedged {
+                        ". An arm with a guard or a nested pattern does not count, because \
+                         whether such arms together cover a variant is not checked \
+                         (Ch. 0 §5.4) — add a `_` arm for when none of them matched"
+                    } else {
+                        ""
+                    }
                 ),
             );
         }
@@ -10545,8 +10594,11 @@ impl Fn<'_> {
         let mut result: Option<(String, Ty)> = None;
 
         // The trit-shaped case: one `br3`, no comparison at all.
+        // One `br3` and no comparison — but also no way to leave an arm
+        // that turned out not to match, so it is for certain arms only.
         if e.tag == layout::Tag::TritShaped
             && !catchall
+            && certain.iter().all(|c| *c)
             && let Some(order) = trit_variant_dispatch(&e.discriminants, &selects)
         {
             let labels: Vec<String> = (0..arms.len()).map(|_| self.fresh("arm")).collect();
@@ -10568,6 +10620,7 @@ impl Fn<'_> {
                     borrowed,
                     span,
                     &dest,
+                    None,
                 )?;
                 merged = Some(self.join_arm(merged));
             }
@@ -10618,6 +10671,11 @@ impl Fn<'_> {
             self.br3(c, &next, &body, &next);
             self.owned = before.clone();
             self.start(body);
+            // An arm that can still fail leaves for `next`, which tests the
+            // arm after it. That re-tests the discriminant against a value
+            // it cannot equal for every arm of a different variant — a few
+            // comparisons, and no ordering to get wrong.
+            let fail = (!certain[arm_index]).then(|| next.clone());
             self.enum_arm(
                 &arms[arm_index],
                 name,
@@ -10629,6 +10687,7 @@ impl Fn<'_> {
                 borrowed,
                 span,
                 &dest,
+                fail.as_deref(),
             )?;
             merged = Some(self.join_arm(merged));
             self.owned = before.clone();
@@ -10639,6 +10698,10 @@ impl Fn<'_> {
             Some(i) => {
                 let variant = selects[i];
                 self.owned = before.clone();
+                // The last arm has nowhere to fall to. Exhaustiveness only
+                // counts certain arms, so a program that reaches this trap
+                // is one the check already refused.
+                let fail = (!certain[i]).then(|| self.fresh("arm.none"));
                 self.enum_arm(
                     &arms[i],
                     name,
@@ -10650,8 +10713,13 @@ impl Fn<'_> {
                     borrowed,
                     span,
                     &dest,
+                    fail.as_deref(),
                 )?;
                 merged = Some(self.join_arm(merged));
+                if let Some(f) = fail {
+                    self.start(f);
+                    self.finish(Terminator::Trap(FaultCode::Trap));
+                }
             }
             None => self.finish(Terminator::Trap(FaultCode::Trap)),
         }
@@ -10662,8 +10730,13 @@ impl Fn<'_> {
         Ok(self.match_result(result))
     }
 
-    /// One arm of an enum `match`: bind whatever the pattern names, then
-    /// lower the body.
+    /// One arm of an enum `match`: bind whatever the pattern names, test
+    /// whatever it insists on, then lower the body.
+    ///
+    /// `fail` is where to go when the arm turns out not to match after its
+    /// discriminant did — a nested pattern that is a different variant, or a
+    /// guard that is false. An arm with neither is given `None`, and then
+    /// nothing here can branch.
     #[allow(clippy::too_many_arguments)]
     fn enum_arm(
         &mut self,
@@ -10677,6 +10750,7 @@ impl Fn<'_> {
         borrowed: bool,
         span: Span,
         dest: &Option<String>,
+        fail: Option<&str>,
     ) -> R<()> {
         let depth = self.scopes.len();
         self.scopes.push(HashMap::new());
@@ -10709,27 +10783,182 @@ impl Fn<'_> {
                     self.scopes.pop();
                     return err(arm.span, format!("this variant has no field `{name}`"));
                 };
-                let ast::Pattern::Bind(bound, _) = pat else {
-                    self.scopes.pop();
-                    return err(arm.span, "nested patterns are not lowered yet");
-                };
                 let p = self.offset(addr.clone(), off);
-                let v = self.load_from(p, &ft);
-                // A binding read out of borrowed storage never owns: the
-                // referent still does, and two owners of one allocation is
-                // the bug this whole chapter exists to make impossible.
-                let local = if borrowed {
-                    self.declare_borrowed(bound, ft.clone())
-                } else {
-                    self.declare(bound, ft.clone(), false)
-                };
-                self.store_at(&local.slot, 0, &ft, v, arm.span)?;
+                if let Err(e) = self.sub_pattern(p, &ft, pat, fail, borrowed, arm.span) {
+                    self.scopes.pop();
+                    return Err(e);
+                }
+            }
+        }
+
+        // A guard is tested after the bindings, because it is written in
+        // terms of them (§5.4).
+        if let Some(g) = &arm.guard {
+            let Some(fail) = fail else {
+                self.scopes.pop();
+                return err(arm.span, "a guarded arm has nowhere to fall through to");
+            };
+            let go = self.fresh("guard.ok");
+            match self.expr(g, Some(&Ty::Bool)) {
+                Ok((c, ct)) => {
+                    if let Err(e) = self.check(&ct, &Ty::Bool, g.span(), "a match guard") {
+                        self.scopes.pop();
+                        return Err(e);
+                    }
+                    self.br3(c, fail, fail, &go);
+                    self.start(go);
+                }
+                Err(e) => {
+                    self.scopes.pop();
+                    return Err(e);
+                }
             }
         }
 
         let r = self.arm_body(arm, expected, result, join, span, Some(depth), dest);
         self.scopes.pop();
         r
+    }
+
+    /// One pattern applied to the storage at `addr`: bind what it names, and
+    /// branch to `fail` when it insists on something that is not there.
+    ///
+    /// This is what makes a pattern nest. A field's pattern used to have to
+    /// be a binding; now it may be anything, and what it is decides whether
+    /// anything is tested at all.
+    fn sub_pattern(
+        &mut self,
+        addr: Operand,
+        ty: &Ty,
+        pat: &ast::Pattern,
+        fail: Option<&str>,
+        borrowed: bool,
+        span: Span,
+    ) -> R<()> {
+        match pat {
+            ast::Pattern::Wild(_) => Ok(()),
+            ast::Pattern::Bind(bound, _) => {
+                let v = self.load_from(addr, ty);
+                // A binding read out of borrowed storage never owns: the
+                // referent still does, and two owners of one allocation is
+                // the bug this whole chapter exists to make impossible.
+                let local = if borrowed {
+                    self.declare_borrowed(bound, ty.clone())
+                } else {
+                    self.declare(bound, ty.clone(), false)
+                };
+                self.store_at(&local.slot, 0, ty, v, span)
+            }
+            ast::Pattern::Aggregate(path, fields, at) => {
+                let Ty::Enum(inner) = peel(ty) else {
+                    // A `Box` holds what it points at, and a pattern reads a
+                    // place: reaching through one is a dereference, and `*b`
+                    // is where a dereference is written.
+                    if matches!(peel(ty), Ty::Boxed(_)) {
+                        return err(
+                            *at,
+                            format!(
+                                "a pattern does not reach through a `Box`: this field is a \
+                                 {ty}, so bind it and `match` on `*` it"
+                            ),
+                        );
+                    }
+                    return err(*at, format!("`{}` does not match {ty}", path.last()));
+                };
+                let inner = inner.clone();
+                let Some(fail) = fail else {
+                    return err(
+                        *at,
+                        "a nested pattern that can fail has nowhere to fall through to",
+                    );
+                };
+                let variant = match path.segments.len() {
+                    2 if heads_match(&path.segments[0], &inner) => path.segments[1].clone(),
+                    1 => path.segments[0].clone(),
+                    _ => {
+                        return err(
+                            *at,
+                            format!("`{}` is not a variant of `{inner}`", path.last()),
+                        );
+                    }
+                };
+                let Some(index) = self.types.variant(&inner, &variant) else {
+                    return err(*at, format!("`{inner}` has no variant `{variant}`"));
+                };
+                let l = self.types.layout(&Ty::Enum(inner.clone()));
+                let e = l.enum_layout.clone().expect("an enum");
+                let (tag, tag_ty) = self.read_tag(addr.clone(), &e);
+                // A variant a niche leaves untagged is recognized by
+                // elimination, which needs the arms around it; nested, there
+                // are none.
+                let Some(value) = tag_value(&e, index) else {
+                    return err(
+                        *at,
+                        format!(
+                            "`{inner}::{variant}` is the variant a niche leaves untagged                              (Ch. 2 §6), and is recognized by being none of the others —                              which a nested pattern has no others to be"
+                        ),
+                    );
+                };
+                let k = Operand::Const(tag_ty, Bt::from_i128(value));
+                let c = self.emit(
+                    "c",
+                    Type::Int(1),
+                    InstKind::Cmp {
+                        ty: tag_ty,
+                        a: tag,
+                        b: k,
+                    },
+                );
+                let go = self.fresh("nest.ok");
+                self.br3(c, fail, &go, fail);
+                self.start(go);
+                let declared = self.types.variant_fields(&inner, index);
+                if !fields.is_empty() && fields.len() != declared.len() {
+                    return err(
+                        *at,
+                        format!(
+                            "this variant has {} field(s), the pattern names {}",
+                            declared.len(),
+                            fields.len()
+                        ),
+                    );
+                }
+                for (name, sub) in fields {
+                    let Some((_, ft, off)) = declared.iter().find(|(n, _, _)| n == name).cloned()
+                    else {
+                        return err(*at, format!("this variant has no field `{name}`"));
+                    };
+                    let p = self.offset(addr.clone(), off);
+                    self.sub_pattern(p, &ft, sub, Some(fail), borrowed, span)?;
+                }
+                Ok(())
+            }
+            other => {
+                // A literal: read the place and compare it.
+                let Some(fail) = fail else {
+                    return err(
+                        other.span(),
+                        "a nested pattern that can fail has nowhere to fall through to",
+                    );
+                };
+                let value = pattern_value(other, ty, other.span())?;
+                let v = self.load_from(addr, ty);
+                let k = Operand::Const(ty.tir(), value);
+                let c = self.emit(
+                    "c",
+                    Type::Int(1),
+                    InstKind::Cmp {
+                        ty: ty.tir(),
+                        a: v,
+                        b: k,
+                    },
+                );
+                let go = self.fresh("lit.ok");
+                self.br3(c, fail, &go, fail);
+                self.start(go);
+                Ok(())
+            }
+        }
     }
 
     /// Fold one arm's ownership state into what the arms before it left.

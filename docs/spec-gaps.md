@@ -2592,6 +2592,36 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.29 — a pattern nests, and an arm may have a guard.** Both were refused
+with "not lowered yet", and both needed one thing: an arm that has matched its
+*head* and can still fail must have somewhere to go.
+
+The general dispatch already had it. Each tested arm is emitted with a `body`
+and a `next`, and `next` is where the discriminant comparison goes when it
+does not match — so it is also where a failing nested pattern or a false
+guard goes. What that costs is a few comparisons: falling out of an arm for
+variant `V` re-tests the discriminant against every later arm's value, and
+those cannot equal `V`, so control reaches the catch-all having done nothing
+but compare. No ordering to get wrong, and no second code path.
+
+The `br3` fast path for a trit-shaped enum (Ch. 2 §5.2) has no `next` — it
+*is* the dispatch — so it is now taken only when every arm is **certain**:
+no guard, and nothing nested that can fail.
+
+*Exhaustiveness is conservative, and says so.* An arm that can still fail
+does not cover its variant. Whether two nested arms together cover one is a
+question about patterns that draft 0.1 does not answer, so it is not assumed;
+the diagnostic says an arm with a guard or a nested pattern does not count,
+and to add a `_` arm for when none of them matched.
+
+*A pattern does not reach through a `Box`.* A `Box<E>` holds an `E` somewhere
+else and a pattern reads a place, so `E::Add(E::Lit(a), b)` is refused and
+says to bind the field and `match` on `*` it — which is what Rust asks for
+too. It matters more here than there, because a compiler's own AST is mostly
+`Box`, and it is the first thing self-hosting will want back.
+
+HPL retires **1 985 745** instructions, unchanged.
+
 **G9.28 — the inliner did not return on mutual recursion.** `is_even` and
 `is_odd` are two four-instruction functions that call each other, and
 compiling them hung. `check` passed; the frontend was fine. The `inline`

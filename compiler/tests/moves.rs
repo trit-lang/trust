@@ -96,3 +96,63 @@ fn a_vec_yields_its_elements() {
                \x20   s\n}\n";
     assert!(lang::compile(src).is_ok());
 }
+
+/// The source a nested-pattern test compiles.
+fn nested(arms: &str) -> String {
+    format!(
+        "enum Inner {{ A(t27), B }}\n\
+         enum Outer {{ One(Inner), Two(t27) }}\n\
+         fn go(o: Outer) -> t27 {{ match o {{ {arms} }} }}\n\
+         fn main() -> t27 {{ go(Outer::Two(1)) }}\n"
+    )
+}
+
+#[test]
+fn a_pattern_nests() {
+    // A field's pattern used to have to be a binding. Now it may insist, and
+    // an arm that insists falls through to the next when it is not there.
+    let src = nested(
+        "Outer::One(Inner::A(n)) => n, Outer::One(Inner::B) => 100, \
+         Outer::Two(k) => k, _ => 0,",
+    );
+    assert_eq!(refusal(&src), None, "{src}");
+}
+
+#[test]
+fn a_guard_decides_between_arms_of_one_variant() {
+    let src = "enum E { Val(t27), Nil }\n\
+               fn go(e: E) -> t27 {\n\
+                   match e {\n\
+                       E::Val(n) if n > 10 => 1,\n\
+                       E::Val(n) if n > 0 => 2,\n\
+                       E::Val(n) => 3,\n\
+                       E::Nil => 4,\n\
+                   }\n\
+               }\n\
+               fn main() -> t27 { go(E::Val(5)) }\n";
+    assert_eq!(refusal(src), None);
+}
+
+#[test]
+fn an_arm_that_can_fail_does_not_cover_its_variant() {
+    // Whether two nested arms *together* cover a variant is a question about
+    // patterns that draft 0.1 does not answer — so it is not assumed, and
+    // the message says what to write instead.
+    let src =
+        nested("Outer::One(Inner::A(n)) => n, Outer::One(Inner::B) => 1, Outer::Two(k) => k,");
+    let why = refusal(&src).expect("refused");
+    assert!(why.contains("not exhaustive"), "{why}");
+    assert!(why.contains("add a `_` arm"), "{why}");
+}
+
+#[test]
+fn a_pattern_does_not_reach_through_a_box() {
+    // `Box<E>` holds an `E` somewhere else, and a pattern reads a place.
+    let src = "enum E { Lit(t27), Add(Box<E>, t27) }\n\
+               fn go(e: E) -> t27 {\n\
+                   match e { E::Lit(n) => n, E::Add(E::Lit(a), b) => a + b, _ => 0 }\n\
+               }\n\
+               fn main() -> t27 { go(E::Lit(1)) }\n";
+    let why = refusal(src).expect("refused");
+    assert!(why.contains("does not reach through a `Box`"), "{why}");
+}
