@@ -81,8 +81,11 @@ ref     self    Self    static  trait   type    union   unsafe
 use     where
 ```
 
-`union` is reserved by Ch. 2 §7 with its semantics deferred; the rest belong
-to Chapters 3 and 4, to the module system, and to the library chapter.
+`union` is reserved by Ch. 2 §7 with its semantics deferred; `mod`, `pub` and
+`use` are **defined by Ch. 6** and are keywords rather than reservations;
+`crate` remains reserved, since Ch. 6 §3.1 declines it as a path prefix and
+nothing else has claimed it. The rest belong to Chapters 3 and 4 and to the
+library chapter.
 
 ### 1.4 Literals
 
