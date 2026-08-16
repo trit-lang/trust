@@ -3047,12 +3047,26 @@ than a position: they need the compiler to answer *what is at this offset*,
 which means keeping the lowered result and an index from span to meaning
 rather than throwing both away at the end of `compile`.
 
-*The other half of an editor is separate work.* Zed's highlighting is
-**tree-sitter only** — there is no regular-expression fallback — so it needs a
-`tree-sitter-trust` grammar, which is a **second grammar** and can drift from
-the parser. Ch. 0 §6's grammar is normative and most of the design, and the
-discipline that would keep them together is a test that every file in
-`examples/trust/` parses with no error node.
+*The other half of an editor is a second grammar.* Zed's highlighting is
+**tree-sitter only**, so `editors/tree-sitter-trust` exists, and it is a
+second parser that can drift from the real one. `scripts/grammar.sh` is what
+stops it: every example must parse with no ERROR or MISSING node, and a
+corpus of nine cases covers each place the two grammars actually disagreed
+while it was being written.
+
+Six of those disagreements were with **Ch. 0 §6's grammar summary**, which is
+informative and out of date in ways §6's own note anticipates:
+
+  * `alt` has no negative literal, and `-1t => …` is how the sign arm of a
+    `<=>` match is written (§4, Ch. 1 §4).
+  * `self_param` has no `self: T`, which Ch. 4 §5.2's destructor form uses.
+  * `where` is `( ident bounds ),*` only; Ch. 4 §2.8's predicates are also
+    written there, and the two are told apart by what follows the name.
+
+The first two are the summary lagging the chapters that cite it — exactly the
+failure §6's note describes for draft 0.1 — and are recorded here rather than
+fixed, because §6 is informative and the chapters it summarizes are not
+wrong.
 
 *No dependency was added.* A language server usually reaches for `serde_json`
 and `lsp-types`. This repository has none at all, and a convenience tool is a

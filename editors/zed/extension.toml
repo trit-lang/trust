@@ -1,0 +1,27 @@
+id = "trust"
+name = "Trust"
+description = "Trust language support: highlighting, and diagnostics from the compiler itself."
+version = "0.1.0"
+schema_version = 1
+authors = ["the Trust authors"]
+repository = "https://github.com/trust-lang/trust"
+
+# Zed fetches a grammar from a git repository rather than from the extension,
+# so this points back at this one. `rev` is the commit that added the grammar;
+# it has to be bumped whenever the grammar changes, which is the one piece of
+# bookkeeping keeping a subdirectory instead of a separate repository costs.
+#
+# Until this repository is pushed anywhere, the URL resolves to nothing. For a
+# local checkout, point it at that instead:
+#
+#     repository = "file:///absolute/path/to/trust-lang"
+#
+# and set `rev` to a commit you have.
+[grammars.trust]
+repository = "https://github.com/trust-lang/trust"
+rev = "faa68b34be1ef47c50cbb8c928deece91fa35511"
+path = "editors/tree-sitter-trust"
+
+[language_servers.trust-lsp]
+name = "Trust"
+languages = ["Trust"]

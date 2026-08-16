@@ -1,0 +1,21 @@
+# Its own workspace, deliberately.
+#
+# The Rust in this directory is not part of the compiler: Zed compiles it to
+# WebAssembly and runs it inside the editor, and it depends on `zed_extension_api`
+# because that is the only way to tell Zed how to start a language server.
+# The compiler workspace has no external dependency at all and keeps none;
+# holding this out of it is what lets both statements stay true.
+[workspace]
+
+[package]
+name = "trust-zed"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7"
