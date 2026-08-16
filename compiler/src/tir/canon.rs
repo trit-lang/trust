@@ -516,10 +516,11 @@ pub fn elide_dominated_checks(f: &mut Function) {
             continue;
         };
 
-        // Walk up the chain of sole predecessors, giving up at a write.
+        // Everything a branch above decided, gathered walking up the chain of
+        // sole predecessors and giving up at a write.
+        let mut facts: Vec<(Operand, Operand)> = Vec::new();
         let mut at = bi;
         let mut clean = !writes(&f.blocks[bi]);
-        let mut proved = false;
         for _ in 0..64 {
             if !clean {
                 break;
@@ -540,16 +541,14 @@ pub fn elide_dominated_checks(f: &mut Function) {
                 && dp.label != *label
                 && let Operand::Value(c1) = dc
                 && let Some(InstKind::Cmp { a: x1, b: y1, .. }) = def.get(c1)
-                && equiv(x1, x2, &def, 0)
-                && equiv(y1, y2, &def, 0)
             {
-                proved = true;
-                break;
+                facts.push((x1.clone(), y1.clone()));
             }
             clean &= !writes(d);
             at = pi;
         }
-        if proved {
+
+        if entails_less(x2, y2, &facts, &def) {
             rewrite.push((bi, neg.clone()));
         }
     }
@@ -558,6 +557,52 @@ pub fn elide_dominated_checks(f: &mut Function) {
     }
     prune_unreachable(f);
     remove_dead(f);
+}
+
+/// Whether the facts force `x < y`.
+///
+/// Directly, or through one step: `x < z` and `z <= y`, where `z <= y` is
+/// itself a fact or a constant comparison. One step is enough for what the
+/// language produces — a loop bound and a length — and stopping there keeps
+/// this a decision rather than a search.
+fn entails_less(
+    x: &Operand,
+    y: &Operand,
+    facts: &[(Operand, Operand)],
+    def: &BTreeMap<String, InstKind>,
+) -> bool {
+    // `x < y` outright.
+    if facts
+        .iter()
+        .any(|(a, b)| equiv(a, x, def, 0) && equiv(b, y, def, 0))
+    {
+        return true;
+    }
+    // `x < z`, and `z` is no larger than `y`.
+    facts
+        .iter()
+        .any(|(a, z)| equiv(a, x, def, 0) && (equiv(z, y, def, 0) || no_larger(z, y, facts, def)))
+}
+
+/// Whether `z <= y` is known: the same value, two constants in order, or a
+/// fact `z < y`.
+fn no_larger(
+    z: &Operand,
+    y: &Operand,
+    facts: &[(Operand, Operand)],
+    def: &BTreeMap<String, InstKind>,
+) -> bool {
+    if equiv(z, y, def, 0) {
+        return true;
+    }
+    if let (Operand::Const(_, a), Operand::Const(_, b)) = (z, y)
+        && let (Some(a), Some(b)) = (a.to_i128(), b.to_i128())
+    {
+        return a <= b;
+    }
+    facts
+        .iter()
+        .any(|(p, q)| equiv(p, z, def, 0) && equiv(q, y, def, 0))
 }
 
 /// Whether a block writes anything a later read could see.

@@ -562,3 +562,39 @@ fn a_fold_that_would_fault_is_not_a_fold() {
     });
     assert!(text.contains("div"), "{text}");
 }
+
+#[test]
+fn a_check_follows_from_two_facts() {
+    // `i < j` above and `j < n` above that force `i < n`, which the earlier
+    // shape — "the same comparison" — could not see. One transitive step is
+    // enough for what the language produces, a loop bound and a length, and
+    // stopping there keeps this a decision rather than a search (TIR §6).
+    let m = tir::parse_module(
+        "tir 0.1 target \"tritium\"\n\n\
+         fn @main(%i: t27, %j: t27, %n: t27) -> t27 {\n\
+         ^entry:\n\
+         %c1 = cmp t27 %j, %n\n\
+         br3 %c1, ^a, ^out, ^out\n\
+         ^a:\n\
+         %c2 = cmp t27 %i, %j\n\
+         br3 %c2, ^b, ^out, ^out\n\
+         ^b:\n\
+         %c3 = cmp t27 %i, %n\n\
+         br3 %c3, ^ok, ^out, ^out\n\
+         ^ok:\n\
+         ret const t27 1\n\
+         ^out:\n\
+         ret const t27 0\n\
+         }\n",
+    )
+    .expect("parses");
+    let mut f = m.funcs[0].clone();
+    tir::elide_dominated_checks(&mut f);
+    // The third test is gone: `^b` goes straight on.
+    let b = f.blocks.iter().find(|b| b.label == "b").expect("^b");
+    assert!(
+        matches!(&b.term, tir::Terminator::Br(t) if t.label == "ok"),
+        "{:?}",
+        b.term
+    );
+}

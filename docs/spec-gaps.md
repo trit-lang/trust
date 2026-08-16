@@ -2777,6 +2777,14 @@ Three more tests hold the other side: a loop that counts past a constant
 length, one bounded by a runtime value the callee cannot relate to the slice,
 and one that outruns a `Vec`. All three still fault.
 
+*Generalized to facts.* "The same comparison" is one case of "the facts force
+it". What the walk collects now is every `x < y` a taken edge decided, and a
+query is answered directly or through **one** transitive step — `i < j` and
+`j <= n` gives `i < n`. One step is what the language produces, a loop bound
+and a length; stopping there keeps this a decision rather than a search. It
+changes no measurement yet, because the fact HPL needs is not on any branch:
+see G8.21.
+
 **G8.20 — no, a release mode will not remove the bounds checks.** Asked once
 and worth answering here, because a 30% number invites it.
 
