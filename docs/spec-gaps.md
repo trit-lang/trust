@@ -2592,6 +2592,42 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.30 — an operator on a reference compiled to a comparison of addresses.**
+`a == b` on two `&t27` emitted `cmp` on two `ptr`s, which is not an
+instruction TIR has; the verifier caught it and the frontend should have.
+Ch. 3 §2.3 already says what to do: automatic dereference is for `.` and
+nothing else, and "`r + 1` is an error, not `*r + 1`". So every operator on a
+reference is now refused, and says to write `*a == *b`.
+
+**G9.31 — `v[i].m()` on a `Vec` loaded twice.** `type_of_place` knew about an
+array's element and a slice's, and not a `Vec`'s — while `place`, beside it,
+has always known. So a method call on `v[i]` took the *non*-place path, which
+binds the receiver to a name and reads it again, and the name it bound was an
+SSA value rather than a slot. What came out was `load t27 %v`, a load from a
+number.
+
+Two fixes, because the second is the one that matters: `type_of_place` learnt
+the case, and the non-place path now materializes a **scalar** receiver into
+a slot before naming it. Only an aggregate's value *is* its storage (TIR §2);
+a scalar's is a value, and binding a name to it says the name's slot is at
+that number. Another disagreement of the same kind would now cost a copy
+rather than a wrong program.
+
+**G9.32 — the prelude defined `Map` twice, and nothing said so.** A program's
+own duplicates are caught while resolving modules (Ch. 6); the prelude is
+parsed and merged rather than resolved, so nothing checked it. The iterator
+adaptor `Map<I, F>` (Ch. 5 §3.1) and a hash map both existed, and the field
+lookup for one found the other's. A test now walks the prelude's items and
+fails on a repeat.
+
+*Two more things the map wanted.* A bound asking for `Eq` or `Ord` is
+satisfied by a **primitive** without an impl: Ch. 4 §5.3 gives those traits
+their meaning for a *nominal* type, and Ch. 1 §4 gives a primitive the
+operators directly, so an impl for one would be writing out what the language
+already does. And the builtin-method gate asked only whether *any* type had a
+method of that name, so a program could not define `insert` on its own type;
+it now asks what the receiver is, from the same table a completion reads.
+
 **G9.29 — a pattern nests, and an arm may have a guard.** Both were refused
 with "not lowered yet", and both needed one thing: an arm that has matched its
 *head* and can still fail must have somewhere to go.

@@ -1654,6 +1654,10 @@ pub const BUILTIN_METHODS: &[(&str, &str, &str)] = &[
     ("int", "is_zero", "fn is_zero(self) -> bool"),
     ("int", "is_neg", "fn is_neg(self) -> bool"),
     ("int", "to_trit", "fn to_trit(self) -> trit"),
+    // A `bool` is the one non-integer the language writes a method on: Ch. 1
+    // §6's projection, and nothing else — `true.wrapping_add(x)` is not a
+    // sentence.
+    ("bool", "to_trit", "fn to_trit(self) -> trit"),
     // Ch. 1 §5: the overflow flavours, written into the operation.
     (
         "int",
@@ -1732,13 +1736,45 @@ pub const BUILTIN_METHODS: &[(&str, &str, &str)] = &[
     ("str", "is_empty", "fn is_empty(&self) -> bool"),
 ];
 
-/// Whether `name` is one the language defines, whatever it is written on.
+/// Which of the table's receiver kinds a type is, or `None` for a type the
+/// language writes nothing on.
 ///
-/// The receiver is checked where the method is lowered, which is where the
-/// diagnostic can say what went wrong; this only has to keep `impl` blocks
-/// from claiming the name.
-fn is_builtin_method(name: &str) -> bool {
-    BUILTIN_METHODS.iter().any(|(_, n, _)| *n == name)
+/// A `struct` is `None`, which is what lets a program define a method whose
+/// name the language also uses: `insert` on a `Vec` is the language's and
+/// `insert` on anything else is the program's.
+pub fn builtin_kind(ty: &str) -> Option<&'static str> {
+    match ty {
+        "trit" | "t9" | "t27" | "taddr" => Some("int"),
+        "bool" => Some("bool"),
+        "Vec" => Some("Vec"),
+        "str" => Some("str"),
+        _ if ty.starts_with('[') => Some("slice"),
+        _ => None,
+    }
+}
+
+/// Whether the language defines `name` on a value of type `ty`.
+///
+/// Draft 0.1 asked only whether *any* type had a method of that name, so a
+/// program that wrote `insert` on its own type was told the language had
+/// claimed it — for a receiver the language writes nothing on at all.
+fn is_builtin_method(ty: &Ty, name: &str) -> bool {
+    let Some(kind) = builtin_kind(&nominal_for_builtin(ty)) else {
+        return false;
+    };
+    BUILTIN_METHODS
+        .iter()
+        .any(|(on, n, _)| *on == kind && *n == name)
+}
+
+/// A type as the builtin table names it: through any references, and by head.
+fn nominal_for_builtin(ty: &Ty) -> String {
+    match ty {
+        Ty::Ref(inner, _) | Ty::Boxed(inner) => nominal_for_builtin(inner),
+        Ty::VecOf(_) => "Vec".to_string(),
+        Ty::Slice(_) => "[]".to_string(),
+        other => format!("{other}"),
+    }
 }
 
 /// The name of the hidden out-pointer for an aggregate return.
@@ -5653,6 +5689,22 @@ impl Fn<'_> {
             return self.compare_nominal(op, &name, va, vb, span);
         }
 
+        // Ch. 3 §2.3: automatic dereference applies to `.` and nowhere else,
+        // so an operator on a reference is an error rather than an operator
+        // on what it points at. Draft 0.1 compiled `a == b` on two `&t27`
+        // into a `cmp` of two addresses, which is not an instruction TIR has
+        // — the verifier caught it, and this is where it should have been
+        // caught instead (G9.30).
+        if matches!(ta, Ty::Ref(..) | Ty::Boxed(_)) {
+            return err(
+                span,
+                format!(
+                    "`{op}` does not apply to {ta}: automatic dereference is for `.` and \
+                     nothing else (Ch. 3 §2.3), so write `*a {op} *b`"
+                ),
+            );
+        }
+
         let tir = ta.tir();
         match op {
             "+" | "-" | "*" | "<<" => {
@@ -5938,6 +5990,13 @@ impl Fn<'_> {
                 };
                 match through_refs(bt) {
                     Ty::Array(elem, _) => Some(*elem),
+                    // A `Vec`'s element is a place like an array's. `place`
+                    // has always known that and this did not, so a method
+                    // call on `v[i]` took the *non*-place path — which binds
+                    // the receiver by name and then reads it again, and the
+                    // name it bound was an SSA value rather than a slot. The
+                    // result was a second `load` from a `t27` (G9.31).
+                    Ty::VecOf(elem) => Some(*elem),
                     Ty::Ref(inner, _) => match *inner {
                         Ty::Slice(elem) => Some(*elem),
                         _ => None,
@@ -6610,6 +6669,12 @@ impl Fn<'_> {
         let ok = match bound {
             "Copy" => self.types.is_copyable(ty),
             "Sized" => !ty.is_unsized(),
+            // Ch. 4 §5.3 gives `==` and `<` their meaning through `Eq` and
+            // `Ord` for a *nominal* type; a primitive has both from Ch. 1
+            // §4 directly, and writing an impl for one would be writing out
+            // what the language already does. So a bound asking for them is
+            // satisfied by a primitive without one.
+            "Eq" | "Ord" if ty.is_scalar() => true,
             // A reference's impls are keyed under its referent, which is
             // where `impl Trait for &T` puts them too (Ch. 4 §2.1).
             _ => match nominal_name(ty).or_else(|| match ty {
@@ -6793,8 +6858,24 @@ impl Fn<'_> {
         span: Span,
     ) -> R<(Operand, Ty)> {
         // Ch. 1's own methods are the language's, and are not overridable;
-        // everything else resolves through impl blocks (Ch. 4 §1.3).
-        if !is_builtin_method(name) {
+        // everything else resolves through impl blocks (Ch. 4 §1.3). Which
+        // ones are the language's depends on what they are written *on*: a
+        // `Vec` has `insert` and a program's own type may have one too.
+        let of = self.type_of_place(recv)?;
+        let receiver = match &of {
+            Some(t) => Some(t.clone()),
+            None => self.peek_ty(recv)?,
+        };
+        // Only a receiver this *knows* the language writes nothing on is
+        // handed to the impl blocks. A receiver whose type is not yet
+        // decidable keeps draft 0.1's rule — the name is the language's
+        // wherever it appears — because getting that wrong turns a method
+        // Ch. 1 defines into one nobody has.
+        let language_owns = match &receiver {
+            Some(t) => is_builtin_method(t, name),
+            None => BUILTIN_METHODS.iter().any(|(_, n, _)| *n == name),
+        };
+        if !language_owns {
             return self.user_method(recv, name, args, expected, span);
         }
         // A `Vec` is mutated in place and never read as a value here, so its
@@ -9243,7 +9324,20 @@ impl Fn<'_> {
             Some(t) => (t, true),
             None => {
                 let (v, ty) = self.expr(&recv, None)?;
-                if let Operand::Value(slot) = v {
+                // Only an aggregate's value *is* its storage (TIR §2). A
+                // scalar's is a value, and binding a name to it would say
+                // the name's slot is at that number — so a scalar receiver
+                // gets a slot of its own to be named by.
+                let held = match (&v, ty.is_aggregate()) {
+                    (Operand::Value(slot), true) => Some(slot.clone()),
+                    (_, false) => {
+                        let slot = self.temp_slot(&ty);
+                        self.store_at(&slot, 0, &ty, v, span)?;
+                        Some(slot)
+                    }
+                    _ => None,
+                };
+                if let Some(slot) = held {
                     let bound = self.bind_existing(slot, ty.clone());
                     recv = ast::Expr::Path(bound, span);
                 }

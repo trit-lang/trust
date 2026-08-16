@@ -73,3 +73,66 @@ fn a_vec_of_char_answers_a_strs_methods() {
                \x20   s.starts_with(\"ab\")\n}\n";
     assert_eq!(refusal(src), None);
 }
+
+#[test]
+fn the_prelude_defines_each_name_once() {
+    // Two `struct Map` coexisted in the prelude — the iterator adaptor and a
+    // hash map — and nothing said so, because a program's own duplicates are
+    // caught while resolving modules and the prelude is not resolved. What
+    // it cost was a field lookup finding the other one's fields (G9.32).
+    use trustc::lang::ast::Item;
+    let file = trustc::lang::parse::parse(trustc::lang::PRELUDE).expect("the prelude parses");
+    let mut seen: Vec<&str> = Vec::new();
+    let mut twice: Vec<&str> = Vec::new();
+    for item in &file.items {
+        let name = match item {
+            Item::Fn(f) => &f.name,
+            Item::Struct(s) => &s.name,
+            Item::Enum(e) => &e.name,
+            Item::Trait(t) => &t.name,
+            Item::Const(c) => &c.name,
+            Item::Alias(a) => &a.name,
+            _ => continue,
+        };
+        if seen.contains(&name.as_str()) {
+            twice.push(name);
+        }
+        seen.push(name);
+    }
+    assert!(twice.is_empty(), "defined twice in the prelude: {twice:?}");
+}
+
+#[test]
+fn a_primitive_satisfies_eq_and_ord() {
+    // Ch. 4 §5.3 gives `==` its meaning through `Eq` for a nominal type; a
+    // primitive has it from Ch. 1 §4 directly, so a bound asking for `Eq` is
+    // satisfied by one without an impl nobody could usefully write.
+    let src = "fn same<K: Eq>(a: &K, b: &K) -> bool { *a == *b }\n\
+               fn main() -> t27 { let x = 1; let y = 1; if same(&x, &y) { 1 } else { 0 } }\n";
+    assert_eq!(refusal(src), None);
+}
+
+#[test]
+fn a_hash_map_holds_what_is_put_in_it() {
+    let src = "fn main() -> t27 {\n\
+               \x20   let mut m: HashMap<t27, t27> = HashMap::new();\n\
+               \x20   m.insert(1, 10);\n\
+               \x20   m.insert(65, 650);\n\
+               \x20   m.insert(1, 11);\n\
+               \x20   let a = 1;\n\
+               \x20   let c = 3;\n\
+               \x20   let hit = if m.has(&a) { 1 } else { 0 };\n\
+               \x20   let miss = if m.has(&c) { 1 } else { 0 };\n\
+               \x20   m.len() as t27 * 100 + hit * 10 + miss\n}\n";
+    assert_eq!(refusal(src), None);
+}
+
+#[test]
+fn a_method_name_the_language_uses_is_free_on_another_type() {
+    // `insert` is a `Vec`'s, and the gate used to ask only whether *any*
+    // type had a method of that name — so a program could not define one.
+    let src = "struct Bag { n: t27 }\n\
+               impl Bag { fn insert(&mut self, x: t27) { self.n += x; } }\n\
+               fn main() -> t27 { let mut b = Bag { n: 0 }; b.insert(3); b.n }\n";
+    assert_eq!(refusal(src), None);
+}

@@ -246,13 +246,10 @@ impl Index {
 /// table `lower` matches against. Reading that same table is what keeps a
 /// completion from being a second list of what exists.
 pub fn builtin_members(ty: &str) -> Vec<(&'static str, &'static str)> {
-    let name = nominal(ty);
-    let kind = match name {
-        "trit" | "t9" | "t27" | "taddr" => "int",
-        "Vec" => "Vec",
-        "str" => "str",
-        _ if name.starts_with('[') => "slice",
-        _ => return Vec::new(),
+    // The same classifier the compiler dispatches by, so a completion offers
+    // exactly what a call would find.
+    let Some(kind) = super::lower::builtin_kind(nominal(ty)) else {
+        return Vec::new();
     };
     super::lower::BUILTIN_METHODS
         .iter()

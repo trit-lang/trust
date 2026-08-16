@@ -371,6 +371,114 @@ impl<T> IntoIterator for Vec<T> {
     }
 }
 
+// --- Ch. 5 §2: a map ------------------------------------------------------
+
+// What a key must be able to do beyond being comparable: turn itself into a
+// number. Equality comes from `Eq`, which every primitive has from Ch. 1 §4
+// and every nominal type may derive (Ch. 4 §6) — so `Key` adds one method
+// and claims one name.
+trait Key: Eq {
+    fn hash(&self) -> taddr;
+}
+
+impl Key for t27 {
+    fn hash(&self) -> taddr { *self as taddr }
+}
+
+impl Key for char {
+    // A `char` converts to `t27` and to nothing else (Ch. 5 §1.2), so the
+    // widening to an address is written in two steps rather than assumed.
+    fn hash(&self) -> taddr { (*self as t27) as taddr }
+}
+
+struct Entry<K, V> {
+    k: K,
+    v: V,
+}
+
+// The name is `HashMap` and not `Map` because the iterator adaptor of
+// Ch. 5 §3.1 is a `Map` already — and the two coexisted silently until one
+// of them was asked for a field the other had (G9.32).
+//
+// Open addressing would be fewer allocations and is what a mature one does.
+// This is a **vector of buckets**, each a vector of entries, because it is
+// the version whose correctness can be read off it: nothing here depends on
+// a load factor, a probe sequence, or a tombstone.
+//
+// `BUCKETS` is fixed, so the map does not grow its table. That is a real
+// limit and it is written here rather than discovered: a map with far more
+// entries than buckets degrades to a linear scan of one of them.
+struct HashMap<K, V> {
+    buckets: Vec<Vec<Entry<K, V>>>,
+    n: taddr,
+}
+
+const BUCKETS: taddr = 64;
+
+impl<K: Key, V> HashMap<K, V> {
+    fn new() -> HashMap<K, V> {
+        let mut bs: Vec<Vec<Entry<K, V>>> = Vec::new();
+        let mut i: taddr = 0;
+        while i < BUCKETS {
+            let empty: Vec<Entry<K, V>> = Vec::new();
+            bs.push(empty);
+            i += 1;
+        }
+        HashMap { buckets: bs, n: 0 }
+    }
+
+    /// How many keys it holds.
+    fn len(&self) -> taddr {
+        self.n
+    }
+
+    fn which(&self, k: &K) -> taddr {
+        let h = k.hash();
+        // `%` here is symmetric (Ch. 1 §4), so it may answer negatively —
+        // which is not a bucket. The sign is taken off before the remainder
+        // rather than after, because `-h % n` and `(-h) % n` differ.
+        let zero: taddr = 0;
+        let a = if h < zero { zero - h } else { h };
+        a % BUCKETS
+    }
+
+    /// The value for `k`, or `None`.
+    fn get(&self, k: &K) -> Option<&V> {
+        let b = self.which(k);
+        let mut i: taddr = 0;
+        while i < self.buckets[b].len() {
+            if self.buckets[b][i].k == *k {
+                return Option::Some(&self.buckets[b][i].v);
+            }
+            i += 1;
+        }
+        Option::None
+    }
+
+    /// Whether `k` is in it.
+    fn has(&self, k: &K) -> bool {
+        match self.get(k) {
+            Option::Some(v) => true,
+            Option::None => false,
+        }
+    }
+
+    /// Put `v` under `k`, replacing whatever was there.
+    fn insert(&mut self, k: K, v: V) {
+        let b = self.which(&k);
+        let mut i: taddr = 0;
+        while i < self.buckets[b].len() {
+            if self.buckets[b][i].k == k {
+                self.buckets[b][i].v = v;
+                return;
+            }
+            i += 1;
+        }
+        self.buckets[b].push(Entry { k: k, v: v });
+        self.n += 1;
+    }
+}
+
 // What a sequence of values can be gathered into (Ch. 5 §3.3).
 //
 // The element is an *associated* type rather than a parameter: a type is
