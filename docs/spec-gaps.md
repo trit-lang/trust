@@ -2681,6 +2681,44 @@ small change, and 167 ms for a 688-line program is not a problem worth it.
 `demo.tr` is 0.04 ms per line, so a gap of six remains and is recorded rather
 than chased.
 
+**G8.18 — common subexpression elimination made this machine slower, and
+that is the finding.** Route C in `docs/status.md` §10 was bounds-check
+elimination, and the profile of an indexed loop said the checks are **four of
+its sixteen instructions**:
+
+```
+^while:  %len1 = load (offset %v.slot 3)      k < v.len()
+         %c1   = cmp %k1, %len1
+^body:   %len2 = load (offset %v.slot 3)      the same load
+         %k2   = load %k.slot                 the same k
+         %c2   = cmp %k2, %len2               the same comparison
+```
+
+The second comparison is decided by the branch above it. It does not *look*
+decided because every operand is a different SSA value, so the obvious first
+move is to make them the same: a value-numbering pass that reuses a load or a
+pure computation already made, inheriting across a **sole** predecessor, which
+is sound because that is the only way in.
+
+It was written, it is correct, it fires — and **every benchmark got worse**:
+the range loop by 9.5%, an adaptor chain by 5%, HPL by 0.08%. The reason is
+not subtle once measured: eliminating a recomputation **extends a live range**
+across the loop's back edge, and a linear-scan allocator with 27 registers
+spills something to pay for it. Recomputing an `offset` is one instruction;
+spilling is two and a frame slot.
+
+*What the finding changes.* Bounds-check elimination does not need the two
+comparisons to *be* one value — it needs to know that they are *equal*. An
+**equivalence oracle** costs no registers: walk the sole-predecessor chain
+from the deciding branch, require no `store` or `call` on the way, and compare
+the two comparisons' operands by their defining instructions rather than by
+name. Nothing is rewritten, so nothing lives longer. That is the design; it is
+not built.
+
+This is also the third measurement in this log to contradict a change that
+looked obviously good — after the inlining budget, which is worse when raised,
+and constant folding, which was worth 62 instructions.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

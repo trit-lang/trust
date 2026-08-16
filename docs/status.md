@@ -401,10 +401,21 @@ words, and two words go through memory. Every iterator pays it per item. The
 fix is not another peephole: it is either promoting small aggregates out of
 memory, or a niche that does not exist.
 
-**C. Range analysis.** Branches and comparisons are 36% of everything HPL
-executes — loop conditions, and the **two** bounds checks every array index
-still pays — and the index multiply is 7.9%. Bounds-check elimination and
-strength reduction both need it, and this compiler has no analysis at all.
+**C. Bounds-check elimination, by an equivalence *oracle*.** Branches and
+comparisons are 36% of everything HPL executes, and in an indexed loop the two
+bounds checks are four of sixteen instructions. The upper one is already
+decided by the loop condition above it — it only looks undecided because every
+operand is a different SSA value.
+
+The obvious move is value numbering, and it was tried and **measured worse**
+(G8.18): merging the values extends a live range across the back edge and the
+allocator spills to pay for it. What is needed instead is an oracle that says
+two comparisons are *equal* without making them one value — walk the
+sole-predecessor chain, require no `store` or `call` on the way, compare
+defining instructions rather than names. Nothing is rewritten, so nothing
+lives longer.
+
+The lower check (`i >= 0`) needs induction reasoning and is a separate half.
 
 **D. The decisions that are the author's.** These are not work items; they are
 questions the implementation cannot answer:
