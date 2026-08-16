@@ -69,7 +69,7 @@ pub fn unary(p: &mut Parser) -> Result<Expr, lex::Error> {
     let next = t.at;
     match t.tok {
         Tok::Op(o) => {
-            if ast::same(&o, "-") || ast::same(&o, "!") {
+            if o.same("-") || o.same("!") {
                 p.at = next;
                 let inner = unary(p)?;
                 return Result::Ok(Expr::Unary(o, Box::new(inner)));
@@ -93,7 +93,7 @@ pub fn primary(p: &mut Parser) -> Result<Expr, lex::Error> {
             let skip = after.at;
             match after.tok {
                 Tok::Op(o) => {
-                    if ast::same(&o, "(") {
+                    if o.same("(") {
                         p.at = skip;
                         let args = arguments(p)?;
                         return Result::Ok(Expr::Call(n, args));
@@ -104,12 +104,12 @@ pub fn primary(p: &mut Parser) -> Result<Expr, lex::Error> {
             }
         }
         Tok::Op(o) => {
-            if ast::same(&o, "(") {
+            if o.same("(") {
                 let inner = expr(p)?;
                 let close = bump(p)?;
                 match close {
                     Tok::Op(c) => {
-                        if !ast::same(&c, ")") {
+                        if !c.same(")") {
                             return Result::Err(lex::Error {
                                 at: p.at,
                                 message: "expected `)`".to_string(),
@@ -138,7 +138,7 @@ fn arguments(p: &mut Parser) -> Result<Vec<Expr>, lex::Error> {
     let skip = first.at;
     match first.tok {
         Tok::Op(o) => {
-            if ast::same(&o, ")") {
+            if o.same(")") {
                 p.at = skip;
                 return Result::Ok(out);
             }
@@ -151,10 +151,10 @@ fn arguments(p: &mut Parser) -> Result<Vec<Expr>, lex::Error> {
         let t = bump(p)?;
         match t {
             Tok::Op(o) => {
-                if ast::same(&o, ")") {
+                if o.same(")") {
                     return Result::Ok(out);
                 }
-                if !ast::same(&o, ",") {
+                if !o.same(",") {
                     return Result::Err(lex::Error {
                         at: p.at,
                         message: "expected `,` or `)`".to_string(),

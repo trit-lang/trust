@@ -38,27 +38,16 @@ pub fn is_space(c: char) -> bool {
     c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
-/// Whether two pieces of text are the same, however each is held.
-///
-/// A `String` is a `Vec<char>` (Ch. 0 §3.6) and has `Eq`'s `eq`, which takes
-/// another `Vec<char>`; a literal is a `&str`. Both *are* `&str` once
-/// borrowed, so the comparison is written where they agree — and this is
-/// the one place a self-hosted lexer needed the language to be told twice
-/// what it already knows (G9.36).
-pub fn same(a: &str, b: &str) -> bool {
-    a.eq(b)
-}
-
 /// Whether `w` is one of §1.3's keywords.
 pub fn is_keyword(w: &str) -> bool {
-    same(w, "as") || same(w, "break") || same(w, "const") || same(w, "continue")
-        || same(w, "dyn") || same(w, "else") || same(w, "enum") || same(w, "false")
-        || same(w, "fn") || same(w, "for") || same(w, "if") || same(w, "impl")
-        || same(w, "in") || same(w, "let") || same(w, "loop") || same(w, "macro")
-        || same(w, "match") || same(w, "mod") || same(w, "mut") || same(w, "pub")
-        || same(w, "return") || same(w, "self") || same(w, "Self") || same(w, "struct")
-        || same(w, "trait") || same(w, "true") || same(w, "type") || same(w, "use")
-        || same(w, "where") || same(w, "while")
+    w.same("as") || w.same("break") || w.same("const") || w.same("continue")
+        || w.same("dyn") || w.same("else") || w.same("enum") || w.same("false")
+        || w.same("fn") || w.same("for") || w.same("if") || w.same("impl")
+        || w.same("in") || w.same("let") || w.same("loop") || w.same("macro")
+        || w.same("match") || w.same("mod") || w.same("mut") || w.same("pub")
+        || w.same("return") || w.same("self") || w.same("Self") || w.same("struct")
+        || w.same("trait") || w.same("true") || w.same("type") || w.same("use")
+        || w.same("where") || w.same("while")
 }
 
 /// One token and where it ended, so the caller can go on from there.
@@ -84,8 +73,8 @@ fn wrong(at: taddr, message: &str) -> Error {
 /// Reserved for a chapter that does not exist yet (§1.3). Using one is an
 /// error that names the reason, rather than a mysterious parse failure.
 pub fn is_reserved(w: &str) -> bool {
-    same(w, "crate") || same(w, "move") || same(w, "ref") || same(w, "static")
-        || same(w, "union") || same(w, "unsafe")
+    w.same("crate") || w.same("move") || w.same("ref") || w.same("static")
+        || w.same("union") || w.same("unsafe")
 }
 
 /// Read one token from `s` starting at `at`, having skipped whitespace and
@@ -176,14 +165,14 @@ pub fn one(s: &str, from: taddr) -> Result<Taken, Error> {
 
     // An operator, longest first (§1.5).
     let three = slice(s, i, min(i + 3, s.len()));
-    if same(&three, "<<=") || same(&three, ">>=") || same(&three, "<=>") || same(&three, "..=") {
+    if three.same("<<=") || three.same(">>=") || three.same("<=>") || three.same("..=") {
         return Result::Ok(Taken { tok: Tok::Op(three), at: i + 3 });
     }
     let two = slice(s, i, min(i + 2, s.len()));
-    if same(&two, "..") || same(&two, "==") || same(&two, "!=") || same(&two, "<=") || same(&two, ">=")
-        || same(&two, "&&") || same(&two, "||") || same(&two, "->") || same(&two, "=>")
-        || same(&two, "::") || same(&two, "+=") || same(&two, "-=") || same(&two, "*=")
-        || same(&two, "/=") || same(&two, "%=") || same(&two, "<<") || same(&two, ">>")
+    if two.same("..") || two.same("==") || two.same("!=") || two.same("<=") || two.same(">=")
+        || two.same("&&") || two.same("||") || two.same("->") || two.same("=>")
+        || two.same("::") || two.same("+=") || two.same("-=") || two.same("*=")
+        || two.same("/=") || two.same("%=") || two.same("<<") || two.same(">>")
     {
         return Result::Ok(Taken { tok: Tok::Op(two), at: i + 2 });
     }

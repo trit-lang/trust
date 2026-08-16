@@ -2659,20 +2659,24 @@ before, it says which branch reaches the join, and only those are joined.
 That shape — check, return, carry on — is half of what a compiler is written
 in.
 
-**G9.36 — `String` and `&str` cannot be compared without saying so.** A
-`String` is a `Vec<char>` (Ch. 0 §3.6) and has `Eq`'s `eq`, which takes
-another `Vec<char>`; a literal is a `&str`. Both *are* `&str` once borrowed,
-and there is no overloading, so the comparison has to be written where the
-two agree:
+**G9.36 — `String` and `&str` could not be compared — RESOLVED, by a name.**
+A `String` is a `Vec<char>` (Ch. 0 §3.6) and has `Eq`'s `eq`, which takes
+another `Vec<char>`; a literal is a `&str`. There is no overloading, so the
+`eq` on `Vec<char>` hid the one on `str` and text could not be compared with
+text.
 
-```
-fn same(a: &str, b: &str) -> bool { a.eq(b) }
-```
+The fix is not a coercion and not overloading: `str`'s comparison is named
+**`same`**, which `Vec<char>` does not have — so the fallback from a
+`Vec<char>` to `str`'s methods finds it, and `s.same("hello")` compares text
+with text however each side is held. `==` still compares two `String`s
+through `Eq`, and `s == t` means what it says.
 
-That is one line and it is not wrong, but it is the language being told
-twice what it already knows. What would fix it is `==` coercing its operands
-the way an argument is coerced (Ch. 5 §2.6), which is a decision about
-comparison rather than about text and is not made here.
+*Why a name and not a rule.* The alternatives were `==` coercing its operands
+or method lookup resolving by argument type. The first makes `==` mean
+something different for text than for everything else; the second is
+overloading, which this language does not have anywhere and would have to
+have everywhere. A name costs one sentence in the prelude and nothing else,
+and the sentence is in it.
 
 **G9.33 — four things a sweep found, and one of them was `==`.** Combining
 what had just been built — a `String`, a `HashMap`, generics, `Eq` — turned

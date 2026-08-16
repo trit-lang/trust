@@ -800,9 +800,14 @@ impl str {
 
     /// Whether this text is `other`, character for character.
     ///
-    /// `==` on two references compares the references (Ch. 3 §2.4), which is
-    /// not the question anyone asks of text.
-    fn eq(&self, other: &str) -> bool {
+    /// Named `same` and not `eq` for a reason worth knowing. A `String` is a
+    /// `Vec<char>` (Ch. 0 §3.6) and has `Eq`'s `eq`, which takes another
+    /// `Vec<char>`; a literal is a `&str`. If this were `eq` too, the one on
+    /// `Vec<char>` would hide it and a `String` could not be compared with a
+    /// literal at all — there is no overloading to sort them out. Under a
+    /// name `Vec<char>` does not have, the fallback to `str`'s methods finds
+    /// it, and text is compared with text however each side is held (G9.36).
+    fn same(&self, other: &str) -> bool {
         if self.len() != other.len() {
             return false;
         }

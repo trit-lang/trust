@@ -22,30 +22,25 @@ pub enum Expr {
 /// How tightly an operator binds (§2.1), loosest first. Zero means it is not
 /// a binary operator at all.
 pub fn level(op: &str) -> taddr {
-    if same(op, "||") {
+    if op.same("||") {
         1
-    } else if same(op, "&&") {
+    } else if op.same("&&") {
         2
-    } else if same(op, "==") || same(op, "!=") || same(op, "<") || same(op, "<=")
-        || same(op, ">") || same(op, ">=")
+    } else if op.same("==") || op.same("!=") || op.same("<") || op.same("<=")
+        || op.same(">") || op.same(">=")
     {
         3
-    } else if same(op, "<=>") {
+    } else if op.same("<=>") {
         4
-    } else if same(op, "<<") || same(op, ">>") {
+    } else if op.same("<<") || op.same(">>") {
         5
-    } else if same(op, "+") || same(op, "-") {
+    } else if op.same("+") || op.same("-") {
         6
-    } else if same(op, "*") || same(op, "/") || same(op, "%") {
+    } else if op.same("*") || op.same("/") || op.same("%") {
         7
     } else {
         0
     }
-}
-
-/// Whether two pieces of text are the same, however each is held (G9.36).
-pub fn same(a: &str, b: &str) -> bool {
-    a.eq(b)
 }
 
 /// The tree, written out in a form that says its shape without ambiguity:

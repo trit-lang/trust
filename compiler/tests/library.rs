@@ -46,6 +46,22 @@ fn an_alias_takes_no_parameters_in_draft_zero_one() {
 }
 
 #[test]
+fn a_string_compares_with_a_literal() {
+    // `str`'s comparison is `same` and not `eq`, so the `Eq` on `Vec<char>`
+    // does not hide it — a `String` is compared with a literal directly, and
+    // with another `String` by `==` (G9.36).
+    let src = "fn main() -> t27 {\n\
+               \x20   let s: String = \"hello\".to_string();\n\
+               \x20   let t: String = \"hello\".to_string();\n\
+               \x20   let mut n = 0;\n\
+               \x20   if s.same(\"hello\") { n += 1; }\n\
+               \x20   if \"abc\".same(\"abc\") { n += 100; }\n\
+               \x20   if s == t { n += 1000; }\n\
+               \x20   n\n}\n";
+    assert_eq!(refusal(src), None);
+}
+
+#[test]
 fn a_string_is_owned_growable_text() {
     // `String` is the prelude's name for `Vec<char>`, so everything a `Vec`
     // can do it can do, and everything a `&str` can do it can do through the
@@ -56,8 +72,8 @@ fn a_string_is_owned_growable_text() {
                \x20   let mut n = 0;\n\
                \x20   if s.starts_with(\"hello\") { n += 1; }\n\
                \x20   if s.contains(\"o, w\") { n += 10; }\n\
-               \x20   if \"abc\".eq(\"abc\") { n += 100; }\n\
-               \x20   if \"abc\".eq(\"abd\") { n += 1000; }\n\
+               \x20   if \"abc\".same(\"abc\") { n += 100; }\n\
+               \x20   if \"abc\".same(\"abd\") { n += 1000; }\n\
                \x20   for c in s { if c == 'o' { n += 10000; } }\n\
                \x20   n\n}\n";
     assert_eq!(refusal(src), None);
