@@ -38,10 +38,13 @@ pub fn inline_module(m: &Module) -> Module {
     let mut out = m.clone();
     let mut tag = 0usize;
     for _ in 0..ROUNDS {
+        // Recomputed each round: splicing changes who calls whom, and a
+        // function that was on no cycle before may be on one now.
+        let cyclic = on_a_cycle(&out);
         let small: HashMap<String, Function> = out
             .funcs
             .iter()
-            .filter(|f| worth_inlining(f))
+            .filter(|f| worth_inlining(f) && !cyclic.contains(&f.sig.name))
             .map(|f| (f.sig.name.clone(), f.clone()))
             .collect();
         if small.is_empty() {
@@ -66,18 +69,109 @@ pub fn inline_module(m: &Module) -> Module {
     out
 }
 
-/// Whether a function is small enough, and simple enough, to splice.
+/// Whether a function is small enough to splice. Being on a call cycle is
+/// the other half of the test, and is `on_a_cycle`'s answer.
 fn worth_inlining(f: &Function) -> bool {
     let insts: usize = f.blocks.iter().map(|b| b.insts.len()).sum();
-    if insts > BUDGET {
-        return false;
+    insts <= BUDGET
+}
+
+/// The functions that lie on a call cycle. None of them may be spliced.
+///
+/// A function that calls itself would be spliced into itself forever, and so
+/// would two that call each other. Excluding the function being inlined
+/// *into* stops the first and not the second: splicing `is_even` into `main`
+/// brings a call to `is_odd`, and the scan walks forward into the body it
+/// just spliced, and splices `is_odd`, which brings a call to `is_even`.
+/// Neither is `main`, so nothing stopped it — and `ROUNDS` never got the
+/// chance, because this all happens inside one call to `inline_into`. Draft
+/// 0.1 said a cycle of two "is stopped by `ROUNDS` instead of by cleverness",
+/// and the compiler hung on `is_even`/`is_odd` (G9.28).
+///
+/// Tarjan's algorithm, and iterative rather than recursive: a compiler that
+/// compiles itself is one large call graph, and running out of stack while
+/// working out where the cycles are would be a poor way to find out.
+fn on_a_cycle(m: &Module) -> HashSet<String> {
+    let names: Vec<&str> = m.funcs.iter().map(|f| f.sig.name.as_str()).collect();
+    let id: HashMap<&str, usize> = names.iter().enumerate().map(|(i, n)| (*n, i)).collect();
+    let edges: Vec<Vec<usize>> = m
+        .funcs
+        .iter()
+        .map(|f| {
+            let mut out: Vec<usize> = f
+                .blocks
+                .iter()
+                .flat_map(|b| &b.insts)
+                .filter_map(|i| match &i.kind {
+                    InstKind::Call {
+                        callee: Callee::Direct(c),
+                        ..
+                    } => id.get(c.as_str()).copied(),
+                    _ => None,
+                })
+                .collect();
+            out.sort_unstable();
+            out.dedup();
+            out
+        })
+        .collect();
+
+    let n = names.len();
+    let (mut index, mut low) = (vec![usize::MAX; n], vec![0usize; n]);
+    let mut on_stack = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut work: Vec<(usize, usize)> = Vec::new();
+    let mut next = 0usize;
+    let mut cyclic: HashSet<String> = HashSet::new();
+
+    for start in 0..n {
+        if index[start] != usize::MAX {
+            continue;
+        }
+        index[start] = next;
+        low[start] = next;
+        next += 1;
+        stack.push(start);
+        on_stack[start] = true;
+        work.push((start, 0));
+        while let Some(&(v, child)) = work.last() {
+            if child < edges[v].len() {
+                work.last_mut().expect("just read").1 += 1;
+                let w = edges[v][child];
+                if index[w] == usize::MAX {
+                    index[w] = next;
+                    low[w] = next;
+                    next += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    work.push((w, 0));
+                } else if on_stack[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+                continue;
+            }
+            work.pop();
+            if let Some(&(parent, _)) = work.last() {
+                low[parent] = low[parent].min(low[v]);
+            }
+            if low[v] == index[v] {
+                // One component. It is a cycle if it holds more than one
+                // function, or one that calls itself.
+                let mut scc = Vec::new();
+                while let Some(w) = stack.pop() {
+                    on_stack[w] = false;
+                    scc.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                if scc.len() > 1 || edges[v].contains(&v) {
+                    cyclic.extend(scc.into_iter().map(|w| names[w].to_string()));
+                }
+            }
+        }
     }
-    // A function that calls itself would be spliced into itself forever. The
-    // check is direct recursion only; a cycle through two functions is
-    // stopped by `ROUNDS` instead of by cleverness.
-    !f.blocks.iter().flat_map(|b| &b.insts).any(
-        |i| matches!(&i.kind, InstKind::Call { callee: Callee::Direct(c), .. } if *c == f.sig.name),
-    )
+    cyclic
 }
 
 /// Splice every eligible call in one function. Returns whether anything moved.
@@ -367,5 +461,69 @@ mod tests {
              }\n",
         );
         assert!(m.function("down").is_some());
+    }
+
+    #[test]
+    fn two_functions_that_call_each_other_are_left_alone() {
+        // Neither calls itself, so the old test — "is this call to me?" —
+        // saw nothing wrong. Splicing `even` into `main` brings a call to
+        // `odd`, and the scan walks forward into what it just spliced.
+        // The compiler hung (G9.28).
+        let text = "tir 0.1 target \"tritium\"\n\n\
+             fn @even(%x: t27) -> t27 {\n\
+             ^entry:\n\
+             %v = call @odd(%x) -> t27\n\
+             ret %v\n\
+             }\n\
+             fn @odd(%x: t27) -> t27 {\n\
+             ^entry:\n\
+             %v = call @even(%x) -> t27\n\
+             ret %v\n\
+             }\n\
+             fn @main() -> t27 {\n\
+             ^entry:\n\
+             %v = call @even(const t27 5) -> t27\n\
+             ret %v\n\
+             }\n";
+        let cycle = on_a_cycle(&parse_module(text).expect("parses"));
+        assert!(cycle.contains("even") && cycle.contains("odd"), "{cycle:?}");
+        assert!(
+            !cycle.contains("main"),
+            "main calls into the cycle, not round it"
+        );
+        let m = round(text);
+        assert!(m.function("even").is_some() && m.function("odd").is_some());
+    }
+
+    #[test]
+    fn a_long_cycle_is_a_cycle_too() {
+        // Three deep, so that nothing about this rests on a pair.
+        let text = "tir 0.1 target \"tritium\"\n\n\
+             fn @a() -> t27 {\n^entry:\n%v = call @b() -> t27\nret %v\n}\n\
+             fn @b() -> t27 {\n^entry:\n%v = call @c() -> t27\nret %v\n}\n\
+             fn @c() -> t27 {\n^entry:\n%v = call @a() -> t27\nret %v\n}\n\
+             fn @main() -> t27 {\n^entry:\n%v = call @a() -> t27\nret %v\n}\n";
+        let cycle = on_a_cycle(&parse_module(text).expect("parses"));
+        assert_eq!(cycle.len(), 3, "{cycle:?}");
+    }
+
+    #[test]
+    fn a_call_that_is_not_a_cycle_is_still_spliced() {
+        // The point of the exclusion is that it excludes cycles and nothing
+        // else: a plain chain still collapses.
+        let m = round(
+            "tir 0.1 target \"tritium\"\n\n\
+             fn @inner(%x: t27) -> t27 {\n^entry:\nret %x\n}\n\
+             fn @outer(%x: t27) -> t27 {\n             ^entry:\n%v = call @inner(%x) -> t27\nret %v\n}\n\
+             fn @main() -> t27 {\n             ^entry:\n%v = call @outer(const t27 5) -> t27\nret %v\n}\n",
+        );
+        let main = m.function("main").expect("main");
+        let calls = main
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter(|i| matches!(i.kind, InstKind::Call { .. }))
+            .count();
+        assert_eq!(calls, 0, "{}", print_module(&m));
     }
 }

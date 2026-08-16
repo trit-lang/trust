@@ -2592,6 +2592,34 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.28 — the inliner did not return on mutual recursion.** `is_even` and
+`is_odd` are two four-instruction functions that call each other, and
+compiling them hung. `check` passed; the frontend was fine. The `inline`
+phase never finished.
+
+The exclusion was "do not splice a call to the function being spliced into",
+which stops direct recursion and nothing else. Splicing `is_even` into `main`
+brings a call to `is_odd`; the scan continues forward into the body just
+spliced, finds it, and splices it, which brings a call to `is_even`. Neither
+is `main`. Draft 0.1's comment said a cycle of two "is stopped by `ROUNDS`
+instead of by cleverness" — but `ROUNDS` bounds the outer loop, and all of
+this happens inside **one** call to `inline_into`.
+
+The fix is the general form of the rule already intended: **a function on a
+call cycle is never spliced**, found by Tarjan's algorithm on the call graph,
+recomputed each round because splicing changes who calls whom. Iterative
+rather than recursive, since a compiler that compiles itself is one large
+call graph and running out of stack while looking for its cycles would be a
+poor way to find out.
+
+It costs nothing: HPL retires **1 985 745** instructions before and after, to
+the instruction. A cycle was never inlinable; it was only unbounded.
+
+*Why it matters more than it looks.* This is the first thing found by asking
+what a **self-hosted** compiler would need. A compiler is mutual recursion —
+`expr` calls `binary` calls `expr` — so every version of this language that
+compiles itself would have hung on itself.
+
 **G9.27 — a move out of a reference was not refused, and the drop ledger
 found it.** `fn take(h: Held)` takes ownership; `fn through(r: &Held) { take(*r) }`
 gave it a value the reference only points at. It compiled, and the value was

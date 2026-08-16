@@ -66,3 +66,19 @@ fn a_box_still_gives_up_what_it_owns() {
                fn main() -> t27 { depth(Tree::Node(Box::new(Tree::Leaf), 1)) }\n";
     assert_eq!(refusal(src), None, "moving out of a box is moving the box");
 }
+
+#[test]
+fn mutual_recursion_compiles_at_all() {
+    // The inliner unrolled `is_even`/`is_odd` into `main` without bound and
+    // the compiler never returned (G9.28). A compiler written in this
+    // language would be nothing but call cycles.
+    let src = "fn is_even(n: t27) -> bool { if n == 0 { true } else { is_odd(n - 1) } }\n\
+               fn is_odd(n: t27) -> bool { if n == 0 { false } else { is_even(n - 1) } }\n\
+               fn main() -> t27 { if is_even(10) { 1 } else { 0 } }\n";
+    let module = lang::compile(src).expect("compiles");
+    let module = trustc::tir::canonicalize_module(&module);
+    let mut module = trustc::tir::inline_module(&module);
+    trustc::tir::drop_uncalled(&mut module, &["main"]);
+    assert!(module.function("is_even").is_some());
+    assert!(module.function("is_odd").is_some());
+}
