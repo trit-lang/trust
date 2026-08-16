@@ -14,6 +14,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "trust"
+version = "0.1.0"
+dependencies = [
+ "tritium",
+ "trustc",
+]
+
+[[package]]
 name = "trustc"
 version = "0.1.0"
 dependencies = [

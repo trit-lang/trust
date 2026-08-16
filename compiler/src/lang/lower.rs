@@ -1588,6 +1588,9 @@ fn fn_kind(name: &str) -> Option<ast::FnKind> {
     }
 }
 
+/// Trytes in a word, which is the unit an aligned copy moves.
+const WORD: i128 = 3;
+
 /// A `taddr` constant, which is what every size and index here is.
 fn konst_addr(v: i128) -> Operand {
     Operand::Const(Type::Int(27), Bt::from_i128(v))
@@ -9255,8 +9258,8 @@ impl Fn<'_> {
             // as raw trytes. A reference inside a payload therefore loses its
             // provenance in the interpreter — see docs/spec-gaps.md G6.7.
             Ty::Enum(_) => {
-                let size = self.types.size(ty);
-                self.copy_trytes(dst, src, size, line)
+                let l = self.types.layout(ty);
+                self.copy_trytes(dst, src, l.size as i128, l.align as i128, line)
             }
 
             _ => {
@@ -9284,14 +9287,50 @@ impl Fn<'_> {
     }
 
     /// Copy raw storage, a tryte at a time.
-    fn copy_trytes(&mut self, dst: Operand, src: Operand, size: i128, line: Line) -> R<()> {
+    fn copy_trytes(
+        &mut self,
+        dst: Operand,
+        src: Operand,
+        size: i128,
+        align: i128,
+        line: Line,
+    ) -> R<()> {
         if size > 243 {
             return err(
                 line,
                 "this milestone copies aggregates of at most 243 trytes",
             );
         }
-        for i in 0..size {
+        // Whole words first where both ends are word-aligned, which for an
+        // enum they are: AM §2.3 caps alignment at a word and an enum holding
+        // one is aligned to it. A tryte-at-a-time copy of an `Option<t27>` is
+        // twelve instructions where two loads and two stores would do, and an
+        // iterator pays it twice per item.
+        let mut i = 0;
+        if align >= WORD {
+            while i + WORD <= size {
+                let from = self.offset(src.clone(), i);
+                let v = self.emit(
+                    "v",
+                    Type::Int(27),
+                    InstKind::Load {
+                        ty: Type::Int(27),
+                        p: from,
+                    },
+                );
+                let to = self.offset(dst.clone(), i);
+                self.push(Inst {
+                    results: Vec::new(),
+                    kind: InstKind::Store {
+                        ty: Type::Int(27),
+                        v,
+                        p: to,
+                    },
+                });
+                i += WORD;
+            }
+        }
+        for i in i..size {
             let from = self.offset(src.clone(), i);
             let v = self.emit(
                 "v",

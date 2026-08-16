@@ -1,0 +1,21 @@
+[package]
+name = "trust"
+description = "Compile a Trust program and run it, without touching the disk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The one crate that is allowed to know about both. `trustc` emits assembly
+# text and stops there, and `tritium` knows nothing about Trust; joining them
+# is a third thing's job, not either of theirs.
+[dependencies]
+trustc = { path = "../compiler" }
+tritium = { path = "../vm" }
+
+[[bin]]
+name = "trust"
+path = "src/main.rs"
+
+[lints.rust]
+missing_docs = "warn"

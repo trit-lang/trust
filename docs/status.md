@@ -450,12 +450,20 @@ reference's impls are found under its referent — so `Iterator` is an
 `IntoIterator` by the blanket impl §5.7 specifies, and `fn f<T: IntoIterator>`
 accepts both an iterator and a `&str`.
 
+**`trust run file.tr`** compiles and executes with nothing on the disk
+(G0.4) — a separate crate, because the compiler emits text and the machine
+knows nothing about Trust. It made one thing visible immediately: HPL takes
+2.9 seconds to compile and 40 milliseconds to run, and every measurement in
+docs/ so far has been about the second number.
+
 `a..b` is a half-open range (G9.25), which is a struct in the library and a
 spelling in the grammar and nothing else — `for i in 0..v.len()` works. It
 costs more than the `while` and an index it replaces, and measuring why found
-that every enum construction zeroed its whole storage first for a determinism
-Ch. 2 §1 does not ask for: the range loop is 18% cheaper without it, and an
-adaptor chain 14%.
+two things: every enum construction zeroed its whole storage first for a
+determinism Ch. 2 §1 does not ask for, and an enum's storage was copied a
+tryte at a time although both ends are word-aligned. The range loop is **42%**
+cheaper without them and an adaptor chain 31%. What is left is destination
+passing — three temporaries where one would do.
 
 What is left of Ch. 5 is `Cell`/`RefCell` (§5), `expect`, formatting, maps and
 sets, sorting and `Rc` — all of §7, all reserved. Ch. 4's list is now empty

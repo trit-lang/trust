@@ -4282,3 +4282,25 @@ fn an_inclusive_range_says_it_is_reserved() {
     let msg = error("fn main() -> t27 { for i in 0..=3 { } 0 }");
     assert!(msg.contains("reserved"), "{msg}");
 }
+
+#[test]
+fn an_aligned_aggregate_is_copied_by_words() {
+    // An enum's storage is copied as raw trytes, because its payload varies
+    // by variant — but the *ends* are word-aligned, and AM §2.3 caps
+    // alignment at a word. A tryte-at-a-time copy of an `Option<t27>` is
+    // twelve instructions where two loads and two stores would do, and an
+    // iterator pays it twice per item.
+    //
+    // The value is what this checks; the instruction count is in G9.25.
+    assert_eq!(
+        run("enum E { A(t27, t27), B(t9) } \
+             fn pick(n: t27) -> E { if n > 0 { E::A(n, n * 2) } else { E::B(1) } } \
+             fn main() -> t27 { \
+                 let x = pick(5); \
+                 let y = x; \
+                 match y { E::A(a, b) => a + b, E::B(c) => c as t27 } \
+             }")
+        .0,
+        15
+    );
+}

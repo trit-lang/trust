@@ -2521,12 +2521,41 @@ failed and neither was about meaning: both had an SSA *number* baked into an
 assertion about a *layout*, so deleting six instructions elsewhere broke a
 test about `slot tryte[3]`. They assert the size now.
 
-*Still 7.7× the `while` loop, and the range is not why.* `next` returns an
-`Option<T>`, an `Option<t27>` has no niche and so is two words, and two words
-go through memory — built into one temporary, copied to a second, copied to
-the caller's. Every iterator pays that per item; the range is only where it is
-easiest to see. Building a variant directly into its destination is the next
-thing worth doing, and it is worth more than any pass left in §8.
+*Then the copies themselves.* `next` returns an `Option<T>`, which without a
+niche is two words that go through memory — built into one temporary, copied
+to a second, copied to the caller's. An enum is copied as **raw trytes**,
+because its payload varies by variant, and that was a tryte at a time: twelve
+instructions to move an `Option<t27>`, paid twice per item. But the ends are
+word-aligned — AM §2.3 caps alignment at a word — so whole words move first
+and only a remainder goes by tryte. Four instructions where twelve were.
+
+The range loop is **38 068** now, from 66 097: **−42%** across the two
+changes. An adaptor chain is −31%. HPL is −265 in total, which is what a
+program that constructs no enums in its hot loops should see.
+
+*Still 5.4× the `while` loop.* What is left is the three temporaries — the
+variant literal's, the `if`'s result, the caller's — and removing them needs
+an expression to be told where its value is going before it computes one.
+That is destination-passing, and it is the largest single thing left in the
+backend; §8's remaining pass is worth nothing beside it.
+
+**G0.4 — `trust run`, and where the three seconds go.** `trustc compile`
+writes assembly and stops, `tritium asm` makes an image and `tritium run`
+executes one: three commands and two temporary files to answer "what does
+this program print", which is the question asked most often. `trust run
+file.tr` answers it with nothing on the disk, and `--stats` reports
+instructions retired, which is the unit every measurement in this log is
+quoted in.
+
+It is a **separate crate**, and that is the point. `compiler/Cargo.toml`
+already said why in a comment — "the compiler itself emits assembly text and
+stops there" — and the machine knows nothing about Trust. Joining them is a
+third thing's job, not either of theirs.
+
+*What it made visible.* HPL takes **2.9 seconds to compile and 40 milliseconds
+to run.** Every measurement in this log has been about the second number.
+Nobody had looked at the first because the three-command shape hid it behind
+two file writes.
 
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
