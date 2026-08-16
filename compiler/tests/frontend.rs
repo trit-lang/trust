@@ -4376,3 +4376,24 @@ fn an_adopted_slot_keeps_the_bindings_name() {
         "{printed}"
     );
 }
+
+#[test]
+fn the_library_prints_a_number() {
+    // Ch. 5 §1.6. One argument and no composition, which is what keeps it
+    // outside what §7 reserves: `Display` and `format!` need variadics or a
+    // macro and this needs neither. It is the digit loop §7 says every
+    // program writes, written once.
+    //
+    // The interesting case is the sign: `%` is the *symmetric* remainder, so
+    // `n % 10` is −9 ..= 9 and a negative digit borrows from the next place.
+    let (_, out) = run("fn main() -> t27 { \
+             print_int(0); print_char(' '); \
+             print_int(7); print_char(' '); \
+             print_int(-7); print_char(' '); \
+             print_int(1234567); print_char(' '); \
+             print_int(-3812798742493); \
+             0 \
+         }");
+    // The last is MIN_WORD, which exists because the range is symmetric.
+    assert_eq!(out, "0 7 -7 1234567 -3812798742493");
+}

@@ -630,6 +630,49 @@ fn println(s: &str) {
     print(s);
     putchar(10);
 }
+
+// A number, in decimal (Ch. 5 §1.6).
+//
+// One argument and no composition, which is what keeps it outside what §7
+// reserves: `Display` and `format!` need variadics or a macro, and this needs
+// neither. It is the digit loop §7 says every program writes, written once.
+//
+// `%` is the *symmetric* remainder, so `n % 10` is −9 ..= 9 and a negative
+// digit borrows from the next place. That is Ch. 1 §4's rounding showing
+// through, and it is why this is not the loop a binary machine would write.
+fn print_int(value: t27) {
+    let mut n = value;
+    if n < 0 {
+        print_char('-');
+        n = -n;
+    }
+    if n == 0 {
+        print_char('0');
+        return;
+    }
+    // 3^27 is under 8·10^12, so fourteen digits is more than a word can need.
+    let mut digits: [t9; 14] = [0; 14];
+    let mut i: taddr = 0;
+    while n > 0 {
+        let mut d = n % 10;
+        n = n / 10;
+        if d < 0 {
+            d += 10;
+            n -= 1;
+        }
+        digits[i] = d as t9;
+        i += 1;
+    }
+    while i > 0 {
+        i -= 1;
+        print_char(char::try_from((digits[i] as t27) + 48).unwrap());
+    }
+}
+
+fn println_int(value: t27) {
+    print_int(value);
+    putchar(10);
+}
 "#;
 
 /// Compile a source file to a TIR module.
@@ -752,6 +795,24 @@ fn prelude_functions() -> std::collections::HashSet<String> {
     names
 }
 
+/// Whether a name is the prelude's, allowing for instantiation.
+///
+/// A generic prelude function is emitted under a *mangled* name —
+/// `Option.unwrap.char` for `Option.unwrap` at `char` — and the set knows
+/// only the name as written. Mangling appends, so a prefix that is in the set
+/// is the answer: without this, one `unwrap` inside `print_int` made every
+/// program that never calls it emit one.
+fn from_prelude(name: &str, prelude: &std::collections::HashSet<String>) -> bool {
+    let mut at = Some(name);
+    while let Some(n) = at {
+        if prelude.contains(n) {
+            return true;
+        }
+        at = n.rfind('.').map(|i| &n[..i]);
+    }
+    false
+}
+
 /// Drop the functions nothing can call.
 ///
 /// Every program carries the prelude, and the prelude is where Chapter 5's
@@ -785,7 +846,7 @@ fn keep_reachable(module: &mut crate::tir::Module, prelude: &std::collections::H
                 .funcs
                 .iter()
                 .map(|f| f.sig.name.clone())
-                .filter(|n| !prelude.contains(n)),
+                .filter(|n| !from_prelude(n, prelude)),
         );
     }
 

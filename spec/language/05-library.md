@@ -139,7 +139,7 @@ documenting it.
 (§2.6). It needs the heap and is defined with it.
 
 A string is **not** normalized, and `char`-wise equality is not
-canonical equivalence. §1.6 says what that means.
+canonical equivalence. §1.7 says what that means.
 
 ### 1.4 Literals
 
@@ -238,7 +238,29 @@ encoding: one word per character, so that a `&'static str` built by the
 assembler and one built by the compiler are the same thing. A directive that
 emits UTF-8 code units is `.utf8`, and it emits trytes.
 
-### 1.6 What a character is not
+### 1.6 Numbers out
+
+```
+fn print_int(n: t27);      // decimal, with a sign where there is one
+fn println_int(n: t27);
+```
+
+One argument and no composition, which is what keeps this outside §7: a
+`Display` or a `format!` needs variadic arguments or a macro, and this needs
+neither. It is the digit loop §7 says every program writes, written once.
+
+The loop is not the one a binary machine would write. `%` is the **symmetric**
+remainder (Ch. 1 §4), so `n % 10` runs −9 ..= 9 and a negative digit borrows
+from the next place. That is the same rounding rule that makes `x >> 11`
+exactly division, and it costs one `if` here.
+
+There is no `print_ternary`, and there could be: balanced ternary is the
+machine's own notation and `0t` is its literal (Ch. 1 §3). It is left out
+because nothing has needed it that a program could not write in six lines,
+and because the digit that has no character — `T` for −1 — is a choice this
+section would have to make.
+
+### 1.7 What a character is not
 
 A `char` is a Unicode scalar value. It is not:
 
@@ -795,7 +817,7 @@ and is derivable (Ch. 4 §6) field by field.
 
 ## 7. What this chapter deliberately does not define
 
-- **Grapheme clusters, normalization, and collation.** §1.6. Each is a
+- **Grapheme clusters, normalization, and collation.** §1.7. Each is a
   table-driven problem whose tables are larger than this document.
 - **A dense native text encoding.** Appendix A, reserved.
 - **`trait Allocator`, and a `Box` parameterized by one.** §2.1. An
@@ -810,8 +832,8 @@ and is derivable (Ch. 4 §6) field by field.
   needs either variadic arguments or a macro system; Ch. 0 §7 reserves macros
   and Ch. 0 §1.5 reserves the `name!(…)` position they would use, so the door
   is held open and nothing walks through it here. A program prints a string
-  with §1.5's `print` and a number with the same digit loop
-  `examples/trust/HPL.tr` writes today.
+  with §1.5's `print` and a number with §1.6's `print_int`; what is missing is
+  putting the two in one call with the text around them.
 - **Maps, sets, and any collection with a hash.** A hash function is a choice
   with security consequences, and nothing here needs one yet. One requirement
   is fixed in advance, because it cannot be added afterwards: **a map's

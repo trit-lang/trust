@@ -2592,6 +2592,36 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.26 — `print_int`, which is not formatting.** Ch. 5 §1.6. The library
+could print a string and then a character and still not a number, and every
+program wrote the same digit loop — HPL's, demo's, `traits.tr`'s, three copies
+of one thing.
+
+§7 reserves `Display`, `format!` and `println!`, and the reason it gives is
+that **each needs variadic arguments or a macro**. One number takes one
+argument and composes with nothing, so it is outside that reservation for the
+same reason `print_char` was: what §7 is holding the door open for is putting
+a value and the text around it in *one call*, and this is not that. §7 said as
+much already — "a number with the same digit loop `examples/trust/HPL.tr`
+writes today" — so writing it once is what the sentence was asking for.
+
+The loop is not the one a binary machine would write: `%` is the **symmetric**
+remainder, so `n % 10` runs −9 ..= 9 and a negative digit borrows from the
+next place. Ch. 1 §4's rounding, once more, and it costs one `if`.
+
+*And it leaked something.* `print_int` calls `char::try_from(…).unwrap()`, and
+`unwrap` is generic, so the module gained `Option.unwrap.char` — a name
+`prelude_functions` does not know, because the set holds names as *written*
+and this one is mangled. Every program that never printed a number emitted it.
+Mangling appends, so a prefix in the set is the answer. Two tests that assert
+a `trit` match compiles to one `br3` and nothing else caught it — the third
+time this session those two have caught something written for another reason.
+
+*Not added:* `print_ternary`. Balanced ternary is the machine's own notation
+and `0t` is its literal, but nothing has needed it that a program cannot write
+in six lines, and the digit that has no character — `T` for −1 — is a choice
+§1.6 would have to make.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The
