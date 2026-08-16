@@ -15,6 +15,10 @@ pub enum Expr {
     Unary(String, Box<Expr>),
     /// `f(a, b)`.
     Call(String, Vec<Expr>),
+    /// `Point { x: 1 }`, `Kind::Rect(2, 3)`, `Kind::Dot` — one shape, because
+    /// a tuple form's fields are its positions written out, and a bare path
+    /// to a variant is that shape with no fields at all.
+    Aggregate(String, Vec<Field>),
     /// `(e)`, kept so that printing round-trips.
     Group(Box<Expr>),
     /// `x.f` — a field.
@@ -73,13 +77,32 @@ pub enum Item {
     Struct(String, Vec<Param>),
     /// `enum Name { A, B(T), … }`.
     Enum(String, Vec<Variant>),
+    /// `mod m;` — a module, which is a file (Ch. 6 §1).
+    Mod(String),
+    /// `use a::b::c;` — the segments, in order (Ch. 6 §3.2).
+    Use(Vec<String>),
+    /// `type Name = T;` (Ch. 0 §3.6).
+    Alias(String, String),
+    /// `const NAME: T = e;`
+    Const(String, String, Expr),
+    /// `impl Trait for Type { … }`. The trait is empty for an inherent impl
+    /// (Ch. 4 §1.2), which is the difference a reader sees.
+    Impl(String, String, Vec<Fn>),
+}
+
+/// One field of an aggregate: the name it is written under, and its value.
+pub struct Field {
+    pub name: String,
+    pub value: Expr,
 }
 
 pub struct Fn {
     pub name: String,
     pub params: Vec<Param>,
     pub ret: String,
-    pub body: Block,
+    /// The body, or nothing for a declaration — a signature whose definition
+    /// is outside the language (§3.1).
+    pub body: Option<Block>,
 }
 
 /// Whether `op` assigns (§2.1's loosest level).
@@ -205,6 +228,20 @@ pub fn show(e: &Expr, out: &mut String) {
             }
             out.push_str(")");
         }
+        Expr::Aggregate(path, fields) => {
+            out.push_str("(agg ");
+            out.push_str(&path);
+            let mut i: taddr = 0;
+            while i < fields.len() {
+                out.push_str(" (");
+                out.push_str(&fields[i].name);
+                out.push_str(" ");
+                show(&fields[i].value, out);
+                out.push_str(")");
+                i += 1;
+            }
+            out.push_str(")");
+        }
     }
 }
 
@@ -303,6 +340,54 @@ pub fn show_item(i: &Item, out: &mut String) {
             }
             out.push_str(")");
         }
+        Item::Mod(name) => {
+            out.push_str("(mod ");
+            out.push_str(&name);
+            out.push_str(")");
+        }
+        Item::Use(segments) => {
+            out.push_str("(use ");
+            let mut k: taddr = 0;
+            while k < segments.len() {
+                if k > 0 {
+                    out.push_str("::");
+                }
+                out.push_str(&segments[k]);
+                k += 1;
+            }
+            out.push_str(")");
+        }
+        Item::Alias(name, ty) => {
+            out.push_str("(type ");
+            out.push_str(&name);
+            out.push_str(" ");
+            out.push_str(&ty);
+            out.push_str(")");
+        }
+        Item::Const(name, ty, value) => {
+            out.push_str("(const ");
+            out.push_str(&name);
+            out.push_str(":");
+            out.push_str(&ty);
+            out.push_str(" ");
+            show(&value, out);
+            out.push_str(")");
+        }
+        Item::Impl(tr, ty, fns) => {
+            out.push_str("(impl ");
+            if tr.len() > 0 {
+                out.push_str(&tr);
+                out.push_str(" for ");
+            }
+            out.push_str(&ty);
+            let mut k: taddr = 0;
+            while k < fns.len() {
+                out.push_str(" ");
+                show_fn(&fns[k], out);
+                k += 1;
+            }
+            out.push_str(")");
+        }
     }
 }
 
@@ -323,8 +408,13 @@ pub fn show_fn(f: &Fn, out: &mut String) {
     }
     out.push_str(") ");
     out.push_str(&f.ret);
-    out.push_str(" ");
-    show_block(&f.body, out);
+    match &f.body {
+        Option::Some(b) => {
+            out.push_str(" ");
+            show_block(&b, out);
+        }
+        Option::None => {}
+    }
     out.push_str(")");
 }
 
@@ -335,7 +425,7 @@ pub fn show_fn(f: &Fn, out: &mut String) {
 /// the floor, so the correction is written out — the same correction the
 /// prelude's `print_int` makes, and the sixth place in this repository where
 /// the radix's division has to be said out loud.
-fn push_int(out: &mut String, v: t27) {
+pub fn push_int(out: &mut String, v: t27) {
     let mut n = v;
     if n < 0 {
         out.push('-');

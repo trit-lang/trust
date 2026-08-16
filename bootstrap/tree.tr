@@ -15,7 +15,7 @@ fn getchar() -> t9;
 
 fn main() -> t27 {
     let src = read_all();
-    let mut p = parse::Parser { src: src, at: 0 };
+    let mut p = parse::Parser { src: src, at: 0, no_struct: false };
     match parse::expr(&mut p) {
         Result::Ok(e) => {
             let mut out: String = Vec::new();

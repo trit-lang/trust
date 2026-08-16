@@ -1,0 +1,20 @@
+mod lex;
+mod parse;
+use lang::lex::Span;
+use lang::parse;
+type Text = Vec<char>;
+const WIDTH: t27 = 27;
+pub struct Buf { at: taddr }
+impl Buf {
+    fn new() -> Buf { Buf { at: 0 } }
+    fn step(&mut self, n: taddr) -> taddr {
+        self.at += n;
+        self.at
+    }
+    fn here(&self) -> taddr { self.at }
+    fn take(self) -> taddr { self.at }
+}
+impl Eq for Buf {
+    fn eq(&self, other: &Buf) -> bool { self.at == other.at }
+}
+fn putchar(c: t9);

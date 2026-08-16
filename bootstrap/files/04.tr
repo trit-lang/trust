@@ -1,0 +1,14 @@
+struct Span { lo: taddr, hi: taddr }
+enum Shape { Dot, Rect(t27, t27) }
+fn make(lo: taddr, hi: taddr) -> Span {
+    let s = Span { lo, hi };
+    let t = Span { lo: lo + 1, hi: hi };
+    if s.lo < t.hi { s } else { t }
+}
+fn shapes() -> t27 {
+    let a = Shape::Dot;
+    let b = Shape::Rect(2, 3);
+    let c = Result::Ok(1);
+    while make(0, 1).lo < 3 { break; }
+    0
+}

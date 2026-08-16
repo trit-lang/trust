@@ -309,8 +309,10 @@ fn show_fn(f: &lang::ast::FnItem, out: &mut String) {
         Some(t) => written_ty(t),
         None => "()".to_string(),
     });
-    out.push(' ');
-    show_block(f.body.as_ref().expect("a body"), out);
+    if let Some(body) = &f.body {
+        out.push(' ');
+        show_block(body, out);
+    }
     out.push(')');
 }
 
@@ -367,6 +369,26 @@ fn print_file(src: &str) -> ExitCode {
                 }
                 out.push(')');
             }
+            Item::Mod(m) => out.push_str(&format!("(mod {})", m.name)),
+            Item::Use(u) => out.push_str(&format!("(use {})", u.segments.join("::"))),
+            Item::Alias(a) => out.push_str(&format!("(type {} {})", a.name, written_ty(&a.ty))),
+            Item::Const(c) => {
+                out.push_str(&format!("(const {}:{} ", c.name, written_ty(&c.ty)));
+                show_expr(&c.value, &mut out);
+                out.push(')');
+            }
+            Item::Impl(i) => {
+                out.push_str("(impl ");
+                if let Some(t) = &i.trait_name {
+                    out.push_str(&format!("{t} for "));
+                }
+                out.push_str(&i.self_ty);
+                for m in &i.methods {
+                    out.push(' ');
+                    show_fn(m, &mut out);
+                }
+                out.push(')');
+            }
             other => out.push_str(&format!("<{:?}>", std::mem::discriminant(other))),
         }
         println!("{out}");
@@ -383,6 +405,7 @@ fn written_ty(t: &lang::ast::Ty) -> String {
         Ty::Ref(inner, true, _) => format!("&mut {}", written_ty(inner)),
         Ty::Ref(inner, false, _) => format!("&{}", written_ty(inner)),
         Ty::Slice(inner, _) => format!("[{}]", written_ty(inner)),
+        Ty::SelfTy(_) => "Self".to_string(),
         Ty::App(n, args, _) => {
             let args: Vec<String> = args.iter().map(written_ty).collect();
             format!("{n}<{}>", args.join(","))
@@ -504,6 +527,15 @@ fn show_expr(e: &lang::ast::Expr, out: &mut String) {
             for a in args {
                 out.push(' ');
                 show_expr(a, out);
+            }
+            out.push(')');
+        }
+        Expr::Aggregate(path, fields, _) => {
+            out.push_str(&format!("(agg {}", path.segments.join("::")));
+            for (name, value) in fields {
+                out.push_str(&format!(" ({name} "));
+                show_expr(value, out);
+                out.push(')');
             }
             out.push(')');
         }

@@ -2592,6 +2592,25 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.42 — `pub` on a method of an `impl`.** Ch. 6 §2.2 says a `pub` on a
+trait's method or an enum's variant is an error, and §5 says an `impl` block
+takes no `pub` because it "is as visible as the more private of the type and
+the trait". Neither sentence covers a method of an *inherent* `impl`, which
+is where Rust does allow `pub` and where it means something: a `pub struct`
+may have methods its module keeps to itself.
+
+The implementation refuses it, which is what §5's rule implies read straight
+through — an impl's methods are as visible as the impl. The cost is that a
+`pub` type has no private helper method; the invariant of Ch. 6 §2.3 is
+still safe, because that rests on the *fields*, and a method that can only
+be reached through `pub` fields it cannot see is not a hole. What is lost is
+a smaller thing: a helper that briefly breaks an invariant is as callable as
+the type.
+
+Recorded rather than settled. The alternative — `pub` admitted on a method
+of an inherent `impl` and private by default there — is a strictly larger
+language and can be added without changing any program that compiles today.
+
 **G9.41 — "nothing yet" was the first arm's state.** `join_arm` folds each
 `match` arm's ownership into what the arms before it left, and `None` meant
 "no arm has contributed". G9.35's fix made a diverging arm contribute

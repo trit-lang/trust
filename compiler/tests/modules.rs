@@ -277,3 +277,23 @@ fn a_use_still_grants_no_access() {
     let why = build(&at).expect_err("refused");
     assert!(why.contains("is not `pub`"), "{why}");
 }
+
+#[test]
+fn an_impl_takes_no_pub_and_neither_does_a_method_of_one() {
+    // §5: an `impl` block is as visible as the more private of the type and
+    // the trait, which makes `pub` on a method of one a word with nothing to
+    // say. The parser refuses it rather than reading and dropping it, so a
+    // reader is never told a visibility that is not the one in force (G9.42).
+    let at = dir("impl-pub");
+    write(
+        &at,
+        "main.tr",
+        "pub struct B { a: t27 }\n\
+         impl B {\n\
+         \x20   pub fn n() -> t27 { 1 }\n\
+         }\n\
+         fn main() -> t27 { B::n() }\n",
+    );
+    let e = build(&at).expect_err("a refusal");
+    assert!(e.contains("found `pub`"), "{e}");
+}

@@ -16,6 +16,10 @@ use lex::Tok;
 pub struct Parser {
     pub src: String,
     pub at: taddr,
+    /// Set where a `{` would be a block and not a struct literal — the
+    /// condition of an `if` or a `while` (§2.8). The ambiguity is real and
+    /// the flag is how both parsers resolve it.
+    pub no_struct: bool,
 }
 
 /// The next token, without consuming it.
@@ -171,6 +175,12 @@ pub fn primary(p: &mut Parser) -> Result<Expr, lex::Error> {
         p.at = after;
         return Result::Ok(Expr::Continue);
     }
+    // `self` is a keyword and a name at once: it is the receiver's, and it is
+    // written the way any other local is (Ch. 3 §1.4).
+    if keyword.same("self") {
+        p.at = after;
+        return Result::Ok(Expr::Name("self".to_string()));
+    }
     let braced = peek(p)?;
     let opens = match braced.tok {
         Tok::Op(o) => o.same("{"),
@@ -187,21 +197,7 @@ pub fn primary(p: &mut Parser) -> Result<Expr, lex::Error> {
         Tok::Int(v) => Result::Ok(Expr::Int(v)),
         Tok::TritLit(v) => Result::Ok(Expr::Int(v)),
         Tok::CharLit(v) => Result::Ok(Expr::Int(v)),
-        Tok::Ident(n) => {
-            let after = peek(p)?;
-            let skip = after.at;
-            match after.tok {
-                Tok::Op(o) => {
-                    if o.same("(") {
-                        p.at = skip;
-                        let args = arguments(p)?;
-                        return Result::Ok(Expr::Call(n, args));
-                    }
-                    Result::Ok(Expr::Name(n))
-                }
-                _ => Result::Ok(Expr::Name(n)),
-            }
-        }
+        Tok::Ident(n) => path_expr(p, n),
         Tok::Op(o) => {
             if o.same("(") {
                 let inner = expr(p)?;
@@ -264,7 +260,11 @@ fn if_expr(p: &mut Parser) -> Result<Expr, lex::Error> {
 /// rather than a struct literal (§2.8). Nothing here reads a struct literal
 /// at all, so the rule costs nothing and is written for the reader.
 fn no_struct_expr(p: &mut Parser) -> Result<Expr, lex::Error> {
-    expr(p)
+    let outer = p.no_struct;
+    p.no_struct = true;
+    let e = expr(p);
+    p.no_struct = outer;
+    e
 }
 
 /// `return`, `break` — a value, unless what follows cannot start one.
@@ -283,6 +283,161 @@ fn optional_value(p: &mut Parser) -> Result<Option<Box<Expr>>, lex::Error> {
 }
 
 /// `a, b, c)` — the arguments of a call, the `(` already read.
+/// A path, and whatever it opens: `f(a)` is a call, `A::B(a)` an aggregate
+/// whose fields are its positions, `T { a: 1 }` an aggregate written out, and
+/// a path alone is a name.
+///
+/// A one-segment name followed by `(` is a *call* and a longer one is an
+/// aggregate, because only the names decide which — and this parser does not
+/// know them. That is the same split the Rust parser makes, and it is made
+/// here for the same reason: it is the last point where the two can agree
+/// without knowing anything.
+fn path_expr(p: &mut Parser, first: String) -> Result<Expr, lex::Error> {
+    let mut path = first;
+    let mut segments: taddr = 1;
+    loop {
+        let t = peek(p)?;
+        let next = t.at;
+        let more = match t.tok {
+            Tok::Op(o) => o.same("::"),
+            _ => false,
+        };
+        if !more {
+            break;
+        }
+        p.at = next;
+        path.push_str("::");
+        let seg = ident(p)?;
+        path.push_str(&seg);
+        segments += 1;
+    }
+    let t = peek(p)?;
+    let next = t.at;
+    let opener = match t.tok {
+        Tok::Op(o) => o,
+        _ => "".to_string(),
+    };
+    if opener.same("(") {
+        p.at = next;
+        if segments == 1 {
+            let args = arguments(p)?;
+            return Result::Ok(Expr::Call(path, args));
+        }
+        let fields = argument_fields(p)?;
+        return Result::Ok(Expr::Aggregate(path, fields));
+    }
+    if opener.same("{") && !p.no_struct {
+        p.at = next;
+        let fields = field_values(p)?;
+        return Result::Ok(Expr::Aggregate(path, fields));
+    }
+    if segments > 1 {
+        let fields: Vec<ast::Field> = Vec::new();
+        return Result::Ok(Expr::Aggregate(path, fields));
+    }
+    Result::Ok(Expr::Name(path))
+}
+
+/// `a: 1, b: 2 }` after the `{` — the fields of a struct literal.
+///
+/// A field written with no value is the value of the name: `Span { lo, hi }`
+/// is `Span { lo: lo, hi: hi }`, which is the one shorthand the language has.
+fn field_values(p: &mut Parser) -> Result<Vec<ast::Field>, lex::Error> {
+    let mut out: Vec<ast::Field> = Vec::new();
+    loop {
+        let t = peek(p)?;
+        let next = t.at;
+        let done = match t.tok {
+            Tok::Op(o) => o.same("}"),
+            Tok::Eof => {
+                return Result::Err(lex::Error {
+                    at: p.at,
+                    message: "unterminated struct literal".to_string(),
+                });
+            }
+            _ => false,
+        };
+        if done {
+            p.at = next;
+            return Result::Ok(out);
+        }
+        let name = ident(p)?;
+        let t2 = peek(p)?;
+        let at2 = t2.at;
+        let written = match t2.tok {
+            Tok::Op(o) => o.same(":"),
+            _ => false,
+        };
+        let value = if written {
+            p.at = at2;
+            // A field's value is a whole expression, and a `{` inside it is
+            // no longer ambiguous — the literal is already open.
+            let outer = p.no_struct;
+            p.no_struct = false;
+            let e = expr(p);
+            p.no_struct = outer;
+            e?
+        } else {
+            Expr::Name(name.to_string())
+        };
+        out.push(ast::Field { name: name, value: value });
+        let t3 = peek(p)?;
+        let at3 = t3.at;
+        let comma = match t3.tok {
+            Tok::Op(o) => o.same(","),
+            _ => false,
+        };
+        if comma {
+            p.at = at3;
+        }
+    }
+}
+
+/// The arguments of `A::B(…)`, named by their positions (§3.3).
+fn argument_fields(p: &mut Parser) -> Result<Vec<ast::Field>, lex::Error> {
+    let mut out: Vec<ast::Field> = Vec::new();
+    let first = peek(p)?;
+    let skip = first.at;
+    match first.tok {
+        Tok::Op(o) => {
+            if o.same(")") {
+                p.at = skip;
+                return Result::Ok(out);
+            }
+        }
+        _ => {}
+    }
+    loop {
+        let mut name: String = Vec::new();
+        ast::push_int(&mut name, out.len() as t27);
+        let outer = p.no_struct;
+        p.no_struct = false;
+        let value = expr(p);
+        p.no_struct = outer;
+        out.push(ast::Field { name: name, value: value? });
+        let t = bump(p)?;
+        match t {
+            Tok::Op(o) => {
+                if o.same(")") {
+                    return Result::Ok(out);
+                }
+                if !o.same(",") {
+                    return Result::Err(lex::Error {
+                        at: p.at,
+                        message: "expected `,` or `)`".to_string(),
+                    });
+                }
+            }
+            _ => {
+                return Result::Err(lex::Error {
+                    at: p.at,
+                    message: "expected `,` or `)`".to_string(),
+                });
+            }
+        }
+    }
+}
+
 fn arguments(p: &mut Parser) -> Result<Vec<Expr>, lex::Error> {
     let mut out: Vec<Expr> = Vec::new();
     let first = peek(p)?;
@@ -451,10 +606,17 @@ pub fn function(p: &mut Parser) -> Result<ast::Fn, lex::Error> {
             p.at = next;
             break;
         }
-        let pname = ident(p)?;
-        expect_op(p, ":")?;
-        let pty = type_name(p)?;
-        params.push(ast::Param { name: pname, ty: pty });
+        match receiver(p)? {
+            Option::Some(r) => {
+                params.push(r);
+            }
+            Option::None => {
+                let pname = ident(p)?;
+                expect_op(p, ":")?;
+                let pty = type_name(p)?;
+                params.push(ast::Param { name: pname, ty: pty });
+            }
+        }
         let t2 = peek(p)?;
         let at2 = t2.at;
         match t2.tok {
@@ -477,8 +639,84 @@ pub fn function(p: &mut Parser) -> Result<ast::Fn, lex::Error> {
         p.at = next;
         ret = type_name(p)?;
     }
+    // A function with no body is a declaration (§3.1): the signature is the
+    // whole item, and what defines it is outside the language.
+    let t2 = peek(p)?;
+    let at2 = t2.at;
+    let declared = match t2.tok {
+        Tok::Op(o) => o.same(";"),
+        _ => false,
+    };
+    if declared {
+        p.at = at2;
+        return Result::Ok(ast::Fn {
+            name: name,
+            params: params,
+            ret: ret,
+            body: Option::None,
+        });
+    }
     let body = block(p)?;
-    Result::Ok(ast::Fn { name: name, params: params, ret: ret, body: body })
+    Result::Ok(ast::Fn {
+        name: name,
+        params: params,
+        ret: ret,
+        body: Option::Some(body),
+    })
+}
+
+/// One of the shortened receiver forms — `self`, `&self`, `&mut self`
+/// (Ch. 3 §1.4) — if that is what comes next.
+///
+/// `&mut self` and `&mut x: T` share a prefix, so the position is put back
+/// when the word after the prefix turns out not to be `self`.
+fn receiver(p: &mut Parser) -> Result<Option<ast::Param>, lex::Error> {
+    let start = p.at;
+    let mut ty: String = Vec::new();
+    let t = peek(p)?;
+    let at = t.at;
+    let amp = match t.tok {
+        Tok::Op(o) => o.same("&"),
+        _ => false,
+    };
+    if amp {
+        p.at = at;
+        ty.push_str("&");
+        let t2 = peek(p)?;
+        let at2 = t2.at;
+        let mutable = match t2.tok {
+            Tok::Kw(k) => k.same("mut"),
+            _ => false,
+        };
+        if mutable {
+            p.at = at2;
+            ty.push_str("mut ");
+        }
+    }
+    let t3 = peek(p)?;
+    let at3 = t3.at;
+    let is_self = match t3.tok {
+        Tok::Kw(k) => k.same("self"),
+        _ => false,
+    };
+    if is_self {
+        p.at = at3;
+        // The long form `self: Buffer` is an ordinary parameter and is left
+        // to the ordinary path.
+        let t4 = peek(p)?;
+        let colon = match t4.tok {
+            Tok::Op(o) => o.same(":"),
+            _ => false,
+        };
+        if colon {
+            p.at = start;
+            return Result::Ok(Option::None);
+        }
+        ty.push_str("Self");
+        return Result::Ok(Option::Some(ast::Param { name: "self".to_string(), ty: ty }));
+    }
+    p.at = start;
+    Result::Ok(Option::None)
 }
 
 /// A type, as the text it was written with.
@@ -672,6 +910,37 @@ pub fn item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
     if word.same("enum") {
         return enum_item(p);
     }
+    if word.same("mod") {
+        p.at = next;
+        let name = ident(p)?;
+        expect_op(p, ";")?;
+        return Result::Ok(ast::Item::Mod(name));
+    }
+    if word.same("use") {
+        p.at = next;
+        return use_item(p);
+    }
+    if word.same("type") {
+        p.at = next;
+        let name = ident(p)?;
+        expect_op(p, "=")?;
+        let ty = type_name(p)?;
+        expect_op(p, ";")?;
+        return Result::Ok(ast::Item::Alias(name, ty));
+    }
+    if word.same("const") {
+        p.at = next;
+        let name = ident(p)?;
+        expect_op(p, ":")?;
+        let ty = type_name(p)?;
+        expect_op(p, "=")?;
+        let value = expr(p)?;
+        expect_op(p, ";")?;
+        return Result::Ok(ast::Item::Const(name, ty, value));
+    }
+    if word.same("impl") {
+        return impl_item(p);
+    }
     Result::Err(lex::Error { at: p.at, message: "expected an item".to_string() })
 }
 
@@ -791,5 +1060,76 @@ fn enum_item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
             }
             _ => {}
         }
+    }
+}
+
+/// `use a::b::c;` — the segments, in order (Ch. 6 §3.2).
+fn use_item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
+    let mut segments: Vec<String> = Vec::new();
+    segments.push(ident(p)?);
+    loop {
+        let t = peek(p)?;
+        let next = t.at;
+        let more = match t.tok {
+            Tok::Op(o) => o.same("::"),
+            _ => false,
+        };
+        if !more {
+            expect_op(p, ";")?;
+            return Result::Ok(ast::Item::Use(segments));
+        }
+        p.at = next;
+        segments.push(ident(p)?);
+    }
+}
+
+/// `impl Type { … }` or `impl Trait for Type { … }` (Ch. 4 §1.2).
+///
+/// Both halves are read as types and only then told apart, because the
+/// difference is the `for` and nothing before it.
+fn impl_item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
+    expect_kw(p, "impl")?;
+    let first = type_name(p)?;
+    let mut tr: String = Vec::new();
+    let mut ty = first;
+    let t = peek(p)?;
+    let next = t.at;
+    let has_for = match t.tok {
+        Tok::Kw(k) => k.same("for"),
+        _ => false,
+    };
+    if has_for {
+        p.at = next;
+        tr = ty;
+        ty = type_name(p)?;
+    }
+    expect_op(p, "{")?;
+    let mut fns: Vec<ast::Fn> = Vec::new();
+    loop {
+        let t2 = peek(p)?;
+        let at2 = t2.at;
+        let done = match t2.tok {
+            Tok::Op(o) => o.same("}"),
+            _ => false,
+        };
+        if done {
+            p.at = at2;
+            return Result::Ok(ast::Item::Impl(tr, ty, fns));
+        }
+        // An `impl` block takes no `pub`, and neither does anything in one:
+        // its methods are as visible as the block, which is as visible as the
+        // more private of the type and the trait (Ch. 6 §5, G9.42).
+        let t3 = peek(p)?;
+        let public = match t3.tok {
+            Tok::Kw(k) => k.same("pub"),
+            _ => false,
+        };
+        if public {
+            return Result::Err(lex::Error {
+                at: p.at,
+                message: "`pub` on a method of an impl".to_string(),
+            });
+        }
+        fns.push(function(p)?);
     }
 }

@@ -60,7 +60,7 @@ the ternary one has no use for.
 ## Building
 
 ```
-cargo test          # 566 tests
+cargo test          # 568 tests
 cargo build
 ```
 
