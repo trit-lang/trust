@@ -340,6 +340,37 @@ impl IntoIterator for &str {
     fn into_iter(self) -> Chars { self.chars() }
 }
 
+// A `Vec` yields its elements, which is what `for x in v` means. It is not
+// itself an iterator — `next` would consume the vector it is called on, and a
+// `Vec` you have iterated once is a `Vec` you still have — so it is a
+// separate type holding the vector and a position, exactly as `Chars` holds a
+// string and one.
+struct VecIter<T> {
+    at: taddr,
+    v: Vec<T>,
+}
+
+impl<T> Iterator for VecIter<T> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        if self.at < self.v.len() {
+            let x = self.v[self.at];
+            self.at = self.at + 1;
+            Option::Some(x)
+        } else {
+            Option::None
+        }
+    }
+}
+
+impl<T> IntoIterator for Vec<T> {
+    type Item = T;
+    type IntoIter = VecIter<T>;
+    fn into_iter(self) -> VecIter<T> {
+        VecIter { at: 0, v: self }
+    }
+}
+
 // What a sequence of values can be gathered into (Ch. 5 §3.3).
 //
 // The element is an *associated* type rather than a parameter: a type is

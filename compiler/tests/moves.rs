@@ -82,3 +82,17 @@ fn mutual_recursion_compiles_at_all() {
     assert!(module.function("is_even").is_some());
     assert!(module.function("is_odd").is_some());
 }
+
+#[test]
+fn a_vec_yields_its_elements() {
+    // `for x in v` needed `Vec` to be turned into an iterator (Ch. 5 §3),
+    // and it is not one itself: `next` would consume the vector, and a `Vec`
+    // you have iterated once is a `Vec` you still have.
+    let src = "fn main() -> t27 {\n\
+               \x20   let mut v: Vec<t27> = Vec::new();\n\
+               \x20   v.push(1); v.push(2); v.push(4);\n\
+               \x20   let mut s = 0;\n\
+               \x20   for x in v { s += x; }\n\
+               \x20   s\n}\n";
+    assert!(lang::compile(src).is_ok());
+}
