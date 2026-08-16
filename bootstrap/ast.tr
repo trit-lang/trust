@@ -91,7 +91,15 @@ pub struct Variant {
 }
 
 /// A top-level item (§3).
-pub enum Item {
+/// One item, and whether it is visible outside the module that holds it
+/// (Ch. 6 §2). The flag is separate from the shape because `pub` is written
+/// in one place and means one thing whatever follows it.
+pub struct Item {
+    pub public: bool,
+    pub what: What,
+}
+
+pub enum What {
     Function(Fn),
     /// `struct Name { field: T, … }`, or a unit struct with no fields.
     Struct(String, Vec<Param>),
@@ -481,9 +489,9 @@ pub fn show_stmt(s: &Stmt, out: &mut String) {
 
 /// One item, written out.
 pub fn show_item(i: &Item, out: &mut String) {
-    match i {
-        Item::Function(f) => show_fn(&f, out),
-        Item::Struct(name, fields) => {
+    match &i.what {
+        What::Function(f) => show_fn(&f, out),
+        What::Struct(name, fields) => {
             out.push_str("(struct ");
             out.push_str(&name);
             out.push_str(" (");
@@ -499,7 +507,7 @@ pub fn show_item(i: &Item, out: &mut String) {
             }
             out.push_str("))");
         }
-        Item::Enum(name, variants) => {
+        What::Enum(name, variants) => {
             out.push_str("(enum ");
             out.push_str(&name);
             let mut k: taddr = 0;
@@ -517,12 +525,12 @@ pub fn show_item(i: &Item, out: &mut String) {
             }
             out.push_str(")");
         }
-        Item::Mod(name) => {
+        What::Mod(name) => {
             out.push_str("(mod ");
             out.push_str(&name);
             out.push_str(")");
         }
-        Item::Use(segments) => {
+        What::Use(segments) => {
             out.push_str("(use ");
             let mut k: taddr = 0;
             while k < segments.len() {
@@ -534,14 +542,14 @@ pub fn show_item(i: &Item, out: &mut String) {
             }
             out.push_str(")");
         }
-        Item::Alias(name, ty) => {
+        What::Alias(name, ty) => {
             out.push_str("(type ");
             out.push_str(&name);
             out.push_str(" ");
             out.push_str(&ty);
             out.push_str(")");
         }
-        Item::Const(name, ty, value) => {
+        What::Const(name, ty, value) => {
             out.push_str("(const ");
             out.push_str(&name);
             out.push_str(":");
@@ -550,7 +558,7 @@ pub fn show_item(i: &Item, out: &mut String) {
             show(&value, out);
             out.push_str(")");
         }
-        Item::Impl(tr, ty, fns) => {
+        What::Impl(tr, ty, fns) => {
             out.push_str("(impl ");
             if tr.len() > 0 {
                 out.push_str(&tr);
@@ -565,6 +573,35 @@ pub fn show_item(i: &Item, out: &mut String) {
             }
             out.push_str(")");
         }
+    }
+}
+
+/// The name an item defines, or nothing for a `use` or an `impl`, which
+/// define none (Ch. 6 §4).
+pub fn defines(w: &What) -> Option<String> {
+    match w {
+        What::Function(f) => Option::Some(f.name.to_string()),
+        What::Struct(name, fields) => Option::Some(name.to_string()),
+        What::Enum(name, variants) => Option::Some(name.to_string()),
+        What::Alias(name, ty) => Option::Some(name.to_string()),
+        What::Const(name, ty, value) => Option::Some(name.to_string()),
+        What::Mod(name) => Option::Some(name.to_string()),
+        What::Use(segments) => Option::None,
+        What::Impl(tr, ty, fns) => Option::None,
+    }
+}
+
+/// What an item is, as the one word a reader would use.
+pub fn kind(w: &What) -> String {
+    match w {
+        What::Function(f) => "fn".to_string(),
+        What::Struct(name, fields) => "struct".to_string(),
+        What::Enum(name, variants) => "enum".to_string(),
+        What::Alias(name, ty) => "type".to_string(),
+        What::Const(name, ty, value) => "const".to_string(),
+        What::Mod(name) => "mod".to_string(),
+        What::Use(segments) => "use".to_string(),
+        What::Impl(tr, ty, fns) => "impl".to_string(),
     }
 }
 

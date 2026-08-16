@@ -993,18 +993,29 @@ pub fn file(p: &mut Parser) -> Result<Vec<ast::Item>, lex::Error> {
 /// nothing here asks about visibility.
 pub fn item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
     let t = peek(p)?;
+    let at = t.at;
+    let public = match t.tok {
+        Tok::Kw(k) => k.same("pub"),
+        _ => false,
+    };
+    if public {
+        p.at = at;
+    }
+    let what = what(p)?;
+    Result::Ok(ast::Item { public: public, what: what })
+}
+
+/// The item itself, after any `pub`.
+fn what(p: &mut Parser) -> Result<ast::What, lex::Error> {
+    let t = peek(p)?;
     let next = t.at;
     let word = match t.tok {
         Tok::Kw(k) => k,
         _ => "".to_string(),
     };
-    if word.same("pub") {
-        p.at = next;
-        return item(p);
-    }
     if word.same("fn") {
         let f = function(p)?;
-        return Result::Ok(ast::Item::Function(f));
+        return Result::Ok(ast::What::Function(f));
     }
     if word.same("struct") {
         return struct_item(p);
@@ -1016,7 +1027,7 @@ pub fn item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
         p.at = next;
         let name = ident(p)?;
         expect_op(p, ";")?;
-        return Result::Ok(ast::Item::Mod(name));
+        return Result::Ok(ast::What::Mod(name));
     }
     if word.same("use") {
         p.at = next;
@@ -1028,7 +1039,7 @@ pub fn item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
         expect_op(p, "=")?;
         let ty = type_name(p)?;
         expect_op(p, ";")?;
-        return Result::Ok(ast::Item::Alias(name, ty));
+        return Result::Ok(ast::What::Alias(name, ty));
     }
     if word.same("const") {
         p.at = next;
@@ -1038,7 +1049,7 @@ pub fn item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
         expect_op(p, "=")?;
         let value = expr(p)?;
         expect_op(p, ";")?;
-        return Result::Ok(ast::Item::Const(name, ty, value));
+        return Result::Ok(ast::What::Const(name, ty, value));
     }
     if word.same("impl") {
         return impl_item(p);
@@ -1047,7 +1058,7 @@ pub fn item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
 }
 
 /// `struct Name { a: T, … }`, `struct Name;` (§3.3).
-fn struct_item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
+fn struct_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
     expect_kw(p, "struct")?;
     let name = ident(p)?;
     let mut fields: Vec<ast::Param> = Vec::new();
@@ -1059,7 +1070,7 @@ fn struct_item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
     };
     if unit {
         p.at = next;
-        return Result::Ok(ast::Item::Struct(name, fields));
+        return Result::Ok(ast::What::Struct(name, fields));
     }
     expect_op(p, "{")?;
     loop {
@@ -1071,7 +1082,7 @@ fn struct_item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
         };
         if done {
             p.at = at2;
-            return Result::Ok(ast::Item::Struct(name, fields));
+            return Result::Ok(ast::What::Struct(name, fields));
         }
         let t3 = peek(p)?;
         let at3 = t3.at;
@@ -1100,7 +1111,7 @@ fn struct_item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
 }
 
 /// `enum Name { A, B(T, U), … }` (§3.3).
-fn enum_item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
+fn enum_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
     expect_kw(p, "enum")?;
     let name = ident(p)?;
     expect_op(p, "{")?;
@@ -1114,7 +1125,7 @@ fn enum_item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
         };
         if done {
             p.at = next;
-            return Result::Ok(ast::Item::Enum(name, variants));
+            return Result::Ok(ast::What::Enum(name, variants));
         }
         let vname = ident(p)?;
         let mut fields: Vec<String> = Vec::new();
@@ -1166,7 +1177,7 @@ fn enum_item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
 }
 
 /// `use a::b::c;` — the segments, in order (Ch. 6 §3.2).
-fn use_item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
+fn use_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
     let mut segments: Vec<String> = Vec::new();
     segments.push(ident(p)?);
     loop {
@@ -1178,7 +1189,7 @@ fn use_item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
         };
         if !more {
             expect_op(p, ";")?;
-            return Result::Ok(ast::Item::Use(segments));
+            return Result::Ok(ast::What::Use(segments));
         }
         p.at = next;
         segments.push(ident(p)?);
@@ -1189,7 +1200,7 @@ fn use_item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
 ///
 /// Both halves are read as types and only then told apart, because the
 /// difference is the `for` and nothing before it.
-fn impl_item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
+fn impl_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
     expect_kw(p, "impl")?;
     let first = type_name(p)?;
     let mut tr: String = Vec::new();
@@ -1216,7 +1227,7 @@ fn impl_item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
         };
         if done {
             p.at = at2;
-            return Result::Ok(ast::Item::Impl(tr, ty, fns));
+            return Result::Ok(ast::What::Impl(tr, ty, fns));
         }
         // An `impl` block takes no `pub`, and neither does anything in one:
         // its methods are as visible as the block, which is as visible as the

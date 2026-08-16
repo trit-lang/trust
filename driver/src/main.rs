@@ -98,6 +98,27 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // Pass one of Ch. 6 §4: every name the program defines, and what it
+    // would be called. It is the first thing a second implementation of the
+    // chapter can be held to, because it needs no types and no lowering.
+    if cmd == "symbols" {
+        let program = lang::modules::load(std::path::Path::new(path));
+        if !program.errors.is_empty() {
+            for e in &program.errors {
+                eprintln!("trust: {}", e.message);
+            }
+            return ExitCode::FAILURE;
+        }
+        for (kind, name, public) in lang::modules::symbols(&program) {
+            let seen = match public {
+                true => "pub",
+                false => "priv",
+            };
+            println!("{kind} {name} {seen}");
+        }
+        return ExitCode::SUCCESS;
+    }
+
     // The whole program as one text, for something that reads stdin.
     //
     // A compiler written in Trust cannot open a file: the machine has a

@@ -131,5 +131,19 @@ for root in examples/trust/modules/main.tr bootstrap/whole.tr bootstrap/items.tr
     m=$((m + $(printf '%s\n' "$rust" | wc -l)))
 done
 
-printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d modules of whole programs — all agreed\n' \
-    "$n" "$r" "$e" "$i" "$w" "$b" "$m"
+# Pass one of Ch. 6 §4: what the program defines, and what each name is
+# called. Two implementations of the chapter, one answer.
+y=0
+for root in examples/trust/modules/main.tr bootstrap/symbols.tr bootstrap/file.tr; do
+    rust=$("$trust" symbols "$root")
+    mine=$("$trust" bundle "$root" | "$trust" run bootstrap/symbols.tr)
+    if [ "$rust" != "$mine" ]; then
+        echo "bootstrap: the two disagree about what $root defines" >&2
+        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10 >&2
+        exit 1
+    fi
+    y=$((y + $(printf '%s\n' "$rust" | wc -l)))
+done
+
+printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d modules of whole programs, %d names defined — all agreed\n' \
+    "$n" "$r" "$e" "$i" "$w" "$b" "$m" "$y"

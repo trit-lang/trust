@@ -143,6 +143,46 @@ fn read(p: &mut Program, path: Vec<String>, file: PathBuf, text: String) {
     }
 }
 
+/// Every name the program defines, as `kind path public` in the order the
+/// modules were read (§4).
+///
+/// This is pass one of `resolve` and nothing more: what each module defines,
+/// and what its full name would be. It is public because a second
+/// implementation of this chapter has to be able to say the same thing, and
+/// the only way to hold two implementations to one answer is to ask them
+/// both the same question.
+pub fn symbols(p: &Program) -> Vec<(String, String, bool)> {
+    let mut out = Vec::new();
+    for (i, file) in p.parsed.iter().enumerate() {
+        let here = &p.sources[i].path;
+        for item in &file.items {
+            if let Item::Mod(m) = item {
+                out.push(("mod".to_string(), join(here, &m.name), m.public));
+                continue;
+            }
+            let Some(name) = defines(item) else { continue };
+            out.push((word(item).to_string(), join(here, name), is_public(item)));
+        }
+    }
+    out
+}
+
+/// What an item is, as the one word a reader would use.
+fn word(i: &Item) -> &'static str {
+    match i {
+        Item::Fn(_) => "fn",
+        Item::Struct(_) => "struct",
+        Item::Enum(_) => "enum",
+        Item::Trait(_) => "trait",
+        Item::Const(_) => "const",
+        Item::Alias(_) => "type",
+        Item::Macro(_) => "macro",
+        Item::Impl(_) => "impl",
+        Item::Mod(_) => "mod",
+        Item::Use(_) => "use",
+    }
+}
+
 /// What one module can name, and what each name means.
 struct Scope {
     /// Item name to full path, for what this module defines and what it

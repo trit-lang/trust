@@ -1,0 +1,132 @@
+// Pass one of Ch. 6 §4, in Trust: what a program defines, and what each
+// name would be called.
+//
+//     trust bundle <root.tr> | trust run bootstrap/symbols.tr
+//
+// One line per item — `kind path pub|priv` — in the order the driver walked
+// the modules, which is the order `trust symbols` prints. Nothing here needs
+// a type or a lowering: a name is a fact about the text and about where the
+// text was, and that is the first thing a second implementation of the
+// chapter can be held to.
+
+mod ast;
+mod bundle;
+mod lex;
+mod parse;
+
+fn getchar() -> t9;
+
+fn main() -> t27 {
+    let src = read_all();
+    let mods = bundle::split(&src);
+    let mut i: taddr = 0;
+    while i < mods.len() {
+        let mut p = parse::Parser { src: mods[i].text.to_string(), at: 0, no_struct: false };
+        match parse::file(&mut p) {
+            Result::Ok(items) => {
+                let mut k: taddr = 0;
+                while k < items.len() {
+                    line(&mods[i].path, &items[k]);
+                    k += 1;
+                }
+            }
+            Result::Err(err) => {
+                print("error ");
+                print(&mods[i].path);
+                print(" ");
+                print_int(err.at as t27);
+                println("");
+            }
+        }
+        i += 1;
+    }
+    0
+}
+
+/// One item's line, or nothing when it defines no name.
+fn line(path: &str, item: &ast::Item) {
+    match ast::defines(&item.what) {
+        Option::Some(name) => {
+            let word = ast::kind(&item.what);
+            let full = joined(path, &name);
+            print(&word);
+            print(" ");
+            print(&full);
+            // A `mod` is not written `pub` by anything below it: the
+            // declaration carries the word, and the item it names is a file.
+            if item.public {
+                println(" pub");
+            } else {
+                println(" priv");
+            }
+        }
+        Option::None => {}
+    }
+}
+
+/// A name through the module holding it — `lex.one` — with `.` for `::`,
+/// because TIR §1 admits a `.` in an identifier and not a `:` (Ch. 6 §4).
+///
+/// The root's path is written `-` by the bundle, since it has no name of its
+/// own (§1.1), and a name in it is that name and nothing before it.
+fn joined(path: &str, name: &str) -> String {
+    let mut out: String = Vec::new();
+    if !path.same("-") {
+        let mut i: taddr = 0;
+        while i < path.len() {
+            out.push(path[i]);
+            i += 1;
+        }
+        out.push('.');
+    }
+    let mut k: taddr = 0;
+    while k < name.len() {
+        out.push(name[k]);
+        k += 1;
+    }
+    out
+}
+
+/// Everything on stdin, as text.
+fn read_all() -> String {
+    let mut out: String = Vec::new();
+    loop {
+        let b = next_byte();
+        if b < 0 {
+            return out;
+        }
+        let extra = if b < 128 { 0 } else if b < 224 { 1 } else if b < 240 { 2 } else { 3 };
+        let mut v = if extra == 0 {
+            b
+        } else if extra == 1 {
+            b - 192
+        } else if extra == 2 {
+            b - 224
+        } else {
+            b - 240
+        };
+        let mut k = 0;
+        while k < extra {
+            let c = next_byte();
+            if c < 0 {
+                return out;
+            }
+            v = v * 64 + (c - 128);
+            k += 1;
+        }
+        out.push(char::try_from(v).unwrap());
+    }
+}
+
+/// One code unit, or −1 when the input has ended (ISA §2.2).
+fn next_byte() -> t27 {
+    loop {
+        let c = getchar() as t27;
+        if c == 0 - 2 {
+            return 0 - 1;
+        }
+        if c >= 0 {
+            return c;
+        }
+    }
+}
