@@ -377,13 +377,22 @@ Everything the specification defines and does not reserve is **built**. What
 follows is therefore not a list of missing features; it is a list of the four
 things that are actually open, in the order they are worth doing.
 
-**A. Compiler speed, which nobody had looked at.** `trust run` made the number
-visible: HPL took 1.6 seconds to compile and 40 milliseconds to run, and every
-measurement in this document until then was about the second. Verification was
-96% of it and is fixed (G8.17), so a compile is 0.455 s — but HPL is still
-0.67 ms per line where `demo.tr` is 0.06, so something remains superlinear.
-**Profile before touching anything**: the two guesses that preceded the last
-profile were both wrong, and both were about code written the same day.
+**A. Compiler speed.** Done for now: **1.6 s → 0.167 s**, ten times (G8.17).
+Both costs were the same shape — a set of `String` rebuilt per block — first
+in the verifier's live-value check, and then in its dominator fixpoint, which
+alone was 280 ms once inlining produced a function of 498 blocks. Cooper,
+Harvey and Kennedy's algorithm replaced the second.
+
+What is left is the register allocator's liveness: 46 ms of the remaining
+167, and the same `BTreeSet<String>` shape one level down. Fixing it means
+interning names as indices, which is not small, and 167 ms for a 688-line
+program is not a problem worth that. `demo.tr` is 0.04 ms per line against
+HPL's 0.24, so a gap of six remains and is recorded rather than chased.
+
+**Profile before touching any of it.** Three profiles in a row have found
+something that guesses missed, and the two guesses before the first were both
+about code written the same day. `trust --time` is a flag now, so nobody has
+to hack the driver to look.
 
 **B. The iterator protocol's remaining cost.** `for i in 0..n` is 3.0× the
 `while` and an index it replaces, down from 9.4× (G9.25). What is left is that
