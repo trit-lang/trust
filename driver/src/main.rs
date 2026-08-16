@@ -119,6 +119,27 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // Pass two of Ch. 6 §4: what every `use` reaches. A refusal is reported
+    // as the rule that refused it and not as its wording, because two
+    // implementations should agree about the language and need not agree
+    // about a sentence.
+    if cmd == "uses" {
+        let program = lang::modules::load(std::path::Path::new(path));
+        if !program.errors.is_empty() {
+            for e in &program.errors {
+                eprintln!("trust: {}", e.message);
+            }
+            return ExitCode::FAILURE;
+        }
+        for (module, written, got) in lang::modules::uses(&program) {
+            match got {
+                Ok(full) => println!("{module} {written} -> {full}"),
+                Err(why) => println!("{module} {written} ! {why}"),
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+
     // The whole program as one text, for something that reads stdin.
     //
     // A compiler written in Trust cannot open a file: the machine has a

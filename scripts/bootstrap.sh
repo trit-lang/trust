@@ -145,5 +145,19 @@ for root in examples/trust/modules/main.tr bootstrap/symbols.tr bootstrap/file.t
     y=$((y + $(printf '%s\n' "$rust" | wc -l)))
 done
 
-printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d modules of whole programs, %d names defined — all agreed\n' \
-    "$n" "$r" "$e" "$i" "$w" "$b" "$m" "$y"
+# Pass two: what every `use` reaches, and by which rule it was refused when
+# it reached nothing. `bootstrap/programs/refused` is every way it can fail.
+u=0
+for root in examples/trust/modules/main.tr bootstrap/programs/refused/main.tr bootstrap/resolve.tr; do
+    rust=$("$trust" uses "$root")
+    mine=$("$trust" bundle "$root" | "$trust" run bootstrap/resolve.tr)
+    if [ "$rust" != "$mine" ]; then
+        echo "bootstrap: the two disagree about what the \`use\`s of $root reach" >&2
+        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10 >&2
+        exit 1
+    fi
+    u=$((u + $(printf '%s\n' "$rust" | wc -l)))
+done
+
+printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d modules of whole programs, %d names defined, %d names resolved — all agreed\n' \
+    "$n" "$r" "$e" "$i" "$w" "$b" "$m" "$y" "$u"

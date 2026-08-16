@@ -1,0 +1,286 @@
+// Pass two of Ch. 6 §4, in Trust: what every `use` reaches.
+//
+//     trust bundle <root.tr> | trust run bootstrap/resolve.tr
+//
+// One line per `use` — `<module> <as written> -> <full name>`, or `!` and
+// the one word for the rule that refused it. A refusal is reported by rule
+// and not by wording, because two implementations should agree about the
+// language and need not agree about a sentence.
+//
+// A `use` is absolute (§3.1): it starts at the root wherever it is written.
+// Where it *is* written still decides visibility, and holding those two
+// apart is the whole of this pass — draft 0.1 had them as one thing and two
+// sibling modules could not see each other at all (G9.37).
+
+mod ast;
+mod bundle;
+mod lex;
+mod parse;
+
+fn getchar() -> t9;
+
+/// One name a module defines, and what it is called from the root.
+pub struct Defined {
+    pub module: String,
+    pub name: String,
+    pub full: String,
+    pub public: bool,
+}
+
+/// Everything resolution knows about the program, gathered once.
+///
+/// Both lists are searched from the front rather than hashed. A program is a
+/// few hundred names and the machine has no clock to lose; a hash of a
+/// `String` would be a second thing to keep the same as the Rust side, and
+/// this pass is about agreeing on answers rather than on how they are found.
+pub struct World {
+    pub modules: Vec<String>,
+    pub defined: Vec<Defined>,
+    pub sources: Vec<String>,
+}
+
+fn main() -> t27 {
+    let src = read_all();
+    let mods = bundle::split(&src);
+    let mut w = World { modules: Vec::new(), defined: Vec::new(), sources: Vec::new() };
+    let mut files: Vec<Vec<ast::Item>> = Vec::new();
+
+    // Pass one, again — a `use` cannot be resolved before it is known what
+    // the program defines, and that is a fact about every module at once.
+    let mut i: taddr = 0;
+    while i < mods.len() {
+        let here = plain(&mods[i].path);
+        w.sources.push(here.to_string());
+        let mut p = parse::Parser { src: mods[i].text.to_string(), at: 0, no_struct: false };
+        match parse::file(&mut p) {
+            Result::Ok(items) => {
+                let mut k: taddr = 0;
+                while k < items.len() {
+                    gather(&mut w, &here, &items[k]);
+                    k += 1;
+                }
+                files.push(items);
+            }
+            Result::Err(err) => {
+                print("error ");
+                print(&mods[i].path);
+                print(" ");
+                print_int(err.at as t27);
+                println("");
+                let empty: Vec<ast::Item> = Vec::new();
+                files.push(empty);
+            }
+        }
+        i += 1;
+    }
+
+    // Pass two: every `use`, in the order the modules were read.
+    let mut f: taddr = 0;
+    while f < files.len() {
+        let here = plain(&mods[f].path);
+        let mut k: taddr = 0;
+        while k < files[f].len() {
+            match &files[f][k].what {
+                ast::What::Use(segments) => report(&w, &mods[f].path, &here, &segments),
+                _ => {}
+            }
+            k += 1;
+        }
+        f += 1;
+    }
+    0
+}
+
+/// One `use`, and what it reached.
+fn report(w: &World, shown: &str, here: &str, segments: &Vec<String>) {
+    let written = written_path(segments);
+    print(shown);
+    print(" ");
+    print(&written);
+    let found = lookup(w, here, segments);
+    match found {
+        Result::Ok(full) => {
+            print(" -> ");
+            println(&full);
+        }
+        Result::Err(why) => {
+            print(" ! ");
+            println(&why);
+        }
+    }
+}
+
+/// Add what one item defines to the world (§4).
+fn gather(w: &mut World, here: &str, item: &ast::Item) {
+    match &item.what {
+        ast::What::Mod(name) => {
+            let full = joined(here, &name);
+            w.modules.push(full);
+        }
+        _ => {
+            match ast::defines(&item.what) {
+                Option::Some(name) => {
+                    let full = joined(here, &name);
+                    w.defined.push(Defined {
+                        module: here.to_string(),
+                        name: name,
+                        full: full,
+                        public: item.public,
+                    });
+                }
+                Option::None => {}
+            }
+        }
+    }
+}
+
+/// Resolve a `use`'s path from the root, checking what `here` may see.
+fn lookup(w: &World, here: &str, segments: &Vec<String>) -> Result<String, String> {
+    // Walk as far as the segments keep naming modules. What stops the walk
+    // is an item, and whatever follows *it* is not this pass's business.
+    let mut at: String = Vec::new();
+    let mut taken: taddr = 0;
+    while taken < segments.len() {
+        let next = joined(&at, &segments[taken]);
+        if !holds(&w.modules, &next) {
+            break;
+        }
+        at = next;
+        taken += 1;
+    }
+    if taken == segments.len() {
+        // The path ended at a module — `use lang::lex;` names one.
+        return Result::Ok(at);
+    }
+    if !holds(&w.sources, &at) {
+        return Result::Err("missing".to_string());
+    }
+    let mut i: taddr = 0;
+    while i < w.defined.len() {
+        if w.defined[i].module.same(&at) && w.defined[i].name.same(&segments[taken]) {
+            // Visibility is checked against where the path was *written*: a
+            // module can see into what is inside it (§2.1), and a `use`
+            // grants no access however far from the root it resolved (§3.2).
+            if !w.defined[i].public && !inside(here, &at) {
+                return Result::Err("private".to_string());
+            }
+            if taken + 1 != segments.len() {
+                // `use a::E::V;` reaches the enum and stops: a `use` names
+                // an item or a module, not something inside one (§3.2).
+                return Result::Err("deep".to_string());
+            }
+            return Result::Ok(w.defined[i].full.to_string());
+        }
+        i += 1;
+    }
+    Result::Err("missing".to_string())
+}
+
+/// Whether module `here` is `at` or inside it (§2.1).
+fn inside(here: &str, at: &str) -> bool {
+    if at.len() == 0 {
+        return true;
+    }
+    if here.len() < at.len() {
+        return false;
+    }
+    let mut i: taddr = 0;
+    while i < at.len() {
+        if here[i] != at[i] {
+            return false;
+        }
+        i += 1;
+    }
+    here.len() == at.len() || here[at.len()] == '.'
+}
+
+/// Whether a list holds this exact name.
+fn holds(names: &Vec<String>, name: &str) -> bool {
+    let mut i: taddr = 0;
+    while i < names.len() {
+        if names[i].same(name) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// A path as it was written, with `::` between the segments.
+fn written_path(segments: &Vec<String>) -> String {
+    let mut out: String = Vec::new();
+    let mut i: taddr = 0;
+    while i < segments.len() {
+        if i > 0 {
+            out.push_str("::");
+        }
+        out.push_str(&segments[i]);
+        i += 1;
+    }
+    out
+}
+
+/// A name through the module holding it, with `.` for `::` (§4). The root
+/// has no name of its own, so a name in it is that name and nothing before.
+fn joined(path: &str, name: &str) -> String {
+    let mut out: String = Vec::new();
+    if path.len() > 0 {
+        out.push_str(path);
+        out.push('.');
+    }
+    out.push_str(name);
+    out
+}
+
+/// The bundle writes the root's path as `-`, since it has none (§1.1).
+fn plain(path: &str) -> String {
+    if path.same("-") {
+        let empty: String = Vec::new();
+        return empty;
+    }
+    path.to_string()
+}
+
+/// Everything on stdin, as text.
+fn read_all() -> String {
+    let mut out: String = Vec::new();
+    loop {
+        let b = next_byte();
+        if b < 0 {
+            return out;
+        }
+        let extra = if b < 128 { 0 } else if b < 224 { 1 } else if b < 240 { 2 } else { 3 };
+        let mut v = if extra == 0 {
+            b
+        } else if extra == 1 {
+            b - 192
+        } else if extra == 2 {
+            b - 224
+        } else {
+            b - 240
+        };
+        let mut k = 0;
+        while k < extra {
+            let c = next_byte();
+            if c < 0 {
+                return out;
+            }
+            v = v * 64 + (c - 128);
+            k += 1;
+        }
+        out.push(char::try_from(v).unwrap());
+    }
+}
+
+/// One code unit, or −1 when the input has ended (ISA §2.2).
+fn next_byte() -> t27 {
+    loop {
+        let c = getchar() as t27;
+        if c == 0 - 2 {
+            return 0 - 1;
+        }
+        if c >= 0 {
+            return c;
+        }
+    }
+}

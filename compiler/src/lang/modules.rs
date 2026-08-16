@@ -183,6 +183,38 @@ fn word(i: &Item) -> &'static str {
     }
 }
 
+/// What every `use` in the program resolves to (§3.2), in the order the
+/// modules were read.
+///
+/// Each entry is the module it was written in, the path as written, and
+/// either the full name it reached or the word for why it did not. It is
+/// pass two of `resolve` reported rather than applied, and it is the second
+/// question two implementations of this chapter can both be asked.
+pub fn uses(p: &Program) -> Vec<(String, String, Result<String, &'static str>)> {
+    let w = world(p);
+    let mut out = Vec::new();
+    for (i, file) in p.parsed.iter().enumerate() {
+        let here = &p.sources[i].path;
+        for item in &file.items {
+            let Item::Use(u) = item else { continue };
+            let written = u.segments.join("::");
+            let where_ = match here.is_empty() {
+                true => "-".to_string(),
+                false => here.join("."),
+            };
+            let got = match lookup(&u.segments, here, &[], &w) {
+                Ok((full, took)) if took == u.segments.len() => Ok(full),
+                // A `use` names an item or a module and not something inside
+                // one: `use a::E::V;` reaches the enum and stops (§3.2).
+                Ok(_) => Err("deep"),
+                Err(refused) => Err(refused.why.word()),
+            };
+            out.push((where_, written, got));
+        }
+    }
+    out
+}
+
 /// What one module can name, and what each name means.
 struct Scope {
     /// Item name to full path, for what this module defines and what it
@@ -202,35 +234,19 @@ pub fn resolve(p: &Program) -> (File, Vec<SyntaxError>) {
     let mut errors = Vec::new();
 
     // Pass one: what each module defines, and which module paths exist.
-    let mut w = World {
-        modules: HashMap::new(),
-        defined: Vec::new(),
-        public: HashMap::new(),
-        kinds: HashMap::new(),
-        sources: &p.sources,
-    };
+    let w = world(p);
     for (i, file) in p.parsed.iter().enumerate() {
-        let here = &p.sources[i].path;
-        let mut mine = HashMap::new();
+        let mut seen: HashSet<&str> = HashSet::new();
         for item in &file.items {
-            if let Item::Mod(m) = item {
-                w.modules.insert(join(here, &m.name), m.public);
-                continue;
-            }
             let Some(name) = defines(item) else { continue };
-            let full = join(here, name);
-            if mine.insert(name.to_string(), full.clone()).is_some() {
+            if !seen.insert(name) {
                 errors.push(SyntaxError {
                     span: item.name_span(),
                     message: format!("`{name}` is defined more than once in this module"),
                 });
             }
-            w.public.insert(full.clone(), is_public(item));
-            w.kinds.insert(full, kind_of(item));
-            // An enum's variants are named through the enum, so they need no
-            // entry of their own; a path stops at the enum (§3.1).
         }
-        w.defined.push(mine);
+        let _ = i;
     }
 
     // Pass two: each module's scope, which is what it defines, the modules
@@ -278,9 +294,9 @@ pub fn resolve(p: &Program) -> (File, Vec<SyntaxError>) {
                         u.segments.join("::")
                     ),
                 }),
-                Err(why) => errors.push(SyntaxError {
+                Err(refused) => errors.push(SyntaxError {
                     span: u.name_span,
-                    message: why,
+                    message: refused.message,
                 }),
             }
         }
@@ -356,12 +372,38 @@ fn is_public(i: &Item) -> bool {
 /// `from` is where it starts, which decides **resolution**. They are the same
 /// for a path in an expression and differ for a `use`, which is absolute
 /// (§3.1) and is the one way a module names something outside itself.
+/// Why a path did not resolve. The message says which name and where; the
+/// class says which of the chapter's two rules refused it, and is what a
+/// second implementation can be held to without being held to the wording.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Why {
+    /// Nothing of that name is there (§3.1).
+    Missing,
+    /// It is there and it is not `pub` (§2.1).
+    Private,
+}
+
+impl Why {
+    /// The one word for it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Why::Missing => "missing",
+            Why::Private => "private",
+        }
+    }
+}
+
+struct Refused {
+    why: Why,
+    message: String,
+}
+
 fn lookup(
     segments: &[String],
     here: &[String],
     from: &[String],
     w: &World,
-) -> Result<(String, usize), String> {
+) -> Result<(String, usize), Refused> {
     // Walk as far as the segments keep naming modules. What stops the walk
     // is an item, and whatever follows *it* — a variant, an associated name
     // — is not this pass's business (§3.1).
@@ -386,25 +428,66 @@ fn lookup(
             true => format!("`{name}` is not a module or an item in scope"),
             false => format!("`{}` has no source", at.join("::")),
         };
-        return Err(what);
+        return Err(Refused {
+            why: Why::Missing,
+            message: what,
+        });
     };
     let Some(full) = w.defined[i].get(name) else {
-        return Err(match at.is_empty() {
-            true => format!("`{name}` is not a module or an item in scope"),
-            false => format!("`{name}` is not in `{}`", at.join("::")),
+        return Err(Refused {
+            why: Why::Missing,
+            message: match at.is_empty() {
+                true => format!("`{name}` is not a module or an item in scope"),
+                false => format!("`{name}` is not in `{}`", at.join("::")),
+            },
         });
     };
     // Visibility is checked against where the path was *written*: a module
     // can see into what is inside it (§2.1), and a `use` grants no access
     // however far from the root it resolved (§3.2).
     if !w.public.get(full).copied().unwrap_or(false) && !inside(here, &at) {
-        return Err(format!(
-            "`{name}` is not `pub`, so it is visible only in `{}` and what is inside it \
-             (Ch. 6 §2.1)",
-            at.join("::")
-        ));
+        return Err(Refused {
+            why: Why::Private,
+            message: format!(
+                "`{name}` is not `pub`, so it is visible only in `{}` and what is inside \
+                 it (Ch. 6 §2.1)",
+                at.join("::")
+            ),
+        });
     }
     Ok((full.clone(), taken + 1))
+}
+
+/// Pass one, gathered: what each module defines, and which module paths
+/// exist. It is a fact about the program and not about any one pass, which
+/// is why `symbols`, `uses` and `resolve` all start by asking for it.
+fn world(p: &Program) -> World<'_> {
+    let mut w = World {
+        modules: HashMap::new(),
+        defined: Vec::new(),
+        public: HashMap::new(),
+        kinds: HashMap::new(),
+        sources: &p.sources,
+    };
+    for (i, file) in p.parsed.iter().enumerate() {
+        let here = &p.sources[i].path;
+        let mut mine = HashMap::new();
+        for item in &file.items {
+            if let Item::Mod(m) = item {
+                w.modules.insert(join(here, &m.name), m.public);
+                continue;
+            }
+            let Some(name) = defines(item) else { continue };
+            let full = join(here, name);
+            mine.insert(name.to_string(), full.clone());
+            w.public.insert(full.clone(), is_public(item));
+            w.kinds.insert(full, kind_of(item));
+            // An enum's variants are named through the enum, so they need no
+            // entry of their own; a path stops at the enum (§3.1).
+        }
+        w.defined.push(mine);
+    }
+    w
 }
 
 /// Everything resolution knows about the program, gathered once.
@@ -500,10 +583,10 @@ impl Rewriter<'_> {
                     *segments = std::iter::once(full).chain(tail).collect();
                     kind
                 }
-                Err(why) => {
+                Err(refused) => {
                     self.errors.push(SyntaxError {
                         span: at,
-                        message: why,
+                        message: refused.message,
                     });
                     None
                 }

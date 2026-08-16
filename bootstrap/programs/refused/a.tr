@@ -1,0 +1,3 @@
+pub fn shown() -> t27 { 1 }
+fn hidden() -> t27 { 2 }
+pub enum Shape { Dot, Line }

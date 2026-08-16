@@ -1,0 +1,19 @@
+// Every way a `use` can fail, in one program (Ch. 6 §3).
+
+mod a;
+mod b;
+
+use a;
+use a::shown;
+use a::hidden;
+use a::Shape;
+use a::Shape::Dot;
+use a::nothing;
+use nowhere::at::all;
+use b::deep;
+use b::inner;
+use b::inner::held;
+
+fn main() -> t27 {
+    0
+}
