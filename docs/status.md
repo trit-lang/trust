@@ -452,9 +452,11 @@ accepts both an iterator and a `&str`.
 
 **`trust run file.tr`** compiles and executes with nothing on the disk
 (G0.4) — a separate crate, because the compiler emits text and the machine
-knows nothing about Trust. It made one thing visible immediately: HPL takes
-2.9 seconds to compile and 40 milliseconds to run, and every measurement in
-docs/ so far has been about the second number.
+knows nothing about Trust. It made one thing visible immediately: HPL took
+1.6 seconds to compile and 40 milliseconds to run, and every measurement in
+docs/ until then had been about the second number. **96% of it was
+verification** — a live-value set rebuilt per block with a string allocation
+per value per dominator — and it is 0.455 s now (G8.17).
 
 `a..b` is a half-open range (G9.25), which is a struct in the library and a
 spelling in the grammar and nothing else — `for i in 0..v.len()` works. It

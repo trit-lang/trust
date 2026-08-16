@@ -2622,6 +2622,44 @@ and `0t` is its literal, but nothing has needed it that a program cannot write
 in six lines, and the digit that has no character — `T` for −1 — is a choice
 §1.6 would have to make.
 
+**G8.17 — the compiler spent 96% of its time verifying, and I guessed twice
+before measuring.** `trust run` made one number visible that three commands
+and two temporary files had hidden: HPL took **1.6 seconds to compile and 40
+milliseconds to run**, and every measurement in this log until then had been
+about the second.
+
+The first two guesses were wrong and both were about code I had just written.
+The inliner restarted its scan from the top after every splice — genuinely
+O(k²·size) — and cloned the callee table once per function. Both were real
+and both were fixed and together they were worth **four milliseconds**.
+
+One profile answered it:
+
+| phase | before | after |
+|---|---|---|
+| canonicalize | 18 ms | 16 ms |
+| inline | 4 ms | 2 ms |
+| legalize | 5 ms | 4 ms |
+| **verify** | **1371 ms** | **~230 ms** |
+| codegen | 106 ms | 102 ms |
+
+`verify_function` built, **for every block**, a `BTreeSet<String>` holding
+every value defined by every block that dominates it — one string allocation
+per value per dominator — and cloned the function's whole type map beside it.
+That is O(blocks × values) allocations, which is fine for what a frontend
+emits and is not fine after inlining triples it.
+
+It answers one question: is this value in scope here. So it asks that instead
+— which block defines the value, and does that block dominate this one — and
+the per-block set holds only what is defined *here*. The type map and the
+dominator set are borrowed rather than cloned. `dominators` also rebuilt its
+predecessor lists on every pass of its fixpoint, by scanning every block.
+
+**1.39 s → 0.455 s**, and the output is identical to the instruction:
+3 233 721 either way. HPL is 0.67 ms per line where it was 2.67; `demo.tr` is
+0.06, so something is still superlinear, and the next profile will say what
+rather than the next guess.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

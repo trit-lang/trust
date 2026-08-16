@@ -1,13 +1,15 @@
 fn factorial(n: t27) -> t27 {
-    if n == 0 {
-        1
-    } else {
-        n * factorial(n - 1)
+    match n <=> 0 {
+        -1t => trap(),        // 負數沒有階乘
+         0t => 1,
+         1t => n * factorial(n - 1),
     }
 }
 
 fn main() -> t27 {
     print("Factorial of 5 is: ");
     print_int(factorial(5));
+    print("\nFactorial of 0 is: ");
+    print_int(factorial(0));
     0
 }

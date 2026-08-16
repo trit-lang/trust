@@ -155,8 +155,22 @@ struct Ctx<'a> {
     func: &'a Function,
     errs: &'a mut Vec<VerifyError>,
     block: String,
-    types: BTreeMap<String, Type>,
+    /// Every value in the function, borrowed — it was cloned per block,
+    /// which is a copy of the whole map for each of them.
+    types: &'a BTreeMap<String, Type>,
+    /// Values in scope *here*: the function's parameters, this block's own
+    /// parameters, and what its instructions have defined so far.
+    ///
+    /// Everything else is answered by asking where a value is defined and
+    /// whether that block dominates this one. Materializing the whole live
+    /// set per block meant one string clone per value per dominator, which
+    /// on HPL was most of the time the whole compiler took.
     live: BTreeSet<String>,
+    /// Which block defines each value, for everything not defined here.
+    defined_in: &'a BTreeMap<String, String>,
+    /// The blocks that dominate this one, itself included — borrowed, for
+    /// the reason `types` is.
+    doms: &'a BTreeSet<&'a str>,
 }
 
 impl Ctx<'_> {
@@ -192,8 +206,15 @@ impl Ctx<'_> {
                 }
                 Some(t) => {
                     let t = *t;
-                    if !self.live.contains(name) {
-                        // SSA: every use must be dominated by its definition.
+                    // SSA: every use must be dominated by its definition —
+                    // in scope here, or defined by a block that dominates
+                    // this one.
+                    let visible = self.live.contains(name)
+                        || self
+                            .defined_in
+                            .get(name)
+                            .is_some_and(|b| *b != self.block && self.doms.contains(b.as_str()));
+                    if !visible {
                         self.err(format!(
                             "`%{name}` is used here but its definition does not dominate this block"
                         ));
@@ -281,6 +302,15 @@ fn verify_function(m: &Module, f: &Function, errs: &mut Vec<VerifyError>) {
         });
     }
 
+    // Which block defines each value, so that "is this in scope" is a
+    // lookup and a dominance test rather than a set built per block.
+    let mut defined_in: BTreeMap<String, String> = BTreeMap::new();
+    for (label, ds) in &defs {
+        for (n, _) in ds {
+            defined_in.insert(n.clone(), (*label).to_string());
+        }
+    }
+
     let doms = dominators(f);
     let reachable: BTreeSet<&str> = doms.keys().copied().collect();
     if reachable.len() != f.blocks.len() {
@@ -311,27 +341,21 @@ fn verify_function(m: &Module, f: &Function, errs: &mut Vec<VerifyError>) {
         // defined by blocks that strictly dominate it, plus the function
         // parameters.
         let mut live: BTreeSet<String> = f.sig.params.iter().map(|(n, _)| n.clone()).collect();
-        if let Some(dominating) = doms.get(b.label.as_str()) {
-            for d in dominating {
-                if *d == b.label {
-                    continue;
-                }
-                for (n, _) in defs.get(d).into_iter().flatten() {
-                    live.insert(n.clone());
-                }
-            }
-        }
         for (n, _) in &b.params {
             live.insert(n.clone());
         }
+        let empty: BTreeSet<&str> = BTreeSet::new();
+        let dominating = doms.get(b.label.as_str()).unwrap_or(&empty);
 
         let mut ctx = Ctx {
             module: m,
             func: f,
             errs,
             block: b.label.clone(),
-            types: types.clone(),
+            types: &types,
             live,
+            defined_in: &defined_in,
+            doms: dominating,
         };
 
         for inst in &b.insts {
@@ -669,6 +693,27 @@ pub fn predecessors<'a>(f: &'a Function, label: &str) -> Vec<&'a Block> {
 /// itself). Iterative fixpoint over the intersection rule — the textbook
 /// algorithm, which is ample for the block counts a frontend emits.
 pub fn dominators(f: &Function) -> BTreeMap<&str, BTreeSet<&str>> {
+    // Every block by label, and every block's predecessors, computed once.
+    //
+    // The fixpoint below asks for a block's predecessors on every pass, and
+    // asking meant scanning the whole function — O(passes · blocks²), which
+    // is fine for what a frontend emits and is not fine after inlining
+    // triples it. On HPL this function alone was 1.37 of the 1.6 seconds the
+    // compiler took, because verification runs it for every function.
+    let by_label: BTreeMap<&str, &Block> =
+        f.blocks.iter().map(|b| (b.label.as_str(), b)).collect();
+    let mut preds_of: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for b in &f.blocks {
+        for t in successors(&b.term) {
+            if by_label.contains_key(t.label.as_str()) {
+                preds_of
+                    .entry(by_label[t.label.as_str()].label.as_str())
+                    .or_default()
+                    .push(b.label.as_str());
+            }
+        }
+    }
+
     let entry = f.blocks[0].label.as_str();
     let mut reachable: BTreeSet<&str> = BTreeSet::new();
     let mut stack = vec![entry];
@@ -676,10 +721,10 @@ pub fn dominators(f: &Function) -> BTreeMap<&str, BTreeSet<&str>> {
         if !reachable.insert(l) {
             continue;
         }
-        if let Some(b) = f.block(l) {
+        if let Some(b) = by_label.get(l) {
             for s in successors(&b.term) {
-                if f.block(&s.label).is_some() {
-                    stack.push(&s.label);
+                if by_label.contains_key(s.label.as_str()) {
+                    stack.push(by_label[s.label.as_str()].label.as_str());
                 }
             }
         }
@@ -707,11 +752,15 @@ pub fn dominators(f: &Function) -> BTreeMap<&str, BTreeSet<&str>> {
             if l == entry {
                 continue;
             }
-            let preds: Vec<&str> = predecessors(f, l)
-                .iter()
-                .map(|b| b.label.as_str())
-                .filter(|p| reachable.contains(p))
-                .collect();
+            let preds: Vec<&str> = preds_of
+                .get(l)
+                .map(|ps| {
+                    ps.iter()
+                        .copied()
+                        .filter(|p| reachable.contains(p))
+                        .collect()
+                })
+                .unwrap_or_default();
             let mut new: BTreeSet<&str> = match preds.split_first() {
                 None => BTreeSet::new(),
                 Some((first, rest)) => rest.iter().fold(dom[first].clone(), |acc, p| {
