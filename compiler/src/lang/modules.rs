@@ -212,8 +212,14 @@ pub fn resolve(p: &Program) -> (File, Vec<SyntaxError>) {
             let Some(last) = u.segments.last() else {
                 continue;
             };
-            match lookup(&u.segments, here, &w) {
+            match lookup(&u.segments, here, &[], &w) {
                 Ok((full, took)) if took == u.segments.len() => {
+                    // A `use` of a *module* binds a module name, which is
+                    // what a path's first segment may be — so it goes where
+                    // a declared module goes and not only among the items.
+                    if w.modules.contains_key(&full) {
+                        scope.mods.insert(last.clone(), full.clone());
+                    }
                     if scope.names.insert(last.clone(), full).is_some() {
                         errors.push(SyntaxError {
                             span: u.name_span,
@@ -306,17 +312,21 @@ fn is_public(i: &Item) -> bool {
 /// The first segment names a module, and then the rest is a path within it,
 /// or it names an item and there is no rest. That order is what tells
 /// `lang::lex::Span` from `Sign::Neg`.
-fn lookup(segments: &[String], here: &[String], w: &World) -> Result<(String, usize), String> {
-    let first = &segments[0];
-    let mut at = here.to_vec();
-    at.push(first.clone());
-    if !w.modules.contains_key(&at.join(".")) {
-        return Err(format!("`{first}` is not a module or an item in scope"));
-    }
+/// `here` is where the path was written, which decides **visibility**;
+/// `from` is where it starts, which decides **resolution**. They are the same
+/// for a path in an expression and differ for a `use`, which is absolute
+/// (§3.1) and is the one way a module names something outside itself.
+fn lookup(
+    segments: &[String],
+    here: &[String],
+    from: &[String],
+    w: &World,
+) -> Result<(String, usize), String> {
     // Walk as far as the segments keep naming modules. What stops the walk
     // is an item, and whatever follows *it* — a variant, an associated name
     // — is not this pass's business (§3.1).
-    let mut taken = 1;
+    let mut at = from.to_vec();
+    let mut taken = 0;
     while taken < segments.len() {
         let mut next = at.clone();
         next.push(segments[taken].clone());
@@ -332,13 +342,21 @@ fn lookup(segments: &[String], here: &[String], w: &World) -> Result<(String, us
     }
     let name = &segments[taken];
     let Some(i) = w.sources.iter().position(|s| s.path == at) else {
-        return Err(format!("`{}` has no source", at.join("::")));
+        let what = match at.is_empty() {
+            true => format!("`{name}` is not a module or an item in scope"),
+            false => format!("`{}` has no source", at.join("::")),
+        };
+        return Err(what);
     };
     let Some(full) = w.defined[i].get(name) else {
-        return Err(format!("`{name}` is not in `{}`", at.join("::")));
+        return Err(match at.is_empty() {
+            true => format!("`{name}` is not a module or an item in scope"),
+            false => format!("`{name}` is not in `{}`", at.join("::")),
+        });
     };
-    // Visibility is checked against where the path was written: a module can
-    // see into what is inside it (§2.1).
+    // Visibility is checked against where the path was *written*: a module
+    // can see into what is inside it (§2.1), and a `use` grants no access
+    // however far from the root it resolved (§3.2).
     if !w.public.get(full).copied().unwrap_or(false) && !inside(here, &at) {
         return Err(format!(
             "`{name}` is not `pub`, so it is visible only in `{}` and what is inside it \
@@ -426,14 +444,20 @@ impl Rewriter<'_> {
     /// A written path. Answers what the head resolved to, when it named
     /// something through a module — which is what tells the node's shape.
     fn path(&mut self, segments: &mut Vec<String>, at: Span) -> Option<Kind> {
-        // A module path resolves as far as it names modules; the rest is a
-        // variant or an associated name and stays as written (§3.1).
-        if segments.len() >= 2 && self.scope.mods.contains_key(&segments[0]) {
-            return match lookup(segments, self.here, self.w) {
+        // A path whose head names a module resolves *inside* that module.
+        // The head may be a submodule declared here or a name a `use`
+        // brought in, and both answer with the module's full path — so the
+        // rest is looked up from there and not from where it was written.
+        if segments.len() >= 2
+            && let Some(base) = self.scope.mods.get(&segments[0]).cloned()
+        {
+            let from: Vec<String> = base.split('.').map(str::to_string).collect();
+            let rest: Vec<String> = segments[1..].to_vec();
+            return match lookup(&rest, self.here, &from, self.w) {
                 Ok((full, took)) => {
                     let kind = self.w.kinds.get(&full).copied();
-                    let rest = segments.split_off(took);
-                    *segments = std::iter::once(full).chain(rest).collect();
+                    let tail: Vec<String> = rest[took..].to_vec();
+                    *segments = std::iter::once(full).chain(tail).collect();
                     kind
                 }
                 Err(why) => {
@@ -548,6 +572,23 @@ impl Rewriter<'_> {
     fn ty(&mut self, t: &mut Ty) {
         match t {
             Ty::Name(n, _) | Ty::Dyn(n, _) => *n = self.local_or_name(n),
+            // `lex::Taken` — a type named through a module. The parser reads
+            // it as an associated type, which is what it would be if `lex`
+            // were one; a module makes it an ordinary name (Ch. 6 §4).
+            Ty::Assoc(base, name, at) => {
+                if let Ty::Name(head, _) = &**base
+                    && self.scope.mods.contains_key(head)
+                {
+                    let mut segments = vec![head.clone(), name.clone()];
+                    let at = *at;
+                    self.path(&mut segments, at);
+                    if segments.len() == 1 {
+                        *t = Ty::Name(segments.remove(0), at);
+                        return;
+                    }
+                }
+                self.ty(base);
+            }
             Ty::App(n, args, _) => {
                 *n = self.local_or_name(n);
                 for a in args {
@@ -558,7 +599,7 @@ impl Rewriter<'_> {
                 self.ty(inner);
                 self.expr(count);
             }
-            Ty::Ref(inner, _, _) | Ty::Slice(inner, _) | Ty::Assoc(inner, _, _) => self.ty(inner),
+            Ty::Ref(inner, _, _) | Ty::Slice(inner, _) => self.ty(inner),
             Ty::Tuple(items, _) => {
                 for t in items {
                     self.ty(t);

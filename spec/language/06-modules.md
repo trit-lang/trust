@@ -164,19 +164,25 @@ A path names an item through the modules that hold it, separated by `::`:
 lang::lex::Span
 ```
 
-A path is resolved from the module it is written in. Its first segment names
-either a module declared in that module, or a module in scope by §3.2, or an
-item.
+A path **in an expression or a type** is resolved from the module it is
+written in. Its first segment names either a module declared in that module,
+or a name brought in by a `use` (§3.2), or an item.
 
-There is no `crate::`, no `super::` and no `self::` path prefix. A module
-reaches what is inside it by naming it, and what is outside it by a `use`
-(§3.2) written at its top. A path that begins with a name the module can see
-is the only form.
+A path **in a `use`** is resolved from the **root** (§1.1). That is the one
+place a module can name something outside itself, and it is why there is no
+`crate::`, `super::` or `self::` prefix: every path that leaves a module is a
+`use`, and every `use` starts from the same place.
 
-> **Informative.** This is the one place the design departs from what a Rust
-> reader expects, and it is deliberate. `super::super::thing` is a path whose
-> meaning depends on where the file sits, so moving a file changes what it
-> means; the same path written after a `use` does not.
+> **Informative.** Draft 0.1 declined all three prefixes and said a module
+> "reaches what is outside it by a `use` written at its top" — while leaving
+> the `use` itself relative, so it could not name the outside either. Two
+> sibling modules could not see each other at all, which a compiler written
+> in this language found on its second file. One rule fixes it and it is the
+> rule that was meant: a `use` is absolute.
+>
+> `super::super::thing` remains declined for the reason it always was — a
+> path whose meaning depends on where its file sits changes meaning when the
+> file moves. An absolute `use` does not.
 
 ### 3.2 `use`
 
@@ -187,6 +193,9 @@ use lang::lex;
 
 `use` binds the **last segment** of a path as a name in the module it is
 written in, for the whole module regardless of where in it the `use` sits.
+Its path is absolute (§3.1): `use lang::lex::Span;` names `Span` in
+`lang::lex` from wherever it is written, and a module names its *sibling* the
+same way it names anything else outside it.
 
 A `use` is an item and appears at the top level of a module. What it binds is
 a name for something already visible: `use` grants no access. A `use` of a

@@ -1,0 +1,173 @@
+// The parser (Ch. 0 §2), in Trust.
+//
+// Recursive descent with the precedence table of §2.1, which is where the
+// mutual recursion is: `expr` calls `binary` calls `unary` calls `primary`
+// calls `expr`. A compiler is that shape all the way down, and it is what
+// found the inliner unrolling a call cycle without bound (G9.28).
+
+// A `use` is absolute — resolved from the root (Ch. 6 §3.1) — which is how
+// this module names its siblings at all.
+use ast;
+use ast::Expr;
+use lex;
+use lex::Tok;
+
+/// Where the parser is, and what it is reading.
+pub struct Parser {
+    pub src: String,
+    pub at: taddr,
+}
+
+/// The next token, without consuming it.
+///
+/// It takes `&mut` and does not need it: a `&mut T` is not a `&T` here, and
+/// every caller has the exclusive one (G9.37). Rust reborrows implicitly;
+/// this language has no rule for it, and Ch. 3 §2.3's "automatic dereference
+/// is for `.` and nothing else" is why.
+pub fn peek(p: &mut Parser) -> Result<lex::Taken, lex::Error> {
+    lex::one(&p.src, p.at)
+}
+
+/// The next token, consumed.
+pub fn bump(p: &mut Parser) -> Result<Tok, lex::Error> {
+    let t = lex::one(&p.src, p.at)?;
+    p.at = t.at;
+    Result::Ok(t.tok)
+}
+
+/// A whole expression (§2.1's loosest level).
+pub fn expr(p: &mut Parser) -> Result<Expr, lex::Error> {
+    binary(p, 1)
+}
+
+/// The left-associative levels, loosest first.
+pub fn binary(p: &mut Parser, min: taddr) -> Result<Expr, lex::Error> {
+    let mut left = unary(p)?;
+    loop {
+        let t = peek(p)?;
+        // Ownership is tracked per local and not per place, so taking the
+        // payload out of `t.tok` marks all of `t` moved — including `t.at`.
+        // Reading the position first is the whole of the workaround, and it
+        // is what `docs/status.md` §11 says to expect.
+        let next = t.at;
+        let op = match t.tok {
+            Tok::Op(o) => o,
+            _ => return Result::Ok(left),
+        };
+        let l = ast::level(&op);
+        if l < min || l == 0 {
+            return Result::Ok(left);
+        }
+        p.at = next;
+        let right = binary(p, l + 1)?;
+        left = Expr::Binary(op, Box::new(left), Box::new(right));
+    }
+}
+
+/// `-e`, `!e`, or a primary.
+pub fn unary(p: &mut Parser) -> Result<Expr, lex::Error> {
+    let t = peek(p)?;
+    let next = t.at;
+    match t.tok {
+        Tok::Op(o) => {
+            if ast::same(&o, "-") || ast::same(&o, "!") {
+                p.at = next;
+                let inner = unary(p)?;
+                return Result::Ok(Expr::Unary(o, Box::new(inner)));
+            }
+            primary(p)
+        }
+        _ => primary(p),
+    }
+}
+
+/// A literal, a name, a call, or a parenthesized expression.
+pub fn primary(p: &mut Parser) -> Result<Expr, lex::Error> {
+    let t = peek(p)?;
+    p.at = t.at;
+    match t.tok {
+        Tok::Int(v) => Result::Ok(Expr::Int(v)),
+        Tok::TritLit(v) => Result::Ok(Expr::Int(v)),
+        Tok::CharLit(v) => Result::Ok(Expr::Int(v)),
+        Tok::Ident(n) => {
+            let after = peek(p)?;
+            let skip = after.at;
+            match after.tok {
+                Tok::Op(o) => {
+                    if ast::same(&o, "(") {
+                        p.at = skip;
+                        let args = arguments(p)?;
+                        return Result::Ok(Expr::Call(n, args));
+                    }
+                    Result::Ok(Expr::Name(n))
+                }
+                _ => Result::Ok(Expr::Name(n)),
+            }
+        }
+        Tok::Op(o) => {
+            if ast::same(&o, "(") {
+                let inner = expr(p)?;
+                let close = bump(p)?;
+                match close {
+                    Tok::Op(c) => {
+                        if !ast::same(&c, ")") {
+                            return Result::Err(lex::Error {
+                                at: p.at,
+                                message: "expected `)`".to_string(),
+                            });
+                        }
+                    }
+                    _ => {
+                        return Result::Err(lex::Error {
+                            at: p.at,
+                            message: "expected `)`".to_string(),
+                        });
+                    }
+                }
+                return Result::Ok(Expr::Group(Box::new(inner)));
+            }
+            Result::Err(lex::Error { at: p.at, message: "expected an expression".to_string() })
+        }
+        _ => Result::Err(lex::Error { at: p.at, message: "expected an expression".to_string() }),
+    }
+}
+
+/// `a, b, c)` — the arguments of a call, the `(` already read.
+fn arguments(p: &mut Parser) -> Result<Vec<Expr>, lex::Error> {
+    let mut out: Vec<Expr> = Vec::new();
+    let first = peek(p)?;
+    let skip = first.at;
+    match first.tok {
+        Tok::Op(o) => {
+            if ast::same(&o, ")") {
+                p.at = skip;
+                return Result::Ok(out);
+            }
+        }
+        _ => {}
+    }
+    loop {
+        let e = expr(p)?;
+        out.push(e);
+        let t = bump(p)?;
+        match t {
+            Tok::Op(o) => {
+                if ast::same(&o, ")") {
+                    return Result::Ok(out);
+                }
+                if !ast::same(&o, ",") {
+                    return Result::Err(lex::Error {
+                        at: p.at,
+                        message: "expected `,` or `)`".to_string(),
+                    });
+                }
+            }
+            _ => {
+                return Result::Err(lex::Error {
+                    at: p.at,
+                    message: "expected `,` or `)`".to_string(),
+                });
+            }
+        }
+    }
+}

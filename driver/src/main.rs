@@ -22,6 +22,8 @@ usage:
     trust asm <file.tr>                print the assembly it would run
     trust check <file.tr>              report what is wrong with it, and stop
     trust lex <file.tr>                print its tokens, one per line
+    trust ast <file.tr>                read the file as one expression and
+                                       print its tree
 
     --time                             report what each phase of the compile
                                        cost, on stderr
@@ -59,6 +61,19 @@ fn main() -> ExitCode {
     if cmd == "lex" {
         return match std::fs::read_to_string(path) {
             Ok(src) => print_tokens(&src),
+            Err(e) => {
+                eprintln!("trust: cannot read `{path}`: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    // The file, read as one expression, printed as a tree — the form
+    // `bootstrap/main.tr` prints, so that the parser written in Trust can be
+    // held to this one.
+    if cmd == "ast" {
+        return match std::fs::read_to_string(path) {
+            Ok(src) => print_expr(&src),
             Err(e) => {
                 eprintln!("trust: cannot read `{path}`: {e}");
                 ExitCode::FAILURE
@@ -165,6 +180,68 @@ fn print_tokens(src: &str) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+/// One expression, as a tree.
+///
+/// The expression is wrapped in a function so that the ordinary parser reads
+/// it, and the tail of that function is what is printed. Every operator is a
+/// prefix and every child is parenthesized, so the shape is unambiguous and
+/// two parsers can be compared on it without agreeing on how to print.
+fn print_expr(src: &str) -> ExitCode {
+    let wrapped = format!("fn e() -> t27 {{ {} }}", src.trim_end());
+    let file = match lang::parse::parse(&wrapped) {
+        Ok(f) => f,
+        Err(e) => {
+            // Where, not why — and in the input's own coordinates, which is
+            // the wrapper's length behind.
+            let prefix = "fn e() -> t27 { ".chars().count() as u32;
+            println!("error {}", e.span.lo.saturating_sub(prefix));
+            return ExitCode::SUCCESS;
+        }
+    };
+    let Some(lang::ast::Item::Fn(f)) = file.items.first() else {
+        return ExitCode::FAILURE;
+    };
+    let Some(tail) = f.body.as_ref().and_then(|b| b.tail.as_ref()) else {
+        println!("error 0");
+        return ExitCode::SUCCESS;
+    };
+    let mut out = String::new();
+    show_expr(tail, &mut out);
+    println!("{out}");
+    ExitCode::SUCCESS
+}
+
+fn show_expr(e: &lang::ast::Expr, out: &mut String) {
+    use lang::ast::Expr;
+    match e {
+        Expr::Int(v, _) => out.push_str(&format!("{}", v.to_i128().unwrap_or(0))),
+        Expr::Trit(t, _) => out.push_str(&format!("{}", t.to_i8())),
+        Expr::Char(v, _) => out.push_str(&format!("{v}")),
+        Expr::Path(n, _) => out.push_str(n),
+        Expr::Unary(op, a, _) => {
+            out.push_str(&format!("({op} "));
+            show_expr(a, out);
+            out.push(')');
+        }
+        Expr::Binary(op, a, b, _) => {
+            out.push_str(&format!("({op} "));
+            show_expr(a, out);
+            out.push(' ');
+            show_expr(b, out);
+            out.push(')');
+        }
+        Expr::Call(f, _, _, args, _) => {
+            out.push_str(&format!("(call {f}"));
+            for a in args {
+                out.push(' ');
+                show_expr(a, out);
+            }
+            out.push(')');
+        }
+        other => out.push_str(&format!("<{other:?}>")),
+    }
 }
 
 /// A frontend module to assembly, by the pipeline TIR §6 describes.

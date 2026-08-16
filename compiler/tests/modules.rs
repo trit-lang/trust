@@ -221,3 +221,59 @@ fn a_diagnostic_names_the_file_it_is_about() {
     assert_eq!(source.path, vec!["m".to_string()], "{}", e.message);
     assert_eq!(e.span.line, 2, "{}", e.message);
 }
+
+#[test]
+fn a_use_is_resolved_from_the_root() {
+    // Ch. 6 §3.1. Draft 0.1 declined `crate::`, `super::` and `self::` and
+    // said a module reaches outside itself by a `use` — while leaving the
+    // `use` relative, so it could not name the outside either. Two siblings
+    // could not see each other at all, which a compiler written in this
+    // language found on its second file.
+    let at = dir("siblings");
+    write(
+        &at,
+        "main.tr",
+        "mod a;\nmod b;\nfn main() -> t27 { b::twice() }\n",
+    );
+    write(&at, "a.tr", "pub fn one() -> t27 { 1 }\n");
+    write(
+        &at,
+        "b.tr",
+        "use a;\npub fn twice() -> t27 { a::one() + a::one() }\n",
+    );
+    assert!(build(&at).is_ok(), "{:?}", build(&at).err());
+}
+
+#[test]
+fn a_use_may_name_a_type_through_a_module() {
+    // `lex::Taken` in a type position: the parser reads it as an associated
+    // type, and a module makes it an ordinary name (Ch. 6 §4).
+    let at = dir("qualified-type");
+    write(
+        &at,
+        "main.tr",
+        "mod a;\nmod b;\nfn main() -> t27 { b::go() }\n",
+    );
+    write(&at, "a.tr", "pub struct Held { pub n: t27 }\n");
+    write(
+        &at,
+        "b.tr",
+        "use a;\npub fn go() -> t27 { let h: a::Held = a::Held { n: 4 }; h.n }\n",
+    );
+    assert!(build(&at).is_ok(), "{:?}", build(&at).err());
+}
+
+#[test]
+fn a_use_still_grants_no_access() {
+    // Absolute resolution is not more visibility: §3.2's rule is unchanged.
+    let at = dir("use-absolute-private");
+    write(
+        &at,
+        "main.tr",
+        "mod a;\nmod b;\nfn main() -> t27 { b::go() }\n",
+    );
+    write(&at, "a.tr", "fn hidden() -> t27 { 1 }\n");
+    write(&at, "b.tr", "use a;\npub fn go() -> t27 { a::hidden() }\n");
+    let why = build(&at).expect_err("refused");
+    assert!(why.contains("is not `pub`"), "{why}");
+}

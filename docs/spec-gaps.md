@@ -2592,6 +2592,45 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.37 — two sibling modules could not see each other, and the spec said
+they could.** Ch. 6 §3.1 declined `crate::`, `super::` and `self::` and said
+a module "reaches what is outside it by a `use` written at its top" — while
+leaving the `use` itself **relative**, so the `use` could not name the
+outside either. `parse.tr` could not say `lex`. A compiler written in this
+language found it on its second file.
+
+The chapter is amended rather than the implementation excused: **a path in a
+`use` is resolved from the root**, and a path in an expression or a type is
+resolved where it is written. That is the rule §3.1 already wanted — every
+path that leaves a module is a `use`, and every `use` starts from the same
+place — and it keeps the reason the prefixes were declined, since a `use` is
+absolute and so does not change meaning when its file moves.
+
+Resolution and **visibility** are now separate arguments: a `use` resolves
+from the root and is still judged from where it was written, because a `use`
+grants no access (§3.2). Two more things had to follow: a `use` of a *module*
+binds a module name, which is what a path's first segment may be; and
+`lex::Taken` in type position — which the parser reads as an associated type
+— is an ordinary name once its head is a module (§4).
+
+*The same divergence bug, in the other construct.* G9.35 taught the `if` that
+a branch which returned contributes nothing to what is owned after it. A
+`match` arm needed the same, and a parser is where it shows:
+
+```
+let op = match t.tok { Tok::Op(o) => o, _ => return Ok(left) };
+...
+left = Expr::Binary(op, Box::new(left), Box::new(right));
+```
+
+**G9.38 — `&mut T` is not a `&T`.** A helper that only reads takes `&Parser`
+and every caller holds `&mut Parser`, and there is no rule that turns one
+into the other. Rust reborrows implicitly; Ch. 3 §2.3's "automatic
+dereference is for `.` and nothing else" is why this does not. The workaround
+is to take `&mut` and not use it, which is what `bootstrap/parse.tr` does and
+says. What would fix it is a coercion, and it is a decision about references
+rather than about parsers.
+
 **G9.35 — a branch that returned still moved.** Writing a lexer in Trust hit
 this on its first page:
 

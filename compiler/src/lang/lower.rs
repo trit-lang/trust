@@ -4007,6 +4007,8 @@ struct Fn<'a> {
     owned: Vec<Owned>,
     /// Live borrows, and the statement each dies after (Ch. 3 §4.2).
     loans: Vec<Loan>,
+    /// Whether the arm just lowered reaches the `match`'s join.
+    arm_reaches: bool,
     /// The statement being lowered, numbered in traversal order.
     stmt: u32,
     /// The running count, which must match the pre-pass's.
@@ -4172,6 +4174,7 @@ fn function(
         slots: Vec::new(),
         scopes: vec![HashMap::new()],
         loops: Vec::new(),
+        arm_reaches: true,
         owned: Vec::new(),
         loans: Vec::new(),
         stmt: 0,
@@ -11169,6 +11172,10 @@ impl Fn<'_> {
     /// move in the first arm made every arm after it complain.
     fn join_arm(&mut self, merged: Option<Vec<Owned>>) -> Vec<Owned> {
         let here = self.owned_snapshot();
+        // An arm that left by another door contributes nothing.
+        if !self.arm_reaches {
+            return merged.unwrap_or(here);
+        }
         match merged {
             None => here,
             Some(prev) => {
@@ -11228,6 +11235,11 @@ impl Fn<'_> {
         if let Some(depth) = scope {
             self.drop_scope(depth, arm.span)?;
         }
+        // Whether this arm *reaches* the join. An arm that returned has
+        // nothing to contribute to what is owned after the `match`, exactly
+        // as a branch of an `if` does not (G9.35) — and the arm is where a
+        // parser writes `_ => return Ok(left)` beside a use of `left`.
+        self.arm_reaches = !self.done;
         self.jump(join);
         Ok(())
     }

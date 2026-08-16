@@ -1,8 +1,8 @@
 #!/bin/bash
-# Hold the lexer written in Trust to the one written in Rust.
+# Hold the lexer and parser written in Trust to the ones written in Rust.
 #
-# `bootstrap/lex.tr` is the first piece of this compiler written in the
-# language it compiles. The point of writing it is not elegance: it is to be
+# `bootstrap/` is this compiler written in the language it compiles — the
+# lexer and the expression parser so far. The point of writing it is not elegance: it is to be
 # *used*, so that what the language cannot yet express is found by trying
 # rather than by thinking. Two bugs and one wart came out of the first
 # hundred lines (G9.35, G9.36).
@@ -57,5 +57,22 @@ for f in bootstrap/refuse/*.tr; do
     r=$((r + 1))
 done
 
-printf 'bootstrap: two lexers agree on %d tokens across %d files, and refuse %d more at the same character\n' \
-    "$n" "$(ls bootstrap/corpus/*.tr | wc -l | tr -d ' ')" "$r"
+# The parsers are compared on the *tree*, printed with every operator a
+# prefix and every child parenthesized — a form neither of them writes for
+# any other purpose, so agreeing on it is agreeing on the shape and not on
+# the printing.
+e=0
+for f in bootstrap/exprs/*.txt; do
+    rust=$("$trust" ast "$f")
+    mine=$("$trust" run bootstrap/tree.tr < "$f")
+    if [ "$rust" != "$mine" ]; then
+        echo "bootstrap: the two parsers disagree on $(cat "$f")" >&2
+        echo "  rust : $rust" >&2
+        echo "  trust: $mine" >&2
+        exit 1
+    fi
+    e=$((e + 1))
+done
+
+printf 'bootstrap: %d tokens agreed across %d files, %d refusals at the same character, %d expression trees identical\n' \
+    "$n" "$(ls bootstrap/corpus/*.tr | wc -l | tr -d ' ')" "$r" "$e"
