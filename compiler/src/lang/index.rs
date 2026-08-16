@@ -51,6 +51,10 @@ pub enum SymbolKind {
     Impl,
     /// A `const`.
     Const,
+    /// A `let` binding or a pattern binding.
+    Local,
+    /// A function's parameter.
+    Parameter,
 }
 
 // An associated type is not here. `TraitItem.assoc` is a list of names with
@@ -84,6 +88,8 @@ pub struct Symbol {
 pub struct Definition {
     /// Where the name is.
     pub at: Span,
+    /// What it is.
+    pub kind: SymbolKind,
     /// The name itself.
     pub name: String,
     /// How it reads: `fn f(x: t27) -> t27`, `n: taddr`, `let mut i`.
@@ -137,6 +143,25 @@ pub struct Index {
     uses: Vec<(Span, Span)>,
     /// Every definition, by where its name is. Sorted.
     defs: Vec<Definition>,
+    /// Names visible everywhere in the file: items, and an enum's variants.
+    globals: Vec<Span>,
+    /// A binding, and the stretch of the file over which it can be named.
+    scoped: Vec<Scoped>,
+}
+
+/// A binding and where it is in scope.
+///
+/// A definition is in scope from where it is written to the end of whatever
+/// held it — a block, a function, a match arm. That is the whole of Ch. 0
+/// §5.2's rule, and it is what a completion needs that a jump does not.
+struct Scoped {
+    /// The definition, by where its name is.
+    at: Span,
+    /// The first offset that can name it: just past its own name, so that
+    /// `let n = n;` offers the outer one.
+    from: u32,
+    /// One past the last offset that can name it.
+    to: u32,
 }
 
 impl Index {
@@ -144,6 +169,7 @@ impl Index {
     pub fn new(file: &File) -> Index {
         let mut b = Builder {
             symbols: Vec::new(),
+            scoped: Vec::new(),
             uses: Vec::new(),
             defs: Vec::new(),
             items: Vec::new(),
@@ -154,6 +180,7 @@ impl Index {
         for item in &file.items {
             b.item(item);
         }
+        b.close_file();
         b.uses.sort_by_key(|(at, _)| (at.lo, at.hi));
         b.defs.sort_by_key(|d| (d.at.lo, d.at.hi));
         b.defs.dedup_by_key(|d| (d.at.lo, d.at.hi));
@@ -161,7 +188,43 @@ impl Index {
             symbols: b.symbols,
             uses: b.uses,
             defs: b.defs,
+            globals: b.items.iter().map(|(_, at)| *at).collect(),
+            scoped: b.scoped,
         }
+    }
+
+    /// Everything that can be named at `offset`, nearest first.
+    ///
+    /// A name written twice is offered once, as whichever is in scope — the
+    /// innermost, which is the one that would be meant. Nothing here needs a
+    /// type, which is why it exists at all: see the note on what a
+    /// *member* completion would need instead.
+    pub fn visible(&self, offset: u32) -> Vec<&Definition> {
+        let mut out: Vec<&Definition> = Vec::new();
+        let mut seen: Vec<&str> = Vec::new();
+        // Innermost first: the scopes are pushed as they close, so the
+        // narrowest ones come first.
+        for s in self
+            .scoped
+            .iter()
+            .filter(|s| s.from <= offset && offset < s.to)
+        {
+            if let Some(d) = self.describe(s.at)
+                && !seen.contains(&d.name.as_str())
+            {
+                seen.push(&d.name);
+                out.push(d);
+            }
+        }
+        for at in &self.globals {
+            if let Some(d) = self.describe(*at)
+                && !seen.contains(&d.name.as_str())
+            {
+                seen.push(&d.name);
+                out.push(d);
+            }
+        }
+        out
     }
 
     /// The name at `offset` and where it was defined.
@@ -255,6 +318,35 @@ impl Index {
     }
 }
 
+/// What the prelude offers, by name.
+///
+/// The prelude is a source file like any other (`lang::PRELUDE`), so it is
+/// indexed like any other — but it is not the file being edited, and its
+/// spans are offsets into *it*. Only the names and how they read are used
+/// here, never a place: a completion may offer `println`, and nothing may
+/// claim to know where in this file it is, because it is not.
+pub fn prelude() -> &'static [Definition] {
+    static ONCE: std::sync::OnceLock<Vec<Definition>> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        let Ok(file) = super::parse::parse(super::PRELUDE) else {
+            // The prelude parses — a test in `lang` says so — and a broken
+            // one is this compiler's fault, not something to offer names
+            // from. Answering with none is the only honest failure.
+            return Vec::new();
+        };
+        let index = Index::new(&file);
+        index
+            .globals
+            .iter()
+            .filter_map(|at| index.describe(*at).cloned())
+            // A mangled instantiation is a name the compiler wrote, not one
+            // a program may type (`Option.unwrap.char`), and a dot is what
+            // marks it: no Trust identifier holds one.
+            .filter(|d| !d.name.contains('.') && !d.name.starts_with('#'))
+            .collect()
+    })
+}
+
 /// One name in scope, and where it was bound.
 struct Binding {
     name: String,
@@ -263,6 +355,7 @@ struct Binding {
 
 struct Builder {
     symbols: Vec<Symbol>,
+    scoped: Vec<Scoped>,
     uses: Vec<(Span, Span)>,
     defs: Vec<Definition>,
     /// File-level names: functions, types, constants, variants.
@@ -281,35 +374,42 @@ impl Builder {
     fn collect_items(&mut self, file: &File) {
         for item in &file.items {
             match item {
-                Item::Fn(f) => self.define_item(&f.name, f.name_span, fn_label(f)),
+                Item::Fn(f) => {
+                    self.define_item(&f.name, f.name_span, SymbolKind::Function, fn_label(f))
+                }
                 Item::Const(c) => self.define_item(
                     &c.name,
                     c.name_span,
+                    SymbolKind::Const,
                     format!("const {}: {}", c.name, type_name(&c.ty)),
                 ),
                 Item::Struct(s) => {
-                    self.define_item(&s.name, s.name_span, format!("struct {}", s.name));
+                    let label = format!("struct {}", s.name);
+                    self.define_item(&s.name, s.name_span, SymbolKind::Struct, label);
                     for f in &s.fields {
                         let label = format!("{}: {}", f.name, type_name(&f.ty));
-                        self.define(f.name_span, &f.name, label);
+                        self.define(f.name_span, &f.name, SymbolKind::Field, label);
                     }
                 }
                 Item::Trait(t) => {
-                    self.define_item(&t.name, t.name_span, format!("trait {}", t.name));
+                    let label = format!("trait {}", t.name);
+                    self.define_item(&t.name, t.name_span, SymbolKind::Trait, label);
                     for m in &t.methods {
                         self.methods.push((m.name.clone(), m.name_span));
                         self.define_method(m.name_span, &m.name, fn_label(m));
                     }
                 }
                 Item::Enum(e) => {
-                    self.define_item(&e.name, e.name_span, format!("enum {}", e.name));
+                    let label = format!("enum {}", e.name);
+                    self.define_item(&e.name, e.name_span, SymbolKind::Enum, label);
                     // A variant is reachable as `Enum::Variant` and, inside a
                     // pattern, often as itself.
                     for v in &e.variants {
-                        self.define_item(&v.name, v.name_span, variant_label(&e.name, v));
+                        let label = variant_label(&e.name, v);
+                        self.define_item(&v.name, v.name_span, SymbolKind::Variant, label);
                         for f in &v.fields {
                             let label = format!("{}: {}", f.name, type_name(&f.ty));
-                            self.define(f.name_span, &f.name, label);
+                            self.define(f.name_span, &f.name, SymbolKind::Field, label);
                         }
                     }
                 }
@@ -325,9 +425,9 @@ impl Builder {
     }
 
     /// A name visible everywhere, and how it reads.
-    fn define_item(&mut self, name: &str, at: Span, label: String) {
+    fn define_item(&mut self, name: &str, at: Span, kind: SymbolKind, label: String) {
         self.items.push((name.to_string(), at));
-        self.define(at, name, label);
+        self.define(at, name, kind, label);
     }
 
     /// A definition a hover can show, wherever it was written.
@@ -336,10 +436,11 @@ impl Builder {
     /// answer with itself — hovering `fn area` on the line that declares it
     /// is the most obvious hover there is, and jumping from a definition
     /// should stay put rather than go nowhere.
-    fn define(&mut self, at: Span, name: &str, label: String) {
+    fn define(&mut self, at: Span, name: &str, kind: SymbolKind, label: String) {
         if at.line != 0 {
             self.defs.push(Definition {
                 at,
+                kind,
                 name: name.to_string(),
                 label,
                 method: false,
@@ -351,7 +452,7 @@ impl Builder {
     /// A method, which a rename must refuse: it is found by its spelling, and
     /// the prelude has methods this index never sees.
     fn define_method(&mut self, at: Span, name: &str, label: String) {
-        self.define(at, name, label);
+        self.define(at, name, SymbolKind::Method, label);
         if let Some(d) = self.defs.last_mut() {
             d.method = true;
         }
@@ -398,18 +499,37 @@ impl Builder {
     }
 
     /// A binding that is also somewhere to point at.
-    fn bind_and_mark(&mut self, name: &str, at: Span, label: String) {
-        self.define(at, name, label);
+    fn bind_and_mark(&mut self, name: &str, at: Span, kind: SymbolKind, label: String) {
+        self.define(at, name, kind, label);
         self.bind(name, at);
     }
 
     /// Bindings made inside `f` are gone after it. Shadowing needs nothing
     /// more: `use_name` searches from the innermost outwards.
-    fn scope<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+    ///
+    /// `region` is what held them, and closing the scope is where each one
+    /// learns how far it reached — which is what `visible` reads.
+    fn scope<T>(&mut self, region: Span, f: impl FnOnce(&mut Self) -> T) -> T {
         let mark = self.scopes.len();
         let out = f(self);
-        self.scopes.truncate(mark);
+        for b in self.scopes.drain(mark..) {
+            if b.at.line != 0 {
+                self.scoped.push(Scoped {
+                    at: b.at,
+                    from: b.at.hi,
+                    to: region.hi,
+                });
+            }
+        }
         out
+    }
+
+    /// Anything still bound when the file ends was bound outside every
+    /// scope, which nothing here does — but draining is what records a
+    /// binding, so this makes sure none is lost silently.
+    fn close_file(&mut self) {
+        debug_assert!(self.scopes.is_empty(), "a scope was left open");
+        self.scopes.clear();
     }
 
     // ------------------------------------------------------------- pass two
@@ -525,12 +645,13 @@ impl Builder {
     }
 
     fn function(&mut self, f: &FnItem, kind: SymbolKind) -> Symbol {
-        self.scope(|b| {
+        self.scope(f.span, |b| {
             for p in &f.params {
                 b.ty(&p.ty);
                 b.bind_and_mark(
                     &p.name,
                     p.name_span,
+                    SymbolKind::Parameter,
                     format!("{}: {}", p.name, type_name(&p.ty)),
                 );
             }
@@ -586,7 +707,7 @@ impl Builder {
     }
 
     fn block(&mut self, b: &Block) {
-        self.scope(|s| {
+        self.scope(b.span, |s| {
             for stmt in &b.stmts {
                 match stmt {
                     Stmt::Let {
@@ -611,7 +732,7 @@ impl Builder {
                             Some(t) => format!("let {m}{name}: {}", type_name(t)),
                             None => format!("let {m}{name}"),
                         };
-                        s.define(*name_span, name, label);
+                        s.define(*name_span, name, SymbolKind::Local, label);
                         s.bind(name, *name_span);
                     }
                     Stmt::Expr(e) => s.expr(e),
@@ -656,8 +777,8 @@ impl Builder {
                 self.expr(v);
                 self.ty(t);
             }
-            Expr::Closure(params, ret, body, _) => {
-                self.scope(|s| {
+            Expr::Closure(params, ret, body, at) => {
+                self.scope(*at, |s| {
                     for (name, ty) in params {
                         if let Some(t) = ty {
                             s.ty(t);
@@ -685,7 +806,7 @@ impl Builder {
             Expr::Match(scrutinee, arms, _) => {
                 self.expr(scrutinee);
                 for arm in arms {
-                    self.scope(|s| {
+                    self.scope(arm.span, |s| {
                         for p in &arm.patterns {
                             s.pattern(p);
                         }
@@ -741,7 +862,9 @@ impl Builder {
         match p {
             // A pattern binding's type is the scrutinee's, which needs a
             // type this cannot compute; the name is all there is to show.
-            Pattern::Bind(name, at) => self.bind_and_mark(name, *at, name.clone()),
+            Pattern::Bind(name, at) => {
+                self.bind_and_mark(name, *at, SymbolKind::Local, name.clone())
+            }
             Pattern::Aggregate(path, fields, _) => {
                 self.use_name(path.last(), path.span);
                 for (_, sub) in fields {
@@ -1159,6 +1282,73 @@ mod tests {
         let src = "fn f() -> t27 { 1 + 2 }\n";
         let at = src.find("+").unwrap() as u32;
         assert_eq!(index(src).rename(at, "x"), Err(NoRename::NotAName));
+    }
+
+    fn names_at(src: &str, marker: &str) -> Vec<String> {
+        let (src, offset) = at(&src.replace(marker, &format!("|{marker}")));
+        index(&src)
+            .visible(offset)
+            .iter()
+            .map(|d| d.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn what_is_visible_is_what_is_in_scope_and_nothing_else() {
+        let src = "fn outer(p: t27) -> t27 {\n    let a = 1;\n    { let b = 2; b }\n    a\n}\n                   fn far() -> t27 { 0 }\n";
+        // At the tail `a`, the block's `b` has closed.
+        let here = names_at(src, "a\n}");
+        assert!(here.contains(&"a".to_string()), "{here:?}");
+        assert!(here.contains(&"p".to_string()), "the parameter: {here:?}");
+        assert!(
+            !here.contains(&"b".to_string()),
+            "the block closed: {here:?}"
+        );
+        // Items are visible everywhere, in any order (§3).
+        assert!(here.contains(&"far".to_string()), "{here:?}");
+        assert!(here.contains(&"outer".to_string()), "{here:?}");
+    }
+
+    #[test]
+    fn a_shadowed_name_is_offered_once_and_it_is_the_near_one() {
+        let src = "const n: t27 = 1;\nfn f() -> t27 {\n    let n = 2;\n    n\n}\n";
+        let names = names_at(src, "n\n}");
+        assert_eq!(names.iter().filter(|x| *x == "n").count(), 1, "{names:?}");
+        // The near one is the `let`, so its label is a `let`.
+        let (source, offset) = at(&src.replace("n\n}", "|n\n}"));
+        let d = index(&source).visible(offset)[0].clone();
+        assert_eq!((d.name.as_str(), d.label.as_str()), ("n", "let n"));
+    }
+
+    #[test]
+    fn a_for_loops_binding_is_in_scope_in_its_body() {
+        // `for` is desugared into a `match` (§5.7), and the arm it becomes
+        // has to reach as far as the body or the name is in scope nowhere.
+        let src = "fn f(n: t27) -> t27 {\n    for i in 0..n {\n        n\n    }\n    n\n}\n";
+        let inside = names_at(src, "n\n    }");
+        assert!(inside.contains(&"i".to_string()), "{inside:?}");
+        let after = names_at(src, "n\n}");
+        assert!(
+            !after.contains(&"i".to_string()),
+            "the loop ended: {after:?}"
+        );
+    }
+
+    #[test]
+    fn a_for_loops_binding_is_where_the_file_wrote_it() {
+        assert_eq!(
+            jump("fn f(n: t27) { for i|tem in 0..n { } }\n").as_deref(),
+            Some("item")
+        );
+    }
+
+    #[test]
+    fn the_prelude_offers_names_a_program_may_type() {
+        let names: Vec<&str> = prelude().iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"println"), "{names:?}");
+        assert!(names.contains(&"Option"), "{names:?}");
+        // Not what the compiler wrote for itself.
+        assert!(!names.iter().any(|n| n.contains('.')), "{names:?}");
     }
 
     #[test]

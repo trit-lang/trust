@@ -3102,13 +3102,34 @@ right for a diagnostic and wrong for a rename — `helper()` is what a
 diagnostic underlines and `helper` is what a rename changes. Both now carry
 **two** spans, and a test holds each to its job.
 
-*What is still not there.* **Completion**, and what it waits on is not
-effort. A hover reads what the file already says; a completion has to know
-what is in scope **and what type each thing has**, and a type is what only
-lowering computes. That means keeping lowering's answers instead of
-discarding everything but the module at the end of `compile` — a different
-kind of change from a span, which was a fact the frontend already knew and
-threw away.
+*Completion is two features, and only one of them needs types.* Offering
+what can be **named** here needs scope and nothing else: the index already
+walks every scope, so recording how far each binding reaches is all it took.
+A completion offers what is in scope, then the prelude's names, then the
+keywords — and a name written twice is offered once, as the near one.
+
+Offering what follows a **`.`** is the other feature, and it does need a
+type: which fields and methods are there depends on what precedes the dot.
+So after a dot the server offers **nothing** rather than the names in scope,
+which are the one thing that certainly cannot follow one. A range is `a..b`,
+so two dots are not one.
+
+Writing the first scope test found a real bug. `for` is desugared into a
+`match` (§5.7), and the arm it becomes carried the span of the `for` keyword
+— so the loop's binding was in scope over an empty stretch of file, and `i`
+was offered nowhere inside `for i in …`. The arm now reaches to the end of
+the body, and the binding keeps the span of the name the file wrote rather
+than the keyword's.
+
+*What is still not there.* **A type at an offset** — which would give
+member completion, and would let a hover on `let n = 1` say `t27` instead of
+`let n`. That means keeping lowering's answers instead of discarding
+everything but the module at the end of `compile`, and it is a different
+kind of change from a span: a span was a fact the frontend already knew and
+threw away, while a type is one only lowering computes. Two things make it
+more than plumbing — the prelude is parsed as its own file, so its spans and
+the user's collide numerically, and lowering monomorphizes, so one written
+expression may be lowered at several types.
 
 *The other half of an editor is a second grammar.* Zed's highlighting is
 **tree-sitter only**, so `editors/tree-sitter-trust` exists, and it is a

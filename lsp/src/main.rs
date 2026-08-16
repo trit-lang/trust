@@ -14,13 +14,16 @@
 //! This crate is the translation and nothing else: character offsets to the
 //! protocol's UTF-16 columns, and structs to JSON.
 //!
+//!   * **completion**, from what is in scope, the prelude, and the keywords.
+//!
 //! A rename that cannot be trusted is refused with its reason rather than
 //! done partly — `NoRename` lists the three ways that happens.
 //!
-//! What is not here is **completion**, and what it waits on is not effort. A
-//! hover shows a definition *as it was written*, which the AST knows; a
-//! completion has to know what is in scope **and what type it has**, and a
-//! type is what only lowering computes. See `docs/spec-gaps.md` G0.5.
+//! What is not here is **member** completion. Which fields and methods
+//! follow a `.` depends on the type of what precedes it, and a type is what
+//! only lowering computes; so after a dot this offers **nothing** rather
+//! than the names in scope, which are the one thing that certainly cannot
+//! follow one. See `docs/spec-gaps.md` G0.5.
 
 mod json;
 
@@ -69,7 +72,8 @@ impl Server {
                        \"definitionProvider\":true,\
                        \"hoverProvider\":true,\
                        \"referencesProvider\":true,\
-                       \"renameProvider\":{\"prepareProvider\":true}},\
+                       \"renameProvider\":{\"prepareProvider\":true},\
+                       \"completionProvider\":{}},\
                        \"serverInfo\":{\"name\":\"trust-lsp\"}}",
                 );
             }
@@ -90,6 +94,12 @@ impl Server {
                         Some(hover(&map, word, &def.label))
                     })
                     .unwrap_or_else(|| "null".to_string());
+                reply(m.get(&["id"]), &out);
+            }
+            "textDocument/completion" => {
+                let out = self
+                    .completions(m)
+                    .unwrap_or_else(|| "{\"isIncomplete\":false,\"items\":[]}".to_string());
                 reply(m.get(&["id"]), &out);
             }
             "textDocument/references" => {
@@ -222,6 +232,47 @@ impl Server {
         ))
     }
 
+    /// What can be named where the cursor is.
+    ///
+    /// Three sources, and none of them needs a type: what is in scope in this
+    /// file, what the prelude defines, and the keywords. After a `.` there is
+    /// a fourth that this cannot supply — which member is there depends on
+    /// the type of what precedes it — so it offers **nothing** rather than
+    /// offering the locals, which are the one thing that certainly cannot
+    /// follow a dot.
+    fn completions(&self, m: &Json) -> Option<String> {
+        let uri = m.str_at(&["params", "textDocument", "uri"])?;
+        let src = self.open.get(uri)?;
+        let map = lang::LineMap::new(src);
+        let at = position(m, &map)?;
+        let chars: Vec<char> = src.chars().collect();
+        if after_a_dot(&chars, at) {
+            return Some("{\"isIncomplete\":false,\"items\":[]}".to_string());
+        }
+        let file = lang::parse::parse(src).ok()?;
+        let index = lang::index::Index::new(&file);
+
+        let mut items: Vec<String> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        for d in index.visible(at) {
+            seen.push(d.name.clone());
+            items.push(item(&d.name, completion_kind(d.kind), &d.label));
+        }
+        for d in lang::index::prelude() {
+            if !seen.contains(&d.name) {
+                seen.push(d.name.clone());
+                items.push(item(&d.name, completion_kind(d.kind), &d.label));
+            }
+        }
+        for kw in lang::lex::KEYWORDS {
+            items.push(item(kw, 14, "keyword"));
+        }
+        Some(format!(
+            "{{\"isIncomplete\":false,\"items\":{}}}",
+            list(items.into_iter())
+        ))
+    }
+
     /// Compile what is open at `uri` and publish what is wrong with it.
     fn check(&self, uri: &str) {
         let Some(src) = self.open.get(uri) else {
@@ -272,6 +323,45 @@ fn location(map: &lang::LineMap, uri: &str, span: lang::Span) -> String {
     let mut quoted = String::new();
     json::quote(uri, &mut quoted);
     format!("{{\"uri\":{quoted},\"range\":{}}}", range(map, span))
+}
+
+/// Whether the cursor sits after a `.` that opens a field or a method.
+///
+/// A range is written `a..b`, and the name after it is an ordinary one — so
+/// two dots are not one. Nothing else in this language puts a dot before a
+/// name (Ch. 0 §2.6).
+fn after_a_dot(chars: &[char], at: u32) -> bool {
+    let mut i = at as usize;
+    while i > 0 && (chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '_') {
+        i -= 1;
+    }
+    i > 0 && chars[i - 1] == '.' && !(i > 1 && chars[i - 2] == '.')
+}
+
+/// One thing a completion offers.
+fn item(name: &str, kind: u32, detail: &str) -> String {
+    let (mut label, mut d) = (String::new(), String::new());
+    json::quote(name, &mut label);
+    json::quote(detail, &mut d);
+    format!("{{\"label\":{label},\"kind\":{kind},\"detail\":{d}}}")
+}
+
+/// The protocol's numbering for what a completion offers, which is a
+/// different list from the one an outline uses.
+fn completion_kind(k: lang::index::SymbolKind) -> u32 {
+    use lang::index::SymbolKind::*;
+    match k {
+        Function => 3,
+        Method => 2,
+        Struct => 22,
+        Enum => 13,
+        Variant => 20,
+        Field => 5,
+        Trait => 8,
+        Impl => 7,
+        Const => 21,
+        Local | Parameter => 6,
+    }
 }
 
 /// A JSON array of already-rendered items.
@@ -340,6 +430,10 @@ fn kind(k: lang::index::SymbolKind) -> u32 {
         Trait => 11,
         Impl => 5,
         Const => 14,
+        // An outline shows what a file declares, and neither of these is
+        // declared at the top level — but the kinds are one enum, so they
+        // answer with the protocol's `Variable` rather than nothing.
+        Local | Parameter => 13,
     }
 }
 

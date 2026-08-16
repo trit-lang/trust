@@ -1382,7 +1382,14 @@ impl Parser {
     ///
     /// The iterator's name contains a dot, which no Trust identifier may, so
     /// it cannot shadow or be shadowed by anything a program wrote.
-    fn desugar_for(&mut self, name: String, iter: Expr, body: Block, span: Span) -> Expr {
+    fn desugar_for(
+        &mut self,
+        name: String,
+        name_span: Span,
+        iter: Expr,
+        body: Block,
+        span: Span,
+    ) -> Expr {
         self.counter += 1;
         let it = format!("it.{}", self.counter);
         let path = |segs: &[&str]| Path {
@@ -1397,16 +1404,22 @@ impl Parser {
             Vec::new(),
             span,
         );
+        // The arm reaches to the end of the body, because that is how far
+        // the loop's binding is in scope — a desugaring that collapsed it to
+        // the `for` keyword would put the name nowhere.
+        let arm_span = span.to(body.span);
         let arms = vec![
             Arm {
                 patterns: vec![Pattern::Aggregate(
                     path(&["Option", "Some"]),
-                    vec![("0".to_string(), Pattern::Bind(name, span))],
+                    // The name is the file's, not the desugaring's, so it
+                    // keeps the place it was written.
+                    vec![("0".to_string(), Pattern::Bind(name, name_span))],
                     span,
                 )],
                 guard: None,
                 body: Expr::Block(body),
-                span,
+                span: arm_span,
             },
             Arm {
                 patterns: vec![Pattern::Aggregate(
@@ -1416,7 +1429,7 @@ impl Parser {
                 )],
                 guard: None,
                 body: Expr::Break(None, span),
-                span,
+                span: arm_span,
             },
         ];
         Expr::Block(Block {
@@ -1657,7 +1670,7 @@ impl Parser {
             // the point §5.7 makes about it.
             Tok::Kw("for") => {
                 self.bump();
-                let name = self.expect_ident()?;
+                let (name, name_span) = self.expect_ident_at()?;
                 if !self.eat_kw("in") {
                     return self.err("expected `in` after the binding of a `for` loop");
                 }
@@ -1666,7 +1679,7 @@ impl Parser {
                 let iter = self.expr()?;
                 self.no_struct = saved;
                 let body = self.block()?;
-                Ok(self.desugar_for(name, iter, body, span))
+                Ok(self.desugar_for(name, name_span, iter, body, span))
             }
             Tok::Kw("true") => {
                 self.bump();
