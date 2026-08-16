@@ -227,7 +227,18 @@ three niche guarantees §6 "elevates from implementation detail to spec":
 spec/        the specification — the authority
 core/        crate trit-core: balanced ternary arithmetic
 compiler/    crate trustc: TIR, legalization, and the Ch. 2 layout engine
+vm/          crate tritium: the reference machine and its assembler
+driver/      crate trust: compile a program and run it, in one command
 targets/     target descriptions (TIR §7)
-examples/    TIR modules that run
+examples/    TIR modules and Trust programs that run
 docs/        notes about the spec, including every derived decision
 ```
+
+## Licence
+
+**GNU Affero General Public License, version 3** — see [LICENSE](LICENSE).
+
+The AGPL's distinguishing clause is §13: offering a modified version to users
+over a network counts as conveying it, so those users are owed the source. A
+compiler is a thing people run behind services, and that is the case this
+licence is chosen for.
