@@ -25,6 +25,9 @@ usage:
     --time                             report what each phase of the compile
                                        cost, on stderr
 
+The file named is the program's **root**; what else is compiled is what its
+`mod` declarations say (Ch. 6 §1).
+
 `check` compiles no further than it must to know: it is what an editor runs
 on every save, and what `trust-lsp` reports. Its output is one diagnostic per
 line, `file:line:column: message`, and it exits 1 if there was one.
@@ -47,21 +50,22 @@ fn main() -> ExitCode {
     let stats = args.iter().any(|a| a == "--stats");
     let timed = args.iter().any(|a| a == "--time");
 
-    let src = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("trust: cannot read `{path}`: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    // A program is a tree of files (Ch. 6 §1), and the one named is its
+    // root: what else is compiled is what its `mod` declarations say.
+    let build = lang::build(std::path::Path::new(path));
+    if !build.errors.is_empty() {
+        report(&build);
+        return ExitCode::FAILURE;
+    }
 
     // `check` stops before code generation, because nothing after the
     // frontend can tell a program anything about itself.
     if cmd == "check" {
-        return check(&src, path);
+        return ExitCode::SUCCESS;
     }
 
-    let asm = match assemble_source(&src, path, timed) {
+    let module = build.module.expect("no errors means a module");
+    let asm = match assemble_module(module, timed) {
         Ok(a) => a,
         Err(code) => return code,
     };
@@ -90,35 +94,29 @@ fn main() -> ExitCode {
 /// what follows it is legalization and code generation, whose errors are
 /// about this compiler rather than about the program. So `check` runs the
 /// frontend and the verifier, and stops.
-fn check(src: &str, path: &str) -> ExitCode {
-    let module = match lang::compile(src) {
-        Ok(m) => m,
-        Err(errs) => {
-            let map = lang::LineMap::new(src);
-            for e in &errs {
-                // `line:column`, which is what an editor's error list, a
-                // terminal's hyperlink and `vim +N` all read.
-                let at = map.pos(e.span.lo);
-                println!("{path}:{}:{}: {}", at.line, at.column, e.message);
-            }
-            return ExitCode::FAILURE;
-        }
-    };
-    // Ill-formed TIR is this compiler's fault and not the program's, but a
-    // reader who hits one would rather be told than have it surface later as
-    // something stranger.
-    let errs = tir::verify(&module);
-    if !errs.is_empty() {
-        for e in &errs {
-            println!("{path}: internal: the frontend emitted ill-formed TIR: {e:?}");
-        }
-        return ExitCode::FAILURE;
+fn report(build: &lang::Build) {
+    // One `LineMap` per file, because a span's offsets are into the file it
+    // names and no other (Ch. 6 §1).
+    let maps: Vec<lang::LineMap> = build
+        .program
+        .sources
+        .iter()
+        .map(|s| lang::LineMap::new(&s.text))
+        .collect();
+    for e in &build.errors {
+        let Some(src) = build.program.sources.get(e.span.file as usize) else {
+            println!("trust: {}", e.message);
+            continue;
+        };
+        // `file:line:column`, which is what an editor's error list, a
+        // terminal's hyperlink and `vim +N` all read.
+        let at = maps[e.span.file as usize].pos(e.span.lo);
+        println!("{}:{}:{}: {}", src.label(), at.line, at.column, e.message);
     }
-    ExitCode::SUCCESS
 }
 
-/// Source to assembly, by the pipeline TIR §6 describes.
-fn assemble_source(src: &str, path: &str, timed: bool) -> Result<String, ExitCode> {
+/// A frontend module to assembly, by the pipeline TIR §6 describes.
+fn assemble_module(module: tir::Module, timed: bool) -> Result<String, ExitCode> {
     // A phase timer that costs nothing when it is not asked for. The
     // discipline it enforces is in docs/status.md §10: the two guesses that
     // preceded the last profile were both wrong, and both were about code
@@ -131,23 +129,7 @@ fn assemble_source(src: &str, path: &str, timed: bool) -> Result<String, ExitCod
         at = std::time::Instant::now();
     };
 
-    let module = match lang::compile(src) {
-        Ok(m) => m,
-        Err(errs) => {
-            eprintln!("trust: {} error(s) in `{path}`:", errs.len());
-            for e in &errs {
-                eprintln!("  {path}:line {}: {}", e.line(), e.message);
-            }
-            return Err(ExitCode::FAILURE);
-        }
-    };
     lap("frontend");
-    let errs = tir::verify(&module);
-    if !errs.is_empty() {
-        eprintln!("trust: the frontend emitted ill-formed TIR: {errs:?}");
-        return Err(ExitCode::FAILURE);
-    }
-    lap("verify1");
 
     let target = tir::TargetDesc::tritium();
     let module = tir::canonicalize_module(&module);

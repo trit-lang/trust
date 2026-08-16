@@ -82,6 +82,8 @@ module.exports = grammar({
 
     _item: ($) =>
       choice(
+        $.mod_item,
+        $.use_item,
         $.function_item,
         $.struct_item,
         $.enum_item,
@@ -89,6 +91,14 @@ module.exports = grammar({
         $.trait_item,
         $.impl_item,
       ),
+
+    /// `mod name;` — a module, which is a file (Ch. 6 §1.2).
+    mod_item: ($) => seq(optional('pub'), 'mod', field('name', $.identifier), ';'),
+
+    /// `use a::b::c;` (Ch. 6 §3.2).
+    use_item: ($) => seq('use', $.module_path, ';'),
+
+    module_path: ($) => sepBy1('::', $.identifier),
 
     attribute: ($) =>
       seq(
@@ -102,6 +112,7 @@ module.exports = grammar({
     function_item: ($) =>
       seq(
         repeat($.attribute),
+        optional('pub'),
         'fn',
         field('name', $.identifier),
         optional($.generic_parameters),
@@ -150,6 +161,7 @@ module.exports = grammar({
     struct_item: ($) =>
       seq(
         repeat($.attribute),
+        optional('pub'),
         'struct',
         field('name', $.identifier),
         optional($.generic_parameters),
@@ -160,13 +172,14 @@ module.exports = grammar({
     field_declarations: ($) => seq('{', commaSep($.field_declaration), '}'),
 
     field_declaration: ($) =>
-      seq(field('name', $.identifier), ':', field('type', $._type)),
+      seq(optional('pub'), field('name', $.identifier), ':', field('type', $._type)),
 
     tuple_fields: ($) => seq('(', commaSep($._type), ')'),
 
     enum_item: ($) =>
       seq(
         repeat($.attribute),
+        optional('pub'),
         'enum',
         field('name', $.identifier),
         optional($.generic_parameters),
@@ -185,6 +198,7 @@ module.exports = grammar({
 
     const_item: ($) =>
       seq(
+        optional('pub'),
         'const',
         field('name', $.identifier),
         ':',
@@ -195,6 +209,7 @@ module.exports = grammar({
 
     trait_item: ($) =>
       seq(
+        optional('pub'),
         'trait',
         field('name', $.identifier),
         optional($.generic_parameters),

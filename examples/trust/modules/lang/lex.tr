@@ -1,0 +1,15 @@
+/// What a thing is made of (Naming §4).
+pub enum Kind { Trit, Tryte, Word }
+
+/// Not `pub`: nothing outside this module may name it, which is what lets it
+/// be changed without asking anyone.
+const PADDING: t27 = 0;
+
+pub fn width(k: Kind) -> t27 {
+    let base = match k {
+        Kind::Trit => 1,
+        Kind::Tryte => 9,
+        Kind::Word => 27,
+    };
+    base + PADDING
+}

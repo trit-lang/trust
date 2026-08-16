@@ -18,6 +18,12 @@ pub type Line = u32;
 /// line to print and no source text to count newlines in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Span {
+    /// Which file it is in. A program is many files now (Ch. 6 §1), and two
+    /// of them number their characters from zero alike, so an offset without
+    /// a file names a place in every one of them.
+    ///
+    /// `File::ROOT` is what a single-file compile uses and what `lex` gives.
+    pub file: File,
     /// The line `lo` falls on.
     pub line: Line,
     /// The first character, counting from zero.
@@ -26,10 +32,17 @@ pub struct Span {
     pub hi: u32,
 }
 
+/// Which source file a span is in — an index into whatever loaded them.
+pub type File = u16;
+
 impl Span {
-    /// A span over `lo..hi`, on `line`.
-    pub fn new(line: Line, lo: usize, hi: usize) -> Span {
+    /// The file a single-file compile is, and the one `lex` gives.
+    pub const ROOT: File = 0;
+
+    /// A span over `lo..hi`, on `line`, in `file`.
+    pub fn new(file: File, line: Line, lo: usize, hi: usize) -> Span {
         Span {
+            file,
             line,
             lo: lo as u32,
             hi: hi as u32,
@@ -42,6 +55,7 @@ impl Span {
     /// reaches a diagnostic is a fault in the synthesis rather than in the
     /// program being compiled. Line zero is a line no file has.
     pub const NONE: Span = Span {
+        file: Span::ROOT,
         line: 0,
         lo: 0,
         hi: 0,
@@ -55,6 +69,7 @@ impl Span {
     /// forward, and is clamped rather than trusted.
     pub fn to(self, end: Span) -> Span {
         Span {
+            file: self.file,
             line: self.line,
             lo: self.lo,
             hi: self.hi.max(end.hi),
@@ -217,8 +232,8 @@ impl std::error::Error for SyntaxError {}
 /// The keywords of §1.3.
 pub const KEYWORDS: &[&str] = &[
     "as", "break", "const", "continue", "dyn", "else", "enum", "false", "fn", "for", "if", "impl",
-    "in", "let", "loop", "match", "mut", "return", "self", "Self", "struct", "trait", "true",
-    "type", "where", "while",
+    "in", "let", "loop", "match", "mod", "mut", "pub", "return", "self", "Self", "struct", "trait",
+    "true", "type", "use", "where", "while",
 ];
 
 /// Reserved by §1.3 and claimed by Ch. 4, which is written but not
@@ -229,9 +244,7 @@ pub const CHAPTER_4: &[&str] = &[];
 
 /// Reserved for chapters that do not exist yet (§1.3). Using one is an error
 /// that names the reason, rather than a mysterious parse failure.
-pub const RESERVED: &[&str] = &[
-    "crate", "mod", "move", "pub", "ref", "static", "union", "unsafe", "use",
-];
+pub const RESERVED: &[&str] = &["crate", "move", "ref", "static", "union", "unsafe"];
 
 /// Operators and punctuation, longest first so that maximal munch is simply
 /// the order of this table.
@@ -243,6 +256,11 @@ const OPERATORS: &[&str] = &[
 
 /// Tokenize a source file.
 pub fn lex(src: &str) -> Result<Vec<(Tok, Span)>, SyntaxError> {
+    lex_in(src, Span::ROOT)
+}
+
+/// Tokenize a source file, whose spans name `file`.
+pub fn lex_in(src: &str, file: File) -> Result<Vec<(Tok, Span)>, SyntaxError> {
     let chars: Vec<char> = src.chars().collect();
     let mut out = Vec::new();
     let mut i = 0usize;
@@ -256,7 +274,7 @@ pub fn lex(src: &str) -> Result<Vec<(Tok, Span)>, SyntaxError> {
         // token's span runs from here to wherever its branch left `i`, which
         // is why each of them pushes after advancing rather than before.
         let lo = i;
-        let at = Span::new(line, lo, lo + 1);
+        let at = Span::new(file, line, lo, lo + 1);
 
         if c == '\n' {
             line += 1;
@@ -316,7 +334,7 @@ pub fn lex(src: &str) -> Result<Vec<(Tok, Span)>, SyntaxError> {
             i = j;
             out.push((
                 Tok::Lifetime(chars[start..j].iter().collect()),
-                Span::new(line, lo, i),
+                Span::new(file, line, lo, i),
             ));
             continue;
         }
@@ -325,7 +343,7 @@ pub fn lex(src: &str) -> Result<Vec<(Tok, Span)>, SyntaxError> {
         if c == '\'' {
             let (v, next) = char_literal(&chars, i, at)?;
             i = next;
-            out.push((Tok::CharLit(v), Span::new(line, lo, i)));
+            out.push((Tok::CharLit(v), Span::new(file, line, lo, i)));
             continue;
         }
 
@@ -334,7 +352,7 @@ pub fn lex(src: &str) -> Result<Vec<(Tok, Span)>, SyntaxError> {
         if c == '"' {
             let (cs, next) = string_literal(&chars, i, at)?;
             i = next;
-            out.push((Tok::StrLit(cs), Span::new(line, lo, i)));
+            out.push((Tok::StrLit(cs), Span::new(file, line, lo, i)));
             continue;
         }
 
@@ -345,7 +363,7 @@ pub fn lex(src: &str) -> Result<Vec<(Tok, Span)>, SyntaxError> {
                 i += 1;
             }
             let text: String = chars[lo..i].iter().collect();
-            let span = Span::new(line, lo, i);
+            let span = Span::new(file, line, lo, i);
             match literal::parse_literal(&text) {
                 Ok(Literal::Int { value, .. }) => out.push((Tok::Int(value), span)),
                 Ok(Literal::Trit(t)) => out.push((Tok::TritLit(t), span)),
@@ -359,7 +377,7 @@ pub fn lex(src: &str) -> Result<Vec<(Tok, Span)>, SyntaxError> {
                 i += 1;
             }
             let text: String = chars[lo..i].iter().collect();
-            let span = Span::new(line, lo, i);
+            let span = Span::new(file, line, lo, i);
             if text == "_" {
                 out.push((Tok::Op("_"), span));
             } else if let Some(k) = KEYWORDS.iter().find(|k| **k == text) {
@@ -391,7 +409,7 @@ pub fn lex(src: &str) -> Result<Vec<(Tok, Span)>, SyntaxError> {
                 // `^` and `~` are reserved, and the diagnostic names the
                 // methods that replace them (§2.5).
                 i += op.chars().count();
-                out.push((Tok::Op(op), Span::new(line, lo, i)));
+                out.push((Tok::Op(op), Span::new(file, line, lo, i)));
             }
             None if c == '^' || c == '~' => {
                 return Err(err(
@@ -408,7 +426,7 @@ pub fn lex(src: &str) -> Result<Vec<(Tok, Span)>, SyntaxError> {
 
     // End of input is a position, not a stretch: an error reported there
     // points at where the file stopped rather than underlining nothing.
-    out.push((Tok::Eof, Span::new(line, chars.len(), chars.len())));
+    out.push((Tok::Eof, Span::new(file, line, chars.len(), chars.len())));
     Ok(out)
 }
 
@@ -613,7 +631,10 @@ mod tests {
         assert_eq!(lex("'a'").unwrap()[0].0, Tok::CharLit(97));
         assert_eq!(lex("\"hi\"").unwrap()[0].0, Tok::StrLit(vec![104, 105]));
 
-        assert!(lex("mod").unwrap_err().message.contains("reserved"));
+        // `mod` was reserved and is now a keyword (Ch. 6 §1.2); `crate` is
+        // still reserved, since Ch. 6 §3.1 declines it as a path prefix.
+        assert_eq!(lex("mod").unwrap()[0].0, Tok::Kw("mod"));
+        assert!(lex("crate").unwrap_err().message.contains("reserved"));
         assert!(lex("a ^ b").unwrap_err().message.contains("tmul"));
     }
 

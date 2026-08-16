@@ -27,6 +27,37 @@ pub enum Item {
     Trait(TraitItem),
     /// `impl Type { … }` or `impl Trait for Type { … }` (Ch. 4 §1.2).
     Impl(ImplItem),
+    /// `mod name;` — a module, which is a file (Ch. 6 §1).
+    Mod(ModItem),
+    /// `use a::b::c;` — a name for something already visible (Ch. 6 §3.2).
+    Use(UseItem),
+}
+
+/// `mod name;`.
+///
+/// It carries no items: a module is a file, and which file is computed from
+/// where this declaration was written (Ch. 6 §1.3).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ModItem {
+    /// Its name, which is also its file's stem.
+    pub name: String,
+    /// Where the name was written.
+    pub name_span: Span,
+    /// Whether the module is visible outside the one declaring it.
+    pub public: bool,
+    /// Where it was written.
+    pub span: Span,
+}
+
+/// `use a::b::c;` — binds `c` in this module (Ch. 6 §3.2).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct UseItem {
+    /// The segments, in order. The last is the name it binds.
+    pub segments: Vec<String>,
+    /// Where the last segment was written, which is what the name means.
+    pub name_span: Span,
+    /// Where it was written.
+    pub span: Span,
 }
 
 impl Item {
@@ -39,6 +70,8 @@ impl Item {
             Item::Enum(e) => e.span,
             Item::Trait(t) => t.span,
             Item::Impl(i) => i.span,
+            Item::Mod(m) => m.span,
+            Item::Use(u) => u.span,
         }
     }
 
@@ -52,6 +85,8 @@ impl Item {
             Item::Enum(e) => e.name_span,
             Item::Trait(t) => t.name_span,
             Item::Impl(i) => i.span,
+            Item::Mod(m) => m.name_span,
+            Item::Use(u) => u.name_span,
         }
     }
 
@@ -64,6 +99,8 @@ impl Item {
             Item::Enum(e) => e.span = span,
             Item::Trait(t) => t.span = span,
             Item::Impl(i) => i.span = span,
+            Item::Mod(m) => m.span = span,
+            Item::Use(u) => u.span = span,
         }
         self
     }
@@ -130,6 +167,8 @@ impl GenericParam {
 pub struct Named {
     /// Its name. A tuple struct's fields are named `0`, `1`, ….
     pub name: String,
+    /// Whether it is visible outside the module defining it (Ch. 6 §2).
+    pub public: bool,
     /// Where the name was written.
     pub name_span: Span,
     /// Its type.
@@ -140,6 +179,7 @@ impl Named {
     /// A name and a type, for the places the compiler invents one.
     pub fn new(name: impl Into<String>, ty: Ty) -> Named {
         Named {
+            public: false,
             name: name.into(),
             name_span: ty.span(),
             ty,
@@ -164,6 +204,8 @@ pub struct TraitItem {
     pub assoc: Vec<String>,
     /// Its associated constants: name and type (Ch. 4 §1.7).
     pub consts: Vec<(String, Ty)>,
+    /// Whether it is visible outside the module defining it (Ch. 6 §2).
+    pub public: bool,
     /// Where its name was written, which is where a reader means
     /// when they point at the item.
     pub name_span: Span,
@@ -256,6 +298,8 @@ pub struct StructItem {
     /// Fields in declaration order. A tuple struct's fields are named `0`,
     /// `1`, …; a unit struct has none.
     pub fields: Vec<Named>,
+    /// Whether it is visible outside the module defining it (Ch. 6 §2).
+    pub public: bool,
     /// Where its name was written, which is where a reader means
     /// when they point at the item.
     pub name_span: Span,
@@ -276,6 +320,8 @@ pub struct EnumItem {
     pub repr: Repr,
     /// Its variants, in declaration order.
     pub variants: Vec<Variant>,
+    /// Whether it is visible outside the module defining it (Ch. 6 §2).
+    pub public: bool,
     /// Where its name was written, which is where a reader means
     /// when they point at the item.
     pub name_span: Span,
@@ -316,6 +362,8 @@ pub struct FnItem {
     /// What the caller must have established, written in the same `where`
     /// clause as the type bounds and checked once on entry (Ch. 4 §2.8).
     pub requires: Vec<Expr>,
+    /// Whether it is visible outside the module defining it (Ch. 6 §2).
+    pub public: bool,
     /// Where its name was written, which is where a reader means
     /// when they point at the item.
     pub name_span: Span,
@@ -332,6 +380,8 @@ pub struct ConstItem {
     pub ty: Ty,
     /// Its value.
     pub value: Expr,
+    /// Whether it is visible outside the module defining it (Ch. 6 §2).
+    pub public: bool,
     /// Where its name was written, which is where a reader means
     /// when they point at the item.
     pub name_span: Span,

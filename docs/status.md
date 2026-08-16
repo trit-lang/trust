@@ -131,6 +131,7 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | `trust-lsp` | diagnostics over stdio, from the compiler itself — no second implementation of the language. Ranges are the expression that is wrong, in the protocol's UTF-16 columns (G0.19) |
 | `editors/` | a tree-sitter grammar (a second parser, held to the first by `scripts/grammar.sh`) and a Zed extension. G0.19 |
 | `lang::index` | an outline, go-to-definition, hover, find-references, rename and completion, from the AST alone — so both work on a file that does not compile. Names resolve by scope and spelling; what needs a type is left unanswered rather than guessed (G0.19) |
+| modules | a program is a tree of files (Ch. 6). `mod m;` finds `m.tr`; `pub` is what a safety claim rests on; resolution renames everything to its path and hands lowering one file, which is why nothing below the frontend knows modules exist |
 | `parse_recovering` | an item that does not parse is skipped and the rest of the file is read, because an editor is asked about a file that is being typed into (G0.19) |
 | member completion | what follows a `.`, from the file, the prelude, and the compiler's own table of what it implements itself (G0.19) |
 | `lang::analyze` | lowering's own answers, kept: the type of each expression by where it was written, so a hover can say what `let n = 1` is (G0.19) |
@@ -170,7 +171,7 @@ inference and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
 | returning a closure | needs `impl Trait` in return position or `Box<dyn Fn>`; Ch. 4 §4.5 |
 | `FnOnce` that moves a capture | every capture is by reference, and moving out of one is now **refused** rather than silently accepted (G9.27). Allowing it needs a move analysis of the closure body |
 | `IntoIterator`, so `for x in xs` over an array | array iterators are the library's; the blanket impl it needs now works (G0.14b) |
-| modules, `use`, `pub`, multiple files | reserved in Ch. 0 §1.3 |
+| separate compilation, a unit larger than a program | Ch. 6 §6; there is no `crate` and no linking of one program to another. Modules, `use` and `pub` are **built** (Ch. 6) |
 | `unsafe`, raw pointers | reserved; `?` is built (G9.8) |
 | bounds checks a loop condition already implies | every array index still costs two comparisons and two branches; branches and comparisons are 36% of everything HPL executes (G8.13). Removing them needs range analysis, which nothing here does |
 

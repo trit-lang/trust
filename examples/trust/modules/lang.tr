@@ -1,0 +1,10 @@
+// A module with a submodule is a directory beside it (§1.3), so `lex` is
+// `lang/lex.tr`.
+pub mod lex;
+
+/// Every width there is, added up. Reaches `lex::PADDING`, which is private
+/// to `lex` — and is refused, because visibility reaches *inward* and `lang`
+/// is not inside `lex` (§2.1). So it uses what `lex` made `pub`.
+pub fn total() -> t27 {
+    lex::width(lex::Kind::Trit) + lex::width(lex::Kind::Tryte) + lex::width(lex::Kind::Word)
+}

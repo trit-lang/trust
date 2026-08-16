@@ -421,6 +421,7 @@ fn completion_kind(k: lang::index::SymbolKind) -> u32 {
         Enum => 13,
         Variant => 20,
         Field => 5,
+        Module => 9,
         Trait => 8,
         Impl => 7,
         Const => 21,
@@ -491,6 +492,8 @@ fn kind(k: lang::index::SymbolKind) -> u32 {
         Field => 8,
         // A trait is an interface, which is the closest thing the protocol's
         // list of kinds has to one.
+        // The protocol has a Module kind; a Trait is closest to Interface.
+        Module => 2,
         Trait => 11,
         Impl => 5,
         Const => 14,

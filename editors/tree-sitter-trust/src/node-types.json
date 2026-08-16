@@ -158,11 +158,19 @@
         "named": true
       },
       {
+        "type": "mod_item",
+        "named": true
+      },
+      {
         "type": "struct_item",
         "named": true
       },
       {
         "type": "trait_item",
+        "named": true
+      },
+      {
+        "type": "use_item",
         "named": true
       }
     ]
@@ -1429,6 +1437,37 @@
     }
   },
   {
+    "type": "mod_item",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "module_path",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "identifier",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "negative_literal",
     "named": true,
     "fields": {},
@@ -2032,6 +2071,21 @@
     "fields": {}
   },
   {
+    "type": "use_item",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "module_path",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "variant",
     "named": true,
     "fields": {
@@ -2399,7 +2453,15 @@
     "named": false
   },
   {
+    "type": "mod",
+    "named": false
+  },
+  {
     "type": "mut",
+    "named": false
+  },
+  {
+    "type": "pub",
     "named": false
   },
   {
@@ -2452,6 +2514,10 @@
   },
   {
     "type": "type",
+    "named": false
+  },
+  {
+    "type": "use",
     "named": false
   },
   {

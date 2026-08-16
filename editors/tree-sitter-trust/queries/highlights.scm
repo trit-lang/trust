@@ -32,6 +32,8 @@
 (struct_expression name: (identifier) @constructor)
 (variant name: (identifier) @constructor)
 (attribute (identifier) @attribute)
+(mod_item name: (identifier) @module)
+(module_path (identifier) @module)
 
 (const_item name: (identifier) @constant)
 
@@ -78,11 +80,14 @@
   "let"
   "loop"
   "match"
+  "mod"
   "mut"
+  "pub"
   "return"
   "struct"
   "trait"
   "type"
+  "use"
   "where"
   "while"
 ] @keyword

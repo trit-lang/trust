@@ -29,7 +29,8 @@ fi
 (cd "$grammar" && tree-sitter generate && tree-sitter test)
 
 status=0
-for f in examples/trust/*.tr; do
+for f in examples/trust/*.tr examples/trust/*/*.tr examples/trust/*/*/*.tr; do
+    [ -e "$f" ] || continue
     out=$(cd "$grammar" && tree-sitter parse "../../$f" 2>&1) || true
     # `tree-sitter parse` reports a bad node inline and in its summary line.
     if printf '%s' "$out" | grep -qE '\(ERROR|\(MISSING|MISSING "'; then
@@ -49,6 +50,6 @@ if ! cmp -s "$grammar/queries/highlights.scm" editors/zed/languages/trust/highli
 fi
 
 if [ "$status" -eq 0 ]; then
-    echo "grammar: $(ls examples/trust/*.tr | wc -l | tr -d ' ') examples parse with no error node"
+    echo "grammar: $(ls examples/trust/*.tr examples/trust/*/*.tr examples/trust/*/*/*.tr 2>/dev/null | wc -l | tr -d ' ') files parse with no error node"
 fi
 exit "$status"

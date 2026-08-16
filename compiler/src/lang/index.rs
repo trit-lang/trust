@@ -51,6 +51,8 @@ pub enum SymbolKind {
     Impl,
     /// A `const`.
     Const,
+    /// A `mod` declaration (Ch. 6 §1.2).
+    Module,
     /// A `let` binding or a pattern binding.
     Local,
     /// A function's parameter.
@@ -523,6 +525,13 @@ impl Builder {
                         self.own(&impl_owner(i), m.name_span);
                     }
                 }
+                Item::Mod(m) => {
+                    let label = format!("mod {}", m.name);
+                    self.define_item(&m.name, m.name_span, SymbolKind::Module, label);
+                }
+                // A `use` binds a name for something defined elsewhere, so
+                // the definition it names is not in this file to point at.
+                Item::Use(_) => {}
             }
         }
     }
@@ -729,6 +738,15 @@ impl Builder {
                     children,
                 })
             }
+            Item::Mod(m) => Some(Symbol {
+                name: m.name.clone(),
+                kind: SymbolKind::Module,
+                detail: String::new(),
+                span: m.span,
+                name_span: m.name_span,
+                children: Vec::new(),
+            }),
+            Item::Use(_) => None,
             Item::Impl(i) => {
                 let children = i
                     .methods

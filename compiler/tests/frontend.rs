@@ -327,7 +327,9 @@ fn the_deferred_features_say_what_they_are_waiting_for() {
     // emit or on a chapter nobody has written.
     assert!(error("fn main() -> t27 { 1 ^ 2 }").contains("tmul"));
     // Reserved for a chapter nobody has written…
-    assert!(error("fn main() -> t27 { mod m; 0 }").contains("not written yet"));
+    // `mod` is Ch. 6's now, and what it says is where it belongs.
+    assert!(error("fn main() -> t27 { mod m; 0 }").contains("top level of a module"));
+    assert!(error("fn main() -> t27 { crate; 0 }").contains("not written yet"));
     // …as against one that is written and only partly built.
     assert!(
         error("trait Shape { fn a(&self) -> t27; } fn main() -> t27 { let x: dyn Shape = 0; 0 }")

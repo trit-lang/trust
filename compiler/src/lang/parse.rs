@@ -5,15 +5,20 @@
 //! `a <=> b <=> c` are syntax errors rather than surprises.
 
 use super::ast::*;
-use super::lex::{Span, SyntaxError, Tok, lex};
+use super::lex::{File as SourceFile, Span, SyntaxError, Tok, lex_in};
 
 type R<T> = Result<T, SyntaxError>;
 
 /// Parse a source file.
 pub fn parse(src: &str) -> R<File> {
+    parse_in(src, Span::ROOT)
+}
+
+/// Parse a source file, whose spans name `file` (Ch. 6 §1).
+pub fn parse_in(src: &str, file: SourceFile) -> R<File> {
     let mut p = Parser {
         counter: 0,
-        toks: lex(src)?,
+        toks: lex_in(src, file)?,
         pos: 0,
         no_struct: false,
     };
@@ -39,7 +44,12 @@ pub fn parse(src: &str) -> R<File> {
 /// A lexical error stops everything, because there is nothing to skip *to* —
 /// an unterminated string swallows the rest of the file by definition.
 pub fn parse_recovering(src: &str) -> (File, Vec<SyntaxError>) {
-    let toks = match lex(src) {
+    parse_recovering_in(src, Span::ROOT)
+}
+
+/// Parse with recovery, whose spans name `file`.
+pub fn parse_recovering_in(src: &str, file: SourceFile) -> (File, Vec<SyntaxError>) {
+    let toks = match lex_in(src, file) {
         Ok(t) => t,
         Err(e) => return (File::default(), vec![e]),
     };
@@ -330,32 +340,101 @@ impl Parser {
             self.expect_op("]")?;
         }
 
+        // Ch. 6 §2.2: one degree of visibility, written before the item.
+        let public = self.eat_kw("pub");
+        if self.at_kw("mod") {
+            return Ok(Item::Mod(self.mod_item(public)?));
+        }
+        if self.at_kw("use") {
+            if public {
+                return self.err(
+                    "`pub use` is a re-export, which Ch. 6 §2.4 declines: a name is reached \
+                     by the path to where it was defined",
+                );
+            }
+            return Ok(Item::Use(self.use_item()?));
+        }
         if self.at_kw("fn") {
-            return Ok(Item::Fn(self.fn_item()?));
+            return Ok(Item::Fn(self.fn_item(public)?));
         }
         if self.at_kw("const") {
-            return Ok(Item::Const(self.const_item()?));
+            return Ok(Item::Const(self.const_item(public)?));
         }
         if self.at_kw("struct") {
-            return Ok(Item::Struct(self.struct_item(repr, derives)?));
+            return Ok(Item::Struct(self.struct_item(repr, derives, public)?));
         }
         if self.at_kw("enum") {
-            return Ok(Item::Enum(self.enum_item(repr, derives)?));
+            return Ok(Item::Enum(self.enum_item(repr, derives, public)?));
         }
         if !derives.is_empty() {
             return self.err("`derive` attaches to a struct or an enum (Ch. 4 §6)");
         }
         if self.at_kw("trait") {
-            return Ok(Item::Trait(self.trait_item()?));
+            return Ok(Item::Trait(self.trait_item(public)?));
         }
         if self.at_kw("impl") {
+            if public {
+                return self.err(
+                    "an `impl` takes no `pub`: it is as visible as the more private of the \
+                     type and the trait (Ch. 6 §5)",
+                );
+            }
             return Ok(Item::Impl(self.impl_item()?));
         }
         self.err(format!("expected an item, found {}", self.peek()))
     }
 
+    /// `mod name;` — a module, which is a file (Ch. 6 §1.2).
+    fn mod_item(&mut self, public: bool) -> R<ModItem> {
+        let span = self.span();
+        self.bump(); // mod
+        let (name, name_span) = self.expect_ident_at()?;
+        if self.at_op("{") {
+            return self.err(
+                "a module is a file (Ch. 6 §1): there is no `mod name { … }`, because \
+                 grouping inside a file is what an `impl` block and a heading comment are for",
+            );
+        }
+        self.expect_op(";")?;
+        Ok(ModItem {
+            name,
+            name_span,
+            public,
+            span,
+        })
+    }
+
+    /// `use a::b::c;` (Ch. 6 §3.2).
+    fn use_item(&mut self) -> R<UseItem> {
+        let span = self.span();
+        self.bump(); // use
+        let mut segments = Vec::new();
+        let (first, mut name_span) = self.expect_ident_at()?;
+        segments.push(first);
+        while self.eat_op("::") {
+            if self.at_op("{") || self.at_op("*") {
+                return self.err(
+                    "a `use` names one thing (Ch. 6 §3.2): there is no `use a::{b, c}` and \
+                     no `use a::*`",
+                );
+            }
+            let (seg, at) = self.expect_ident_at()?;
+            segments.push(seg);
+            name_span = at;
+        }
+        if self.at_kw("as") {
+            return self.err("a `use` does not rename (Ch. 6 §3.2)");
+        }
+        self.expect_op(";")?;
+        Ok(UseItem {
+            segments,
+            name_span,
+            span,
+        })
+    }
+
     /// `struct Name { … }`, `struct Name(…);`, `struct Name;` (§3.3).
-    fn struct_item(&mut self, repr: Repr, derives: Vec<String>) -> R<StructItem> {
+    fn struct_item(&mut self, repr: Repr, derives: Vec<String>, public: bool) -> R<StructItem> {
         let span = self.span();
         self.bump(); // struct
         let (name, name_span) = self.expect_ident_at()?;
@@ -374,6 +453,7 @@ impl Parser {
             Vec::new()
         };
         Ok(StructItem {
+            public,
             name,
             name_span,
             generics,
@@ -384,7 +464,7 @@ impl Parser {
         })
     }
 
-    fn enum_item(&mut self, repr: Repr, derives: Vec<String>) -> R<EnumItem> {
+    fn enum_item(&mut self, repr: Repr, derives: Vec<String>, public: bool) -> R<EnumItem> {
         let span = self.span();
         self.bump(); // enum
         let (name, name_span) = self.expect_ident_at()?;
@@ -436,6 +516,7 @@ impl Parser {
             }
         }
         Ok(EnumItem {
+            public,
             name,
             name_span,
             generics,
@@ -649,9 +730,11 @@ impl Parser {
             if self.at(&Tok::Eof) {
                 return self.err("unterminated field list");
             }
+            let public = self.eat_kw("pub");
             let (name, name_span) = self.expect_ident_at()?;
             self.expect_op(":")?;
             fields.push(Named {
+                public,
                 name,
                 name_span,
                 ty: self.ty()?,
@@ -679,7 +762,7 @@ impl Parser {
     }
 
     /// `trait Name<T>: Super + Other { … }` (Ch. 4 §§1.1, 1.7).
-    fn trait_item(&mut self) -> R<TraitItem> {
+    fn trait_item(&mut self, public: bool) -> R<TraitItem> {
         let span = self.span();
         self.bump(); // trait
         let (name, name_span) = self.expect_ident_at()?;
@@ -734,6 +817,7 @@ impl Parser {
             declared.push((n, ty));
         }
         Ok(TraitItem {
+            public,
             name,
             name_span,
             params,
@@ -810,6 +894,7 @@ impl Parser {
                 // name was read as part of the declaration list, and the
                 // whole clause is as narrow a place as there is to point at.
                 Some(value) => given.push(ConstItem {
+                    public: true,
                     name,
                     name_span: span,
                     ty,
@@ -896,7 +981,7 @@ impl Parser {
                     self.peek()
                 ));
             }
-            methods.push(self.fn_item()?);
+            methods.push(self.fn_item(true)?);
         }
         Ok((methods, assoc, consts))
     }
@@ -916,6 +1001,7 @@ impl Parser {
                 return None;
             }
             return Some(Named {
+                public: false,
                 name: "self".to_string(),
                 name_span: span,
                 ty: Ty::SelfTy(span),
@@ -929,6 +1015,7 @@ impl Parser {
             if self.at_kw("self") {
                 self.bump();
                 return Some(Named {
+                    public: false,
                     name: "self".to_string(),
                     name_span: span,
                     ty: Ty::Ref(Box::new(Ty::SelfTy(span)), mutable, span),
@@ -939,7 +1026,7 @@ impl Parser {
         None
     }
 
-    fn fn_item(&mut self) -> R<FnItem> {
+    fn fn_item(&mut self, public: bool) -> R<FnItem> {
         let span = self.span();
         self.bump(); // fn
         let (name, name_span) = self.expect_ident_at()?;
@@ -967,6 +1054,7 @@ impl Parser {
                 };
                 self.expect_op(":")?;
                 params.push(Named {
+                    public: false,
                     name: pname,
                     name_span: pspan,
                     ty: self.ty()?,
@@ -996,6 +1084,7 @@ impl Parser {
             Some(self.block()?)
         };
         Ok(FnItem {
+            public,
             name,
             name_span,
             generics,
@@ -1007,7 +1096,7 @@ impl Parser {
         })
     }
 
-    fn const_item(&mut self) -> R<ConstItem> {
+    fn const_item(&mut self, public: bool) -> R<ConstItem> {
         let span = self.span();
         self.bump(); // const
         let (name, name_span) = self.expect_ident_at()?;
@@ -1017,6 +1106,7 @@ impl Parser {
         let value = self.expr()?;
         self.expect_op(";")?;
         Ok(ConstItem {
+            public,
             name,
             name_span,
             ty,
@@ -1168,6 +1258,16 @@ impl Parser {
             }
             if self.eat_op(";") {
                 continue;
+            }
+            // Ch. 6 §1.2: a `mod` is an item and appears at the top level of
+            // a module. A `use` likewise (§3.2). Neither is an expression,
+            // and a block is where expressions go.
+            if self.at_kw("mod") || self.at_kw("use") {
+                let what = if self.at_kw("mod") { "mod" } else { "use" };
+                return self.err(format!(
+                    "a `{what}` is an item and belongs at the top level of a module, not \
+                     inside a function (Ch. 6 §§1.2, 3.2)"
+                ));
             }
 
             // In statement position a block-shaped expression is parsed

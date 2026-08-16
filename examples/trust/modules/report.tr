@@ -1,0 +1,8 @@
+/// A module that names nothing of the program's: the prelude is in scope in
+/// every module with no `use` (§3.3), and that is all this needs.
+pub fn line(what: &str, n: t27) {
+    print(what);
+    print(" is ");
+    print_int(n);
+    println(" trits");
+}

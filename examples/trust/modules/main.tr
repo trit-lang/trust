@@ -1,0 +1,33 @@
+// A program in four files (Ch. 6).
+//
+// The file named to the compiler is the root; what else is compiled is what
+// its `mod` declarations say, and where each file is follows from where the
+// declaration is (§1.3):
+//
+//     main.tr           mod lang;  mod report;
+//     lang.tr           pub mod lex;
+//     lang/lex.tr
+//     report.tr
+//
+// Nothing here is new syntax except `mod`, `use` and `pub`. A module is a
+// naming construct and nothing else (§4): `lang::lex::width` is the function
+// `lang.lex.width` in TIR, and every rule about types, ownership and traits
+// is the rule it was in one file.
+
+mod lang;
+mod report;
+
+// `use` binds the last segment, for the whole module (§3.2).
+use lang::lex::Kind;
+
+fn main() -> t27 {
+    let widths = Kind::Trit;
+    report::line("trit", lang::lex::width(widths));
+    report::line("tryte", lang::lex::width(Kind::Tryte));
+    report::line("word", lang::lex::width(Kind::Word));
+
+    // `lang` reaches into `lang::lex` because `lex` is inside it; `main`
+    // reaches `width` because it is `pub`. `lang::lex::PADDING` is neither,
+    // and naming it here is refused — which is the whole of §2.
+    lang::total()
+}

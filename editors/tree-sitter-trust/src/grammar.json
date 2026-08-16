@@ -31,6 +31,14 @@
       "members": [
         {
           "type": "SYMBOL",
+          "name": "mod_item"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "use_item"
+        },
+        {
+          "type": "SYMBOL",
           "name": "function_item"
         },
         {
@@ -52,6 +60,81 @@
         {
           "type": "SYMBOL",
           "name": "impl_item"
+        }
+      ]
+    },
+    "mod_item": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "pub"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": "mod"
+        },
+        {
+          "type": "FIELD",
+          "name": "name",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": ";"
+        }
+      ]
+    },
+    "use_item": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "use"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "module_path"
+        },
+        {
+          "type": "STRING",
+          "value": ";"
+        }
+      ]
+    },
+    "module_path": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "identifier"
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "SEQ",
+            "members": [
+              {
+                "type": "STRING",
+                "value": "::"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "identifier"
+              }
+            ]
+          }
         }
       ]
     },
@@ -156,6 +239,18 @@
             "type": "SYMBOL",
             "name": "attribute"
           }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "pub"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
         },
         {
           "type": "STRING",
@@ -740,6 +835,18 @@
           }
         },
         {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "pub"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
           "type": "STRING",
           "value": "struct"
         },
@@ -870,6 +977,18 @@
       "type": "SEQ",
       "members": [
         {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "pub"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
           "type": "FIELD",
           "name": "name",
           "content": {
@@ -963,6 +1082,18 @@
             "type": "SYMBOL",
             "name": "attribute"
           }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "pub"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
         },
         {
           "type": "STRING",
@@ -1119,6 +1250,18 @@
       "type": "SEQ",
       "members": [
         {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "pub"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
           "type": "STRING",
           "value": "const"
         },
@@ -1176,6 +1319,18 @@
     "trait_item": {
       "type": "SEQ",
       "members": [
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "pub"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
         {
           "type": "STRING",
           "value": "trait"

@@ -205,8 +205,21 @@ Each is one line.
 Ch. 5's prelude is in scope in **every** module, with no `use`. It is not a
 module and has no path.
 
-An item a module defines shadows a prelude item of the same name, in that
-module only, exactly as Ch. 5 states for a file.
+An item **the program** defines shadows a prelude item of the same name,
+everywhere in the program — not only in the module defining it. A prelude
+name means one thing in a program.
+
+> **Informative.** Per-module shadowing was considered and declined. The
+> prelude has no path, so a module cannot say "the prelude's `print`, not
+> mine"; with per-module shadowing, `print` in one module and `print` in
+> another would be different functions with no way to write the difference,
+> and a reader moving a line between files would change what it calls.
+> Program-wide is the rule that can be stated in one sentence and checked by
+> reading one program.
+
+An item **a module** defines is its own, and does not collide with an item of
+the same name in another module: `m::go` and the root's `go` are two
+functions (§4).
 
 ---
 

@@ -10,6 +10,7 @@ pub mod ast;
 pub mod index;
 pub mod lex;
 pub mod lower;
+pub mod modules;
 pub mod parse;
 
 pub use lex::{LineMap, Pos, Span, SyntaxError};
@@ -703,7 +704,7 @@ pub fn analyze(src: &str) -> Analysis {
         .filter_map(item_name)
         .map(str::to_string)
         .collect();
-    let file = merged(&user);
+    let file = merged(&user, 1);
     let noted = std::cell::RefCell::new(lower::Noted::default());
     let found = lower::lower_noting(&file, &mine, Some(&noted))
         .err()
@@ -719,16 +720,95 @@ pub fn analyze(src: &str) -> Analysis {
     }
 }
 
-/// The prelude with the file written over it: a name the file defines
-/// replaces the prelude's, rather than colliding with it.
-fn merged(user: &ast::File) -> ast::File {
-    let mut file = parse::parse(PRELUDE).expect("the prelude parses");
+/// The prelude with the program written over it: a name the program defines
+/// replaces the prelude's, rather than colliding with it (Ch. 6 §3.3).
+///
+/// `at` is the file id the prelude's spans carry, which is one past the
+/// program's own files so that nothing in it is read as a place in them.
+fn merged(user: &ast::File, at: lex::File) -> ast::File {
+    let mut file = parse::parse_in(PRELUDE, at).expect("the prelude parses");
     let defined: std::collections::HashSet<&str> =
         user.items.iter().filter_map(item_name).collect();
     file.items
         .retain(|i| item_name(i).is_none_or(|n| !defined.contains(n)));
     file.items.extend(user.items.iter().cloned());
     file
+}
+
+/// What one build produced, and everything wrong with it.
+///
+/// A program is a tree of files (Ch. 6 §1), so an error names one: `errors`
+/// carry a `Span` whose `file` indexes `program.sources`.
+pub struct Build {
+    /// The files, as loaded, for a diagnostic to place itself in.
+    pub program: modules::Program,
+    /// The module, if it got that far.
+    pub module: Option<crate::tir::Module>,
+    /// Everything wrong with it, in the order found.
+    pub errors: Vec<SyntaxError>,
+}
+
+/// Compile a program from its root file, following its `mod` declarations.
+pub fn build(root: &std::path::Path) -> Build {
+    finish(modules::load(root))
+}
+
+/// Compile a program that is one file with nothing under it.
+pub fn build_text(src: &str) -> Build {
+    finish(modules::one(src))
+}
+
+fn finish(program: modules::Program) -> Build {
+    // A file that does not parse is not resolved: what resolution would say
+    // about the part that parsed is mostly about the part that did not.
+    if !program.errors.is_empty() {
+        let errors = program.errors.clone();
+        return Build {
+            program,
+            module: None,
+            errors,
+        };
+    }
+    let (user, errors) = modules::resolve(&program);
+    if !errors.is_empty() {
+        return Build {
+            program,
+            module: None,
+            errors,
+        };
+    }
+    let file = merged(&user, program.sources.len() as lex::File);
+    match lower::lower(&file) {
+        Ok(module) => {
+            let errs = crate::tir::verify(&module);
+            if !errs.is_empty() {
+                let errors = errs
+                    .into_iter()
+                    .map(|e| SyntaxError {
+                        span: Span::NONE,
+                        message: format!("the frontend produced ill-formed TIR: {e}"),
+                    })
+                    .collect();
+                return Build {
+                    program,
+                    module: None,
+                    errors,
+                };
+            }
+            let mut module = module;
+            keep_reachable(&mut module, &prelude_functions());
+            Build {
+                program,
+                module: Some(module),
+                errors: Vec::new(),
+            }
+        }
+        Err(errors) => Build {
+            program,
+            module: None,
+            errors,
+        },
+    }
 }
 
 /// Compile a source file to a TIR module.
@@ -742,7 +822,7 @@ fn merged(user: &ast::File) -> ast::File {
 /// its own `sum` gets its own `sum`.
 pub fn compile(src: &str) -> Result<crate::tir::Module, Vec<SyntaxError>> {
     let user = parse::parse(src).map_err(|e| vec![e])?;
-    let file = merged(&user);
+    let file = merged(&user, 1);
     let module = lower::lower(&file)?;
 
     // Verified **before** pruning, and the order is the point. A function
@@ -780,7 +860,11 @@ fn item_name(i: &ast::Item) -> Option<&str> {
         ast::Item::Enum(e) => Some(&e.name),
         ast::Item::Trait(t) => Some(&t.name),
         ast::Item::Const(c) => Some(&c.name),
-        ast::Item::Impl(_) => None,
+        // An `impl` defines none: it adds methods to a type, and two impls
+        // of different traits for one type are not a collision. A `mod` and
+        // a `use` define a name in their own module and are resolved away
+        // before this is asked (Ch. 6 §4).
+        ast::Item::Impl(_) | ast::Item::Mod(_) | ast::Item::Use(_) => None,
     }
 }
 

@@ -1058,6 +1058,7 @@ pub fn lower_noting(
                     let mut value = c.value.clone();
                     subst_expr(&mut value, &self_repr);
                     consts.push(ast::ConstItem {
+                        public: true,
                         name: format!("{}.{}", imp.self_ty, c.name),
                         name_span: c.name_span,
                         ty: subst_self_ty(&c.ty, &self_repr),
@@ -4861,6 +4862,7 @@ impl Fn<'_> {
             .borrow_mut()
             .insert(key.clone(), (vec![ty.clone()], Ty::Unit));
         self.extra_fns.borrow_mut().push(ast::FnItem {
+            public: true,
             requires: Vec::new(),
             name: key,
             name_span: span,
@@ -8597,6 +8599,7 @@ impl Fn<'_> {
         call_params.extend(ps.clone());
         let call = format!("{name}.call");
         let item = ast::FnItem {
+            public: true,
             requires: Vec::new(),
             name: call.clone(),
             name_span: span,
