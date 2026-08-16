@@ -10835,6 +10835,22 @@ impl Fn<'_> {
         borrowed: bool,
         span: Span,
     ) -> R<()> {
+        // A `Box` is an address, so reaching through one is a load and then
+        // the same question about what it points at.
+        //
+        // What comes out is **borrowed**, always. The box is still owned by
+        // whatever holds it and will drop what is inside; a binding that
+        // owned it too would be the second owner, which is the double free
+        // G9.27 was. So a pattern may look through a box and not take from
+        // it — and `E::Add(E::Lit(a), b)` reads `a` without disturbing the
+        // tree it is in, which is what a compiler wants of its own AST.
+        if let Ty::Boxed(inner) = peel(ty)
+            && !matches!(pat, ast::Pattern::Wild(_) | ast::Pattern::Bind(..))
+        {
+            let inner = (**inner).clone();
+            let at = self.load_from(addr, ty);
+            return self.sub_pattern(at, &inner, pat, fail, true, span);
+        }
         match pat {
             ast::Pattern::Wild(_) => Ok(()),
             ast::Pattern::Bind(bound, _) => {
@@ -10851,18 +10867,6 @@ impl Fn<'_> {
             }
             ast::Pattern::Aggregate(path, fields, at) => {
                 let Ty::Enum(inner) = peel(ty) else {
-                    // A `Box` holds what it points at, and a pattern reads a
-                    // place: reaching through one is a dereference, and `*b`
-                    // is where a dereference is written.
-                    if matches!(peel(ty), Ty::Boxed(_)) {
-                        return err(
-                            *at,
-                            format!(
-                                "a pattern does not reach through a `Box`: this field is a \
-                                 {ty}, so bind it and `match` on `*` it"
-                            ),
-                        );
-                    }
                     return err(*at, format!("`{}` does not match {ty}", path.last()));
                 };
                 let inner = inner.clone();

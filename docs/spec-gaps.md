@@ -2614,11 +2614,21 @@ question about patterns that draft 0.1 does not answer, so it is not assumed;
 the diagnostic says an arm with a guard or a nested pattern does not count,
 and to add a `_` arm for when none of them matched.
 
-*A pattern does not reach through a `Box`.* A `Box<E>` holds an `E` somewhere
-else and a pattern reads a place, so `E::Add(E::Lit(a), b)` is refused and
-says to bind the field and `match` on `*` it — which is what Rust asks for
-too. It matters more here than there, because a compiler's own AST is mostly
-`Box`, and it is the first thing self-hosting will want back.
+*A pattern reaches through a `Box`, and what it takes is borrowed.* A
+compiler's own AST is mostly `Box`, so `E::Add(E::Lit(a), E::Lit(b))` is the
+shape that matters — two levels of a tree read in one arm. Reaching through
+one is a load and then the same question about what it points at, which is
+three lines.
+
+What comes out is **borrowed, always**. The box still owns what is inside and
+will drop it; a binding that owned it too would be the second owner, which is
+G9.27's double free written as a pattern. So a pattern may look through a box
+and not take from it, and a program that tries is refused by the machinery
+that already refuses it for a `match` on a reference.
+
+This is more than Rust gives — `box` patterns are unstable there — and it is
+sound for a reason Rust does not have available: a binding here can be
+*borrowed* rather than owning, which is what `match &e` has always produced.
 
 HPL retires **1 985 745** instructions, unchanged.
 

@@ -146,13 +146,39 @@ fn an_arm_that_can_fail_does_not_cover_its_variant() {
 }
 
 #[test]
-fn a_pattern_does_not_reach_through_a_box() {
-    // `Box<E>` holds an `E` somewhere else, and a pattern reads a place.
-    let src = "enum E { Lit(t27), Add(Box<E>, t27) }\n\
-               fn go(e: E) -> t27 {\n\
-                   match e { E::Lit(n) => n, E::Add(E::Lit(a), b) => a + b, _ => 0 }\n\
+fn a_pattern_reaches_through_a_box() {
+    // A compiler's own AST is mostly `Box`, so this is the shape that
+    // matters: read two levels of a tree in one arm without taking it apart.
+    let src = "enum E { Lit(t27), Add(Box<E>, Box<E>) }\n\
+               fn eval(e: &E) -> t27 {\n\
+                   match e {\n\
+                       E::Lit(n) => n,\n\
+                       E::Add(E::Lit(a), E::Lit(b)) => a + b,\n\
+                       E::Add(l, r) => eval(&*l) + eval(&*r),\n\
+                       _ => 0,\n\
+                   }\n\
                }\n\
-               fn main() -> t27 { go(E::Lit(1)) }\n";
+               fn main() -> t27 {\n\
+                   let t = E::Add(Box::new(E::Lit(1)), Box::new(E::Lit(2)));\n\
+                   eval(&t)\n\
+               }\n";
+    assert_eq!(refusal(src), None);
+}
+
+#[test]
+fn what_a_pattern_takes_through_a_box_is_borrowed() {
+    // The box still owns what is inside it and will drop it. A binding that
+    // owned it too would be the second owner — which is G9.27's double free
+    // written as a pattern.
+    let src = "struct Held { n: t27 }\n\
+               fn drop(self: Held) { print_int(self.n); }\n\
+               fn take(h: Held) -> t27 { h.n }\n\
+               enum Inner { Has(Held), Nothing }\n\
+               enum E { One(Box<Inner>), None }\n\
+               fn go(e: E) -> t27 {\n\
+                   match e { E::One(Inner::Has(h)) => take(h), _ => 0 }\n\
+               }\n\
+               fn main() -> t27 { go(E::None) }\n";
     let why = refusal(src).expect("refused");
-    assert!(why.contains("does not reach through a `Box`"), "{why}");
+    assert!(why.contains("cannot be moved out of"), "{why}");
 }
