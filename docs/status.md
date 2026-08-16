@@ -48,7 +48,8 @@ spec/                              5 660 lines of specification, 11 documents
 │   ├── 03-references.md     520   Ch. 3 — ownership, references, lifetimes, slices
 │   ├── 04-generics.md     1 048   Ch. 4 — traits, generics, dyn, closures, lang items
 │   ├── 05-library.md        784   Ch. 5 — text, the heap, iterators, ?, interior mutability
-│   └── 06-modules.md        289   Ch. 6 — a module is a file; privacy is what a safety claim rests on
+│   ├── 06-modules.md        289   Ch. 6 — a module is a file; privacy is what a safety claim rests on
+│   └── 07-macros.md          267   Ch. 7 — one rule, variadic, hygienic; what a function cannot be
 └── isa/
     ├── trisc-27-0.1.md      713   the machine: registers, encoding, instructions
     └── assembly-0.1.md      518   the assembly language

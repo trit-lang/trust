@@ -540,7 +540,8 @@ their meaning is not.
 
 ```
 file        := item*
-item        := attr* ( fn | struct | enum | const | trait | impl | alias )
+item        := attr* ( fn | struct | enum | const | trait | impl | alias
+                     | macro )                               -- Ch. 7
 alias       := 'type' ident '=' type ';'                     -- §3.6
 attr        := '#' '[' ident '(' ident,* ')' ']'
 
