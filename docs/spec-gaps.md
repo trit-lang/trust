@@ -2864,6 +2864,44 @@ told at compile time. That needs a proof language. The runtime check is the
 conservative reading of the same clause, so adding the proof later changes no
 existing program's meaning.
 
+**G8.22 — a loop that calls something keeps its bounds check, and the reason
+is not the one it looks like.** `print`'s loop is `while i < s.len() { s[i] }`
+— the shape G8.19 was built for — and its upper check survives. So does the
+one in any loop containing a real call.
+
+The obvious cause is the rule that **any call clobbers**, which makes
+"nothing wrote between the fact and the use" false as soon as a loop calls
+anything. And the obvious fix is an escape test: a slot whose address never
+leaves the function cannot be written by a callee, which has no way to name
+it, nor by a store through any *other* pointer — the only addresses into it
+are the ones derived from it here. That is sound, it is what `promote_slots`
+already reasons about, and it was written.
+
+**It changed nothing measurable, so it was reverted.** A diagnostic says why
+it was the wrong target:
+
+```text
+DBG idx.lo.20    facts=["idx.ok.23"]                above={body.8, entry, idx.lo.20, while.7}
+DBG idx.lo.20.i1 facts=["body.8.i1", "idx.ok.23.i1"] above={body.8.i1, …}
+```
+
+In the standalone copy the loop header's fact — the one at `body.8` — is
+**not collected at all**, and cleanliness never enters into it. In the inlined
+copy it is collected and in scope, and the fold still does not happen, so
+there the equivalence is what fails.
+
+Two different causes wearing the same symptom, and neither is the one the
+escape test addresses. The next step is to find out why a header's fact goes
+uncollected — the edge test requires the taken target to have exactly one
+predecessor, and something about the shape after `elide_sign_checks` may
+break that — rather than to write more analysis on top.
+
+*Kept as a method note.* Three times in this session a change that looked
+obviously right measured nothing or worse: CSE (G8.18), the inliner's
+quadratic scan (G8.17), and this. Every one was found by measuring rather
+than by reading, and the two that were reverted cost less than the one that
+was not.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The
