@@ -228,6 +228,23 @@ impl Parser {
         })
     }
 
+    /// Open one reference in a type.
+    ///
+    /// `&&T` lexes as the logical-and (§1.5's maximal munch), and only the
+    /// type grammar knows it is two references. Splitting it here — taking
+    /// one `&` and leaving the other in place — is the same device
+    /// `close_angle` uses for `>>`, and for the same reason.
+    fn open_ref(&mut self) -> bool {
+        if self.eat_op("&") {
+            return true;
+        }
+        if self.at_op("&&") {
+            self.toks[self.pos].0 = Tok::Op("&");
+            return true;
+        }
+        false
+    }
+
     /// Close one level of angle brackets.
     ///
     /// `Option<Option<t27>>` ends in a token the lexer has every reason to
@@ -1229,7 +1246,7 @@ impl Parser {
             self.expect_op("]")?;
             return Ok(Ty::Array(Box::new(elem), Box::new(n), span));
         }
-        if self.eat_op("&") {
+        if self.open_ref() {
             // A lifetime is erased before TIR (Ch. 3 §3.1), so it is parsed
             // and dropped rather than carried through the compiler.
             if let Tok::Lifetime(_) = self.peek() {
@@ -1410,7 +1427,19 @@ impl Parser {
             return self.let_tuple(span);
         }
         let mutable = self.eat_kw("mut");
-        let (name, name_span) = self.expect_ident_at()?;
+        // `let _ = e;` — §5.2's grammar says a *pattern*, and `_` is the one
+        // that binds nothing (§4). It is given a name no program can write,
+        // so the value is dropped where any other binding would be: at the
+        // end of the scope, and not at the end of the statement as Rust's
+        // `let _` does.
+        let (name, name_span) = if self.at_op("_") {
+            let at = self.span();
+            self.bump();
+            self.counter += 1;
+            (format!("#wild{}", self.counter), at)
+        } else {
+            self.expect_ident_at()?
+        };
         let ty = if self.eat_op(":") {
             Some(self.ty()?)
         } else {

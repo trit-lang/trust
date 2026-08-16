@@ -24,6 +24,8 @@ usage:
     trust lex <file.tr>                print its tokens, one per line
     trust ast <file.tr>                read the file as one expression and
                                        print its tree
+    trust item <file.tr>               read the file as one function and
+                                       print its tree
 
     --time                             report what each phase of the compile
                                        cost, on stderr
@@ -61,6 +63,17 @@ fn main() -> ExitCode {
     if cmd == "lex" {
         return match std::fs::read_to_string(path) {
             Ok(src) => print_tokens(&src),
+            Err(e) => {
+                eprintln!("trust: cannot read `{path}`: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    // The file, read as one function, printed as a tree.
+    if cmd == "item" {
+        return match std::fs::read_to_string(path) {
+            Ok(src) => print_item(&src),
             Err(e) => {
                 eprintln!("trust: cannot read `{path}`: {e}");
                 ExitCode::FAILURE
@@ -213,6 +226,94 @@ fn print_expr(src: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// One function, as a tree.
+fn print_item(src: &str) -> ExitCode {
+    let file = match lang::parse::parse(src) {
+        Ok(f) => f,
+        Err(e) => {
+            println!("error {}", e.span.lo);
+            return ExitCode::SUCCESS;
+        }
+    };
+    let Some(lang::ast::Item::Fn(f)) = file.items.first() else {
+        println!("error 0");
+        return ExitCode::SUCCESS;
+    };
+    let mut out = String::new();
+    out.push_str(&format!("(fn {} (", f.name));
+    for (i, p) in f.params.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(&format!("{}:{}", p.name, written_ty(&p.ty)));
+    }
+    out.push_str(") ");
+    out.push_str(&match &f.ret {
+        Some(t) => written_ty(t),
+        None => "()".to_string(),
+    });
+    out.push(' ');
+    show_block(f.body.as_ref().expect("a body"), &mut out);
+    out.push(')');
+    println!("{out}");
+    ExitCode::SUCCESS
+}
+
+/// A type as its text, which is all either parser keeps of one here.
+fn written_ty(t: &lang::ast::Ty) -> String {
+    use lang::ast::Ty;
+    match t {
+        Ty::Name(n, _) => n.clone(),
+        Ty::Unit(_) => "()".to_string(),
+        Ty::Ref(inner, true, _) => format!("&mut {}", written_ty(inner)),
+        Ty::Ref(inner, false, _) => format!("&{}", written_ty(inner)),
+        Ty::Slice(inner, _) => format!("[{}]", written_ty(inner)),
+        Ty::App(n, args, _) => {
+            let args: Vec<String> = args.iter().map(written_ty).collect();
+            format!("{n}<{}>", args.join(","))
+        }
+        other => format!("{other:?}"),
+    }
+}
+
+fn show_block(b: &lang::ast::Block, out: &mut String) {
+    use lang::ast::Stmt;
+    out.push_str("(block");
+    for s in &b.stmts {
+        out.push(' ');
+        match s {
+            Stmt::Let {
+                mutable,
+                name,
+                value,
+                ..
+            } => {
+                out.push_str(if *mutable { "(let-mut " } else { "(let " });
+                // `let _` is given an invented name (Ch. 0 §5.2), which is
+                // this compiler's business and not the tree's.
+                out.push_str(match name.starts_with("#wild") {
+                    true => "_",
+                    false => name,
+                });
+                out.push(' ');
+                show_expr(value, out);
+                out.push(')');
+            }
+            Stmt::Expr(e) => {
+                out.push_str("(do ");
+                show_expr(e, out);
+                out.push(')');
+            }
+        }
+    }
+    if let Some(t) = &b.tail {
+        out.push_str(" (tail ");
+        show_expr(t, out);
+        out.push(')');
+    }
+    out.push(')');
+}
+
 fn show_expr(e: &lang::ast::Expr, out: &mut String) {
     use lang::ast::Expr;
     match e {
@@ -225,11 +326,26 @@ fn show_expr(e: &lang::ast::Expr, out: &mut String) {
             show_expr(a, out);
             out.push(')');
         }
-        Expr::Binary(op, a, b, _) => {
+        Expr::Assign(op, a, b, _) | Expr::Binary(op, a, b, _) => {
             out.push_str(&format!("({op} "));
             show_expr(a, out);
             out.push(' ');
             show_expr(b, out);
+            out.push(')');
+        }
+        Expr::Field(base, name, _) => {
+            out.push_str("(field ");
+            show_expr(base, out);
+            out.push_str(&format!(" {name})"));
+        }
+        Expr::Method(base, name, _, args, _) => {
+            out.push_str("(method ");
+            show_expr(base, out);
+            out.push_str(&format!(" {name}"));
+            for a in args {
+                out.push(' ');
+                show_expr(a, out);
+            }
             out.push(')');
         }
         Expr::Call(f, _, _, args, _) => {

@@ -1,0 +1,5 @@
+fn types(a: &t27, b: &mut t27, c: &[t27], d: Vec<t27>) -> taddr {
+    let x: t27 = 1;
+    let y: &t27 = a;
+    d.len()
+}

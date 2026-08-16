@@ -74,5 +74,18 @@ for f in bootstrap/exprs/*.txt; do
     e=$((e + 1))
 done
 
-printf 'bootstrap: %d tokens agreed across %d files, %d refusals at the same character, %d expression trees identical\n' \
-    "$n" "$(ls bootstrap/corpus/*.tr | wc -l | tr -d ' ')" "$r" "$e"
+i=0
+for f in bootstrap/fns/*.tr; do
+    rust=$("$trust" item "$f")
+    mine=$("$trust" run bootstrap/items.tr < "$f")
+    if [ "$rust" != "$mine" ]; then
+        echo "bootstrap: the two parsers disagree on $f" >&2
+        echo "  rust : $rust" >&2
+        echo "  trust: $mine" >&2
+        exit 1
+    fi
+    i=$((i + 1))
+done
+
+printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees — all agreed\n' \
+    "$n" "$r" "$e" "$i"

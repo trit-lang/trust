@@ -2592,6 +2592,29 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.39 — three things a parser needs that the parser did not have.** Growing
+`bootstrap/parse.tr` to statements and functions found each of them by
+failing to compile itself.
+
+*`let _ = f();`* Ch. 0 §5.2's grammar says a **pattern**, and `_` is the one
+that binds nothing (§4). Draft 0.1 read only a name, so the way a value is
+evaluated and discarded did not parse. `_` now binds a name no program can
+write, which means the value drops at the end of the scope rather than at the
+end of the statement as Rust's `let _` does — a difference worth knowing and
+not worth a second mechanism.
+
+*`&&T`.* It lexes as the logical-and by maximal munch (§1.5), and only the
+type grammar knows it is two references. The token is split where it is read,
+which is the device `close_angle` has always used for `>>` in `Vec<Vec<T>>` —
+and the Trust parser needed both splits, since it has both problems.
+
+*A type is read recursively.* The first version of `type_name` in Trust
+stopped at the first name and left `<t27>` for its caller to trip over. A
+type has types inside it, and reading one is reading them.
+
+None of the three is deep. All three are what a compiler writes on its first
+page, which is the argument for writing one.
+
 **G9.37 — two sibling modules could not see each other, and the spec said
 they could.** Ch. 6 §3.1 declined `crate::`, `super::` and `self::` and said
 a module "reaches what is outside it by a `use` written at its top" — while

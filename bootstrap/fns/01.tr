@@ -1,0 +1,5 @@
+fn add(a: t27, b: t27) -> t27 {
+    let mut n = a + b;
+    n = n * 2;
+    n
+}

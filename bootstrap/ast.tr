@@ -17,6 +17,49 @@ pub enum Expr {
     Call(String, Vec<Expr>),
     /// `(e)`, kept so that printing round-trips.
     Group(Box<Expr>),
+    /// `x.f` — a field.
+    Field(Box<Expr>, String),
+    /// `x.m(args)` — a method call (§2.6).
+    Method(Box<Expr>, String, Vec<Expr>),
+    /// `a = b`, and the compound forms, which are §2.1's loosest level and
+    /// right-associative.
+    Assign(String, Box<Expr>, Box<Expr>),
+}
+
+/// A statement (§5.2).
+pub enum Stmt {
+    /// `let mut? name = expr;`
+    Let(bool, String, Expr),
+    /// An expression evaluated for its effect.
+    Do(Expr),
+}
+
+/// A block: statements, then an optional trailing expression (§5.1).
+pub struct Block {
+    pub stmts: Vec<Stmt>,
+    pub tail: Option<Box<Expr>>,
+}
+
+/// One parameter: a name and its written type, kept as text because nothing
+/// here reads a type for anything but printing it.
+pub struct Param {
+    pub name: String,
+    pub ty: String,
+}
+
+/// A top-level item (§3). Only `fn` so far, which is what a parser has to
+/// read before it can read anything else.
+pub struct Fn {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub ret: String,
+    pub body: Block,
+}
+
+/// Whether `op` assigns (§2.1's loosest level).
+pub fn assigns(op: &str) -> bool {
+    op.same("=") || op.same("+=") || op.same("-=") || op.same("*=")
+        || op.same("/=") || op.same("%=") || op.same("<<=") || op.same(">>=")
 }
 
 /// How tightly an operator binds (§2.1), loosest first. Zero means it is not
@@ -57,6 +100,35 @@ pub fn show(e: &Expr, out: &mut String) {
             show(&*a, out);
             out.push_str(")");
         }
+        Expr::Field(base, name) => {
+            out.push_str("(field ");
+            show(&*base, out);
+            out.push_str(" ");
+            out.push_str(&name);
+            out.push_str(")");
+        }
+        Expr::Method(base, name, args) => {
+            out.push_str("(method ");
+            show(&*base, out);
+            out.push_str(" ");
+            out.push_str(&name);
+            let mut i: taddr = 0;
+            while i < args.len() {
+                out.push_str(" ");
+                show(&args[i], out);
+                i += 1;
+            }
+            out.push_str(")");
+        }
+        Expr::Assign(op, a, b) => {
+            out.push_str("(");
+            out.push_str(&op);
+            out.push_str(" ");
+            show(&*a, out);
+            out.push_str(" ");
+            show(&*b, out);
+            out.push_str(")");
+        }
         Expr::Binary(op, a, b) => {
             out.push_str("(");
             out.push_str(&op);
@@ -78,6 +150,71 @@ pub fn show(e: &Expr, out: &mut String) {
             out.push_str(")");
         }
     }
+}
+
+/// A block, written out.
+pub fn show_block(b: &Block, out: &mut String) {
+    out.push_str("(block");
+    let mut i: taddr = 0;
+    while i < b.stmts.len() {
+        out.push_str(" ");
+        show_stmt(&b.stmts[i], out);
+        i += 1;
+    }
+    match &b.tail {
+        // The binding is read *through* the reference the match borrowed,
+        // so it names the box rather than taking it (Ch. 3 §1.2).
+        Option::Some(t) => {
+            out.push_str(" (tail ");
+            show(&*t, out);
+            out.push_str(")");
+        }
+        Option::None => {}
+    }
+    out.push_str(")");
+}
+
+pub fn show_stmt(s: &Stmt, out: &mut String) {
+    match s {
+        Stmt::Let(mutable, name, e) => {
+            if mutable {
+                out.push_str("(let-mut ");
+            } else {
+                out.push_str("(let ");
+            }
+            out.push_str(&name);
+            out.push_str(" ");
+            show(&e, out);
+            out.push_str(")");
+        }
+        Stmt::Do(e) => {
+            out.push_str("(do ");
+            show(&e, out);
+            out.push_str(")");
+        }
+    }
+}
+
+/// A function, written out.
+pub fn show_fn(f: &Fn, out: &mut String) {
+    out.push_str("(fn ");
+    out.push_str(&f.name);
+    out.push_str(" (");
+    let mut i: taddr = 0;
+    while i < f.params.len() {
+        if i > 0 {
+            out.push_str(" ");
+        }
+        out.push_str(&f.params[i].name);
+        out.push_str(":");
+        out.push_str(&f.params[i].ty);
+        i += 1;
+    }
+    out.push_str(") ");
+    out.push_str(&f.ret);
+    out.push_str(" ");
+    show_block(&f.body, out);
+    out.push_str(")");
 }
 
 /// A number, written into `out`.

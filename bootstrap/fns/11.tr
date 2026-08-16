@@ -1,0 +1,1 @@
+fn nested() -> t27 { let a = f(g(h(1, 2), 3), 4); a }

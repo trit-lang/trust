@@ -1,0 +1,5 @@
+fn discard() -> t27 {
+    let _ = f();
+    let _: t27 = 2;
+    0
+}

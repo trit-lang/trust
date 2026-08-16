@@ -4584,3 +4584,21 @@ fn a_while_loop_puts_its_body_before_its_test() {
         1 + 2 + 4 + 5
     );
 }
+
+#[test]
+fn a_let_may_bind_nothing() {
+    // Ch. 0 §5.2's grammar says a *pattern*, and `_` is the one that binds
+    // nothing (§4). Draft 0.1 took only a name, so `let _ = f();` — the way
+    // a value is evaluated and discarded — did not parse.
+    let _ = tir_of("fn f() -> t27 { 7 }\nfn main() -> t27 { let _ = f(); let _: t27 = 2; 3 }\n");
+}
+
+#[test]
+fn a_reference_to_a_reference_is_a_type() {
+    // `&&T` lexes as the logical-and by maximal munch (§1.5), and only the
+    // type grammar knows it is two references — the same split `>>` needs.
+    let _ = tir_of(
+        "fn f(r: &&t27) -> t27 { **r }\n\
+         fn main() -> t27 { let x = 1; let p = &x; let q = &p; f(q) }\n",
+    );
+}

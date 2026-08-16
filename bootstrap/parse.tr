@@ -34,9 +34,22 @@ pub fn bump(p: &mut Parser) -> Result<Tok, lex::Error> {
     Result::Ok(t.tok)
 }
 
-/// A whole expression (§2.1's loosest level).
+/// A whole expression: assignment, which is §2.1's loosest level and is
+/// right-associative.
 pub fn expr(p: &mut Parser) -> Result<Expr, lex::Error> {
-    binary(p, 1)
+    let left = binary(p, 1)?;
+    let t = peek(p)?;
+    let next = t.at;
+    let op = match t.tok {
+        Tok::Op(o) => o,
+        _ => return Result::Ok(left),
+    };
+    if !ast::assigns(&op) {
+        return Result::Ok(left);
+    }
+    p.at = next;
+    let right = expr(p)?;
+    Result::Ok(Expr::Assign(op, Box::new(left), Box::new(right)))
 }
 
 /// The left-associative levels, loosest first.
@@ -63,7 +76,38 @@ pub fn binary(p: &mut Parser, min: taddr) -> Result<Expr, lex::Error> {
     }
 }
 
-/// `-e`, `!e`, or a primary.
+/// A primary, and whatever follows it: `.f`, `.m(args)` (§2.6).
+pub fn postfix(p: &mut Parser) -> Result<Expr, lex::Error> {
+    let mut e = primary(p)?;
+    loop {
+        let t = peek(p)?;
+        let next = t.at;
+        let dot = match t.tok {
+            Tok::Op(o) => o.same("."),
+            _ => false,
+        };
+        if !dot {
+            return Result::Ok(e);
+        }
+        p.at = next;
+        let name = ident(p)?;
+        let t2 = peek(p)?;
+        let at2 = t2.at;
+        let is_call = match t2.tok {
+            Tok::Op(o) => o.same("("),
+            _ => false,
+        };
+        if is_call {
+            p.at = at2;
+            let args = arguments(p)?;
+            e = Expr::Method(Box::new(e), name, args);
+        } else {
+            e = Expr::Field(Box::new(e), name);
+        }
+    }
+}
+
+/// `-e`, `!e`, or a postfix chain.
 pub fn unary(p: &mut Parser) -> Result<Expr, lex::Error> {
     let t = peek(p)?;
     let next = t.at;
@@ -74,9 +118,9 @@ pub fn unary(p: &mut Parser) -> Result<Expr, lex::Error> {
                 let inner = unary(p)?;
                 return Result::Ok(Expr::Unary(o, Box::new(inner)));
             }
-            primary(p)
+            postfix(p)
         }
-        _ => primary(p),
+        _ => postfix(p),
     }
 }
 
@@ -168,5 +212,305 @@ fn arguments(p: &mut Parser) -> Result<Vec<Expr>, lex::Error> {
                 });
             }
         }
+    }
+}
+
+// ------------------------------------------------------- statements, items
+
+/// `{ stmt* expr? }` (§5.1).
+pub fn block(p: &mut Parser) -> Result<ast::Block, lex::Error> {
+    expect_op(p, "{")?;
+    let mut stmts: Vec<ast::Stmt> = Vec::new();
+    let mut tail: Option<Box<Expr>> = Option::None;
+    loop {
+        let t = peek(p)?;
+        let next = t.at;
+        match t.tok {
+            Tok::Eof => return Result::Err(lex::Error {
+                at: p.at,
+                message: "unterminated block".to_string(),
+            }),
+            Tok::Op(o) => {
+                if o.same("}") {
+                    p.at = next;
+                    return Result::Ok(ast::Block { stmts: stmts, tail: tail });
+                }
+                if o.same(";") {
+                    p.at = next;
+                }
+            }
+            _ => {}
+        }
+        let t2 = peek(p)?;
+        let after = t2.at;
+        let is_close = match t2.tok {
+            Tok::Op(o) => o.same("}"),
+            _ => false,
+        };
+        if is_close {
+            p.at = after;
+            return Result::Ok(ast::Block { stmts: stmts, tail: tail });
+        }
+        // A `let` is a statement and nothing else is decided until the
+        // terminator: `e;` is a statement and `e}` is the block's value.
+        let ahead = peek(p)?;
+        let is_let = match ahead.tok {
+            Tok::Kw(k) => k.same("let"),
+            _ => false,
+        };
+        if is_let {
+            stmts.push(let_stmt(p)?);
+        } else {
+            let e = expr(p)?;
+            let t3 = peek(p)?;
+            let at3 = t3.at;
+            let ends = match t3.tok {
+                Tok::Op(o) => o.same(";"),
+                _ => false,
+            };
+            if ends {
+                p.at = at3;
+                stmts.push(ast::Stmt::Do(e));
+            } else {
+                tail = Option::Some(Box::new(e));
+            }
+        }
+    }
+}
+
+/// `let mut? name = expr;` (§5.2).
+fn let_stmt(p: &mut Parser) -> Result<ast::Stmt, lex::Error> {
+    let kw = bump(p)?;
+    let _ = kw;
+    let mut mutable = false;
+    let t = peek(p)?;
+    let next = t.at;
+    match t.tok {
+        Tok::Kw(k) => {
+            if k.same("mut") {
+                mutable = true;
+                p.at = next;
+            }
+        }
+        _ => {}
+    }
+    let name = ident(p)?;
+    // A written type is read and dropped: nothing here does anything with
+    // one, and pretending otherwise would be a second thing to keep right.
+    let t2 = peek(p)?;
+    let at2 = t2.at;
+    let has_ty = match t2.tok {
+        Tok::Op(o) => o.same(":"),
+        _ => false,
+    };
+    if has_ty {
+        p.at = at2;
+        let _ = type_name(p)?;
+    }
+    expect_op(p, "=")?;
+    let e = expr(p)?;
+    expect_op(p, ";")?;
+    Result::Ok(ast::Stmt::Let(mutable, name, e))
+}
+
+/// `fn name(a: T, …) -> R { … }` (§3.1).
+pub fn function(p: &mut Parser) -> Result<ast::Fn, lex::Error> {
+    expect_kw(p, "fn")?;
+    let name = ident(p)?;
+    expect_op(p, "(")?;
+    let mut params: Vec<ast::Param> = Vec::new();
+    loop {
+        let t = peek(p)?;
+        let next = t.at;
+        let done = match t.tok {
+            Tok::Op(o) => o.same(")"),
+            _ => false,
+        };
+        if done {
+            p.at = next;
+            break;
+        }
+        let pname = ident(p)?;
+        expect_op(p, ":")?;
+        let pty = type_name(p)?;
+        params.push(ast::Param { name: pname, ty: pty });
+        let t2 = peek(p)?;
+        let at2 = t2.at;
+        match t2.tok {
+            Tok::Op(o) => {
+                if o.same(",") {
+                    p.at = at2;
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut ret: String = "()".to_string();
+    let t = peek(p)?;
+    let next = t.at;
+    let arrow = match t.tok {
+        Tok::Op(o) => o.same("->"),
+        _ => false,
+    };
+    if arrow {
+        p.at = next;
+        ret = type_name(p)?;
+    }
+    let body = block(p)?;
+    Result::Ok(ast::Fn { name: name, params: params, ret: ret, body: body })
+}
+
+/// A type, as the text it was written with.
+///
+/// Nothing here reads a type for anything but printing it, so it is kept as
+/// the characters it was written with — and read *recursively*, because
+/// `Vec<t27>` and `&[t27]` are types with types inside them and stopping at
+/// the first name would leave the rest for the caller to trip over.
+fn type_name(p: &mut Parser) -> Result<String, lex::Error> {
+    let mut out: String = Vec::new();
+    // `&` and `mut` are prefixes and may repeat (Ch. 3 §2.1).
+    loop {
+        let t = peek(p)?;
+        let next = t.at;
+        let mut went = false;
+        match t.tok {
+            Tok::Op(o) => {
+                if o.same("&") {
+                    p.at = next;
+                    out.push_str("&");
+                    went = true;
+                } else if o.same("&&") {
+                    // `&&T` lexes as the logical-and by maximal munch, and
+                    // only the type grammar knows it is two references. One
+                    // is taken here and the position is left *before* the
+                    // second character, so the next turn takes the other.
+                    p.at = next - 1;
+                    out.push_str("&");
+                    went = true;
+                }
+            }
+            Tok::Kw(k) => {
+                if k.same("mut") {
+                    p.at = next;
+                    out.push_str("mut ");
+                    went = true;
+                }
+            }
+            _ => {}
+        }
+        if !went {
+            break;
+        }
+    }
+
+    let t = peek(p)?;
+    let next = t.at;
+    match t.tok {
+        Tok::Ident(n) => {
+            p.at = next;
+            out.push_str(&n);
+            let t2 = peek(p)?;
+            let at2 = t2.at;
+            let generic = match t2.tok {
+                Tok::Op(o) => o.same("<"),
+                _ => false,
+            };
+            if generic {
+                p.at = at2;
+                out.push_str("<");
+                loop {
+                    let inner = type_name(p)?;
+                    out.push_str(&inner);
+                    let t3 = peek(p)?;
+                    let at3 = t3.at;
+                    let more = match t3.tok {
+                        Tok::Op(o) => o.same(","),
+                        _ => false,
+                    };
+                    if !more {
+                        break;
+                    }
+                    p.at = at3;
+                    out.push_str(",");
+                }
+                close_angle(p)?;
+                out.push_str(">");
+            }
+            Result::Ok(out)
+        }
+        Tok::Op(o) => {
+            if o.same("[") {
+                p.at = next;
+                out.push_str("[");
+                let inner = type_name(p)?;
+                out.push_str(&inner);
+                expect_op(p, "]")?;
+                out.push_str("]");
+                return Result::Ok(out);
+            }
+            if o.same("(") {
+                p.at = next;
+                expect_op(p, ")")?;
+                out.push_str("()");
+                return Result::Ok(out);
+            }
+            Result::Err(lex::Error { at: p.at, message: "expected a type".to_string() })
+        }
+        _ => Result::Err(lex::Error { at: p.at, message: "expected a type".to_string() }),
+    }
+}
+
+fn ident(p: &mut Parser) -> Result<String, lex::Error> {
+    let t = bump(p)?;
+    match t {
+        Tok::Ident(n) => Result::Ok(n),
+        _ => Result::Err(lex::Error { at: p.at, message: "expected a name".to_string() }),
+    }
+}
+
+/// Close one level of angle brackets, splitting a `>>` the same way.
+fn close_angle(p: &mut Parser) -> Result<(), lex::Error> {
+    let t = peek(p)?;
+    let next = t.at;
+    match t.tok {
+        Tok::Op(o) => {
+            if o.same(">") {
+                p.at = next;
+                return Result::Ok(());
+            }
+            if o.same(">>") {
+                // Leave the second `>` where it is, for the caller's caller.
+                p.at = next - 1;
+                return Result::Ok(());
+            }
+            Result::Err(lex::Error { at: p.at, message: "expected `>`".to_string() })
+        }
+        _ => Result::Err(lex::Error { at: p.at, message: "expected `>`".to_string() }),
+    }
+}
+
+fn expect_op(p: &mut Parser, want: &str) -> Result<(), lex::Error> {
+    let t = bump(p)?;
+    match t {
+        Tok::Op(o) => {
+            if o.same(want) {
+                return Result::Ok(());
+            }
+            Result::Err(lex::Error { at: p.at, message: "unexpected operator".to_string() })
+        }
+        _ => Result::Err(lex::Error { at: p.at, message: "expected an operator".to_string() }),
+    }
+}
+
+fn expect_kw(p: &mut Parser, want: &str) -> Result<(), lex::Error> {
+    let t = bump(p)?;
+    match t {
+        Tok::Kw(k) => {
+            if k.same(want) {
+                return Result::Ok(());
+            }
+            Result::Err(lex::Error { at: p.at, message: "unexpected keyword".to_string() })
+        }
+        _ => Result::Err(lex::Error { at: p.at, message: "expected a keyword".to_string() }),
     }
 }
