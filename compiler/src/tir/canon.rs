@@ -592,22 +592,29 @@ pub fn elide_dominated_checks(f: &mut Function) {
 /// language produces — a loop bound and a length — and stopping there keeps
 /// this a decision rather than a search.
 /// Which blocks reach which, by label and by index.
+///
+/// Rows are bitsets, which is not premature: this is a transitive closure and
+/// a function after inlining can have five hundred blocks, so the inner loop
+/// runs a hundred million times if it runs one bit at a time.
 struct Reach {
     index: BTreeMap<String, usize>,
-    to: Vec<Vec<bool>>,
+    words: usize,
+    to: Vec<u64>,
 }
 
 impl Reach {
+    fn bit(&self, i: usize, j: usize) -> bool {
+        self.to[i * self.words + j / 64] >> (j % 64) & 1 == 1
+    }
     fn at(&self, from: &str, w: usize) -> bool {
-        self.index.get(from).is_some_and(|&i| self.to[i][w])
+        self.index.get(from).is_some_and(|&i| self.bit(i, w))
     }
     fn to(&self, w: usize, to: &str) -> bool {
-        self.index.get(to).is_some_and(|&j| self.to[w][j])
+        self.index.get(to).is_some_and(|&j| self.bit(w, j))
     }
 }
 
-/// The transitive closure of the successor relation. A function has few
-/// enough blocks that the square is cheaper than being clever.
+/// The transitive closure of the successor relation.
 fn reachability(f: &Function) -> Reach {
     let index: BTreeMap<String, usize> = f
         .blocks
@@ -616,26 +623,29 @@ fn reachability(f: &Function) -> Reach {
         .map(|(i, b)| (b.label.clone(), i))
         .collect();
     let n = f.blocks.len();
-    let mut to = vec![vec![false; n]; n];
+    let words = n.div_ceil(64).max(1);
+    let mut to = vec![0u64; n * words];
+    let mut set = |to: &mut Vec<u64>, i: usize, j: usize| {
+        to[i * words + j / 64] |= 1 << (j % 64);
+    };
     for (i, b) in f.blocks.iter().enumerate() {
-        to[i][i] = true;
+        set(&mut to, i, i);
         for s in successors(&b.term) {
             if let Some(&j) = index.get(&s) {
-                to[i][j] = true;
+                set(&mut to, i, j);
             }
         }
     }
     for k in 0..n {
         for i in 0..n {
-            if to[i][k] {
-                let row = to[k].clone();
-                for (j, r) in row.iter().enumerate() {
-                    to[i][j] |= *r;
+            if to[i * words + k / 64] >> (k % 64) & 1 == 1 {
+                for w in 0..words {
+                    to[i * words + w] |= to[k * words + w];
                 }
             }
         }
     }
-    Reach { index, to }
+    Reach { index, words, to }
 }
 
 /// A relation a branch decided, and where it became true.
