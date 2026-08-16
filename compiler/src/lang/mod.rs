@@ -381,6 +381,44 @@ trait Key: Eq {
     fn hash(&self) -> taddr;
 }
 
+// What `==` means for a type the language does not define it on (Ch. 4
+// §5.3). `#[derive(Eq)]` writes one of these; so may a program.
+trait Eq {
+    fn eq(&self, other: &Self) -> bool;
+}
+
+// A `String` is a `Vec<char>` (Ch. 0 §3.6), and two are equal when they hold
+// the same characters in the same order — which is what makes one a key.
+impl Eq for Vec<char> {
+    fn eq(&self, other: &Vec<char>) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        let mut i: taddr = 0;
+        while i < self.len() {
+            if self[i] != other[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+}
+
+impl Key for Vec<char> {
+    fn hash(&self) -> taddr {
+        // Multiply and add — the shift is by one trit, so a character moved
+        // one place along changes the answer, which is the whole requirement.
+        let mut h: taddr = 0;
+        let mut i: taddr = 0;
+        while i < self.len() {
+            h = h.wrapping_mul(3).wrapping_add((self[i] as t27) as taddr);
+            i += 1;
+        }
+        h
+    }
+}
+
 impl Key for t27 {
     fn hash(&self) -> taddr { *self as taddr }
 }
@@ -433,13 +471,15 @@ impl<K: Key, V> HashMap<K, V> {
     }
 
     fn which(&self, k: &K) -> taddr {
-        let h = k.hash();
-        // `%` here is symmetric (Ch. 1 §4), so it may answer negatively —
-        // which is not a bucket. The sign is taken off before the remainder
-        // rather than after, because `-h % n` and `(-h) % n` differ.
+        // `%` is **symmetric** (Ch. 1 §4): it rounds the quotient to nearest,
+        // so `40 % 64` is −24 and not 40. A negative bucket is not a bucket,
+        // and taking the sign off the *hash* first is not enough — the
+        // remainder itself can still be negative. So the correction is after.
         let zero: taddr = 0;
+        let h = k.hash();
         let a = if h < zero { zero - h } else { h };
-        a % BUCKETS
+        let r = a % BUCKETS;
+        if r < zero { r + BUCKETS } else { r }
     }
 
     /// The value for `k`, or `None`.
@@ -951,8 +991,20 @@ fn merged(user: &ast::File, at: lex::File) -> ast::File {
     let mut file = parse::parse_in(PRELUDE, at).expect("the prelude parses");
     let defined: std::collections::HashSet<&str> =
         user.items.iter().filter_map(item_name).collect();
-    file.items
-        .retain(|i| item_name(i).is_none_or(|n| !defined.contains(n)));
+    // An `impl` goes with what it is written on. Dropping a shadowed item and
+    // keeping the prelude's impls *for* it left `impl Key for t27` behind to
+    // be checked against a program's own `Key` — which has different methods,
+    // and said so in a message about a trait the program never saw (G9.34).
+    file.items.retain(|i| match i {
+        ast::Item::Impl(imp) => {
+            !defined.contains(imp.self_ty.as_str())
+                && imp
+                    .trait_name
+                    .as_deref()
+                    .is_none_or(|t| !defined.contains(t))
+        }
+        other => item_name(other).is_none_or(|n| !defined.contains(n)),
+    });
     file.items.extend(user.items.iter().cloned());
     file
 }

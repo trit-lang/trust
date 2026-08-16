@@ -136,3 +136,71 @@ fn a_method_name_the_language_uses_is_free_on_another_type() {
                fn main() -> t27 { let mut b = Bag { n: 0 }; b.insert(3); b.n }\n";
     assert_eq!(refusal(src), None);
 }
+
+#[test]
+fn a_string_is_a_key() {
+    let src = "fn main() -> t27 {\n\
+               \x20   let mut m: HashMap<String, t27> = HashMap::new();\n\
+               \x20   m.insert(\"alpha\".to_string(), 1);\n\
+               \x20   m.insert(\"beta\".to_string(), 2);\n\
+               \x20   m.insert(\"alpha\".to_string(), 3);\n\
+               \x20   let k = \"alpha\".to_string();\n\
+               \x20   let miss = \"gamma\".to_string();\n\
+               \x20   let hit = if m.has(&k) { 1 } else { 0 };\n\
+               \x20   let no = if m.has(&miss) { 1 } else { 0 };\n\
+               \x20   m.len() as t27 * 100 + hit * 10 + no\n}\n";
+    assert_eq!(refusal(src), None);
+}
+
+#[test]
+fn a_program_may_name_a_trait_the_prelude_names() {
+    // An `impl` goes with what it is written on. Dropping a shadowed item
+    // and keeping the prelude's impls *for* it left `impl Key for t27`
+    // behind, to be checked against the program's own `Key` (G9.34).
+    let src = "trait Key { fn same(&self, other: &Self) -> bool; }\n\
+               impl Key for t27 { fn same(&self, o: &t27) -> bool { *self == *o } }\n\
+               fn main() -> t27 { let x = 1; let y = 1; if x.same(&y) { 1 } else { 0 } }\n";
+    assert_eq!(refusal(src), None);
+}
+
+#[test]
+fn a_comparison_reads_its_operands_and_does_not_take_them() {
+    // `self.expr` on a place of non-copyable type moves it (Ch. 3 §1.2), so
+    // `==` used to consume both sides — and one inside a loop then said the
+    // value had already been moved (G9.33).
+    let src = "fn main() -> t27 {\n\
+               \x20   let a = \"x\".to_string();\n\
+               \x20   let b = \"x\".to_string();\n\
+               \x20   let mut n = 0;\n\
+               \x20   let mut i: taddr = 0;\n\
+               \x20   while i < 3 { if a == b { n += 1; } i += 1; }\n\
+               \x20   n\n}\n";
+    assert_eq!(refusal(src), None);
+}
+
+#[test]
+fn deriving_eq_alone_works_and_an_underivable_field_says_so() {
+    // `eq` is written in terms of `cmp`, so deriving `Eq` derives the
+    // comparison too — draft 0.1 emitted a call to one nobody defined.
+    let ok = "#[derive(Eq)]\nstruct P { a: t27 }\n\
+              fn main() -> t27 { let x = P { a: 1 }; let y = P { a: 2 }; if x == y { 1 } else { 7 } }\n";
+    assert_eq!(refusal(ok), None);
+    let bad = "#[derive(Eq)]\nstruct P { a: Vec<t27> }\nfn main() -> t27 { 0 }\n";
+    let why = refusal(bad).expect("refused");
+    assert!(
+        why.contains("has no comparison to derive one from"),
+        "{why}"
+    );
+}
+
+#[test]
+fn a_vec_infers_its_element_through_a_reference() {
+    // `Vec<T>` keeps its element in the type rather than in a mangled name,
+    // so it unifies structurally — which is how a program passes one.
+    let src = "fn n<T>(xs: &Vec<T>) -> taddr { xs.len() }\n\
+               fn main() -> t27 {\n\
+               \x20   let mut v: Vec<t27> = Vec::new();\n\
+               \x20   v.push(1);\n\
+               \x20   n(&v) as t27\n}\n";
+    assert_eq!(refusal(src), None);
+}

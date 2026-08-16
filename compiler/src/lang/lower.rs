@@ -2991,10 +2991,17 @@ fn unify(written: &ast::Ty, got: &Ty, params: &[ast::GenericParam], env: &mut Ha
             }
         }
         ast::Ty::App(name, wargs, _) => {
-            // `Pair<T, U>` against `Pair.t27.t9`: the instantiation's own
-            // arguments are not recoverable from the mangled name, so this
-            // matches only when the concrete type is the same application.
-            let _ = (name, wargs);
+            // `Vec<T>` keeps its element *in the type* rather than in a
+            // name, so this one application unifies structurally — and it is
+            // the one a program passes by reference all day.
+            if name == "Vec"
+                && let (Some(w), Ty::VecOf(t)) = (wargs.first(), got)
+            {
+                unify(w, t, params, env);
+            }
+            // Anything else: `Pair<T, U>` against `Pair.t27.t9`. The
+            // instantiation's arguments are not recoverable from the mangled
+            // name here, so the call site has to write them (Ch. 4 §2.3).
         }
         _ => {}
     }
@@ -3054,12 +3061,20 @@ fn derived_functions(file: &ast::File, types: &Types) -> (Vec<Function>, Vec<Ty>
             }
         };
 
+        // `eq` is written in terms of `cmp` (§5.3.3), so deriving `Eq`
+        // derives the comparison whether or not `Ord` was asked for.
+        // Draft 0.1 emitted an `eq` that called a `cmp` nobody defined, and
+        // `#[derive(Eq)]` on its own produced ill-formed TIR (G9.33).
+        let needs_cmp = derives.iter().any(|d| d == "Ord" || d == "Eq");
+        if needs_cmp {
+            match derive_cmp(name, &ty, &fields, types) {
+                Ok(f) => funcs.push(f),
+                Err(e) => errs.push(SyntaxError { span, message: e }),
+            }
+        }
         for d in derives {
             match d.as_str() {
-                "Ord" => match derive_cmp(name, &ty, &fields, types) {
-                    Ok(f) => funcs.push(f),
-                    Err(e) => errs.push(SyntaxError { span, message: e }),
-                },
+                "Ord" => {}
                 "Eq" => funcs.push(derive_eq(name)),
                 "Clone" => funcs.push(derive_clone(name, &ty, types)),
                 _ => {}
@@ -3138,10 +3153,16 @@ fn derive_cmp(
             });
         } else {
             // A field that is itself nominal compares with its own `cmp`,
-            // which is what makes the derivation recursive.
-            let Some(fname) = nominal_name(fty) else {
+            // which is what makes the derivation recursive. Only a `struct`
+            // or an `enum` has one: a `Vec`, a slice or a reference has a
+            // name and no comparison, and draft 0.1 emitted a call to one
+            // that was never defined (G9.33).
+            let comparable = matches!(fty, Ty::Struct(_) | Ty::Enum(_));
+            let Some(fname) = nominal_name(fty).filter(|_| comparable) else {
                 return Err(format!(
-                    "`{name}` has a field of type {fty}, which has no `cmp`"
+                    "`{name}` has a field of type {fty}, which has no comparison to derive \
+                     one from: a derived `Eq` or `Ord` compares field by field, and only a \
+                     scalar, a struct and an enum can be compared (Ch. 4 §6)"
                 ));
             };
             insts.push(Inst {
@@ -5673,8 +5694,29 @@ impl Fn<'_> {
         }
 
         let arith_hint = expected.filter(|t| t.is_arithmetic());
-        let (va, ta) = self.expr(a, arith_hint)?;
-        let (vb, tb) = self.expr(b, Some(&ta))?;
+        // A comparison **reads** its operands and does not take them. For an
+        // aggregate that matters: `self.expr` on a place of non-copyable
+        // type moves it (Ch. 3 §1.2), so `x == y` used to consume both, and
+        // a `==` inside a loop said the value had already been moved. The
+        // address is what `compare_nominal` wants anyway.
+        let compares = matches!(op, "==" | "!=" | "<" | "<=" | ">" | ">=" | "<=>");
+        let borrowed = |this: &mut Self, e: &ast::Expr| -> R<Option<(Operand, Ty)>> {
+            if !compares {
+                return Ok(None);
+            }
+            match this.type_of_place(e)? {
+                Some(t) if t.is_aggregate() => Ok(Some(this.place(e, span)?)),
+                _ => Ok(None),
+            }
+        };
+        let (va, ta) = match borrowed(self, a)? {
+            Some(p) => p,
+            None => self.expr(a, arith_hint)?,
+        };
+        let (vb, tb) = match borrowed(self, b)? {
+            Some(p) => p,
+            None => self.expr(b, Some(&ta))?,
+        };
         // Mixed-width arithmetic is a compile-time error (Ch. 1, P2).
         self.check(&tb, &ta, span, "right operand")?;
 

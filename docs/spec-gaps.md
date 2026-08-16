@@ -2592,6 +2592,44 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.33 — four things a sweep found, and one of them was `==`.** Combining
+what had just been built — a `String`, a `HashMap`, generics, `Eq` — turned
+up four separate acceptances of the unacceptable.
+
+*`==` moved its operands.* Reading a place of non-copyable type moves it
+(Ch. 3 §1.2), and a comparison read both sides — so `x == y` consumed them,
+and a `==` inside a loop said the value had already been moved. A comparison
+*reads*; it takes the address, which is what `compare_nominal` wanted anyway.
+
+*`#[derive(Eq)]` on its own emitted ill-formed TIR.* `eq` is written in terms
+of `cmp` (§5.3.3), and only `#[derive(Ord)]` emitted one — so deriving `Eq`
+alone produced a call to a function nobody defined. Deriving either now
+derives the comparison.
+
+*A derived comparison over a `Vec` field called a `cmp` that never existed.*
+`nominal_name` gives a `Vec<t27>` a name, and having a name is not having a
+comparison. Only a scalar, a struct and an enum can be compared field by
+field, and a field of any other type is now refused with that sentence.
+
+*`Vec<T>` did not unify.* `fn n<T>(xs: &Vec<T>)` could not be called with a
+`&Vec<t27>` — the unifier's application arm did nothing, because an
+instantiation's arguments are not recoverable from its mangled name. A `Vec`
+is the exception: it keeps its element *in the type*, so it unifies
+structurally, and it is the one application a program passes by reference all
+day.
+
+*And `%` bit for the fifth time.* A hash bucket was `hash % BUCKETS`, and `%`
+is symmetric (Ch. 1 §4): `40 % 64` is **−24**. Taking the sign off the hash
+first is not enough — the remainder itself can be negative — so the
+correction is after, and a negative bucket met the bounds check as a trap.
+
+**G9.34 — shadowing the prelude left its impls behind.** A program that
+defines a `trait Key` shadows the prelude's, and the prelude's `impl Key for
+t27` stayed: an `impl` has no item name, so the rule that drops a shadowed
+item never saw it. What the program got was a complaint about a method of a
+trait it had never read. An `impl` goes with what it is written on, and is
+dropped when either its trait or its self type is shadowed.
+
 **G9.30 — an operator on a reference compiled to a comparison of addresses.**
 `a == b` on two `&t27` emitted `cmp` on two `ptr`s, which is not an
 instruction TIR has; the verifier caught it and the frontend should have.
