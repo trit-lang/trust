@@ -4571,7 +4571,7 @@ fn a_while_loop_puts_its_body_before_its_test() {
     );
     assert_eq!(
         value("let mut n: t27 = 0; let mut i: t27 = 0; while i < 5 { n += i; i += 1; } n"),
-        0 + 1 + 2 + 3 + 4
+        1 + 2 + 3 + 4
     );
     // `break` and `continue` still go where they went.
     assert_eq!(

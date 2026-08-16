@@ -1,0 +1,33 @@
+// echo.tr — everything on the input, back out, and how much of it there was.
+//
+// The character ports are the target's, not the language's (Ch. 5 §1.5), and
+// `getchar` is declared here for the reason `putchar` is declared in the
+// prelude: it reaches a memory-mapped device, which TIR has no way to name.
+//
+// The port answers in code units, and it has two answers that are not one:
+// −1 means nothing has arrived *yet*, and −2 means nothing ever will
+// (ISA §2.2). A program that treats them the same either spins or stops
+// early, so the loop below tells them apart.
+//
+//     printf 'hello, 世界' | trust run examples/trust/echo.tr
+//
+// prints the text back and then 13 — the count is of UTF-8 code units, which
+// is what a port carries, and not of characters, which is what a `str` holds.
+
+fn getchar() -> t9;
+
+fn main() -> t27 {
+    let mut n: t27 = 0;
+    loop {
+        let c: t9 = getchar();
+        if (c as t27) == 0 - 2 { break; }
+        if (c as t27) >= 0 {
+            putchar(c);
+            n += 1;
+        }
+    }
+    println("");
+    print_int(n);
+    println(" code units");
+    0
+}

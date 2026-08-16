@@ -17,7 +17,8 @@ const USAGE: &str = "\
 trust — compile a Trust program and run it
 
 usage:
-    trust run <file.tr> [--stats]      compile, link the runtime, execute
+    trust run <file.tr> [--stats]      compile, link the runtime, execute;
+                                       stdin to stdout
     trust asm <file.tr>                print the assembly it would run
 
     --time                             report what each phase of the compile
@@ -152,11 +153,14 @@ fn run(asm: &str, stats: bool) -> ExitCode {
         }
     };
     let mut vm = tritium::Vm::with_default_memory();
+    // The same arrangement `tritium run` uses. Input is read only when the
+    // program asks for a code unit, so one that never touches the port does
+    // not wait on a stream that may never close; output passes through as it
+    // is written, so a program that prints and then faults has printed.
+    vm.io =
+        tritium::Io::with_source(Box::new(std::io::stdin())).with_sink(Box::new(std::io::stdout()));
     vm.load_image(&image);
     let stop = vm.run(u64::MAX);
-    // The program's own output first, whatever happened: a program that
-    // printed and then faulted printed.
-    print!("{}", String::from_utf8_lossy(vm.io.output()));
     if stats {
         eprintln!("{} instruction(s) retired", vm.steps());
     }
