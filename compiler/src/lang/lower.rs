@@ -1610,41 +1610,114 @@ fn mentions_self(t: &ast::Ty) -> bool {
     }
 }
 
-/// The methods Ch. 1 defines on the built-in types. A user method of the
-/// same name on the same type would shadow a language rule, so these are
-/// matched first and impl blocks never see them.
-const BUILTIN_METHODS: &[&str] = &[
-    "mulh",
-    "tmin",
-    "tmax",
-    "tmul",
-    "tneg",
-    "is_pos",
-    "is_zero",
-    "is_neg",
-    "to_trit",
-    "len",
-    "push",
-    "pop",
-    "clear",
-    "reserve",
-    "insert",
-    "remove",
-    "capacity",
-    "is_empty",
-    "wrapping_add",
-    "wrapping_sub",
-    "wrapping_mul",
-    "saturating_add",
-    "saturating_sub",
-    "saturating_mul",
-    "overflowing_add",
-    "overflowing_sub",
-    "overflowing_mul",
-    "checked_add",
-    "checked_sub",
-    "checked_mul",
+/// The methods the language defines on its own types, by what they are
+/// written on and how they read.
+///
+/// A user method of the same name on the same type would shadow a language
+/// rule, so these are matched first and `impl` blocks never see them.
+///
+/// The receiver is a *written* type's name, so that an editor can ask what a
+/// `Vec<t27>` has on it and be answered from the same list the compiler
+/// matches against. There is one list, so there is nothing to drift.
+pub const BUILTIN_METHODS: &[(&str, &str, &str)] = &[
+    // Ch. 1 §4: the trit-wise operations, which are methods because §2.5
+    // gives their symbols to nothing.
+    ("int", "tmin", "fn tmin(self, other: Self) -> Self"),
+    ("int", "tmax", "fn tmax(self, other: Self) -> Self"),
+    ("int", "tmul", "fn tmul(self, other: Self) -> Self"),
+    ("int", "tneg", "fn tneg(self) -> Self"),
+    ("int", "mulh", "fn mulh(self, other: Self) -> Self"),
+    // Ch. 1 §6: what a trit is, asked of a value.
+    ("int", "is_pos", "fn is_pos(self) -> bool"),
+    ("int", "is_zero", "fn is_zero(self) -> bool"),
+    ("int", "is_neg", "fn is_neg(self) -> bool"),
+    ("int", "to_trit", "fn to_trit(self) -> trit"),
+    // Ch. 1 §5: the overflow flavours, written into the operation.
+    (
+        "int",
+        "wrapping_add",
+        "fn wrapping_add(self, other: Self) -> Self",
+    ),
+    (
+        "int",
+        "wrapping_sub",
+        "fn wrapping_sub(self, other: Self) -> Self",
+    ),
+    (
+        "int",
+        "wrapping_mul",
+        "fn wrapping_mul(self, other: Self) -> Self",
+    ),
+    (
+        "int",
+        "saturating_add",
+        "fn saturating_add(self, other: Self) -> Self",
+    ),
+    (
+        "int",
+        "saturating_sub",
+        "fn saturating_sub(self, other: Self) -> Self",
+    ),
+    (
+        "int",
+        "saturating_mul",
+        "fn saturating_mul(self, other: Self) -> Self",
+    ),
+    (
+        "int",
+        "overflowing_add",
+        "fn overflowing_add(self, other: Self) -> (Self, trit)",
+    ),
+    (
+        "int",
+        "overflowing_sub",
+        "fn overflowing_sub(self, other: Self) -> (Self, trit)",
+    ),
+    (
+        "int",
+        "overflowing_mul",
+        "fn overflowing_mul(self, other: Self) -> (Self, trit)",
+    ),
+    (
+        "int",
+        "checked_add",
+        "fn checked_add(self, other: Self) -> Option<Self>",
+    ),
+    (
+        "int",
+        "checked_sub",
+        "fn checked_sub(self, other: Self) -> Option<Self>",
+    ),
+    (
+        "int",
+        "checked_mul",
+        "fn checked_mul(self, other: Self) -> Option<Self>",
+    ),
+    // Ch. 5 §2: the growable array, whose storage is the compiler's.
+    ("Vec", "len", "fn len(&self) -> taddr"),
+    ("Vec", "is_empty", "fn is_empty(&self) -> bool"),
+    ("Vec", "push", "fn push(&mut self, value: T)"),
+    ("Vec", "pop", "fn pop(&mut self) -> Option<T>"),
+    ("Vec", "clear", "fn clear(&mut self)"),
+    ("Vec", "reserve", "fn reserve(&mut self, more: taddr)"),
+    ("Vec", "insert", "fn insert(&mut self, at: taddr, value: T)"),
+    ("Vec", "remove", "fn remove(&mut self, at: taddr) -> T"),
+    ("Vec", "capacity", "fn capacity(&self) -> taddr"),
+    // A slice and a string know how long they are, and nothing else here.
+    ("slice", "len", "fn len(&self) -> taddr"),
+    ("slice", "is_empty", "fn is_empty(&self) -> bool"),
+    ("str", "len", "fn len(&self) -> taddr"),
+    ("str", "is_empty", "fn is_empty(&self) -> bool"),
 ];
+
+/// Whether `name` is one the language defines, whatever it is written on.
+///
+/// The receiver is checked where the method is lowered, which is where the
+/// diagnostic can say what went wrong; this only has to keep `impl` blocks
+/// from claiming the name.
+fn is_builtin_method(name: &str) -> bool {
+    BUILTIN_METHODS.iter().any(|(_, n, _)| *n == name)
+}
 
 /// The name of the hidden out-pointer for an aggregate return.
 const SRET: &str = "sret";
@@ -6675,7 +6748,7 @@ impl Fn<'_> {
     ) -> R<(Operand, Ty)> {
         // Ch. 1's own methods are the language's, and are not overridable;
         // everything else resolves through impl blocks (Ch. 4 §1.3).
-        if !BUILTIN_METHODS.contains(&name) {
+        if !is_builtin_method(name) {
             return self.user_method(recv, name, args, expected, span);
         }
         // A `Vec` is mutated in place and never read as a value here, so its
@@ -9266,7 +9339,18 @@ impl Fn<'_> {
 
     /// The address of a place, and its type (Ch. 3 §1.3). A place is a local,
     /// a field of a place, an element of a place, or a dereference.
+    /// A place, and its type — recorded like an expression's, because it is
+    /// one. `p` in `p.x` never reaches `expr`, and an editor asking what `p`
+    /// is has to be told the same answer either way.
     fn place(&mut self, e: &ast::Expr, span: Span) -> R<(Operand, Ty)> {
+        let out = self.place_inner(e, span)?;
+        if let Some(sink) = self.noted {
+            sink.borrow_mut().note(e.span(), &out.1);
+        }
+        Ok(out)
+    }
+
+    fn place_inner(&mut self, e: &ast::Expr, span: Span) -> R<(Operand, Ty)> {
         match e {
             ast::Expr::Path(name, l) => {
                 if let Some(local) = self.lookup(name) {

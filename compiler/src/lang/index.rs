@@ -147,6 +147,9 @@ pub struct Index {
     globals: Vec<Span>,
     /// A binding, and the stretch of the file over which it can be named.
     scoped: Vec<Scoped>,
+    /// What each nominal type has written on it: a struct's fields, and the
+    /// methods of every `impl` for it. By the type's own name.
+    members: std::collections::HashMap<String, Vec<Span>>,
 }
 
 /// A binding and where it is in scope.
@@ -170,6 +173,7 @@ impl Index {
         let mut b = Builder {
             symbols: Vec::new(),
             scoped: Vec::new(),
+            members: std::collections::HashMap::new(),
             uses: Vec::new(),
             defs: Vec::new(),
             items: Vec::new(),
@@ -190,9 +194,112 @@ impl Index {
             defs: b.defs,
             globals: b.items.iter().map(|(_, at)| *at).collect(),
             scoped: b.scoped,
+            members: b.members,
         }
     }
 
+    /// The names this file makes visible everywhere.
+    ///
+    /// Not the ones the compiler wrote for itself: a mangled instantiation
+    /// (`Option.unwrap.char`) holds a dot, which no Trust identifier may, so
+    /// it is a name no program can type.
+    pub fn globals(&self) -> Vec<&Definition> {
+        self.globals
+            .iter()
+            .filter_map(|at| self.describe(*at))
+            .filter(|d| !d.name.contains('.') && !d.name.starts_with('#'))
+            .collect()
+    }
+
+    /// What can be written after a `.` on something of this type.
+    ///
+    /// `ty` is a type as it is written — `&mut Point`, `Vec<t27>`, `dyn Area`
+    /// — and what it is written *on* is the same either way: a reference's
+    /// methods have always been the referent's (Ch. 4 §1.4), and a generic
+    /// type's are its head's.
+    pub fn members(&self, ty: &str) -> Vec<&Definition> {
+        // Two keys, because an impl is written on one of two things.
+        // `impl<T> Vec<T>` is written on every `Vec`; `impl Vec<char>` is
+        // written on that one, and a `Vec<t27>` has none of it.
+        let bare = stripped(ty);
+        let keys = [nominal(ty), bare];
+        let mut out: Vec<&Definition> = keys
+            .iter()
+            .filter(|k| !k.is_empty())
+            .flat_map(|k| self.members.get(*k).into_iter().flatten())
+            .filter_map(|at| self.describe(*at))
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out.dedup_by(|a, b| a.name == b.name);
+        out
+    }
+}
+
+/// What the language itself writes on a type, from the compiler's own table.
+///
+/// A `Vec`'s `push` is not in the prelude and not in any file: its storage is
+/// the compiler's (Ch. 5 §2), so the only place it is written down is the
+/// table `lower` matches against. Reading that same table is what keeps a
+/// completion from being a second list of what exists.
+pub fn builtin_members(ty: &str) -> Vec<(&'static str, &'static str)> {
+    let name = nominal(ty);
+    let kind = match name {
+        "trit" | "t9" | "t27" | "taddr" => "int",
+        "Vec" => "Vec",
+        "str" => "str",
+        _ if name.starts_with('[') => "slice",
+        _ => return Vec::new(),
+    };
+    super::lower::BUILTIN_METHODS
+        .iter()
+        .filter(|(on, _, _)| *on == kind)
+        .map(|(_, n, sig)| (*n, *sig))
+        .collect()
+}
+
+/// What an `impl` block's methods are written on.
+///
+/// `impl<T> Vec<T>` is written on every `Vec` and keys by its head;
+/// `impl Vec<char>` is written on that one and keys by the whole thing. What
+/// tells them apart is whether the arguments are the impl's own parameters.
+fn impl_owner(i: &ImplItem) -> String {
+    let params: Vec<&str> = i.generics.iter().map(GenericParam::name).collect();
+    let generic = |t: &Ty| match t {
+        Ty::Name(n, _) => params.contains(&n.as_str()),
+        _ => false,
+    };
+    if i.self_args.is_empty() || i.self_args.iter().any(generic) {
+        return i.self_ty.clone();
+    }
+    let args: Vec<String> = i.self_args.iter().map(type_name).collect();
+    format!("{}<{}>", i.self_ty, args.join(", "))
+}
+
+/// A written type with what it is held by taken off: `&mut Vec<t27>` is a
+/// `Vec<t27>`, arguments and all.
+fn stripped(ty: &str) -> &str {
+    let mut t = ty.trim();
+    loop {
+        let next = t
+            .strip_prefix('&')
+            .map(str::trim_start)
+            .map(|t| t.strip_prefix("mut ").unwrap_or(t))
+            .or_else(|| t.strip_prefix("dyn ").map(str::trim_start));
+        match next {
+            Some(rest) if rest != t => t = rest.trim_start(),
+            _ => break,
+        }
+    }
+    t
+}
+
+/// The name a written type is written *on*: `&mut Vec<t27>` is a `Vec`.
+fn nominal(ty: &str) -> &str {
+    let t = stripped(ty);
+    t.split('<').next().unwrap_or(t).trim()
+}
+
+impl Index {
     /// Everything that can be named at `offset`, nearest first.
     ///
     /// A name written twice is offered once, as whichever is in scope — the
@@ -325,25 +432,15 @@ impl Index {
 /// spans are offsets into *it*. Only the names and how they read are used
 /// here, never a place: a completion may offer `println`, and nothing may
 /// claim to know where in this file it is, because it is not.
-pub fn prelude() -> &'static [Definition] {
-    static ONCE: std::sync::OnceLock<Vec<Definition>> = std::sync::OnceLock::new();
+pub fn prelude() -> &'static Index {
+    static ONCE: std::sync::OnceLock<Index> = std::sync::OnceLock::new();
     ONCE.get_or_init(|| {
-        let Ok(file) = super::parse::parse(super::PRELUDE) else {
-            // The prelude parses — a test in `lang` says so — and a broken
-            // one is this compiler's fault, not something to offer names
-            // from. Answering with none is the only honest failure.
-            return Vec::new();
-        };
-        let index = Index::new(&file);
-        index
-            .globals
-            .iter()
-            .filter_map(|at| index.describe(*at).cloned())
-            // A mangled instantiation is a name the compiler wrote, not one
-            // a program may type (`Option.unwrap.char`), and a dot is what
-            // marks it: no Trust identifier holds one.
-            .filter(|d| !d.name.contains('.') && !d.name.starts_with('#'))
-            .collect()
+        // The prelude parses — a test in `lang` says so — and a broken one
+        // is this compiler's fault. Recovery makes the failure partial
+        // rather than total, which is the right shape for a fault that is
+        // ours: whatever still reads is still true.
+        let (file, _) = super::parse::parse_recovering(super::PRELUDE);
+        Index::new(&file)
     })
 }
 
@@ -356,6 +453,7 @@ struct Binding {
 struct Builder {
     symbols: Vec<Symbol>,
     scoped: Vec<Scoped>,
+    members: std::collections::HashMap<String, Vec<Span>>,
     uses: Vec<(Span, Span)>,
     defs: Vec<Definition>,
     /// File-level names: functions, types, constants, variants.
@@ -389,6 +487,7 @@ impl Builder {
                     for f in &s.fields {
                         let label = format!("{}: {}", f.name, type_name(&f.ty));
                         self.define(f.name_span, &f.name, SymbolKind::Field, label);
+                        self.own(&s.name, f.name_span);
                     }
                 }
                 Item::Trait(t) => {
@@ -397,6 +496,9 @@ impl Builder {
                     for m in &t.methods {
                         self.methods.push((m.name.clone(), m.name_span));
                         self.define_method(m.name_span, &m.name, fn_label(m));
+                        // A `dyn Trait` has the trait's methods and nothing
+                        // else (Ch. 4 §3.1), so they are written on it.
+                        self.own(&t.name, m.name_span);
                     }
                 }
                 Item::Enum(e) => {
@@ -418,6 +520,7 @@ impl Builder {
                         self.methods.push((m.name.clone(), m.name_span));
                         let label = format!("{}\n{}", impl_label(i), fn_label(m));
                         self.define_method(m.name_span, &m.name, label);
+                        self.own(&impl_owner(i), m.name_span);
                     }
                 }
             }
@@ -428,6 +531,13 @@ impl Builder {
     fn define_item(&mut self, name: &str, at: Span, kind: SymbolKind, label: String) {
         self.items.push((name.to_string(), at));
         self.define(at, name, kind, label);
+    }
+
+    /// Record that something is written on a type, for `Index::members`.
+    fn own(&mut self, ty: &str, at: Span) {
+        if at.line != 0 {
+            self.members.entry(ty.to_string()).or_default().push(at);
+        }
     }
 
     /// A definition a hover can show, wherever it was written.
@@ -1344,11 +1454,70 @@ mod tests {
 
     #[test]
     fn the_prelude_offers_names_a_program_may_type() {
-        let names: Vec<&str> = prelude().iter().map(|d| d.name.as_str()).collect();
+        let globals = prelude().globals();
+        let names: Vec<&str> = globals.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"println"), "{names:?}");
         assert!(names.contains(&"Option"), "{names:?}");
         // Not what the compiler wrote for itself.
         assert!(!names.iter().any(|n| n.contains('.')), "{names:?}");
+    }
+
+    #[test]
+    fn a_type_carries_what_is_written_on_it() {
+        let src = "struct P { x: t27, y: t27 }\n                   impl P { fn area(&self) -> t27 { 0 } }\n                   trait Draw { fn draw(&self); }\n                   impl Draw for P { fn draw(&self) {} }\n";
+        let i = index(src);
+        let names: Vec<&str> = i.members("P").iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["area", "draw", "x", "y"]);
+        // A reference's members are the referent's, and a `dyn Trait` has
+        // the trait's.
+        assert_eq!(i.members("&mut P").len(), 4);
+        let dynamic: Vec<&str> = i
+            .members("&dyn Draw")
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect();
+        assert_eq!(dynamic, vec!["draw"]);
+        assert!(i.members("t27").is_empty(), "a primitive has none here");
+    }
+
+    fn member_names(index: &Index, ty: &str) -> Vec<String> {
+        index.members(ty).iter().map(|d| d.name.clone()).collect()
+    }
+
+    #[test]
+    fn an_impl_on_one_instantiation_is_written_on_that_one_only() {
+        // The prelude has `impl Vec<char> { push_str }` and a blanket
+        // `impl FromIterator for Vec<A>`. A `Vec<t27>` has the second.
+        let all = member_names(prelude(), "Vec<t27>");
+        assert!(all.contains(&"from_iter".to_string()), "{all:?}");
+        assert!(!all.contains(&"push_str".to_string()), "{all:?}");
+        let chars = member_names(prelude(), "&mut Vec<char>");
+        assert!(chars.contains(&"push_str".to_string()), "{chars:?}");
+        assert!(
+            chars.contains(&"from_iter".to_string()),
+            "the blanket one too"
+        );
+    }
+
+    #[test]
+    fn what_the_language_writes_on_a_type_comes_from_the_compilers_own_table() {
+        // `Vec::push` is nowhere in any file: its storage is the compiler's,
+        // so the only place it is written down is the table `lower` matches
+        // against, and that is the table this reads.
+        let vec: Vec<&str> = builtin_members("Vec<t27>")
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        assert!(vec.contains(&"push"), "{vec:?}");
+        assert!(vec.contains(&"len"), "{vec:?}");
+        let int: Vec<&str> = builtin_members("&t9").iter().map(|(n, _)| *n).collect();
+        assert!(int.contains(&"tmin"), "{int:?}");
+        assert!(int.contains(&"checked_add"), "{int:?}");
+        assert!(!int.contains(&"push"), "an integer is not a Vec: {int:?}");
+        assert!(builtin_members("Point").is_empty(), "a struct has none");
+        // A slice knows how long it is, and that is all.
+        let slice: Vec<&str> = builtin_members("&[t27]").iter().map(|(n, _)| *n).collect();
+        assert_eq!(slice, vec!["len", "is_empty"]);
     }
 
     #[test]

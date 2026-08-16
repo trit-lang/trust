@@ -3175,13 +3175,41 @@ is not a complaint.
     go to `helper`                 line 1
     completion                     total, helper, main, Option, …
 
-*What is still not there.* **Member completion.** Two things, and the second
-is the harder one. Which fields and methods a type has lives in lowering's
-tables, which `analyze` does not keep — that is plumbing. But `p.` with
-nothing after it is not an expression, so *the statement it is in* does not
-parse, and item-level recovery does not go inside an item. Offering members
-means the parser has to make something of a half-written expression, which
-is a different kind of tolerance from skipping an item.
+*Member completion, without teaching the parser about half an expression.*
+`p.` with nothing after it is not an expression, so the statement it sits in
+does not parse and there is no type to be had. Rather than make the parser
+tolerate that, the server **writes a name in after the dot** and analyses
+that. Everything before the dot keeps its offset, and the receiver is the
+only thing asked about — writing after it cannot change what it is.
+
+Three sources answer, and each is the only place its answer is written down:
+
+  * the file's own `struct` fields and `impl` methods;
+  * the prelude's, for `Vec`, `str`, `char` and the rest;
+  * the **compiler's own table**, for what is not written in any file at all.
+    `Vec::push` has no Trust source: its storage is the compiler's (Ch. 5
+    §2), so the only place it exists is the list `lower` matches against, and
+    that list is now `(what it is written on, its name, how it reads)` and is
+    read by both. There is one list, so there is nothing to drift.
+
+An `impl` is written on one of two things, and which one matters:
+`impl<T> Vec<T>` is written on every `Vec`, while `impl Vec<char>` is written
+on that one — so a `Vec<t27>` is not offered `push_str`. What tells them
+apart is whether the arguments are the impl's own parameters.
+
+One thing had to change in `lower` for this: `p` in `p.x` goes down the
+*place* path and never reaches `expr`, so its type was recorded nowhere. A
+place has a type like anything else, and an editor asking what `p` is has to
+be told the same answer either way.
+
+    p.        area, x, y
+    v.        from_iter, len, is_empty, push, pop, clear, reserve, …
+    p.x.      tmin, tmax, tmul, tneg, mulh, is_pos, …
+
+*What is still not there.* A method reached through a **trait bound** rather
+than a concrete type: `fn f<T: Area>(t: T) { t.` knows `T` and not what
+implements it. And an editor's other half — formatting — which Ch. 5 §7
+reserves and this repository does not define.
 
 *The other half of an editor is a second grammar.* Zed's highlighting is
 **tree-sitter only**, so `editors/tree-sitter-trust` exists, and it is a

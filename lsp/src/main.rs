@@ -259,8 +259,8 @@ impl Server {
         let map = lang::LineMap::new(src);
         let at = position(m, &map)?;
         let chars: Vec<char> = src.chars().collect();
-        if after_a_dot(&chars, at) {
-            return Some("{\"isIncomplete\":false,\"items\":[]}".to_string());
+        if let Some(dot) = dot_before(&chars, at) {
+            return Some(self.members(src, &chars, dot));
         }
         let (file, _) = lang::parse::parse_recovering(src);
         let index = lang::index::Index::new(&file);
@@ -271,7 +271,7 @@ impl Server {
             seen.push(d.name.clone());
             items.push(item(&d.name, completion_kind(d.kind), &d.label));
         }
-        for d in lang::index::prelude() {
+        for d in lang::index::prelude().globals() {
             if !seen.contains(&d.name) {
                 seen.push(d.name.clone());
                 items.push(item(&d.name, completion_kind(d.kind), &d.label));
@@ -284,6 +284,58 @@ impl Server {
             "{{\"isIncomplete\":false,\"items\":{}}}",
             list(items.into_iter())
         ))
+    }
+
+    /// What can be written after the `.` at `dot`.
+    ///
+    /// The receiver's type is what decides, and `p.` with nothing after it is
+    /// not an expression — so the statement it sits in does not parse, and
+    /// there is no type to be had. A name is written in after the dot, which
+    /// makes it one. Everything **before** the dot keeps its offset, and the
+    /// receiver is the only thing asked about: writing after it cannot change
+    /// what it is.
+    fn members(&self, src: &str, chars: &[char], dot: u32) -> String {
+        let empty = "{\"isIncomplete\":false,\"items\":[]}".to_string();
+        let mut probe: String = chars[..dot as usize + 1].iter().collect();
+        probe.push_str("probe");
+        let mut after = dot as usize + 1;
+        while after < chars.len() && (chars[after].is_ascii_alphanumeric() || chars[after] == '_') {
+            after += 1;
+        }
+        probe.extend(chars[after..].iter());
+
+        // The last character of the receiver, which is what has a type.
+        let Some(last) = dot.checked_sub(1) else {
+            return empty;
+        };
+        let Some(ty) = lang::analyze(&probe).types.at(last).map(str::to_string) else {
+            return empty;
+        };
+        let (file, _) = lang::parse::parse_recovering(src);
+        let index = lang::index::Index::new(&file);
+
+        let mut items = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        for d in index
+            .members(&ty)
+            .into_iter()
+            .chain(lang::index::prelude().members(&ty))
+        {
+            if !seen.contains(&d.name) {
+                seen.push(d.name.clone());
+                items.push(item(&d.name, completion_kind(d.kind), &d.label));
+            }
+        }
+        for (name, sig) in lang::index::builtin_members(&ty) {
+            if !seen.iter().any(|s| s == name) {
+                seen.push(name.to_string());
+                items.push(item(name, 2, sig));
+            }
+        }
+        format!(
+            "{{\"isIncomplete\":false,\"items\":{}}}",
+            list(items.into_iter())
+        )
     }
 
     /// Compile what is open at `uri` and publish what is wrong with it.
@@ -335,17 +387,19 @@ fn location(map: &lang::LineMap, uri: &str, span: lang::Span) -> String {
     format!("{{\"uri\":{quoted},\"range\":{}}}", range(map, span))
 }
 
-/// Whether the cursor sits after a `.` that opens a field or a method.
+/// Where the `.` is, when the cursor sits after one that opens a field or
+/// a method access.
 ///
 /// A range is written `a..b`, and the name after it is an ordinary one — so
 /// two dots are not one. Nothing else in this language puts a dot before a
 /// name (Ch. 0 §2.6).
-fn after_a_dot(chars: &[char], at: u32) -> bool {
-    let mut i = at as usize;
+fn dot_before(chars: &[char], at: u32) -> Option<u32> {
+    let mut i = (at as usize).min(chars.len());
     while i > 0 && (chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '_') {
         i -= 1;
     }
-    i > 0 && chars[i - 1] == '.' && !(i > 1 && chars[i - 2] == '.')
+    let dot = i.checked_sub(1)?;
+    (chars[dot] == '.' && !(dot > 0 && chars[dot - 1] == '.')).then_some(dot as u32)
 }
 
 /// One thing a completion offers.
