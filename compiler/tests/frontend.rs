@@ -4553,3 +4553,32 @@ fn a_loop_that_calls_something_keeps_what_it_knows() {
          fn main() -> t27 { let b: [t9; 3] = [65, 66, 10]; emit(&b) }");
     assert_eq!(out, "AB\n");
 }
+
+#[test]
+fn a_while_loop_puts_its_body_before_its_test() {
+    // A loop laid out test-then-body ends its body with a jump back, and a
+    // backward jump is an instruction: the test, the branch and the jump are
+    // three per iteration where two will do. The body comes first, so its
+    // jump to the test is a fall-through and the branch back into the body is
+    // the only transfer left.
+    //
+    // What this checks is that it still means the same thing — in particular
+    // that a loop whose condition is false at the start runs its body zero
+    // times, which is the case the rotation could most easily have broken.
+    assert_eq!(
+        value("let mut n: t27 = 0; let mut i: t27 = 0; while i < 0 { n += 1; i += 1; } n"),
+        0
+    );
+    assert_eq!(
+        value("let mut n: t27 = 0; let mut i: t27 = 0; while i < 5 { n += i; i += 1; } n"),
+        0 + 1 + 2 + 3 + 4
+    );
+    // `break` and `continue` still go where they went.
+    assert_eq!(
+        value(
+            "let mut n: t27 = 0; let mut i: t27 = 0; \
+             while i < 10 { i += 1; if i == 3 { continue; } if i == 6 { break; } n += i; } n"
+        ),
+        1 + 2 + 4 + 5
+    );
+}

@@ -2980,6 +2980,34 @@ loop over a slice with a call in it −9%.
 on top, and neither could have been found before the other. A profile after
 each change, not a plan before them.
 
+**G8.24 — a `while` puts its body before its test.** With the checks and the
+loads gone, the profile's next entry was `jal (jump)` at **5.1%** — 104 944
+unconditional jumps, none of which could fall through, because they were all
+loop back edges.
+
+A loop laid out test-then-body ends its body with a jump *backwards*, and a
+backward jump is an instruction. Per iteration: the test, the branch, and the
+jump — three transfers where two will do. Emitting the **body first** makes
+its jump to the test a fall-through, and the branch back into the body is the
+only transfer left.
+
+It is four lines in the frontend and nothing else: no pass, no duplication, no
+change to what a `while` means. The loop is still entered by jumping to the
+test, so a condition false at the start still runs the body zero times, which
+is the case the rotation could most easily have broken and the one the test
+checks first.
+
+**HPL: 2 059 024 → 1 985 745, −3.6%**, and `jal (jump)` from 104 944 to
+**31 593**. Every other measurement moved too.
+
+*Two things ruled out on the way, by measuring rather than assuming.* Block
+layout already elides a jump to the next block — all 180 static jumps went
+somewhere else, so there was nothing to gain there. And **strength reduction
+is worth zero on this machine**: `alui.mul` is 14% of HPL, but replacing
+`base + i·size` with an incrementing pointer trades a one-instruction multiply
+for a one-instruction add. A register-starved machine with no multiply
+penalty gets nothing from the classic transformation.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The
