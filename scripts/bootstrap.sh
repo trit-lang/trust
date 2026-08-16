@@ -99,6 +99,22 @@ for f in bootstrap/files/*.tr; do
     w=$((w + $(printf '%s\n' "$rust" | wc -l)))
 done
 
+# The parser over its own source. Every file this directory holds goes
+# through both parsers, and the two trees must be the same characters — which
+# is the whole claim of a bootstrap, made against the largest Trust program
+# that exists. It is the slow part of this script and it is the point of it.
+b=0
+for f in bootstrap/*.tr; do
+    rust=$("$trust" file "$f")
+    mine=$("$trust" run bootstrap/file.tr < "$f")
+    if [ "$rust" != "$mine" ]; then
+        echo "bootstrap: the two parsers disagree on the parser's own $f" >&2
+        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10 >&2
+        exit 1
+    fi
+    b=$((b + $(printf '%s\n' "$rust" | wc -l)))
+done
+
 # A whole *program*, not a file. The machine has a character port and no
 # filesystem (ISA §2.2), so the driver walks the module tree and hands the
 # program over on stdin — which is where finding files belongs anyway, since
@@ -115,5 +131,5 @@ for root in examples/trust/modules/main.tr bootstrap/whole.tr bootstrap/items.tr
     m=$((m + $(printf '%s\n' "$rust" | wc -l)))
 done
 
-printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d modules of whole programs — all agreed\n' \
-    "$n" "$r" "$e" "$i" "$w" "$m"
+printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d modules of whole programs — all agreed\n' \
+    "$n" "$r" "$e" "$i" "$w" "$b" "$m"

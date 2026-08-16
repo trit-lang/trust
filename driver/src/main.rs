@@ -406,6 +406,7 @@ fn written_ty(t: &lang::ast::Ty) -> String {
         Ty::Ref(inner, false, _) => format!("&{}", written_ty(inner)),
         Ty::Slice(inner, _) => format!("[{}]", written_ty(inner)),
         Ty::SelfTy(_) => "Self".to_string(),
+        Ty::Assoc(base, name, _) => format!("{}::{name}", written_ty(base)),
         Ty::App(n, args, _) => {
             let args: Vec<String> = args.iter().map(written_ty).collect();
             format!("{n}<{}>", args.join(","))
@@ -459,6 +460,35 @@ fn show_block(b: &lang::ast::Block, out: &mut String) {
         out.push(')');
     }
     out.push(')');
+}
+
+fn show_pattern(p: &lang::ast::Pattern, out: &mut String) {
+    use lang::ast::Pattern;
+    match p {
+        Pattern::Wild(_) => out.push('_'),
+        Pattern::Bind(n, _) => out.push_str(n),
+        Pattern::Int(v, _) => out.push_str(&format!("{}", v.to_i128().unwrap_or(0))),
+        Pattern::Trit(t, _) => out.push_str(&format!("{}", t.to_i8())),
+        Pattern::Char(v, _) => out.push_str(&format!("{v}")),
+        Pattern::Bool(b, _) => out.push_str(if *b { "true" } else { "false" }),
+        Pattern::Aggregate(path, fields, _) => {
+            out.push_str(&format!("(pat {}", path.segments.join("::")));
+            for (name, pat) in fields {
+                out.push_str(&format!(" ({name} "));
+                show_pattern(pat, out);
+                out.push(')');
+            }
+            out.push(')');
+        }
+        Pattern::Tuple(items, _) => {
+            out.push_str("(tuple");
+            for i in items {
+                out.push(' ');
+                show_pattern(i, out);
+            }
+            out.push(')');
+        }
+    }
 }
 
 fn show_expr(e: &lang::ast::Expr, out: &mut String) {
@@ -527,6 +557,38 @@ fn show_expr(e: &lang::ast::Expr, out: &mut String) {
             for a in args {
                 out.push(' ');
                 show_expr(a, out);
+            }
+            out.push(')');
+        }
+        Expr::Unit(_) => out.push_str("(unit)"),
+        Expr::Tuple(items, _) => {
+            out.push_str("(tuple");
+            for i in items {
+                out.push(' ');
+                show_expr(i, out);
+            }
+            out.push(')');
+        }
+        Expr::Match(scrutinee, arms, _) => {
+            out.push_str("(match ");
+            show_expr(scrutinee, out);
+            for arm in arms {
+                out.push_str(" (arm (");
+                for (i, p) in arm.patterns.iter().enumerate() {
+                    if i > 0 {
+                        out.push(' ');
+                    }
+                    show_pattern(p, out);
+                }
+                out.push(')');
+                if let Some(g) = &arm.guard {
+                    out.push_str(" (when ");
+                    show_expr(g, out);
+                    out.push(')');
+                }
+                out.push(' ');
+                show_expr(&arm.body, out);
+                out.push(')');
             }
             out.push(')');
         }

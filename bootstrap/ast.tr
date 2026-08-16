@@ -33,6 +33,12 @@ pub enum Expr {
     Cast(Box<Expr>, String),
     /// `e?` (Ch. 5 §6.2).
     Try(Box<Expr>),
+    /// `()` — the one value of the unit type (Ch. 2 §1).
+    Unit,
+    /// `(a, b)` (Ch. 2 §3).
+    Tuple(Vec<Expr>),
+    /// `match e { p => v, … }` (§5.4).
+    Match(Box<Expr>, Vec<Arm>),
     /// `(e)`, kept so that printing round-trips.
     Group(Box<Expr>),
     /// `x.f` — a field.
@@ -102,6 +108,37 @@ pub enum Item {
     /// `impl Trait for Type { … }`. The trait is empty for an inherent impl
     /// (Ch. 4 §1.2), which is the difference a reader sees.
     Impl(String, String, Vec<Fn>),
+}
+
+/// One arm: its patterns, its guard if it has one, and its value.
+pub struct Arm {
+    pub patterns: Vec<Pattern>,
+    pub guard: Option<Expr>,
+    pub body: Expr,
+}
+
+/// A pattern (§4). It has the shape of an expression and is not one: a
+/// pattern is *matched*, and the only names in it are the ones it binds.
+pub enum Pattern {
+    /// `_` — matches and binds nothing.
+    Wild,
+    /// A name, which binds.
+    Bind(String),
+    /// A literal, as its value; a `trit` and a `char` are numbers here.
+    Int(t27),
+    /// `true` and `false`.
+    Bool(bool),
+    /// `Kind::Rect(a, b)`, `Span { lo, hi }`, `Kind::Dot` — one shape, as in
+    /// an expression, and for the same reason.
+    Aggregate(String, Vec<PatField>),
+    /// `(a, b)`.
+    Tuple(Vec<Pattern>),
+}
+
+/// One field of a pattern: the name it is written under, and the pattern.
+pub struct PatField {
+    pub name: String,
+    pub pat: Pattern,
 }
 
 /// One field of an aggregate: the name it is written under, and its value.
@@ -287,6 +324,47 @@ pub fn show(e: &Expr, out: &mut String) {
             show(&*inner, out);
             out.push_str(")");
         }
+        Expr::Unit => out.push_str("(unit)"),
+        Expr::Tuple(items) => {
+            out.push_str("(tuple");
+            let mut i: taddr = 0;
+            while i < items.len() {
+                out.push_str(" ");
+                show(&items[i], out);
+                i += 1;
+            }
+            out.push_str(")");
+        }
+        Expr::Match(scrutinee, arms) => {
+            out.push_str("(match ");
+            show(&*scrutinee, out);
+            let mut i: taddr = 0;
+            while i < arms.len() {
+                out.push_str(" (arm (");
+                let mut k: taddr = 0;
+                while k < arms[i].patterns.len() {
+                    if k > 0 {
+                        out.push_str(" ");
+                    }
+                    show_pattern(&arms[i].patterns[k], out);
+                    k += 1;
+                }
+                out.push_str(")");
+                match &arms[i].guard {
+                    Option::Some(g) => {
+                        out.push_str(" (when ");
+                        show(&g, out);
+                        out.push_str(")");
+                    }
+                    Option::None => {}
+                }
+                out.push_str(" ");
+                show(&arms[i].body, out);
+                out.push_str(")");
+                i += 1;
+            }
+            out.push_str(")");
+        }
         Expr::Aggregate(path, fields) => {
             out.push_str("(agg ");
             out.push_str(&path);
@@ -297,6 +375,46 @@ pub fn show(e: &Expr, out: &mut String) {
                 out.push_str(" ");
                 show(&fields[i].value, out);
                 out.push_str(")");
+                i += 1;
+            }
+            out.push_str(")");
+        }
+    }
+}
+
+/// A pattern, written out.
+pub fn show_pattern(p: &Pattern, out: &mut String) {
+    match p {
+        Pattern::Wild => out.push_str("_"),
+        Pattern::Bind(n) => out.push_str(&n),
+        Pattern::Int(v) => push_int(out, v),
+        Pattern::Bool(b) => {
+            if b {
+                out.push_str("true");
+            } else {
+                out.push_str("false");
+            }
+        }
+        Pattern::Aggregate(path, fields) => {
+            out.push_str("(pat ");
+            out.push_str(&path);
+            let mut i: taddr = 0;
+            while i < fields.len() {
+                out.push_str(" (");
+                out.push_str(&fields[i].name);
+                out.push_str(" ");
+                show_pattern(&fields[i].pat, out);
+                out.push_str(")");
+                i += 1;
+            }
+            out.push_str(")");
+        }
+        Pattern::Tuple(items) => {
+            out.push_str("(tuple");
+            let mut i: taddr = 0;
+            while i < items.len() {
+                out.push_str(" ");
+                show_pattern(&items[i], out);
                 i += 1;
             }
             out.push_str(")");

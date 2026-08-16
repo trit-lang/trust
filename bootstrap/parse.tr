@@ -181,6 +181,7 @@ pub fn block_shaped(e: &Expr) -> bool {
         Expr::If(c, t, o) => true,
         Expr::While(c, b) => true,
         Expr::Loop(b) => true,
+        Expr::Match(e, arms) => true,
         _ => false,
     }
 }
@@ -197,11 +198,16 @@ pub fn primary(p: &mut Parser) -> Result<Expr, lex::Error> {
     if keyword.same("if") {
         return if_expr(p);
     }
+
     if keyword.same("while") {
         p.at = after;
         let c = no_struct_expr(p)?;
         let b = block(p)?;
         return Result::Ok(Expr::While(Box::new(c), Box::new(b)));
+    }
+    if keyword.same("match") {
+        p.at = after;
+        return match_expr(p);
     }
     if keyword.same("loop") {
         p.at = after;
@@ -254,25 +260,14 @@ pub fn primary(p: &mut Parser) -> Result<Expr, lex::Error> {
         Tok::Ident(n) => path_expr(p, n),
         Tok::Op(o) => {
             if o.same("(") {
-                let inner = expr(p)?;
-                let close = bump(p)?;
-                match close {
-                    Tok::Op(c) => {
-                        if !c.same(")") {
-                            return Result::Err(lex::Error {
-                                at: p.at,
-                                message: "expected `)`".to_string(),
-                            });
-                        }
-                    }
-                    _ => {
-                        return Result::Err(lex::Error {
-                            at: p.at,
-                            message: "expected `)`".to_string(),
-                        });
-                    }
-                }
-                return Result::Ok(Expr::Group(Box::new(inner)));
+                // A struct literal is legal again inside parentheses: the
+                // `{` cannot be a block here, because a block cannot open
+                // where an expression has already begun.
+                let outer = p.no_struct;
+                p.no_struct = false;
+                let e = parenthesized(p);
+                p.no_struct = outer;
+                return e;
             }
             Result::Err(lex::Error { at: p.at, message: "expected an expression".to_string() })
         }
@@ -513,6 +508,21 @@ fn arguments(p: &mut Parser) -> Result<Vec<Expr>, lex::Error> {
             Tok::Op(o) => {
                 if o.same(")") {
                     return Result::Ok(out);
+                }
+                // A trailing comma closes the list: an argument written on
+                // its own line ends with one, and a diff of the line after it
+                // should not be a diff of the line before.
+                if o.same(",") {
+                    let t2 = peek(p)?;
+                    let at2 = t2.at;
+                    let closes = match t2.tok {
+                        Tok::Op(c) => c.same(")"),
+                        _ => false,
+                    };
+                    if closes {
+                        p.at = at2;
+                        return Result::Ok(out);
+                    }
                 }
                 if !o.same(",") {
                     return Result::Err(lex::Error {
@@ -832,9 +842,34 @@ fn type_name(p: &mut Parser) -> Result<String, lex::Error> {
     let t = peek(p)?;
     let next = t.at;
     match t.tok {
+        Tok::Kw(k) => {
+            // `Self` is a type and is a keyword (Ch. 4 §1.2).
+            if k.same("Self") {
+                p.at = next;
+                out.push_str("Self");
+                return Result::Ok(out);
+            }
+            Result::Err(lex::Error { at: p.at, message: "expected a type".to_string() })
+        }
         Tok::Ident(n) => {
             p.at = next;
             out.push_str(&n);
+            // `lex::Taken` — a type through the module holding it (Ch. 6 §3.1).
+            loop {
+                let q = peek(p)?;
+                let at_q = q.at;
+                let qualified = match q.tok {
+                    Tok::Op(o) => o.same("::"),
+                    _ => false,
+                };
+                if !qualified {
+                    break;
+                }
+                p.at = at_q;
+                out.push_str("::");
+                let seg = ident(p)?;
+                out.push_str(&seg);
+            }
             let t2 = peek(p)?;
             let at2 = t2.at;
             let generic = match t2.tok {
@@ -1198,5 +1233,380 @@ fn impl_item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
             });
         }
         fns.push(function(p)?);
+    }
+}
+
+/// `match e { p => v, … }` (§5.4), after the word.
+fn match_expr(p: &mut Parser) -> Result<Expr, lex::Error> {
+    let scrutinee = no_struct_expr(p)?;
+    expect_op(p, "{")?;
+    let mut arms: Vec<ast::Arm> = Vec::new();
+    loop {
+        let t = peek(p)?;
+        let next = t.at;
+        let done = match t.tok {
+            Tok::Op(o) => o.same("}"),
+            Tok::Eof => {
+                return Result::Err(lex::Error {
+                    at: p.at,
+                    message: "unterminated `match`".to_string(),
+                });
+            }
+            _ => false,
+        };
+        if done {
+            p.at = next;
+            return Result::Ok(Expr::Match(Box::new(scrutinee), arms));
+        }
+        let mut patterns: Vec<ast::Pattern> = Vec::new();
+        patterns.push(pattern(p)?);
+        loop {
+            let t2 = peek(p)?;
+            let at2 = t2.at;
+            let more = match t2.tok {
+                Tok::Op(o) => o.same("|"),
+                _ => false,
+            };
+            if !more {
+                break;
+            }
+            p.at = at2;
+            patterns.push(pattern(p)?);
+        }
+        // A guard is an ordinary expression and its `{` would be a block, so
+        // the restriction that stands over the scrutinee stands over it too.
+        let t3 = peek(p)?;
+        let at3 = t3.at;
+        let guarded = match t3.tok {
+            Tok::Kw(k) => k.same("if"),
+            _ => false,
+        };
+        let guard: Option<Expr> = if guarded {
+            p.at = at3;
+            Option::Some(expr(p)?)
+        } else {
+            Option::None
+        };
+        expect_op(p, "=>")?;
+        let body = expr(p)?;
+        let needs_comma = !block_shaped(&body);
+        arms.push(ast::Arm { patterns: patterns, guard: guard, body: body });
+        let t4 = peek(p)?;
+        let at4 = t4.at;
+        let comma = match t4.tok {
+            Tok::Op(o) => o.same(","),
+            _ => false,
+        };
+        if comma {
+            p.at = at4;
+        } else if needs_comma {
+            let t5 = peek(p)?;
+            let closes = match t5.tok {
+                Tok::Op(o) => o.same("}"),
+                _ => false,
+            };
+            if !closes {
+                return Result::Err(lex::Error {
+                    at: p.at,
+                    message: "expected `,` between match arms".to_string(),
+                });
+            }
+        }
+    }
+}
+
+/// One pattern (§4).
+fn pattern(p: &mut Parser) -> Result<ast::Pattern, lex::Error> {
+    let t = peek(p)?;
+    let next = t.at;
+    match t.tok {
+        Tok::Int(v) => {
+            p.at = next;
+            Result::Ok(ast::Pattern::Int(v))
+        }
+        Tok::TritLit(v) => {
+            p.at = next;
+            Result::Ok(ast::Pattern::Int(v))
+        }
+        Tok::CharLit(v) => {
+            p.at = next;
+            Result::Ok(ast::Pattern::Int(v))
+        }
+        Tok::Kw(k) => {
+            if k.same("true") {
+                p.at = next;
+                return Result::Ok(ast::Pattern::Bool(true));
+            }
+            if k.same("false") {
+                p.at = next;
+                return Result::Ok(ast::Pattern::Bool(false));
+            }
+            Result::Err(lex::Error { at: p.at, message: "expected a pattern".to_string() })
+        }
+        Tok::Ident(n) => {
+            p.at = next;
+            path_pattern(p, n)
+        }
+        Tok::Op(o) => {
+            if o.same("_") {
+                p.at = next;
+                return Result::Ok(ast::Pattern::Wild);
+            }
+            if o.same("-") {
+                p.at = next;
+                let after = bump(p)?;
+                match after {
+                    Tok::Int(v) => Result::Ok(ast::Pattern::Int(0 - v)),
+                    Tok::TritLit(v) => Result::Ok(ast::Pattern::Int(0 - v)),
+                    _ => Result::Err(lex::Error {
+                        at: p.at,
+                        message: "expected a literal after `-`".to_string(),
+                    }),
+                }
+            } else if o.same("(") {
+                p.at = next;
+                let items = pattern_list(p, ")")?;
+                Result::Ok(ast::Pattern::Tuple(items))
+            } else {
+                Result::Err(lex::Error { at: p.at, message: "expected a pattern".to_string() })
+            }
+        }
+        Tok::Eof => Result::Err(lex::Error {
+            at: p.at,
+            message: "expected a pattern, found the end".to_string(),
+        }),
+        _ => Result::Err(lex::Error { at: p.at, message: "expected a pattern".to_string() }),
+    }
+}
+
+/// A pattern that began with a name: a binding, or an aggregate.
+///
+/// One segment and nothing after it *binds* — `x` is a name for whatever was
+/// matched and not a comparison against something called `x`, which is the
+/// one place a pattern reads unlike the expression it resembles.
+fn path_pattern(p: &mut Parser, first: String) -> Result<ast::Pattern, lex::Error> {
+    let mut path = first;
+    let mut segments: taddr = 1;
+    loop {
+        let t = peek(p)?;
+        let next = t.at;
+        let more = match t.tok {
+            Tok::Op(o) => o.same("::"),
+            _ => false,
+        };
+        if !more {
+            break;
+        }
+        p.at = next;
+        path.push_str("::");
+        let seg = ident(p)?;
+        path.push_str(&seg);
+        segments += 1;
+    }
+    let t = peek(p)?;
+    let next = t.at;
+    let opener = match t.tok {
+        Tok::Op(o) => o,
+        _ => "".to_string(),
+    };
+    if opener.same("(") {
+        p.at = next;
+        let fields = pattern_fields(p)?;
+        return Result::Ok(ast::Pattern::Aggregate(path, fields));
+    }
+    if opener.same("{") {
+        p.at = next;
+        let fields = field_patterns(p)?;
+        return Result::Ok(ast::Pattern::Aggregate(path, fields));
+    }
+    if segments > 1 {
+        let fields: Vec<ast::PatField> = Vec::new();
+        return Result::Ok(ast::Pattern::Aggregate(path, fields));
+    }
+    // `name @ pattern` binds the whole and matches the part (§4). It is kept
+    // as a field named `@`, which no program can write and so cannot collide.
+    let t2 = peek(p)?;
+    let at2 = t2.at;
+    let at_sign = match t2.tok {
+        Tok::Op(o) => o.same("@"),
+        _ => false,
+    };
+    if at_sign {
+        p.at = at2;
+        let inner = pattern(p)?;
+        let mut fields: Vec<ast::PatField> = Vec::new();
+        fields.push(ast::PatField { name: "@".to_string(), pat: inner });
+        return Result::Ok(ast::Pattern::Aggregate(path, fields));
+    }
+    Result::Ok(ast::Pattern::Bind(path))
+}
+
+/// Patterns up to `close`, separated by commas.
+fn pattern_list(p: &mut Parser, close: &str) -> Result<Vec<ast::Pattern>, lex::Error> {
+    let mut out: Vec<ast::Pattern> = Vec::new();
+    loop {
+        let t = peek(p)?;
+        let next = t.at;
+        let done = match t.tok {
+            Tok::Op(o) => o.same(close),
+            Tok::Eof => {
+                return Result::Err(lex::Error {
+                    at: p.at,
+                    message: "unterminated pattern list".to_string(),
+                });
+            }
+            _ => false,
+        };
+        if done {
+            p.at = next;
+            return Result::Ok(out);
+        }
+        out.push(pattern(p)?);
+        let t2 = peek(p)?;
+        let at2 = t2.at;
+        let comma = match t2.tok {
+            Tok::Op(o) => o.same(","),
+            _ => false,
+        };
+        if comma {
+            p.at = at2;
+        }
+    }
+}
+
+/// The patterns of `A::B(…)`, named by their positions — the same shape a
+/// tuple variant's *expression* takes, and named the same way.
+fn pattern_fields(p: &mut Parser) -> Result<Vec<ast::PatField>, lex::Error> {
+    let mut out: Vec<ast::PatField> = Vec::new();
+    loop {
+        let t = peek(p)?;
+        let next = t.at;
+        let done = match t.tok {
+            Tok::Op(o) => o.same(")"),
+            Tok::Eof => {
+                return Result::Err(lex::Error {
+                    at: p.at,
+                    message: "unterminated pattern list".to_string(),
+                });
+            }
+            _ => false,
+        };
+        if done {
+            p.at = next;
+            return Result::Ok(out);
+        }
+        let mut name: String = Vec::new();
+        ast::push_int(&mut name, out.len() as t27);
+        let pat = pattern(p)?;
+        out.push(ast::PatField { name: name, pat: pat });
+        let t2 = peek(p)?;
+        let at2 = t2.at;
+        let comma = match t2.tok {
+            Tok::Op(o) => o.same(","),
+            _ => false,
+        };
+        if comma {
+            p.at = at2;
+        }
+    }
+}
+
+/// `a: p, b, … }` after the `{` — the fields of a struct pattern. A field
+/// with no pattern binds its own name, as it does in a literal.
+fn field_patterns(p: &mut Parser) -> Result<Vec<ast::PatField>, lex::Error> {
+    let mut out: Vec<ast::PatField> = Vec::new();
+    loop {
+        let t = peek(p)?;
+        let next = t.at;
+        let done = match t.tok {
+            Tok::Op(o) => o.same("}"),
+            Tok::Eof => {
+                return Result::Err(lex::Error {
+                    at: p.at,
+                    message: "unterminated field pattern".to_string(),
+                });
+            }
+            _ => false,
+        };
+        if done {
+            p.at = next;
+            return Result::Ok(out);
+        }
+        let name = ident(p)?;
+        let t2 = peek(p)?;
+        let at2 = t2.at;
+        let written = match t2.tok {
+            Tok::Op(o) => o.same(":"),
+            _ => false,
+        };
+        let pat = if written {
+            p.at = at2;
+            pattern(p)?
+        } else {
+            ast::Pattern::Bind(name.to_string())
+        };
+        out.push(ast::PatField { name: name, pat: pat });
+        let t3 = peek(p)?;
+        let at3 = t3.at;
+        let comma = match t3.tok {
+            Tok::Op(o) => o.same(","),
+            _ => false,
+        };
+        if comma {
+            p.at = at3;
+        }
+    }
+}
+
+/// What follows a `(`: nothing, one expression, or a tuple of them.
+fn parenthesized(p: &mut Parser) -> Result<Expr, lex::Error> {
+    let t = peek(p)?;
+    let next = t.at;
+    let empty = match t.tok {
+        Tok::Op(o) => o.same(")"),
+        _ => false,
+    };
+    if empty {
+        p.at = next;
+        return Result::Ok(Expr::Unit);
+    }
+    let first = expr(p)?;
+    let t2 = peek(p)?;
+    let at2 = t2.at;
+    let comma = match t2.tok {
+        Tok::Op(o) => o.same(","),
+        _ => false,
+    };
+    if !comma {
+        expect_op(p, ")")?;
+        return Result::Ok(Expr::Group(Box::new(first)));
+    }
+    let mut items: Vec<Expr> = Vec::new();
+    items.push(first);
+    p.at = at2;
+    loop {
+        let t3 = peek(p)?;
+        let at3 = t3.at;
+        let done = match t3.tok {
+            Tok::Op(o) => o.same(")"),
+            _ => false,
+        };
+        if done {
+            p.at = at3;
+            return Result::Ok(Expr::Tuple(items));
+        }
+        items.push(expr(p)?);
+        let t4 = peek(p)?;
+        let at4 = t4.at;
+        let more = match t4.tok {
+            Tok::Op(o) => o.same(","),
+            _ => false,
+        };
+        if more {
+            p.at = at4;
+        } else {
+            expect_op(p, ")")?;
+            return Result::Ok(Expr::Tuple(items));
+        }
     }
 }

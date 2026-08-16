@@ -1,0 +1,31 @@
+enum Shape { Dot, Line(t27), Rect(t27, t27) }
+struct Span { lo: taddr, hi: taddr }
+fn area(s: &Shape) -> t27 {
+    match s {
+        Shape::Dot => 0,
+        Shape::Line(n) => n,
+        Shape::Rect(w, h) if w > h => w * h,
+        Shape::Rect(w, h) => 0 - w * h,
+    }
+}
+fn kind(n: t27, s: &Span) -> t27 {
+    let r = match n {
+        0 => 1,
+        1 | 2 => 2,
+        -1 => 3,
+        1t => 4,
+        _ => match s {
+            Span { lo, hi: h } => lo as t27 + h as t27,
+        },
+    };
+    match n {
+        big @ 9 => big,
+        _ => r,
+    }
+}
+fn opt(v: Option<t27>) -> t27 {
+    match v {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
