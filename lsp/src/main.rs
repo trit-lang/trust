@@ -23,7 +23,7 @@
 //! follow a `.` depends on the type of what precedes it, and a type is what
 //! only lowering computes; so after a dot this offers **nothing** rather
 //! than the names in scope, which are the one thing that certainly cannot
-//! follow one. See `docs/spec-gaps.md` G0.5.
+//! follow one. See `docs/spec-gaps.md` G0.19.
 
 mod json;
 

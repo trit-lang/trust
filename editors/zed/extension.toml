@@ -4,7 +4,7 @@ description = "Trust language support: highlighting, and diagnostics from the co
 version = "0.1.0"
 schema_version = 1
 authors = ["the Trust authors"]
-repository = "https://github.com/Young-TW/trust-lang"
+repository = "https://github.com/trit-lang/trust"
 
 # Zed fetches a grammar from a git repository rather than from the extension,
 # so this points back at this one: it runs `git remote add`, `git fetch` and
@@ -14,12 +14,8 @@ repository = "https://github.com/Young-TW/trust-lang"
 # the grammar changes. That is the one piece of bookkeeping a subdirectory
 # costs over a separate repository, and it buys the grammar being checked
 # against the examples in the same commit that changes either.
-#
-# Note this is the repository the code is *pushed* to. Naming §2 names the
-# monorepo `trit-lang/trust`, which is where it is meant to end up; Zed needs
-# somewhere it can fetch from today (G0.6).
 [grammars.trust]
-repository = "https://github.com/Young-TW/trust-lang"
+repository = "https://github.com/trit-lang/trust"
 rev = "faa68b34be1ef47c50cbb8c928deece91fa35511"
 path = "editors/tree-sitter-trust"
 

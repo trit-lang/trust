@@ -2574,7 +2574,7 @@ An adaptor chain is **791 → 731**, and HPL **3 246 793 → 3 233 721** — the
 first thing since inlining to move HPL at all, because `let` of an aggregate
 is something HPL does even though building one in a loop is not.
 
-**G0.4 — `trust run`, and where the three seconds go.** `trustc compile`
+**G0.18 — `trust run`, and where the three seconds go.** `trustc compile`
 writes assembly and stops, `tritium asm` makes an image and `tritium run`
 executes one: three commands and two temporary files to answer "what does
 this program print", which is the question asked most often. `trust run
@@ -3008,27 +3008,7 @@ is worth zero on this machine**: `alui.mul` is 14% of HPL, but replacing
 for a one-instruction add. A register-starved machine with no multiply
 penalty gets nothing from the classic transformation.
 
-**G0.6 — the repository is not where Naming §2 says it is.**
-Naming §2 names the monorepo **`trit-lang/trust`**. The code is pushed to
-**`Young-TW/trust-lang`**, and `editors/zed/extension.toml` names *that* one,
-because Zed fetches the tree-sitter grammar over git — `git remote add`,
-`git fetch <rev>`, `git checkout` — and so needs a URL that resolves today.
-`Cargo.toml` and Naming §2 name the destination.
-
-The handle changed while this gap was open, which is worth recording rather
-than quietly fixing. §1.2 said the handle was `trust-lang`, mirroring
-`rust-lang` "exactly and for the same reason". It is held by a GitHub account
-with content, so it will not be released, and the rule could not be satisfied
-as written. `trit-lang` replaces it — not as a fallback, but because `trit` is
-the one term here no other project's audience uses, which is the property the
-rule exists to buy. §5 records `trust-lang` and the padded variants so neither
-is re-proposed.
-
-This closes when the organisation exists and the repository is under it: the
-two URLs in `extension.toml` follow, and this entry goes. Commit SHAs do not
-change when a repository moves, so the pinned `rev` stays valid either way.
-
-**G0.5 — an editor can be told what is wrong, and where.**
+**G0.19 — an editor can be told what is wrong, and where.**
 `trust check` compiles no further than the frontend and prints one diagnostic
 per line; `trust-lsp` sends the same over stdio, so an editor squiggles as you
 type, from **exactly the compiler that will build the program**. There is no

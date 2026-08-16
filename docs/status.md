@@ -126,10 +126,10 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | Backend (TIR → TRISC-27) | works, with a **linear-scan register allocator over live intervals**, decided once per function (G8.9, G8.11: −34.8%, and frame traffic down from 44% of everything executed to 13.5%) and instruction selection that uses the fields the encoding has — immediates, branch displacements, access displacements (G8.6−G8.8: a further −26.0% on HPL). A parameter stays in the register it arrived in where nothing can clobber it, and a function whose values all fit in registers opens no frame. Block parameters are allocated too, with each edge a parallel copy (G8.12); no peephole pass |
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
 | `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6). **83 M instructions/second**, 32× what it was (G8.15) |
-| `trust` driver | compile and run in one command, nothing on the disk (G0.4); `trust check` reports diagnostics and stops |
-| `trust-lsp` | diagnostics over stdio, from the compiler itself — no second implementation of the language. Ranges are the expression that is wrong, in the protocol's UTF-16 columns (G0.5) |
-| `editors/` | a tree-sitter grammar (a second parser, held to the first by `scripts/grammar.sh`) and a Zed extension. G0.5 |
-| `lang::index` | an outline, go-to-definition, hover, find-references, rename and completion, from the AST alone — so both work on a file that does not compile. Names resolve by scope and spelling; what needs a type is left unanswered rather than guessed (G0.5) |
+| `trust` driver | compile and run in one command, nothing on the disk (G0.18); `trust check` reports diagnostics and stops |
+| `trust-lsp` | diagnostics over stdio, from the compiler itself — no second implementation of the language. Ranges are the expression that is wrong, in the protocol's UTF-16 columns (G0.19) |
+| `editors/` | a tree-sitter grammar (a second parser, held to the first by `scripts/grammar.sh`) and a Zed extension. G0.19 |
+| `lang::index` | an outline, go-to-definition, hover, find-references, rename and completion, from the AST alone — so both work on a file that does not compile. Names resolve by scope and spelling; what needs a type is left unanswered rather than guessed (G0.19) |
 | spans | every token, AST node and error carries one: the line, and the characters it covers. `LineMap` turns an offset into a column for a terminal or a code-unit offset for an editor |
 
 **447 tests, zero clippy warnings, 95 commits.** `scripts/stats.sh`.

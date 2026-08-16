@@ -55,3 +55,32 @@ rm -f "$out"
 n=$(grep -rhoE '(AM|TIR|ISA|Ch\. [0-9]) §[0-9]+(\.[0-9]+)*' \
   core/src compiler/src vm/src spec docs README.md 2>/dev/null | sort -u | wc -l)
 printf 'citations: %d distinct, every section named exists\n' "$n"
+
+# The gap registry, checked the same way and for the same reason.
+#
+# `docs/spec-gaps.md` is a registry: other documents and the source cite an
+# entry by number, so a number that names two entries names neither. Three
+# collisions accumulated before anything looked — G0.4, G0.5 and G0.6 — each
+# added by someone reaching for "the next number" without reading to the end
+# of a file that is thousands of lines long. Reading is what a script is for.
+gaps=docs/spec-gaps.md
+bad=$(grep -oE '^\*\*G[0-9]+\.[0-9]+[a-z]*' "$gaps" | sed 's/^\*\*//' | sort | uniq -d)
+if [ -n "$bad" ]; then
+  echo "$bad" | sed 's/^/gap number names more than one entry: /'
+  exit 1
+fi
+
+# And a citation of a gap that does not exist, which is the other way the
+# registry stops being one.
+missing=$(grep -rhoE '\bG[0-9]+\.[0-9]+[a-z]*' \
+  core/src compiler/src vm/src lsp/src driver/src spec docs editors README.md 2>/dev/null |
+  sort -u |
+  while IFS= read -r g; do
+    grep -qE "^\*\*$(echo "$g" | sed 's/\./\\./g')[^0-9]" "$gaps" || echo "$g"
+  done)
+if [ -n "$missing" ]; then
+  echo "$missing" | sed 's/^/no such gap: /'
+  exit 1
+fi
+printf 'gaps: %d entries, every number unique and every citation resolves\n' \
+  "$(grep -cE '^\*\*G[0-9]+\.[0-9]+[a-z]*' "$gaps")"
