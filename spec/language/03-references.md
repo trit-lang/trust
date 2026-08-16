@@ -191,6 +191,28 @@ with `(*(*r)).x`.
 Automatic dereference applies to `.`, and nowhere else. `r + 1` is an error,
 not `*r + 1`.
 
+### 2.3a An exclusive reference is accepted where a shared one is wanted
+
+Where a `&T` is expected, a `&mut T` is accepted, and means the same place.
+
+This is not a dereference and not a conversion. The value is the same
+address; what changes is the permission carried with it, and it changes
+*downward* — the exclusive reference the caller holds is not weakened, and
+the callee is given strictly less than it had. §2.2's rule cannot be broken
+by giving away less: while the exclusive reference is live, the place is
+reachable only through it, and a shared reference derived from it is reached
+through it too.
+
+The reverse is an error: a `&T` where a `&mut T` is wanted is asking for a
+permission nobody has.
+
+> **Informative.** This is Rust's implicit reborrow, and it is here for the
+> reason it is there: without it, a function that only reads has to be
+> written twice, or every caller has to write `&*r`. Draft 0.1 omitted it
+> and the omission was found by writing a parser, where every helper that
+> only *looks* at the position is called from something holding the
+> exclusive reference. `&*r` remains writable and means exactly this.
+
 ### 2.4 References are never null and never dangle
 
 A reference always refers to an initialized value of its type that is live for

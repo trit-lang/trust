@@ -5225,6 +5225,17 @@ impl Fn<'_> {
         if let Some(want) = expected
             && ty != *want
         {
+            // An exclusive reference is accepted where a shared one is
+            // wanted (Ch. 3 §2.3a). It is neither a dereference nor a
+            // conversion — the same address, carrying less permission — so
+            // it is checked before the two that do convert a representation.
+            if let (Ty::Ref(have, true), Ty::Ref(wanted, false)) = (&ty, want)
+                && have == wanted
+            {
+                let shared = Ty::Ref(have.clone(), false);
+                note(&shared);
+                return Ok((v, shared));
+            }
             if let Some(fat) = self.coerce_dyn(v.clone(), &ty, want, e.span())? {
                 note(&fat.1);
                 return Ok(fat);

@@ -20,11 +20,10 @@ pub struct Parser {
 
 /// The next token, without consuming it.
 ///
-/// It takes `&mut` and does not need it: a `&mut T` is not a `&T` here, and
-/// every caller has the exclusive one (G9.37). Rust reborrows implicitly;
-/// this language has no rule for it, and Ch. 3 §2.3's "automatic dereference
-/// is for `.` and nothing else" is why.
-pub fn peek(p: &mut Parser) -> Result<lex::Taken, lex::Error> {
+/// It takes the shared reference it needs, and every caller holds the
+/// exclusive one — which is accepted where a shared one is wanted (Ch. 3
+/// §2.3a). Draft 0.1 had no such rule, and this said `&mut` and meant `&`.
+pub fn peek(p: &Parser) -> Result<lex::Taken, lex::Error> {
     lex::one(&p.src, p.at)
 }
 

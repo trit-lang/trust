@@ -182,3 +182,28 @@ fn what_a_pattern_takes_through_a_box_is_borrowed() {
     let why = refusal(src).expect("refused");
     assert!(why.contains("cannot be moved out of"), "{why}");
 }
+
+#[test]
+fn an_exclusive_reference_is_accepted_where_a_shared_one_is_wanted() {
+    // Ch. 3 §2.3a. Neither a dereference nor a conversion: the same
+    // address, carrying less permission, and the permission goes down.
+    let src = "struct P { n: t27 }\n\
+               fn read(p: &P) -> t27 { p.n }\n\
+               fn write(p: &mut P) -> t27 { p.n += 1; read(p) }\n\
+               fn main() -> t27 {\n\
+               \x20   let mut p = P { n: 1 };\n\
+               \x20   let a = write(&mut p);\n\
+               \x20   let b = read(&p);\n\
+               \x20   a + b\n}\n";
+    assert_eq!(refusal(src), None);
+}
+
+#[test]
+fn a_shared_reference_is_not_accepted_where_an_exclusive_one_is_wanted() {
+    // The reverse is asking for a permission nobody has.
+    let src = "struct P { n: t27 }\n\
+               fn write(p: &mut P) { p.n += 1; }\n\
+               fn main() -> t27 { let mut p = P { n: 1 }; let r = &p; write(r); p.n }\n";
+    let why = refusal(src).expect("refused");
+    assert!(why.contains("expected &mut P"), "{why}");
+}

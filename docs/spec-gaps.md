@@ -2623,13 +2623,21 @@ let op = match t.tok { Tok::Op(o) => o, _ => return Ok(left) };
 left = Expr::Binary(op, Box::new(left), Box::new(right));
 ```
 
-**G9.38 — `&mut T` is not a `&T`.** A helper that only reads takes `&Parser`
-and every caller holds `&mut Parser`, and there is no rule that turns one
-into the other. Rust reborrows implicitly; Ch. 3 §2.3's "automatic
-dereference is for `.` and nothing else" is why this does not. The workaround
-is to take `&mut` and not use it, which is what `bootstrap/parse.tr` does and
-says. What would fix it is a coercion, and it is a decision about references
-rather than about parsers.
+**G9.38 — `&mut T` was not a `&T` — RESOLVED.** A helper that only reads
+takes `&Parser` and every caller holds `&mut Parser`, and there was no rule
+that turned one into the other, so `bootstrap/parse.tr` said `&mut` and meant
+`&`.
+
+Ch. 3 **§2.3a** now says it: where a `&T` is expected, a `&mut T` is
+accepted and means the same place. It is neither a dereference nor a
+conversion — the same address, carrying less permission — which is why it
+sits beside §2.3 rather than under it, and why it does not weaken "automatic
+dereference applies to `.` and nowhere else". §2.2 cannot be broken by giving
+away less: while the exclusive reference is live the place is reachable only
+through it, and a shared reference derived from it is reached through it too.
+
+The reverse stays an error, and says so: a `&T` where a `&mut T` is wanted is
+asking for a permission nobody has.
 
 **G9.35 — a branch that returned still moved.** Writing a lexer in Trust hit
 this on its first page:
