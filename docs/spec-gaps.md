@@ -2777,6 +2777,35 @@ Three more tests hold the other side: a loop that counts past a constant
 length, one bounded by a runtime value the callee cannot relate to the slice,
 and one that outruns a `Vec`. All three still fault.
 
+**G8.20 — no, a release mode will not remove the bounds checks.** Asked once
+and worth answering here, because a 30% number invites it.
+
+Ch. 2 §3 is **normative**: an out-of-bounds access "faults or panics per the
+safety chapter, **never proceeds**". A flag that removed the check would make
+a program *proceed*, which is a change to what it means and not to how fast it
+runs.
+
+The line is in the same place Rust puts it, and Rust's own split says why:
+`--release` turns off *overflow* checks and keeps *bounds* checks, because
+overflow is merely wrong and out-of-bounds is memory-unsafe. Trust does not
+need even that flag — the overflow behaviour is written into the operation as
+`.wrap`, `.trap` or `.flag` (Ch. 1 §4) — so this language currently has **no
+flag-dependent semantics at all**, and that is a property worth keeping. A
+language that is safe only when the optimizer is off should not be called
+Trust.
+
+Three things legitimately remove a check, and a build flag is none of them:
+
+1. **Proving it.** G8.19 recovered 48% of what they cost on HPL.
+2. **Hoisting it** out of a loop, which needs the interval reasoning this
+   compiler still has none of.
+3. **An `unsafe` unchecked index**, which Ch. 3 §6 reserves the chapter for —
+   and which must be visible *at the call site*, in the source, so that the
+   line doing it says so.
+
+The third is the only route to HPL's remaining 16%, and its price is that the
+program admits what it is doing.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The
