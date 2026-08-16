@@ -540,6 +540,14 @@ pub enum Stmt {
         ty: Option<Ty>,
         /// Its initializer.
         value: Expr,
+        /// A pattern to take the value apart with, when one was written
+        /// (§4). `name` then binds the whole and is moved into the pattern,
+        /// which is what lets a struct with two non-`Copy` fields be taken
+        /// apart at all (G9.46).
+        ///
+        /// Boxed because a `Stmt` is mostly `Let` and mostly has no pattern,
+        /// and a `Pattern` is the largest thing in one.
+        pattern: Option<Box<Pattern>>,
         /// Where it was written.
         span: Span,
     },

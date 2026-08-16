@@ -5125,6 +5125,7 @@ impl Fn<'_> {
                 name_span,
                 ty,
                 value,
+                pattern,
                 span,
             } => {
                 let declared = match ty {
@@ -5189,21 +5190,61 @@ impl Fn<'_> {
                     let old = slot.clone();
                     let new = self.fresh(&format!("{name}.slot"));
                     self.rename_value(&old, &new);
-                    self.declare_at(name, new, ty.clone(), *mutable);
-                    return Ok(());
+                    self.declare_at(name, new.clone(), ty.clone(), *mutable);
+                    return self.let_pattern(name, &new, &ty, pattern.as_deref(), *span);
                 }
                 let local = self.declare(name, ty.clone(), *mutable);
                 // An aggregate is copied into the binding's own storage, so
                 // that writing to one does not write through to another.
                 let slot = local.slot.clone();
                 self.store_at(&slot, 0, &ty, v, *span)?;
-                Ok(())
+                self.let_pattern(name, &slot, &ty, pattern.as_deref(), *span)
             }
             ast::Stmt::Expr(e) => {
                 self.expr(e, None)?;
                 Ok(())
             }
         }
+    }
+
+    /// `let P { a, b } = e;` — take the whole apart into the names the
+    /// pattern writes.
+    ///
+    /// The whole was bound first, under a name no program can write, and is
+    /// **moved** into the pattern: the parts own what it held, and it owns
+    /// nothing, so the drop at the end of the scope is one drop per part.
+    /// Through a reference nothing moves and the parts borrow, which is the
+    /// same rule a `match` follows (Ch. 3 §1.2).
+    fn let_pattern(
+        &mut self,
+        name: &str,
+        slot: &str,
+        ty: &Ty,
+        pattern: Option<&ast::Pattern>,
+        span: Span,
+    ) -> R<()> {
+        let Some(pattern) = pattern else {
+            return Ok(());
+        };
+        let mut addr = Operand::Value(slot.to_string());
+        let mut at = ty.clone();
+        let mut borrowed = false;
+        while let Ty::Ref(target, _) | Ty::Boxed(target) = at.clone() {
+            if target.is_unsized() {
+                break;
+            }
+            borrowed = true;
+            addr = self.load_from(addr, &at);
+            at = *target;
+        }
+        if !at.is_aggregate() {
+            return err(span, format!("cannot take a {at} apart: it has no fields"));
+        }
+        self.sub_pattern(addr, &at, pattern, None, borrowed, span)?;
+        if !borrowed {
+            self.mark_moved(name);
+        }
+        Ok(())
     }
 
     // --------------------------------------------------------- expressions
@@ -11158,6 +11199,30 @@ impl Fn<'_> {
                     self.declare(bound, ty.clone(), false)
                 };
                 self.store_at(&local.slot, 0, ty, v, span)
+            }
+            // `(a, b)` — a tuple has one shape too, and its fields are its
+            // positions (Ch. 2 §3).
+            ast::Pattern::Tuple(items, at) => {
+                let Ty::Tuple(parts) = peel(ty) else {
+                    return err(*at, format!("a tuple pattern does not match {ty}"));
+                };
+                if parts.len() != items.len() {
+                    return err(
+                        *at,
+                        format!(
+                            "this tuple has {} part(s), the pattern names {}",
+                            parts.len(),
+                            items.len()
+                        ),
+                    );
+                }
+                let declared = self.types.fields(&peel(ty).clone());
+                for (i, sub) in items.iter().enumerate() {
+                    let (_, ft, off) = declared[i].clone();
+                    let p = self.offset(addr.clone(), off);
+                    self.sub_pattern(p, &ft, sub, fail, borrowed, span)?;
+                }
+                Ok(())
             }
             ast::Pattern::Aggregate(path, fields, at) => {
                 // A struct pattern names every field it wants and tests

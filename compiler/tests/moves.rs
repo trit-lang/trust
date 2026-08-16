@@ -289,3 +289,21 @@ fn a_struct_pattern_has_one_arm_because_a_struct_has_one_shape() {
                fn main() -> t27 { 0 }\n";
     assert!(refusal(src).expect("a refusal").contains("has one shape"));
 }
+
+#[test]
+fn a_let_may_take_a_struct_apart() {
+    let src = "struct P { a: Vec<t27>, b: Vec<t27> }\n\
+               fn parts(p: P) -> taddr { let P { a, b } = p; a.len() + b.len() }\n\
+               fn main() -> t27 { let p = P { a: Vec::new(), b: Vec::new() }; \
+               parts(p) as t27 }\n";
+    assert_eq!(refusal(src), None);
+}
+
+#[test]
+fn a_tuple_of_values_that_own_can_be_taken_apart() {
+    // The old desugaring read the fields out one by one, which moves the
+    // whole on the first and refuses the second (G9.46).
+    let src = "fn two() -> (Vec<t27>, Vec<t27>) { (Vec::new(), Vec::new()) }\n\
+               fn main() -> t27 { let (a, b) = two(); (a.len() + b.len()) as t27 }\n";
+    assert_eq!(refusal(src), None);
+}

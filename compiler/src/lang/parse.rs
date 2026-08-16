@@ -1427,6 +1427,19 @@ impl Parser {
             return self.let_tuple(span);
         }
         let mutable = self.eat_kw("mut");
+        // `let P { a, b } = e;` — §4's grammar says a *pattern*, and this is
+        // the one that takes a struct apart. The whole is bound to a name no
+        // program can write and moved into the pattern from there, so
+        // nothing is owned twice and nothing is left half-owned.
+        //
+        // `mut` cannot precede one: what a pattern binds is what is
+        // mutable, and there is nowhere yet to write that.
+        if !mutable
+            && matches!(self.peek(), Tok::Ident(_))
+            && matches!(self.peek_at(1), Tok::Op("{"))
+        {
+            return self.let_pattern(span);
+        }
         // `let _ = e;` — §5.2's grammar says a *pattern*, and `_` is the one
         // that binds nothing (§4). It is given a name no program can write,
         // so the value is dropped where any other binding would be: at the
@@ -1454,6 +1467,33 @@ impl Parser {
             name_span,
             ty,
             value,
+            pattern: None,
+            span,
+        }])
+    }
+
+    /// `let P { a, b } = e;` — the whole bound out of reach, and taken
+    /// apart by the pattern machinery rather than by field reads.
+    fn let_pattern(&mut self, span: Span) -> R<Vec<Stmt>> {
+        let pattern = self.pattern()?;
+        let ty = if self.eat_op(":") {
+            Some(self.ty()?)
+        } else {
+            None
+        };
+        self.expect_op("=")?;
+        let value = self.expr()?;
+        self.expect_op(";")?;
+        // `#` is not an identifier character, so this cannot collide with
+        // anything a program can write.
+        self.counter += 1;
+        Ok(vec![Stmt::Let {
+            mutable: false,
+            name: format!("#pat{}", self.counter),
+            name_span: span,
+            ty,
+            value,
+            pattern: Some(Box::new(pattern)),
             span,
         }])
     }
@@ -1472,6 +1512,34 @@ impl Parser {
         if names.is_empty() {
             return self.err("a tuple binding names nothing");
         }
+        // With nothing written `mut`, the whole is taken apart by the
+        // pattern machinery, which is what lets the parts be values that
+        // own something. The `mut` form still reads the fields out one by
+        // one, and so still wants every part to be `Copy` (G9.46).
+        if !names.iter().any(|(m, _, _)| *m) {
+            let ty = if self.eat_op(":") {
+                Some(self.ty()?)
+            } else {
+                None
+            };
+            self.expect_op("=")?;
+            let value = self.expr()?;
+            self.expect_op(";")?;
+            let items = names
+                .iter()
+                .map(|(_, n, at)| Pattern::Bind(n.clone(), *at))
+                .collect();
+            self.counter += 1;
+            return Ok(vec![Stmt::Let {
+                mutable: false,
+                name: format!("#pat{}", self.counter),
+                name_span: span,
+                ty,
+                value,
+                pattern: Some(Box::new(Pattern::Tuple(items, span))),
+                span,
+            }]);
+        }
         let ty = if self.eat_op(":") {
             Some(self.ty()?)
         } else {
@@ -1487,6 +1555,7 @@ impl Parser {
         let whole = format!("#t{}", self.counter);
         let mut out = vec![Stmt::Let {
             mutable: false,
+            pattern: None,
             // The whole-tuple binding is the compiler's, not the file's, so
             // it points at the `let` that stands for it.
             name: whole.clone(),
@@ -1501,6 +1570,7 @@ impl Parser {
                 name,
                 name_span,
                 ty: None,
+                pattern: None,
                 value: Expr::Field(
                     Box::new(Expr::Path(whole.clone(), span)),
                     i.to_string(),
@@ -1729,6 +1799,7 @@ impl Parser {
                     name: it,
                     name_span: span,
                     ty: None,
+                    pattern: None,
                     // Ch. 4 §5.7: the loop's expression is turned into an
                     // iterator first, which is what lets `for c in s` walk a
                     // string and not only something that is already one.

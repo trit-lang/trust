@@ -876,8 +876,17 @@ impl Builder {
                         name_span,
                         ty,
                         value,
+                        pattern,
                         span: _,
                     } => {
+                        // A `let` with a pattern binds what the pattern
+                        // binds; the name is the compiler's and names
+                        // nothing a reader wrote (§4).
+                        if let Some(p) = pattern {
+                            s.expr(value);
+                            s.pattern(p);
+                            continue;
+                        }
                         // The initializer is read before the name is bound,
                         // so `let x = x;` means the outer `x` (§5.2).
                         s.expr(value);
