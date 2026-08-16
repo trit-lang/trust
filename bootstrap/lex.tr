@@ -67,12 +67,33 @@ pub struct Taken {
     pub at: taddr,
 }
 
+/// What is wrong, and where.
+///
+/// The position is a character offset, which is what a `str` is indexed by
+/// (Ch. 5 §1.1) — not a byte, and not a line, because a line is computed
+/// from an offset and an offset is not computed from a line.
+pub struct Error {
+    pub at: taddr,
+    pub message: String,
+}
+
+fn wrong(at: taddr, message: &str) -> Error {
+    Error { at: at, message: message.to_string() }
+}
+
+/// Reserved for a chapter that does not exist yet (§1.3). Using one is an
+/// error that names the reason, rather than a mysterious parse failure.
+pub fn is_reserved(w: &str) -> bool {
+    same(w, "crate") || same(w, "move") || same(w, "ref") || same(w, "static")
+        || same(w, "union") || same(w, "unsafe")
+}
+
 /// Read one token from `s` starting at `at`, having skipped whitespace and
 /// comments. `at` is one past the end of the token.
-pub fn one(s: &str, from: taddr) -> Taken {
-    let mut i = skip(s, from);
+pub fn one(s: &str, from: taddr) -> Result<Taken, Error> {
+    let mut i = skip(s, from)?;
     if i >= s.len() {
-        return Taken { tok: Tok::Eof, at: i };
+        return Result::Ok(Taken { tok: Tok::Eof, at: i });
     }
     let c = s[i];
 
@@ -86,16 +107,19 @@ pub fn one(s: &str, from: taddr) -> Taken {
         }
         let text = slice(s, start, i);
         if trit_literal(&text) {
-            return Taken { tok: Tok::TritLit(trit_value(&text)), at: i };
+            return Result::Ok(Taken { tok: Tok::TritLit(trit_value(&text)), at: i });
         }
-        return Taken { tok: Tok::Int(number(&text)), at: i };
+        if !well_formed(&text) {
+            return Result::Err(wrong(start, "this is not a number in any of the three radices"));
+        }
+        return Result::Ok(Taken { tok: Tok::Int(number(&text)), at: i });
     }
 
     // A lifetime and a character literal both open with `'`, and are told
     // apart by the third character: `'a'` closes and `'a` does not (§1.4).
     if c == '\'' {
         if i + 2 < s.len() && s[i + 2] == '\'' && s[i + 1] != '\\' {
-            return Taken { tok: Tok::CharLit(s[i + 1] as t27), at: i + 3 };
+            return Result::Ok(Taken { tok: Tok::CharLit(s[i + 1] as t27), at: i + 3 });
         }
         if i + 1 < s.len() && s[i + 1] == '\\' {
             return escape_literal(s, i);
@@ -105,7 +129,10 @@ pub fn one(s: &str, from: taddr) -> Taken {
         while j < s.len() && is_alnum(s[j]) {
             j += 1;
         }
-        return Taken { tok: Tok::Lifetime(slice(s, start, j)), at: j };
+        if j == start {
+            return Result::Err(wrong(i, "in a character literal: it is empty, or is not closed"));
+        }
+        return Result::Ok(Taken { tok: Tok::Lifetime(slice(s, start, j)), at: j });
     }
 
     if is_alpha(c) {
@@ -115,25 +142,42 @@ pub fn one(s: &str, from: taddr) -> Taken {
         }
         let w = slice(s, start, i);
         if is_keyword(&w) {
-            return Taken { tok: Tok::Kw(w), at: i };
+            return Result::Ok(Taken { tok: Tok::Kw(w), at: i });
         }
-        return Taken { tok: Tok::Ident(w), at: i };
+        if is_reserved(&w) {
+            return Result::Err(wrong(start, "reserved for a chapter that is not written yet"));
+        }
+        return Result::Ok(Taken { tok: Tok::Ident(w), at: i });
     }
 
     if c == '"' {
+        let open = i;
         i += 1;
         let start = i;
-        while i < s.len() && s[i] != '"' {
+        // A newline inside one ends it: an unclosed quote would otherwise
+        // swallow the rest of the file and be reported somewhere unrelated.
+        while i < s.len() && s[i] != '"' && s[i] != '\n' {
             i += 1;
         }
+        if i >= s.len() || s[i] == '\n' {
+            return Result::Err(wrong(open, "unterminated string literal"));
+        }
         let text = slice(s, start, i);
-        return Taken { tok: Tok::Str(text), at: i + 1 };
+        return Result::Ok(Taken { tok: Tok::Str(text), at: i + 1 });
+    }
+
+    // `^` and `~` are reserved, and the refusal names what replaces them.
+    if c == '^' || c == '~' {
+        return Result::Err(wrong(
+            i,
+            "reserved: the trit-wise operations are the methods `tmin`, `tmax`, `tmul` and `tneg`",
+        ));
     }
 
     // An operator, longest first (§1.5).
     let three = slice(s, i, min(i + 3, s.len()));
     if same(&three, "<<=") || same(&three, ">>=") || same(&three, "<=>") || same(&three, "..=") {
-        return Taken { tok: Tok::Op(three), at: i + 3 };
+        return Result::Ok(Taken { tok: Tok::Op(three), at: i + 3 });
     }
     let two = slice(s, i, min(i + 2, s.len()));
     if same(&two, "..") || same(&two, "==") || same(&two, "!=") || same(&two, "<=") || same(&two, ">=")
@@ -141,14 +185,64 @@ pub fn one(s: &str, from: taddr) -> Taken {
         || same(&two, "::") || same(&two, "+=") || same(&two, "-=") || same(&two, "*=")
         || same(&two, "/=") || same(&two, "%=") || same(&two, "<<") || same(&two, ">>")
     {
-        return Taken { tok: Tok::Op(two), at: i + 2 };
+        return Result::Ok(Taken { tok: Tok::Op(two), at: i + 2 });
     }
     let one = slice(s, i, i + 1);
-    Taken { tok: Tok::Op(one), at: i + 1 }
+    if !is_punctuation(c) {
+        return Result::Err(wrong(i, "unexpected character"));
+    }
+    Result::Ok(Taken { tok: Tok::Op(one), at: i + 1 })
+}
+
+/// §1.5's punctuation, one character at a time.
+fn is_punctuation(c: char) -> bool {
+    c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}'
+        || c == ',' || c == ';' || c == ':' || c == '.' || c == '#' || c == '='
+        || c == '<' || c == '>' || c == '+' || c == '-' || c == '*' || c == '/'
+        || c == '%' || c == '!' || c == '&' || c == '|' || c == '@' || c == '_'
+        || c == '?' || c == '$'
+}
+
+/// Whether a run of digits and letters is a number at all (§1.4).
+fn well_formed(text: &str) -> bool {
+    if text.len() > 2 && text[0] == '0' && (text[1] == 't' || text[1] == 'T') {
+        let mut i: taddr = 2;
+        while i < text.len() {
+            let c = text[i];
+            if c != '_' && c != '0' && c != '1' && c != 'T' && c != 't' {
+                return false;
+            }
+            i += 1;
+        }
+        return true;
+    }
+    if text.len() > 2 && text[0] == '0' && (text[1] == 'h' || text[1] == 'H') {
+        let mut i: taddr = 2;
+        while i < text.len() {
+            let c = text[i];
+            let ok = c == '_' || is_digit(c) || (c >= 'A' && c <= 'Q') || (c >= 'a' && c <= 'q');
+            if !ok {
+                return false;
+            }
+            i += 1;
+        }
+        return true;
+    }
+    let mut i: taddr = 0;
+    while i < text.len() {
+        if text[i] != '_' && !is_digit(text[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 /// A character literal whose character is written `\\…` (Ch. 5 §1.4).
-fn escape_literal(s: &str, at: taddr) -> Taken {
+fn escape_literal(s: &str, at: taddr) -> Result<Taken, Error> {
+    if at + 2 >= s.len() {
+        return Result::Err(wrong(at, "in an escape: the file ends"));
+    }
     let e = s[at + 2];
     if e == 'u' {
         // `\u{…}`, hexadecimal, because it names a code point in a standard
@@ -159,7 +253,12 @@ fn escape_literal(s: &str, at: taddr) -> Taken {
             v = v * 16 + hex(s[i]);
             i += 1;
         }
-        return Taken { tok: Tok::CharLit(v), at: i + 2 };
+        return Result::Ok(Taken { tok: Tok::CharLit(v), at: i + 2 });
+    }
+    let known = e == 'n' || e == 'r' || e == 't' || e == '0' || e == '\\'
+        || e == '\'' || e == '"';
+    if !known {
+        return Result::Err(wrong(at, "in an escape: that is not one"));
     }
     let v = if e == 'n' {
         10
@@ -172,7 +271,7 @@ fn escape_literal(s: &str, at: taddr) -> Taken {
     } else {
         e as t27
     };
-    Taken { tok: Tok::CharLit(v), at: at + 4 }
+    Result::Ok(Taken { tok: Tok::CharLit(v), at: at + 4 })
 }
 
 fn hex(c: char) -> t27 {
@@ -201,7 +300,7 @@ fn slice(s: &str, from: taddr, to: taddr) -> String {
 }
 
 /// Past whitespace and comments (§1.2), which are the same thing.
-fn skip(s: &str, from: taddr) -> taddr {
+fn skip(s: &str, from: taddr) -> Result<taddr, Error> {
     let mut i = from;
     while i < s.len() {
         if is_space(s[i]) {
@@ -211,16 +310,16 @@ fn skip(s: &str, from: taddr) -> taddr {
                 i += 1;
             }
         } else if s[i] == '/' && i + 1 < s.len() && s[i + 1] == '*' {
-            i = block_comment(s, i);
+            i = block_comment(s, i)?;
         } else {
-            return i;
+            return Result::Ok(i);
         }
     }
-    i
+    Result::Ok(i)
 }
 
 /// Past a block comment, which nests (§1.2).
-fn block_comment(s: &str, from: taddr) -> taddr {
+fn block_comment(s: &str, from: taddr) -> Result<taddr, Error> {
     let mut i = from + 2;
     let mut depth = 1;
     while i < s.len() && depth > 0 {
@@ -234,7 +333,10 @@ fn block_comment(s: &str, from: taddr) -> taddr {
             i += 1;
         }
     }
-    i
+    if depth > 0 {
+        return Result::Err(wrong(from, "unterminated block comment"));
+    }
+    Result::Ok(i)
 }
 
 /// Whether a run of digits and letters is a `trit` literal (§1.4).

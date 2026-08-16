@@ -18,7 +18,20 @@ fn main() -> t27 {
     let src = read_all();
     let mut at: taddr = 0;
     loop {
-        let t = lex::one(&src, at);
+        let taken = match lex::one(&src, at) {
+            Result::Ok(t) => t,
+            // A refusal prints where it refused and nothing about *why*:
+            // the two lexers are held to agreeing on what is wrong and on
+            // the character it is at, and not on how each says it. Wording
+            // is not the thing a second implementation checks.
+            Result::Err(e) => {
+                print("error ");
+                print_int(e.at as t27);
+                println("");
+                return 0;
+            }
+        };
+        let t = taken;
         at = t.at;
         match t.tok {
             Tok::Eof => { println("eof"); return 0; }

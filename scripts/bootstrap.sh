@@ -17,10 +17,11 @@
 # maximal munch, a string holding what looks like a comment, a comment
 # holding what looks like a comment, and text above the basic plane.
 #
-# What is *not* covered, and so is not claimed: the lexical **errors**. The
-# Rust lexer refuses `crate`, `^`, `~`, an unterminated string and a bad
-# escape by name (Ch. 0 §1.3, §2.5); the Trust one does not refuse anything
-# yet, so the corpus holds nothing it would have to refuse.
+# `bootstrap/refuse/` is the other half: each file is one the lexers must
+# **refuse**, and they are compared on *where* rather than on why. Two
+# implementations agreeing on the wording of a diagnostic would be one
+# copying the other; agreeing on which character is wrong is the claim worth
+# checking.
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -38,5 +39,23 @@ for f in bootstrap/corpus/*.tr; do
     fi
     n=$((n + $(printf '%s\n' "$rust" | wc -l)))
 done
-printf 'bootstrap: two lexers agree on %d tokens across %d files\n' \
-    "$n" "$(ls bootstrap/corpus/*.tr | wc -l | tr -d ' ')"
+
+r=0
+for f in bootstrap/refuse/*.tr; do
+    rust=$("$trust" lex "$f" | tail -1)
+    mine=$("$trust" run bootstrap/main.tr < "$f" | tail -1)
+    case "$rust" in
+        error\ *) ;;
+        *) echo "bootstrap: $f is in refuse/ and the Rust lexer accepted it" >&2; exit 1 ;;
+    esac
+    if [ "$rust" != "$mine" ]; then
+        echo "bootstrap: the two lexers refuse $f differently" >&2
+        echo "  rust: $rust" >&2
+        echo "  trust: $mine" >&2
+        exit 1
+    fi
+    r=$((r + 1))
+done
+
+printf 'bootstrap: two lexers agree on %d tokens across %d files, and refuse %d more at the same character\n' \
+    "$n" "$(ls bootstrap/corpus/*.tr | wc -l | tr -d ' ')" "$r"

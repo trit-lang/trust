@@ -1,0 +1,3 @@
+fn f() -> t27 { let s = "unclosed;
+    0
+}

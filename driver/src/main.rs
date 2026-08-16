@@ -136,9 +136,13 @@ fn print_tokens(src: &str) -> ExitCode {
     use lang::lex::Tok;
     let toks = match lang::lex::lex(src) {
         Ok(t) => t,
+        // Where, not why. The lexer written in Trust is held to agreeing on
+        // what is wrong and on the character it is at, and not on how each
+        // of them says it: wording is not what a second implementation
+        // checks.
         Err(e) => {
-            eprintln!("trust: {}", e.message);
-            return ExitCode::FAILURE;
+            println!("error {}", e.span.lo);
+            return ExitCode::SUCCESS;
         }
     };
     for (t, _) in &toks {
