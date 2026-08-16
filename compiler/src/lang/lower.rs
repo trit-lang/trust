@@ -10669,6 +10669,13 @@ impl Fn<'_> {
         if let Ty::Enum(name) = ty.clone() {
             return self.match_enum(&name, v, arms, expected, borrowed, dest, span);
         }
+        // A struct has one shape, so a pattern for it cannot fail and cannot
+        // be one of several. That is what makes it worth having: it takes
+        // the struct apart in a single move, which per-local ownership can
+        // express and `let a = p.x; let b = p.y;` cannot (G9.46).
+        if let Ty::Struct(name) = ty.clone() {
+            return self.match_struct(&name, v, arms, expected, borrowed, dest, span);
+        }
         if !ty.is_scalar() {
             return err(span, format!("cannot match on {ty}"));
         }
@@ -10740,6 +10747,50 @@ impl Fn<'_> {
     /// representation-identical to `trit`, and this is where Ch. 2 §5.2's
     /// promise is kept: the dispatch is one `br3`.
     #[allow(clippy::too_many_arguments)]
+    /// `match p { P { a, b } => … }` — one arm, no test, no join.
+    #[allow(clippy::too_many_arguments)]
+    fn match_struct(
+        &mut self,
+        name: &str,
+        addr: Operand,
+        arms: &[ast::Arm],
+        expected: Option<&Ty>,
+        borrowed: bool,
+        dest: Option<String>,
+        span: Span,
+    ) -> R<(Operand, Ty)> {
+        let ty = Ty::Struct(name.to_string());
+        if arms.len() != 1 || arms[0].patterns.len() != 1 {
+            return err(
+                span,
+                format!(
+                    "`{name}` is a struct and has one shape, so a `match` on one has one \
+                     arm and one pattern"
+                ),
+            );
+        }
+        let arm = &arms[0];
+        if arm.guard.is_some() {
+            return err(
+                span,
+                "a guard makes an arm able to fail, and there is no other arm for a struct \
+                 to fall through to",
+            );
+        }
+        let depth = self.scopes.len();
+        self.scopes.push(HashMap::new());
+        // The scrutinee was read by `expr` above, which moved it if it was
+        // not behind a reference — so the bindings receive what it held.
+        self.sub_pattern(addr, &ty, &arm.patterns[0], None, borrowed, span)?;
+        self.dest = dest;
+        let out = self.expr(&arm.body, expected);
+        self.dest = None;
+        let out = out?;
+        self.drop_scope(depth, span)?;
+        self.scopes.pop();
+        Ok(out)
+    }
+
     fn match_enum(
         &mut self,
         name: &str,
@@ -11109,6 +11160,25 @@ impl Fn<'_> {
                 self.store_at(&local.slot, 0, ty, v, span)
             }
             ast::Pattern::Aggregate(path, fields, at) => {
+                // A struct pattern names every field it wants and tests
+                // nothing: there is one shape, so it always matches.
+                if let Ty::Struct(inner) = peel(ty) {
+                    let inner = inner.clone();
+                    if path.segments.len() != 1 || !heads_match(&path.segments[0], &inner) {
+                        return err(*at, format!("`{}` does not match {inner}", path.last()));
+                    }
+                    let declared = self.types.fields(&Ty::Struct(inner.clone()));
+                    for (name, sub) in fields {
+                        let Some((_, ft, off)) =
+                            declared.iter().find(|(n, _, _)| n == name).cloned()
+                        else {
+                            return err(*at, format!("`{inner}` has no field `{name}`"));
+                        };
+                        let p = self.offset(addr.clone(), off);
+                        self.sub_pattern(p, &ft, sub, fail, borrowed, span)?;
+                    }
+                    return Ok(());
+                }
                 let Ty::Enum(inner) = peel(ty) else {
                     return err(*at, format!("`{}` does not match {ty}", path.last()));
                 };

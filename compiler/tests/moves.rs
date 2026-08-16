@@ -268,3 +268,24 @@ fn a_copyable_field_of_a_borrowed_struct_is_read_and_not_moved() {
                fn main() -> t27 { let p = Pair { a: 1, b: 2 }; sum(&p) }\n";
     assert_eq!(refusal(src), None);
 }
+
+#[test]
+fn a_struct_can_be_taken_apart_by_matching_on_it() {
+    // Ch. 0 §4 lists `Point { x, y }` among the patterns and draft 0.1 read
+    // it nowhere: `match` refused a struct outright, and with ownership
+    // tracked per local a struct with two non-`Copy` fields could not be
+    // taken apart at all (G9.46).
+    let src = "struct P { a: Vec<t27>, b: Vec<t27> }\n\
+               fn swap(p: P) -> P { match p { P { a, b } => P { a: b, b: a } } }\n\
+               fn main() -> t27 { let p = P { a: Vec::new(), b: Vec::new() }; \
+               let q = swap(p); q.a.len() as t27 }\n";
+    assert_eq!(refusal(src), None);
+}
+
+#[test]
+fn a_struct_pattern_has_one_arm_because_a_struct_has_one_shape() {
+    let src = "struct P { a: t27 }\n\
+               fn f(p: P) -> t27 { match p { P { a } => a, P { a } => a } }\n\
+               fn main() -> t27 { 0 }\n";
+    assert!(refusal(src).expect("a refusal").contains("has one shape"));
+}

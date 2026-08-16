@@ -2592,6 +2592,41 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.46 — a struct could not be taken apart.** Ch. 0 §4 lists
+`Point { x, y }` among the patterns and says patterns appear in `match` arms
+and in `let`. The implementation read one in neither: `match` on a struct
+answered "cannot match on P", and `let` took a name.
+
+That is not only a missing spelling. Ownership is tracked per *local* and
+not per place, so a move out of one field marks the whole local moved —
+
+```
+let x = p.a;
+let y = p.b;          // `p` was moved out of and cannot be used again
+```
+
+— which means a struct with two non-`Copy` fields could not be taken apart
+at all, by any spelling. Found writing the resolver of Ch. 6 in Trust, where
+every rewriting function wants to consume a node and hand its parts to the
+functions below it.
+
+A struct pattern in a `match` is implemented, and it is the shape that suits
+the ownership model as it stands: one move takes the whole struct apart into
+several locals, and nothing is left half-owned. A struct has one shape, so
+such a `match` has one arm, one pattern and no guard — there is nothing for a
+guard to fall through to.
+
+**Still open**, and recorded here rather than in a commit message:
+
+- `let P { a, b } = p;` and `let (a, b) = pair;` for non-`Copy` fields.
+  `let_tuple` desugars into field reads, which is the move above written
+  twice, so tuple destructuring works today only for `Copy` fields. Both want
+  a `let` lowered through the pattern machinery rather than through
+  projections.
+- **Per-place ownership.** Moving `p.a` should leave `p.b` alive. It needs
+  ownership tracked per field path, drop glue that can skip a moved field,
+  and per-field flags where a branch left it undecided.
+
 **G9.45 — the same double free, one projection along.** G9.27 refused
 `take(*r)`: reading a non-`Copy` value through a reference moves it, and
 there is nothing there to move *from*. The field and index cases were said
