@@ -122,12 +122,13 @@ That exact output is asserted by `the_demo_runs_the_whole_way`.
 | TIR canonicalization | four transformations: `promote_slots` (a `slot` never escaping one block becomes the value it holds — the shape `lower.rs` emits for every parameter, G8.7), `mem2reg::promote` (the same across blocks, inserting block parameters where the predecessors disagree, G8.13), `branch_through_select` (a branch on a select of constants reads the select's selector, G8.10) and `remove_dead`. TIR §6's target-independent optimization stage, newly occupied |
 | TIR legalization | promotion complete; **expansion complete**: `add`, `sub`, `mul`, `div`, `rem`, `shl`/`shr` by a constant, `neg`, `cmp`, `tmin`/`tmax`/`tmul`, `select3`, wide loads and stores, and wide values across a function boundary — a real Trust program legalizes for a nine-trit machine and computes the same answers (G6.11). `mul` expands (G6.6 closed — TIR §3.1 gained `mulh`), and so do `shl` and `shr` by a **constant** amount (G6.12); `div` and `rem` become a call to a helper written in TIR (G6.13). A wide value crosses a function boundary as its parts, with a wide result through a hidden pointer (G6.5). What is left: a shift by a *computed* amount |
 | Layout engine (Ch. 2) | complete: sizes, alignments, offsets, both `repr`s, discriminants, niche optimization |
-| Trust frontend | Ch. 0–3 complete; Ch. 4 complete except generic traits |
+| Trust frontend | Ch. 0–4 **complete**; Ch. 5 complete but for what §7 reserves. Generic traits, blanket impls with associated types, `Fn` bounds on named parameters, impls for one instantiation and for references, and generic impls of parameterized traits all work |
 | Backend (TIR → TRISC-27) | works, with a **linear-scan register allocator over live intervals**, decided once per function (G8.9, G8.11: −34.8%, and frame traffic down from 44% of everything executed to 13.5%) and instruction selection that uses the fields the encoding has — immediates, branch displacements, access displacements (G8.6−G8.8: a further −26.0% on HPL). A parameter stays in the register it arrived in where nothing can clobber it, and a function whose values all fit in registers opens no frame. Block parameters are allocated too, with each edge a parallel copy (G8.12); no peephole pass |
 | Assembler | complete: two-pass, exact balanced-ternary expressions, every directive and pseudo-instruction |
-| `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6) |
+| `tritium` VM | complete: encode/decode, ALU, sparse memory, negative-address device region, and `tritium profile` — which instruction ran, how often, and addressed from what (G8.6). **83 M instructions/second**, 32× what it was (G8.15) |
+| `trust` driver | compile and run in one command, nothing on the disk (G0.4) |
 
-**393 tests, zero clippy warnings, 68 commits.** `scripts/stats.sh`.
+**447 tests, zero clippy warnings, 95 commits.** `scripts/stats.sh`.
 
 ---
 
@@ -367,156 +368,52 @@ contradicts is the next thing to catch.
 
 ## 10. Where to go next
 
-Three coherent directions, in no forced order:
+> **Ordering constraint.** Before anything else, re-read §11 and hunt for
+> anything of the shape it describes: a drop or move bug that no test can see.
+> Five have been found this way, every one of them by the drop ledger — a
+> resource whose destructor prints — and nothing else has ever found one.
 
-> **Ordering constraint.** Before route A, re-read §11 and hunt for anything
-> of the shape it describes: a drop or move bug that no test can see because
-> the language owns no resources. Three were found and fixed after this
-> document's first draft; an allocator turns the next one into a real
-> double-free, found by a crash, in a session that is thinking about
-> allocation. The cheapest time to look is while nothing is at stake.
+Everything the specification defines and does not reserve is **built**. What
+follows is therefore not a list of missing features; it is a list of the four
+things that are actually open, in the order they are worth doing.
 
-**A. Ch. 5 as implementation.** §1 is done (G9.5–G9.7): `char`, `str`, both
-literal forms, `char::try_from`, and a text library written in Trust in the
-prelude, which a program pays nothing for unless it calls it.
-`examples/trust/hello.tr` prints `Hello, 世界! 🙂` and the only thing in it
-that is not Trust is `putchar`. §4's `?` is built too (G9.8), and §3's adaptors —
-`Map`, `Filter`, `Take`, `Skip`, `Enumerate`, `Zip` — are structs in the
-prelude (G9.9). §4.3's `unwrap` is written in the
-language too, on `!` and `trap()` (G9.10). §3's consuming methods are built too
-(G9.11), and the heap's two halves below the language
-are built: the assembler defines `_end` and the runtime supplies `alloc` and
-`free` (G9.2). `Box` is built (G9.12), Ch. 2 §8's binary tree runs
-(G9.13), and `Vec` is built: `new`, `push`, `pop`, `len`, `capacity`,
-`is_empty`, `reserve`, `clear`, indexing, dropping, and the coercion of
-`&Vec<T>` to `&[T]` (G9.14, G9.15). `String` **is** `Vec<char>` and needed no
-rules of its own. Building the last of those uncovered the drop ledger's fifth
-bug — an arm's pattern bindings were never dropped — and closing it needed the
-condition that they own only when the scrutinee was matched by value.
+**A. Compiler speed, which nobody had looked at.** `trust run` made the number
+visible: HPL took 1.6 seconds to compile and 40 milliseconds to run, and every
+measurement in this document until then was about the second. Verification was
+96% of it and is fixed (G8.17), so a compile is 0.455 s — but HPL is still
+0.67 ms per line where `demo.tr` is 0.06, so something remains superlinear.
+**Profile before touching anything**: the two guesses that preceded the last
+profile were both wrong, and both were about code written the same day.
 
-§1.5's `print` and `println` are in the prelude now, so
-`examples/trust/hello.tr` is a `main` with one statement in it and
-`examples/trust/HPL.tr` is 277 lines shorter — every line of its output was a
-hand-encoded ASCII array with the text in a comment above it, and all 53 are
-string literals now, for −0.2% instructions rather than a cost; `putchar` is
-declared there too, which makes it the third required target function after
-`alloc` and `free` (G9.17). `char::to_utf8` has the signature the
-specification always gave it, `let` binds a tuple, and `str::chars` iterates.
+**B. The iterator protocol's remaining cost.** `for i in 0..n` is 3.0× the
+`while` and an index it replaces, down from 9.4× (G9.25). What is left is that
+`next` returns an `Option<T>`, an `Option<t27>` has no niche and so is two
+words, and two words go through memory. Every iterator pays it per item. The
+fix is not another peephole: it is either promoting small aggregates out of
+memory, or a niche that does not exist.
 
-Both gaps that opened underneath it are closed: a `match` binding taken
-through a reference may be read and borrowed but not moved out of (Ch. 3
-§1.3), and a block-shaped expression in statement position ends its statement
-(Ch. 0 §5.2).
+**C. Range analysis.** Branches and comparisons are 36% of everything HPL
+executes — loop conditions, and the **two** bounds checks every array index
+still pays — and the index multiply is 7.9%. Bounds-check elimination and
+strength reduction both need it, and this compiler has no analysis at all.
 
-`F: Fn(A) -> B` is a bound a program can write now (G9.18), and instantiation
-happens in two stages where a method has type parameters of its own inside a
-generic impl (G9.19) — so §3.1's adaptors are the provided methods that
-section always described, and they chain:
+**D. The decisions that are the author's.** These are not work items; they are
+questions the implementation cannot answer:
 
-```
-sum(it.map(|x| x * x).filter(|v| v % 2 == 0))
-```
+- `From` and `Into` in the prelude, which collides with programs that declare
+  their own — the shadowing rule is about *named* items and an impl has no
+  name (G9.24). It is a coherence question.
+- Binding by reference in a `match`, which really needs a **deref coercion** —
+  the language's third implicit conversion — and should be decided as one
+  (G9.15).
+- `Cell`/`RefCell`, `expect`, formatting's composition, maps and sets,
+  sorting, `Rc`: all of Ch. 5 §7, each reserved with a stated reason.
+- G7.6, G0.2a and G0.3a, which have been waiting since before this document.
 
-Every adaptor's `Item` follows the iterator underneath it rather than being a
-fixed `t27`, which it had been because `same_ast_ty` had no case for `I::Item`
-and so a generic impl could only choose an associated type it could name.
-
-`collect` is built (G9.20), which made `Vec` a nominal type the library can
-implement traits for — `impl<A> FromIterator for Vec<A>` is written in Trust
-in the prelude:
-
-```
-let v: Vec<t27> = it.map(|x| x * x).filter(|y| y % 2 != 0).collect();
-let s: String = text.chars().map(f).collect();
-```
-
-`Vec` is finished: `insert`, `remove`, `with_capacity` and `push_str` are
-built (G9.21), and the claim that `insert` waited on a `copy_within` §7
-reserved was wrong — §7 reserved nothing of the kind, and now reserves it
-properly as the slice method it is.
-
-An impl may name one instantiation now (G9.22), so `String`'s `push_str` is
-written in the library in Trust as `impl Vec<char>`, and declarations are
-pruned like functions — `alloc` and `free` had begun appearing in every
-program the moment the library gained a method that pushes.
-
-An impl's self type may be a reference now (G9.23), so `for c in s` walks a
-string and `for`'s desugaring turns its expression into an iterator the way
-Ch. 4 §5.7 says. A blanket impl covers what its bounds allow rather than every
-type, which is what made `impl IntoIterator for &str` writable.
-
-A blanket impl carries an associated type, a bound is satisfied by one, and a
-reference's impls are found under its referent — so `Iterator` is an
-`IntoIterator` by the blanket impl §5.7 specifies, and `fn f<T: IntoIterator>`
-accepts both an iterator and a `&str`.
-
-**`trust run file.tr`** compiles and executes with nothing on the disk
-(G0.4) — a separate crate, because the compiler emits text and the machine
-knows nothing about Trust. It made one thing visible immediately: HPL took
-1.6 seconds to compile and 40 milliseconds to run, and every measurement in
-docs/ until then had been about the second number. **96% of it was
-verification** — a live-value set rebuilt per block with a string allocation
-per value per dominator — and it is 0.455 s now (G8.17).
-
-`a..b` is a half-open range (G9.25), which is a struct in the library and a
-spelling in the grammar and nothing else — `for i in 0..v.len()` works. It
-costs more than the `while` and an index it replaces, and measuring why found
-two things: every enum construction zeroed its whole storage first for a
-determinism Ch. 2 §1 does not ask for, and an enum's storage was copied a
-tryte at a time although both ends are word-aligned. The range loop is 42%
-cheaper without them and an adaptor chain 31%.
-
-Then **destination passing**: an expression is told where its value is going
-before it computes one, so a literal builds there rather than in a temporary
-something copies from. `for i in 0..1000` is **21 043** instructions from
-66 097 — **−68%** across the three changes, and 3.0× the `while` and an index
-rather than 9.4×. A call takes a destination too, and a `let` whose
-initializer computed an aggregate takes that storage as the binding's own
-rather than copying out of it — renamed as it is adopted, so reading the TIR
-still shows whose storage it is. HPL 3 246 793 → **3 233 721**, the first
-change since inlining to move it.
-
-What is left of Ch. 5 is `Cell`/`RefCell` (§5), `expect`, formatting, maps and
-sets, sorting and `Rc` — all of §7, all reserved. Ch. 4's list is now empty
-but for what the specification itself reserves: binding by reference in a
-`match` stays reserved (G9.15), because what it really needs is a deref
-coercion — the language's third implicit conversion — and that deserves its
-own decision rather than arriving as a consequence.
-
-The nearest thing merely unbuilt is Ch. 4 §5.5's `From` and `Into` in the
-prelude, which waits on the shadowing rule covering impls (G9.24).
-
-**B00. Interpreter speed.** 2.57 → **83.2 M instructions/second** on HPL, 32×
-(G8.15): `shr3` was a loop where its own comment already gave the closed
-form; a direct-mapped decode cache with invalidation on store; and then three
-more of the same mistake — a division on every `add` that a test already
-performed had ruled out, a page looked up three times per word read, and
-sign-correcting remainders on addresses known to be non-negative. Every
-earlier measurement moved instructions *retired*; this is the first to move
-instructions per *second*, which with no hardware is the other factor of the
-same product.
-
-**B0. Inlining.** A call to a small non-recursive function becomes its body
-(G8.14): HPL 3 661 618 → 3 247 122, −11.3%, with the four solve intervals down
-about 12% each. The budget is 24 instructions and larger is measurably worse —
-a bigger splice costs more in spills than it saves in calls.
-
-**B. Backend quality.** The instruction stream is a third of what it was
-(G8.6–G8.13, −66.6% on HPL), and memory is nearly out of the picture: frame
-traffic is 3.6%. What is left is analysis. Branches and comparisons are 36%
-of everything executed — loop conditions, and the two bounds checks every
-array index still pays — and the index multiply is 7.9%. Bounds-check
-elimination and strength reduction both need a range analysis, which is the
-next thing this compiler does not have. Expansion is complete except for a
-shift by a computed amount.
-
-**C. Generic traits.** §6 above says what it needs. It closes Ch. 4 and
-unblocks `From`/`Into`.
-
-Smaller, self-contained: `IntoIterator`; `FnOnce`; capture by place rather
-than by variable (Ch. 4 §4.4 says place, the implementation does variable);
-associated types in generic impls; `F_ILLEGAL` / `F_ADDRESS` fault codes,
-which **G0.2a** reports the AM as lacking.
+Not worth doing, and measured rather than assumed: TIR §3.3's predicate
+re-fusion, whose redundancies never execute in anything a Trust program
+compiles to (they are multi-part legalization's, and Ch. 1's types stop at a
+word); and a wide shift by a computed amount, for the same reason.
 
 ---
 
