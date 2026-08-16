@@ -4336,3 +4336,43 @@ fn a_value_is_built_where_it_is_going() {
         18 * 100 + 1
     );
 }
+
+#[test]
+fn a_binding_takes_the_storage_its_initializer_made() {
+    // A computed aggregate lives in a temporary nothing else names, so the
+    // binding can take it rather than copy out of it. A *place* is different:
+    // `let y = x` must not make `y` another name for `x`, which is what this
+    // checks — writing through one must not be visible through the other.
+    assert_eq!(
+        run("struct P { a: t27, b: t27 } \
+             fn make(n: t27) -> P { P { a: n, b: n * 2 } } \
+             fn main() -> t27 { \
+                 let p = make(3); \
+                 let mut q = p; \
+                 q.a = 100; \
+                 p.a * 1000 + q.a \
+             }")
+        .0,
+        // `p.a` is still 3: `q` took a copy, because `p` was a place.
+        3 * 1000 + 100
+    );
+}
+
+#[test]
+fn an_adopted_slot_keeps_the_bindings_name() {
+    // The storage is renamed as it is adopted, so reading the TIR still shows
+    // which binding a slot belongs to. Half of what this project has found,
+    // it found by reading TIR.
+    let m = tir_of(
+        "struct P { a: t27, b: t27 } \
+         fn make(n: t27) -> P { P { a: n, b: n } } \
+         fn main() -> t27 { let wide = make(3); wide.a }",
+    );
+    let printed = tir::print_module(&m);
+    assert!(
+        printed
+            .lines()
+            .any(|l| l.contains("wide.slot") && l.contains("slot tryte[6]")),
+        "{printed}"
+    );
+}

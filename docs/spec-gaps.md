@@ -2556,9 +2556,23 @@ three changes, and 3.0× the `while` and an index rather than 9.4×. An adaptor
 chain is **−54%**. HPL is unmoved, which is right: it constructs no aggregates
 in its hot loops, and this was never about HPL.
 
-*What is left.* A call still writes its aggregate result into a temporary that
-`let` then copies — the destination is not yet passed to a call's result
-pointer, which is the same idea one step further out.
+*Then the call's result pointer, and the `let` that receives it.* A call
+consumes a destination rather than passing one on — it *writes* its result —
+and it takes one before its arguments are lowered, so an argument cannot take
+it. And a `let` whose initializer **computed** an aggregate takes that
+storage as the binding's own instead of copying out of it: the temporary was
+made for this value and nothing else names it. A *place* is excluded, because
+`let y = x` must not make `y` another name for `x`.
+
+The adopted slot is **renamed** to the binding's, so that reading the TIR
+still shows which binding storage belongs to. That is not tidiness: the enum
+zeroing above, the double copy, and half of the drop bugs in this log were
+found by reading TIR, and an optimization that made every `let` anonymous
+would have cost more than it saved.
+
+An adaptor chain is **791 → 731**, and HPL **3 246 793 → 3 233 721** — the
+first thing since inlining to move HPL at all, because `let` of an aggregate
+is something HPL does even though building one in a loop is not.
 
 **G0.4 — `trust run`, and where the three seconds go.** `trustc compile`
 writes assembly and stops, `tritium asm` makes an image and `tritium run`

@@ -468,8 +468,11 @@ Then **destination passing**: an expression is told where its value is going
 before it computes one, so a literal builds there rather than in a temporary
 something copies from. `for i in 0..1000` is **21 043** instructions from
 66 097 — **−68%** across the three changes, and 3.0× the `while` and an index
-rather than 9.4×. What is left is passing a destination to a *call's* result
-pointer, which is the same idea one step further out.
+rather than 9.4×. A call takes a destination too, and a `let` whose
+initializer computed an aggregate takes that storage as the binding's own
+rather than copying out of it — renamed as it is adopted, so reading the TIR
+still shows whose storage it is. HPL 3 246 793 → **3 233 721**, the first
+change since inlining to move it.
 
 What is left of Ch. 5 is `Cell`/`RefCell` (§5), `expect`, formatting, maps and
 sets, sorting and `Rc` — all of §7, all reserved. Ch. 4's list is now empty

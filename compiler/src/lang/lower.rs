@@ -4062,6 +4062,53 @@ impl Fn<'_> {
             results: vec![slot.clone()],
             kind: InstKind::Slot { trytes },
         });
+        self.declare_at(name, slot, ty, mutable)
+    }
+
+    /// Rename one SSA value everywhere this function has emitted it so far.
+    ///
+    /// Sound because the name is a *definition* this function made and has
+    /// not finished with: nothing outside can hold it, and the new name is
+    /// fresh.
+    fn rename_value(&mut self, from: &str, to: &str) {
+        fn one(inst: &mut Inst, from: &str, to: &str) {
+            for r in &mut inst.results {
+                if r == from {
+                    *r = to.to_string();
+                }
+            }
+            crate::tir::canon::map_operands(&mut inst.kind, &mut |o: &mut Operand| {
+                if let Operand::Value(v) = o
+                    && v == from
+                {
+                    *v = to.to_string();
+                }
+            });
+        }
+        for inst in self.slots.iter_mut().chain(self.insts.iter_mut()) {
+            one(inst, from, to);
+        }
+        for b in &mut self.blocks {
+            for inst in &mut b.insts {
+                one(inst, from, to);
+            }
+            crate::tir::canon::map_terminator(&mut b.term, &mut |o: &mut Operand| {
+                if let Operand::Value(v) = o
+                    && v == from
+                {
+                    *v = to.to_string();
+                }
+            });
+        }
+    }
+
+    /// The same, for storage that already exists.
+    ///
+    /// A `let` whose initializer *computed* an aggregate can take that
+    /// storage as the binding's own rather than copy out of it — the
+    /// temporary was made for this value and nothing else names it. A place
+    /// is different: `let y = x` must not make `y` another name for `x`.
+    fn declare_at(&mut self, name: &str, slot: String, ty: Ty, mutable: bool) -> Local {
         // A local whose type has a destructor is dropped when its scope ends,
         // unless it was moved out of (Ch. 3 §1.4).
         let needs_drop = self.types.needs_drop(&ty);
@@ -4788,6 +4835,8 @@ impl Fn<'_> {
                     None => None,
                 };
                 let loans_before = self.loans.len();
+                // Asked before lowering, since lowering a place moves it.
+                let was_place = self.type_of_place(value)?.is_some();
                 let (v, vt) = self.expr(value, declared.as_ref())?;
                 let ty = match declared {
                     Some(d) => {
@@ -4814,6 +4863,23 @@ impl Fn<'_> {
                 check_sized(&ty, *line, &format!("the binding `{name}`"))?;
                 if !ty.is_scalar() && !ty.is_aggregate() {
                     return err(*line, format!("cannot bind a value of type {ty}"));
+                }
+                // The initializer's storage becomes the binding's, where it
+                // was made for this value: a computed aggregate lives in a
+                // temporary that nothing else names, and copying out of it
+                // is a copy for its own sake.
+                if ty.is_aggregate()
+                    && !was_place
+                    && let Operand::Value(slot) = &v
+                {
+                    // Renamed as it is adopted, so that reading the TIR still
+                    // shows which binding a slot belongs to. Half of what was
+                    // found this way was found by reading it.
+                    let old = slot.clone();
+                    let new = self.fresh(&format!("{name}.slot"));
+                    self.rename_value(&old, &new);
+                    self.declare_at(name, new, ty.clone(), *mutable);
+                    return Ok(());
                 }
                 let local = self.declare(name, ty.clone(), *mutable);
                 // An aggregate is copied into the binding's own storage, so
@@ -5004,8 +5070,16 @@ impl Fn<'_> {
             E::Binary(op, a, b, line) => self.binary(op, a, b, expected, *line),
             E::Assign(op, target, value, line) => self.assign(op, target, value, *line),
             E::Cast(inner, ty, line) => self.cast(inner, ty, *line),
-            E::Call(name, targs, args, line) => self.call(name, targs, args, expected, *line),
-            E::Method(recv, name, args, line) => self.method(recv, name, args, expected, *line),
+            // A call *writes* its aggregate result, so it consumes a
+            // destination rather than passing one on.
+            E::Call(name, targs, args, line) => {
+                self.dest = dest;
+                self.call(name, targs, args, expected, *line)
+            }
+            E::Method(recv, name, args, line) => {
+                self.dest = dest;
+                self.method(recv, name, args, expected, *line)
+            }
 
             // Transparent to a destination: their value is one of their
             // arms' values, and an arm may build where the whole is going.
@@ -6383,8 +6457,12 @@ impl Fn<'_> {
         }
         let mut values = Vec::new();
         // An aggregate result is written through a pointer the caller
-        // supplies, since TIR has no aggregate values (TIR §2).
-        let out = ret.is_aggregate().then(|| self.temp_slot(&ret));
+        // supplies, since TIR has no aggregate values (TIR §2) — and the
+        // pointer is where the value was going, when that is known, so
+        // `let v = f()` writes into `v` rather than into a temporary `v` is
+        // copied from. Taken before the arguments are lowered, so an
+        // argument cannot take it.
+        let out = ret.is_aggregate().then(|| self.dest_or_temp(&ret));
         if let Some(slot) = &out {
             values.push(Operand::Value(slot.clone()));
         }
