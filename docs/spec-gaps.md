@@ -2756,6 +2756,27 @@ An indexed loop over an array is −1.4%. Two tests hold the other side down: a
 written negative index and one counted negative through a function that cannot
 see where it came from, both of which still fault.
 
+*Then the upper half, by the oracle G8.18's negative result asked for.*
+`while k < v.len() { v[k] }` asks the same question twice and the second time
+it is already answered — but it does not *look* answered, because every
+operand is a different SSA value. Making them one value was measured worse, so
+nothing is rewritten: this walks up the chain of **sole** predecessors looking
+for a `br3` whose taken edge decided the same comparison, and compares the two
+by their **defining instructions** rather than by their names. An oracle
+extends no live range.
+
+A `store` or a `call` anywhere on the path gives up, and that single condition
+is what makes comparing two *loads* sound with no alias analysis at all.
+
+**HPL: 2 965 929 → 2 762 032, −6.9%**, and an indexed loop over a `Vec` reaches
+**exactly** the figure measured with the checks deleted outright — every check
+in it is provable. Across both halves: **3 233 721 → 2 762 032, −14.6%**, which
+is **48% of everything bounds checking costs**.
+
+Three more tests hold the other side: a loop that counts past a constant
+length, one bounded by a runtime value the callee cannot relate to the slice,
+and one that outruns a `Vec`. All three still fault.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

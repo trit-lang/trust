@@ -4420,17 +4420,81 @@ fn a_counter_that_starts_at_zero_needs_no_lower_bound_check() {
     );
 }
 
+/// Compile a program the whole way and run it, expecting a fault.
+fn must_fault(src: &str) {
+    let module = tir_of(src);
+    let target = tir::TargetDesc::tritium();
+    let module = tir::canonicalize_module(&module);
+    let mut module = tir::inline_module(&module);
+    tir::drop_uncalled(&mut module, &["main"]);
+    let module = tir::canonicalize_module(&module);
+    let legalized = tir::legalize_module(&module, &target).expect("legalizes");
+    let mut asm = trustc::codegen::compile(&legalized, "main").expect("generates");
+    asm.push_str(include_str!("../../examples/trisc/runtime.t27"));
+    let image = tritium::assemble(&asm).expect("assembles");
+    let mut vm = tritium::Vm::with_default_memory();
+    vm.load_image(&image);
+    match vm.run(1_000_000) {
+        tritium::Stop::Halted(v) => panic!("halted with {v}; it should have faulted:\n{src}"),
+        other => assert!(format!("{other}").contains("F_TRAP"), "{other}"),
+    }
+}
+
+#[test]
+fn an_index_past_the_end_still_faults() {
+    // The upper check is elided only where the loop's own condition *is*
+    // that check. None of these has that shape: the first counts past a
+    // constant length, the second is bounded by a runtime value the callee
+    // cannot relate to the slice, and the third outruns a `Vec` (TIR §6).
+    must_fault(
+        "fn main() -> t27 { \
+             let a: [t27; 4] = [1, 2, 3, 4]; \
+             let mut s: t27 = 0; let mut k: taddr = 0; \
+             while k < 6 { s += a[k]; k += 1; } s }",
+    );
+    must_fault(
+        "fn walk(a: &[t27], n: taddr) -> t27 { \
+             let mut s: t27 = 0; let mut k: taddr = 0; \
+             while k < n { s += a[k]; k += 1; } s } \
+         fn main() -> t27 { let a: [t27; 4] = [1, 2, 3, 4]; walk(&a, 9) }",
+    );
+    must_fault(
+        "fn main() -> t27 { \
+             let mut v: Vec<t27> = Vec::new(); v.push(1); v.push(2); \
+             let mut s: t27 = 0; let mut k: taddr = 0; \
+             while k < 5 { s += v[k]; k += 1; } s }",
+    );
+}
+
+#[test]
+fn a_loop_condition_decides_its_own_bounds_check() {
+    // `while k < v.len() { v[k] }` asks the same question twice, and the
+    // second time it is already answered. Nothing is rewritten to see that —
+    // the two comparisons are compared by their defining instructions, since
+    // making them one value costs more in spills than it saves (G8.18).
+    assert_eq!(
+        run("fn sum(v: &[t27]) -> t27 { \
+                 let mut s: t27 = 0; let mut k: taddr = 0; \
+                 while k < v.len() { s += v[k]; k += 1; } s } \
+             fn main() -> t27 { let a: [t27; 4] = [1, 2, 3, 4]; sum(&a) }")
+        .0,
+        10
+    );
+}
+
 #[test]
 fn a_negative_index_still_faults() {
     // The half of the check that is *not* elided, and the reason the proof
     // has to be a proof: `.trap` arithmetic is what makes it sound, and a
     // subtraction is refuted rather than assumed.
-    for src in [
-        // Written negative.
+    // Written negative.
+    must_fault(
         "fn main() -> t27 { \
              let a: [t27; 4] = [1, 2, 3, 4]; let i: taddr = 0 - 1; a[i] }",
-        // Counted negative, through a function that cannot see where the
-        // index came from.
+    );
+    // Counted negative, through a function that cannot see where the index
+    // came from.
+    must_fault(
         "fn get(a: &[t27], i: taddr) -> t27 { a[i] } \
          fn main() -> t27 { \
              let a: [t27; 4] = [1, 2, 3, 4]; \
@@ -4438,22 +4502,5 @@ fn a_negative_index_still_faults() {
              while k > 0 - 3 { k -= 1; } \
              get(&a, k) \
          }",
-    ] {
-        let module = tir_of(src);
-        let target = tir::TargetDesc::tritium();
-        let module = tir::canonicalize_module(&module);
-        let mut module = tir::inline_module(&module);
-        tir::drop_uncalled(&mut module, &["main"]);
-        let module = tir::canonicalize_module(&module);
-        let legalized = tir::legalize_module(&module, &target).expect("legalizes");
-        let mut asm = trustc::codegen::compile(&legalized, "main").expect("generates");
-        asm.push_str(include_str!("../../examples/trisc/runtime.t27"));
-        let image = tritium::assemble(&asm).expect("assembles");
-        let mut vm = tritium::Vm::with_default_memory();
-        vm.load_image(&image);
-        match vm.run(1_000_000) {
-            tritium::Stop::Halted(v) => panic!("halted with {v}; it should have faulted:\n{src}"),
-            other => assert!(format!("{other}").contains("F_TRAP"), "{other}"),
-        }
-    }
+    );
 }

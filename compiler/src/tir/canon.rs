@@ -80,6 +80,7 @@ pub fn canonicalize_module(m: &Module) -> Module {
         crate::tir::mem2reg::promote(f);
         fold_constants(f);
         elide_sign_checks(f);
+        elide_dominated_checks(f);
         branch_through_select(f);
         remove_dead(f);
     }
@@ -457,6 +458,173 @@ fn targets(t: &Terminator) -> Vec<&Target> {
         Terminator::Br3 { neg, zero, pos, .. } => vec![neg, zero, pos],
         Terminator::Br(d) => vec![d],
         Terminator::Ret(_) | Terminator::Trap(_) | Terminator::Unreachable => Vec::new(),
+    }
+}
+
+/// Drop a comparison a branch above it already decided (TIR §6).
+///
+/// The upper half of an index check is usually the loop's own condition,
+/// asked a second time:
+///
+/// ```text
+/// ^while:   %c1 = cmp %k, %len1        ; %len1 = load (offset %v 3)
+///           br3 %c1, ^body, ^done, ^done
+/// ^body:    …
+/// ^idx.lo:  %c2 = cmp %k, %len2        ; %len2 = the same load, again
+///           br3 %c2, ^ok, ^fault, ^fault
+/// ```
+///
+/// It does not *look* decided because every operand is a different SSA
+/// value, and the obvious fix — number them and make them one value — was
+/// measured and made every benchmark **slower**: merging two computations
+/// extends a live range across the loop's back edge, and a linear-scan
+/// allocator with 27 registers spills to pay for it (G8.18).
+///
+/// So nothing is rewritten. This asks whether the two comparisons are
+/// *equal*, by their defining instructions rather than by their names, and
+/// an oracle costs no registers. A `store` or a `call` anywhere on the path
+/// gives up, which is what makes comparing two loads sound without any alias
+/// analysis at all.
+pub fn elide_dominated_checks(f: &mut Function) {
+    let def: BTreeMap<String, InstKind> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| match &i.results[..] {
+            [r] => Some((r.clone(), i.kind.clone())),
+            _ => None,
+        })
+        .collect();
+    let preds = predecessors_by_label(f);
+    let index: BTreeMap<String, usize> = f
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.label.clone(), i))
+        .collect();
+
+    let mut rewrite: Vec<(usize, Target)> = Vec::new();
+    for (bi, b) in f.blocks.iter().enumerate() {
+        let Terminator::Br3 { t, neg, zero, pos } = &b.term else {
+            continue;
+        };
+        if zero != pos {
+            continue;
+        }
+        let Operand::Value(c2) = t else { continue };
+        let Some(InstKind::Cmp { a: x2, b: y2, .. }) = def.get(c2) else {
+            continue;
+        };
+
+        // Walk up the chain of sole predecessors, giving up at a write.
+        let mut at = bi;
+        let mut clean = !writes(&f.blocks[bi]);
+        let mut proved = false;
+        for _ in 0..64 {
+            if !clean {
+                break;
+            }
+            let label = &f.blocks[at].label;
+            let Some(ps) = preds.get(label) else { break };
+            let [p] = &ps[..] else { break };
+            let Some(&pi) = index.get(p) else { break };
+            let d = &f.blocks[pi];
+            if let Terminator::Br3 {
+                t: dc,
+                neg: dn,
+                zero: dz,
+                pos: dp,
+            } = &d.term
+                && dn.label == *label
+                && dz.label != *label
+                && dp.label != *label
+                && let Operand::Value(c1) = dc
+                && let Some(InstKind::Cmp { a: x1, b: y1, .. }) = def.get(c1)
+                && equiv(x1, x2, &def, 0)
+                && equiv(y1, y2, &def, 0)
+            {
+                proved = true;
+                break;
+            }
+            clean &= !writes(d);
+            at = pi;
+        }
+        if proved {
+            rewrite.push((bi, neg.clone()));
+        }
+    }
+    for (bi, to) in rewrite {
+        f.blocks[bi].term = Terminator::Br(to);
+    }
+    prune_unreachable(f);
+    remove_dead(f);
+}
+
+/// Whether a block writes anything a later read could see.
+fn writes(b: &Block) -> bool {
+    b.insts
+        .iter()
+        .any(|i| matches!(i.kind, InstKind::Store { .. } | InstKind::Call { .. }))
+}
+
+fn predecessors_by_label(f: &Function) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for b in &f.blocks {
+        for s in successors(&b.term) {
+            let e = out.entry(s).or_default();
+            if !e.contains(&b.label) {
+                e.push(b.label.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Whether two operands must hold the same value — by what defines them, not
+/// by what they are called.
+fn equiv(a: &Operand, b: &Operand, def: &BTreeMap<String, InstKind>, depth: u32) -> bool {
+    if a == b {
+        return true;
+    }
+    if depth > 4 {
+        return false;
+    }
+    let (Operand::Value(x), Operand::Value(y)) = (a, b) else {
+        return false;
+    };
+    let (Some(dx), Some(dy)) = (def.get(x), def.get(y)) else {
+        return false;
+    };
+    match (dx, dy) {
+        (InstKind::Load { ty: t1, p: p1 }, InstKind::Load { ty: t2, p: p2 }) => {
+            t1 == t2 && equiv(p1, p2, def, depth + 1)
+        }
+        (InstKind::Offset { p: p1, d: d1 }, InstKind::Offset { p: p2, d: d2 }) => {
+            equiv(p1, p2, def, depth + 1) && equiv(d1, d2, def, depth + 1)
+        }
+        (
+            InstKind::Flavored {
+                op: o1,
+                flavor: f1,
+                ty: t1,
+                a: a1,
+                b: b1,
+            },
+            InstKind::Flavored {
+                op: o2,
+                flavor: f2,
+                ty: t2,
+                a: a2,
+                b: b2,
+            },
+        ) => {
+            o1 == o2
+                && f1 == f2
+                && t1 == t2
+                && equiv(a1, a2, def, depth + 1)
+                && equiv(b1, b2, def, depth + 1)
+        }
+        _ => false,
     }
 }
 

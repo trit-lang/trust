@@ -401,7 +401,19 @@ words, and two words go through memory. Every iterator pays it per item. The
 fix is not another peephole: it is either promoting small aggregates out of
 memory, or a niche that does not exist.
 
-**C. Bounds-check elimination, by an equivalence *oracle*.** Branches and
+**C. Bounds-check elimination — done, and worth 14.6%.** Deleting the checks
+outright is −30.4% of HPL, so that is the ceiling; half of it is now
+recovered, and most of the rest is not recoverable at all — HPL indexes
+`[t27; 35]` with a *runtime* bound, and that check is the price of safety.
+Both halves are in G8.19: a counter that starts at zero needs no lower check
+(a greatest fixpoint, sound because `.trap` cannot wrap below zero), and a
+loop condition decides its own upper check (an equivalence oracle, which
+rewrites nothing and so extends no live range).
+
+What is left of the old route C: **hoisting** a check out of a loop, which
+needs the interval reasoning this compiler still has none of.
+
+*The route as it was written, before it was done:* Branches and
 comparisons are 36% of everything HPL executes, and in an indexed loop the two
 bounds checks are four of sixteen instructions. The upper one is already
 decided by the loop condition above it — it only looks undecided because every
