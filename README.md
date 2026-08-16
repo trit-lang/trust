@@ -60,7 +60,7 @@ the ternary one has no use for.
 ## Building
 
 ```
-cargo test          # 558 tests
+cargo test          # 566 tests
 cargo build
 ```
 
@@ -233,7 +233,7 @@ vm/          crate tritium: the reference machine and its assembler
 driver/      crate trust: compile a program and run it, in one command
 lsp/         crate trust-lsp: diagnostics for an editor, over stdio
 editors/     a tree-sitter grammar, and the Zed extension that loads it
-bootstrap/   the compiler, in Trust — the lexer so far, held to the Rust one
+bootstrap/   the compiler, in Trust — lexer and parser, held to the Rust one
 targets/     target descriptions (TIR §7)
 examples/    TIR modules and Trust programs that run
 docs/        notes about the spec, including every derived decision

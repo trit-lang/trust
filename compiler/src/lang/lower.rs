@@ -10660,7 +10660,7 @@ impl Fn<'_> {
                 self.owned = before.clone();
                 self.start(label.clone());
                 self.arm_body(arm, expected, &mut result, &join, span, None, &dest)?;
-                merged = Some(self.join_arm(merged));
+                merged = self.join_arm(merged);
             }
             if let Some(m) = merged {
                 self.owned = m;
@@ -10680,7 +10680,7 @@ impl Fn<'_> {
             let unconditional = self.arm_test(arm, &v, &ty, &body, &next, span)?;
             self.start(body);
             self.arm_body(arm, expected, &mut result, &join, span, None, &dest)?;
-            merged = Some(self.join_arm(merged));
+            merged = self.join_arm(merged);
             if unconditional {
                 // A wildcard or binding matches everything, so no later arm
                 // and no fallthrough block is reachable — and an unreachable
@@ -10831,7 +10831,7 @@ impl Fn<'_> {
                     &dest,
                     None,
                 )?;
-                merged = Some(self.join_arm(merged));
+                merged = self.join_arm(merged);
             }
             if let Some(m) = merged {
                 self.owned = m;
@@ -10898,7 +10898,7 @@ impl Fn<'_> {
                 &dest,
                 fail.as_deref(),
             )?;
-            merged = Some(self.join_arm(merged));
+            merged = self.join_arm(merged);
             self.owned = before.clone();
             self.start(next);
         }
@@ -10924,7 +10924,7 @@ impl Fn<'_> {
                     &dest,
                     fail.as_deref(),
                 )?;
-                merged = Some(self.join_arm(merged));
+                merged = self.join_arm(merged);
                 if let Some(f) = fail {
                     self.start(f);
                     self.finish(Terminator::Trap(FaultCode::Trap));
@@ -11181,17 +11181,22 @@ impl Fn<'_> {
     /// maybe-owned afterwards, which is what the drop flag is for (Ch. 3
     /// §1.2). `if`/`else` did this from the start and `match` did not, so a
     /// move in the first arm made every arm after it complain.
-    fn join_arm(&mut self, merged: Option<Vec<Owned>>) -> Vec<Owned> {
-        let here = self.owned_snapshot();
+    /// Fold one arm's ownership state into what the arms before it left.
+    ///
+    /// `None` means no arm has contributed yet — which is not the same as
+    /// "the first arm's state", and confusing the two put a diverging
+    /// *first* arm's state in as if it were everyone's (G9.41).
+    fn join_arm(&mut self, merged: Option<Vec<Owned>>) -> Option<Vec<Owned>> {
         // An arm that left by another door contributes nothing.
         if !self.arm_reaches {
-            return merged.unwrap_or(here);
+            return merged;
         }
+        let here = self.owned_snapshot();
         match merged {
-            None => here,
+            None => Some(here),
             Some(prev) => {
                 self.owned_join(prev, here);
-                self.owned_snapshot()
+                Some(self.owned_snapshot())
             }
         }
     }

@@ -124,8 +124,63 @@ pub fn unary(p: &mut Parser) -> Result<Expr, lex::Error> {
     }
 }
 
-/// A literal, a name, a call, or a parenthesized expression.
+/// Whether an expression is written with braces, and so may stand as a
+/// statement without a `;` (§5.1).
+pub fn block_shaped(e: &Expr) -> bool {
+    match e {
+        Expr::Nested(b) => true,
+        Expr::If(c, t, o) => true,
+        Expr::While(c, b) => true,
+        Expr::Loop(b) => true,
+        _ => false,
+    }
+}
+
+/// A literal, a name, a call, a parenthesized expression, or one of §5's
+/// constructs written with braces.
 pub fn primary(p: &mut Parser) -> Result<Expr, lex::Error> {
+    let ahead = peek(p)?;
+    let after = ahead.at;
+    let keyword = match ahead.tok {
+        Tok::Kw(k) => k,
+        _ => "".to_string(),
+    };
+    if keyword.same("if") {
+        return if_expr(p);
+    }
+    if keyword.same("while") {
+        p.at = after;
+        let c = no_struct_expr(p)?;
+        let b = block(p)?;
+        return Result::Ok(Expr::While(Box::new(c), Box::new(b)));
+    }
+    if keyword.same("loop") {
+        p.at = after;
+        let b = block(p)?;
+        return Result::Ok(Expr::Loop(Box::new(b)));
+    }
+    if keyword.same("return") {
+        p.at = after;
+        return Result::Ok(Expr::Return(optional_value(p)?));
+    }
+    if keyword.same("break") {
+        p.at = after;
+        return Result::Ok(Expr::Break(optional_value(p)?));
+    }
+    if keyword.same("continue") {
+        p.at = after;
+        return Result::Ok(Expr::Continue);
+    }
+    let braced = peek(p)?;
+    let opens = match braced.tok {
+        Tok::Op(o) => o.same("{"),
+        _ => false,
+    };
+    if opens {
+        let b = block(p)?;
+        return Result::Ok(Expr::Nested(Box::new(b)));
+    }
+
     let t = peek(p)?;
     p.at = t.at;
     match t.tok {
@@ -173,6 +228,58 @@ pub fn primary(p: &mut Parser) -> Result<Expr, lex::Error> {
         }
         _ => Result::Err(lex::Error { at: p.at, message: "expected an expression".to_string() }),
     }
+}
+
+/// `if c { … } else { … }` (§5.3). The `else` is an expression, so `else if`
+/// is an `if` rather than a third shape.
+fn if_expr(p: &mut Parser) -> Result<Expr, lex::Error> {
+    expect_kw(p, "if")?;
+    let c = no_struct_expr(p)?;
+    let then = block(p)?;
+    let t = peek(p)?;
+    let next = t.at;
+    let has_else = match t.tok {
+        Tok::Kw(k) => k.same("else"),
+        _ => false,
+    };
+    if !has_else {
+        return Result::Ok(Expr::If(Box::new(c), Box::new(then), Option::None));
+    }
+    p.at = next;
+    let t2 = peek(p)?;
+    let chained = match t2.tok {
+        Tok::Kw(k) => k.same("if"),
+        _ => false,
+    };
+    let other = if chained {
+        if_expr(p)?
+    } else {
+        let b = block(p)?;
+        Expr::Nested(Box::new(b))
+    };
+    Result::Ok(Expr::If(Box::new(c), Box::new(then), Option::Some(Box::new(other))))
+}
+
+/// A condition: an expression, read where a `{` opens the block that follows
+/// rather than a struct literal (§2.8). Nothing here reads a struct literal
+/// at all, so the rule costs nothing and is written for the reader.
+fn no_struct_expr(p: &mut Parser) -> Result<Expr, lex::Error> {
+    expr(p)
+}
+
+/// `return`, `break` — a value, unless what follows cannot start one.
+fn optional_value(p: &mut Parser) -> Result<Option<Box<Expr>>, lex::Error> {
+    let t = peek(p)?;
+    let ends = match t.tok {
+        Tok::Op(o) => o.same(";") || o.same("}") || o.same(")") || o.same(","),
+        Tok::Eof => true,
+        _ => false,
+    };
+    if ends {
+        return Result::Ok(Option::None);
+    }
+    let e = expr(p)?;
+    Result::Ok(Option::Some(Box::new(e)))
 }
 
 /// `a, b, c)` — the arguments of a call, the `(` already read.
@@ -271,6 +378,20 @@ pub fn block(p: &mut Parser) -> Result<ast::Block, lex::Error> {
             if ends {
                 p.at = at3;
                 stmts.push(ast::Stmt::Do(e));
+            } else if block_shaped(&e) {
+                // A block-shaped expression may stand as a statement with no
+                // terminator (§5.1) — unless it is the block's own value,
+                // which is what a `}` after it says.
+                let t4 = peek(p)?;
+                let closes = match t4.tok {
+                    Tok::Op(o) => o.same("}"),
+                    _ => false,
+                };
+                if closes {
+                    tail = Option::Some(Box::new(e));
+                } else {
+                    stmts.push(ast::Stmt::Do(e));
+                }
             } else {
                 tail = Option::Some(Box::new(e));
             }
@@ -512,5 +633,163 @@ fn expect_kw(p: &mut Parser, want: &str) -> Result<(), lex::Error> {
             Result::Err(lex::Error { at: p.at, message: "unexpected keyword".to_string() })
         }
         _ => Result::Err(lex::Error { at: p.at, message: "expected a keyword".to_string() }),
+    }
+}
+
+/// A whole file: items, in the order written (§3).
+pub fn file(p: &mut Parser) -> Result<Vec<ast::Item>, lex::Error> {
+    let mut out: Vec<ast::Item> = Vec::new();
+    loop {
+        let t = peek(p)?;
+        match t.tok {
+            Tok::Eof => return Result::Ok(out),
+            _ => {}
+        }
+        out.push(item(p)?);
+    }
+}
+
+/// One item. `pub` is read and dropped: it decides visibility (Ch. 6 §2) and
+/// nothing here asks about visibility.
+pub fn item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
+    let t = peek(p)?;
+    let next = t.at;
+    let word = match t.tok {
+        Tok::Kw(k) => k,
+        _ => "".to_string(),
+    };
+    if word.same("pub") {
+        p.at = next;
+        return item(p);
+    }
+    if word.same("fn") {
+        let f = function(p)?;
+        return Result::Ok(ast::Item::Function(f));
+    }
+    if word.same("struct") {
+        return struct_item(p);
+    }
+    if word.same("enum") {
+        return enum_item(p);
+    }
+    Result::Err(lex::Error { at: p.at, message: "expected an item".to_string() })
+}
+
+/// `struct Name { a: T, … }`, `struct Name;` (§3.3).
+fn struct_item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
+    expect_kw(p, "struct")?;
+    let name = ident(p)?;
+    let mut fields: Vec<ast::Param> = Vec::new();
+    let t = peek(p)?;
+    let next = t.at;
+    let unit = match t.tok {
+        Tok::Op(o) => o.same(";"),
+        _ => false,
+    };
+    if unit {
+        p.at = next;
+        return Result::Ok(ast::Item::Struct(name, fields));
+    }
+    expect_op(p, "{")?;
+    loop {
+        let t2 = peek(p)?;
+        let at2 = t2.at;
+        let done = match t2.tok {
+            Tok::Op(o) => o.same("}"),
+            _ => false,
+        };
+        if done {
+            p.at = at2;
+            return Result::Ok(ast::Item::Struct(name, fields));
+        }
+        let t3 = peek(p)?;
+        let at3 = t3.at;
+        let public = match t3.tok {
+            Tok::Kw(k) => k.same("pub"),
+            _ => false,
+        };
+        if public {
+            p.at = at3;
+        }
+        let fname = ident(p)?;
+        expect_op(p, ":")?;
+        let fty = type_name(p)?;
+        fields.push(ast::Param { name: fname, ty: fty });
+        let t4 = peek(p)?;
+        let at4 = t4.at;
+        match t4.tok {
+            Tok::Op(o) => {
+                if o.same(",") {
+                    p.at = at4;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `enum Name { A, B(T, U), … }` (§3.3).
+fn enum_item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
+    expect_kw(p, "enum")?;
+    let name = ident(p)?;
+    expect_op(p, "{")?;
+    let mut variants: Vec<ast::Variant> = Vec::new();
+    loop {
+        let t = peek(p)?;
+        let next = t.at;
+        let done = match t.tok {
+            Tok::Op(o) => o.same("}"),
+            _ => false,
+        };
+        if done {
+            p.at = next;
+            return Result::Ok(ast::Item::Enum(name, variants));
+        }
+        let vname = ident(p)?;
+        let mut fields: Vec<String> = Vec::new();
+        let t2 = peek(p)?;
+        let at2 = t2.at;
+        let payload = match t2.tok {
+            Tok::Op(o) => o.same("("),
+            _ => false,
+        };
+        if payload {
+            p.at = at2;
+            loop {
+                let t3 = peek(p)?;
+                let at3 = t3.at;
+                let close = match t3.tok {
+                    Tok::Op(o) => o.same(")"),
+                    _ => false,
+                };
+                if close {
+                    p.at = at3;
+                    break;
+                }
+                let ty = type_name(p)?;
+                fields.push(ty);
+                let t4 = peek(p)?;
+                let at4 = t4.at;
+                match t4.tok {
+                    Tok::Op(o) => {
+                        if o.same(",") {
+                            p.at = at4;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        variants.push(ast::Variant { name: vname, fields: fields });
+        let t5 = peek(p)?;
+        let at5 = t5.at;
+        match t5.tok {
+            Tok::Op(o) => {
+                if o.same(",") {
+                    p.at = at5;
+                }
+            }
+            _ => {}
+        }
     }
 }

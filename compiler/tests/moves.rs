@@ -207,3 +207,24 @@ fn a_shared_reference_is_not_accepted_where_an_exclusive_one_is_wanted() {
     let why = refusal(src).expect("refused");
     assert!(why.contains("expected &mut P"), "{why}");
 }
+
+#[test]
+fn a_diverging_first_arm_does_not_speak_for_the_others() {
+    // `join_arm` folded each arm into what the ones before it left, and
+    // "nothing has contributed yet" was represented by the first arm's own
+    // state — so a first arm that *returned* put its state in as if it were
+    // everyone's, and a loop then said the value was moved (G9.41).
+    let src = "enum E { Done, More }\n\
+               fn next() -> E { E::Done }\n\
+               fn go() -> Vec<t27> {\n\
+               \x20   let mut out: Vec<t27> = Vec::new();\n\
+               \x20   loop {\n\
+               \x20       match next() {\n\
+               \x20           E::Done => return out,\n\
+               \x20           E::More => {}\n\
+               \x20       }\n\
+               \x20       out.push(1);\n\
+               \x20   }\n}\n\
+               fn main() -> t27 { go().len() as t27 }\n";
+    assert_eq!(refusal(src), None);
+}

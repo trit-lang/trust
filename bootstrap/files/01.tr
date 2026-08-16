@@ -1,0 +1,5 @@
+pub struct Point { pub x: t27, y: taddr }
+struct Unit;
+pub enum Kind { Trit, Tryte, Word }
+enum Shape { Dot, Line(t27), Rect(t27, t27) }
+fn area(k: t27) -> t27 { k * k }

@@ -1,0 +1,7 @@
+fn stmtblocks() {
+    { f(); }
+    if a { g(); }
+    while b { h(); }
+    loop { break; }
+    i();
+}

@@ -29,6 +29,7 @@ usage:
     trust bundle <file.tr>             the whole module tree as one text,
                                        for a compiler that cannot open files
     trust modules <file.tr>            each module of it, and its token count
+    trust file <file.tr>               every item in it, as a tree
 
     --time                             report what each phase of the compile
                                        cost, on stderr
@@ -125,6 +126,17 @@ fn main() -> ExitCode {
             print!("{}", source.text);
         }
         return ExitCode::SUCCESS;
+    }
+
+    // Every item in a file, as a tree.
+    if cmd == "file" {
+        return match std::fs::read_to_string(path) {
+            Ok(src) => print_file(&src),
+            Err(e) => {
+                eprintln!("trust: cannot read `{path}`: {e}");
+                ExitCode::FAILURE
+            }
+        };
     }
 
     // The file, read as one function, printed as a tree.
@@ -284,19 +296,7 @@ fn print_expr(src: &str) -> ExitCode {
 }
 
 /// One function, as a tree.
-fn print_item(src: &str) -> ExitCode {
-    let file = match lang::parse::parse(src) {
-        Ok(f) => f,
-        Err(e) => {
-            println!("error {}", e.span.lo);
-            return ExitCode::SUCCESS;
-        }
-    };
-    let Some(lang::ast::Item::Fn(f)) = file.items.first() else {
-        println!("error 0");
-        return ExitCode::SUCCESS;
-    };
-    let mut out = String::new();
+fn show_fn(f: &lang::ast::FnItem, out: &mut String) {
     out.push_str(&format!("(fn {} (", f.name));
     for (i, p) in f.params.iter().enumerate() {
         if i > 0 {
@@ -310,9 +310,67 @@ fn print_item(src: &str) -> ExitCode {
         None => "()".to_string(),
     });
     out.push(' ');
-    show_block(f.body.as_ref().expect("a body"), &mut out);
+    show_block(f.body.as_ref().expect("a body"), out);
     out.push(')');
+}
+
+fn print_item(src: &str) -> ExitCode {
+    let file = match lang::parse::parse(src) {
+        Ok(f) => f,
+        Err(e) => {
+            println!("error {}", e.span.lo);
+            return ExitCode::SUCCESS;
+        }
+    };
+    let Some(lang::ast::Item::Fn(f)) = file.items.first() else {
+        println!("error 0");
+        return ExitCode::SUCCESS;
+    };
+    let mut out = String::new();
+    show_fn(f, &mut out);
     println!("{out}");
+    ExitCode::SUCCESS
+}
+
+/// Every item of a file, one per line.
+fn print_file(src: &str) -> ExitCode {
+    use lang::ast::Item;
+    let file = match lang::parse::parse(src) {
+        Ok(f) => f,
+        Err(e) => {
+            println!("error {}", e.span.lo);
+            return ExitCode::SUCCESS;
+        }
+    };
+    for item in &file.items {
+        let mut out = String::new();
+        match item {
+            Item::Fn(f) => show_fn(f, &mut out),
+            Item::Struct(s) => {
+                out.push_str(&format!("(struct {} (", s.name));
+                for (i, f) in s.fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push(' ');
+                    }
+                    out.push_str(&format!("{}:{}", f.name, written_ty(&f.ty)));
+                }
+                out.push_str("))");
+            }
+            Item::Enum(e) => {
+                out.push_str(&format!("(enum {}", e.name));
+                for v in &e.variants {
+                    out.push_str(&format!(" ({}", v.name));
+                    for f in &v.fields {
+                        out.push_str(&format!(" {}", written_ty(&f.ty)));
+                    }
+                    out.push(')');
+                }
+                out.push(')');
+            }
+            other => out.push_str(&format!("<{:?}>", std::mem::discriminant(other))),
+        }
+        println!("{out}");
+    }
     ExitCode::SUCCESS
 }
 
@@ -331,6 +389,15 @@ fn written_ty(t: &lang::ast::Ty) -> String {
         }
         other => format!("{other:?}"),
     }
+}
+
+fn show_jump(word: &str, v: Option<&lang::ast::Expr>, out: &mut String) {
+    out.push_str(&format!("({word}"));
+    if let Some(e) = v {
+        out.push(' ');
+        show_expr(e, out);
+    }
+    out.push(')');
 }
 
 fn show_block(b: &lang::ast::Block, out: &mut String) {
@@ -390,6 +457,33 @@ fn show_expr(e: &lang::ast::Expr, out: &mut String) {
             show_expr(b, out);
             out.push(')');
         }
+        Expr::Block(b) => show_block(b, out),
+        Expr::If(c, then, other, _) => {
+            out.push_str("(if ");
+            show_expr(c, out);
+            out.push(' ');
+            show_block(then, out);
+            if let Some(o) = other {
+                out.push(' ');
+                show_expr(o, out);
+            }
+            out.push(')');
+        }
+        Expr::While(c, b, _) => {
+            out.push_str("(while ");
+            show_expr(c, out);
+            out.push(' ');
+            show_block(b, out);
+            out.push(')');
+        }
+        Expr::Loop(b, _) => {
+            out.push_str("(loop ");
+            show_block(b, out);
+            out.push(')');
+        }
+        Expr::Return(v, _) => show_jump("return", v.as_deref(), out),
+        Expr::Break(v, _) => show_jump("break", v.as_deref(), out),
+        Expr::Continue(_) => out.push_str("(continue)"),
         Expr::Field(base, name, _) => {
             out.push_str("(field ");
             show_expr(base, out);

@@ -2592,6 +2592,30 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.41 — "nothing yet" was the first arm's state.** `join_arm` folds each
+`match` arm's ownership into what the arms before it left, and `None` meant
+"no arm has contributed". G9.35's fix made a diverging arm contribute
+nothing — but on the *first* arm there was nothing to fall back to, and the
+code returned the diverging arm's own state instead. So
+
+```
+loop {
+    match next() { E::Done => return out, E::More => {} }
+    out.push(1);
+}
+```
+
+was told `out` "is moved out of here, and the loop may reach this again". The
+`return` is the only place it moves, and the loop cannot reach it again
+because the function is over.
+
+The fix is a type: `join_arm` returns `Option<Vec<Owned>>`, so "nothing yet"
+and "this state" are different values and cannot be confused. That is the
+third time this session that a diverging path needed excluding — an `if`
+branch, a `match` arm, and now the *first* `match` arm — and each was found
+by a parser written in the language, because a parser is written as `check,
+leave, carry on`.
+
 **G9.40 — a compiler written in Trust cannot open a file, and does not need
 to.** The machine has a character port and no filesystem (ISA §2.2). Giving
 it one would be putting an operating system inside a machine, so the line is

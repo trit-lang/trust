@@ -1,0 +1,8 @@
+fn jumps(a: t27) -> t27 {
+    if a < 0 { return 0; }
+    loop {
+        if a > 3 { break a; }
+        if a == 2 { continue; }
+        a += 1;
+    }
+}

@@ -1,0 +1,10 @@
+struct Held { v: Vec<t27>, r: &[t27] }
+enum Tree { Leaf, Node(Box<Tree>, t27, Box<Tree>) }
+fn walk(t: &Tree) -> t27 {
+    let mut n = 0;
+    while n < 10 {
+        if n == 3 { break; }
+        n += 1;
+    }
+    n
+}

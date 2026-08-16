@@ -24,6 +24,19 @@ pub enum Expr {
     /// `a = b`, and the compound forms, which are §2.1's loosest level and
     /// right-associative.
     Assign(String, Box<Expr>, Box<Expr>),
+    /// A block used as an expression (§5.1).
+    Nested(Box<Block>),
+    /// `if c { … } else { … }` (§5.3). The alternative is an expression so
+    /// that `else if` is an `if` and not a third shape.
+    If(Box<Expr>, Box<Block>, Option<Box<Expr>>),
+    /// `while c { … }` (§5.5).
+    While(Box<Expr>, Box<Block>),
+    /// `loop { … }` (§5.5).
+    Loop(Box<Block>),
+    /// `return e?`, `break e?`, `continue` (§§5.5, 5.7).
+    Return(Option<Box<Expr>>),
+    Break(Option<Box<Expr>>),
+    Continue,
 }
 
 /// A statement (§5.2).
@@ -47,8 +60,21 @@ pub struct Param {
     pub ty: String,
 }
 
-/// A top-level item (§3). Only `fn` so far, which is what a parser has to
-/// read before it can read anything else.
+/// One variant of an enum: a name, and its payload types as text (§3.3).
+pub struct Variant {
+    pub name: String,
+    pub fields: Vec<String>,
+}
+
+/// A top-level item (§3).
+pub enum Item {
+    Function(Fn),
+    /// `struct Name { field: T, … }`, or a unit struct with no fields.
+    Struct(String, Vec<Param>),
+    /// `enum Name { A, B(T), … }`.
+    Enum(String, Vec<Variant>),
+}
+
 pub struct Fn {
     pub name: String,
     pub params: Vec<Param>,
@@ -100,6 +126,36 @@ pub fn show(e: &Expr, out: &mut String) {
             show(&*a, out);
             out.push_str(")");
         }
+        Expr::Nested(b) => show_block(&*b, out),
+        Expr::If(c, then, other) => {
+            out.push_str("(if ");
+            show(&*c, out);
+            out.push_str(" ");
+            show_block(&*then, out);
+            match &other {
+                Option::Some(e) => {
+                    out.push_str(" ");
+                    show(&*e, out);
+                }
+                Option::None => {}
+            }
+            out.push_str(")");
+        }
+        Expr::While(c, b) => {
+            out.push_str("(while ");
+            show(&*c, out);
+            out.push_str(" ");
+            show_block(&*b, out);
+            out.push_str(")");
+        }
+        Expr::Loop(b) => {
+            out.push_str("(loop ");
+            show_block(&*b, out);
+            out.push_str(")");
+        }
+        Expr::Return(v) => show_jump("return", &v, out),
+        Expr::Break(v) => show_jump("break", &v, out),
+        Expr::Continue => out.push_str("(continue)"),
         Expr::Field(base, name) => {
             out.push_str("(field ");
             show(&*base, out);
@@ -152,6 +208,20 @@ pub fn show(e: &Expr, out: &mut String) {
     }
 }
 
+/// `return`, `break` — a word and an optional value.
+fn show_jump(word: &str, v: &Option<Box<Expr>>, out: &mut String) {
+    out.push_str("(");
+    out.push_str(word);
+    match v {
+        Option::Some(e) => {
+            out.push_str(" ");
+            show(&*e, out);
+        }
+        Option::None => {}
+    }
+    out.push_str(")");
+}
+
 /// A block, written out.
 pub fn show_block(b: &Block, out: &mut String) {
     out.push_str("(block");
@@ -190,6 +260,47 @@ pub fn show_stmt(s: &Stmt, out: &mut String) {
         Stmt::Do(e) => {
             out.push_str("(do ");
             show(&e, out);
+            out.push_str(")");
+        }
+    }
+}
+
+/// One item, written out.
+pub fn show_item(i: &Item, out: &mut String) {
+    match i {
+        Item::Function(f) => show_fn(&f, out),
+        Item::Struct(name, fields) => {
+            out.push_str("(struct ");
+            out.push_str(&name);
+            out.push_str(" (");
+            let mut k: taddr = 0;
+            while k < fields.len() {
+                if k > 0 {
+                    out.push_str(" ");
+                }
+                out.push_str(&fields[k].name);
+                out.push_str(":");
+                out.push_str(&fields[k].ty);
+                k += 1;
+            }
+            out.push_str("))");
+        }
+        Item::Enum(name, variants) => {
+            out.push_str("(enum ");
+            out.push_str(&name);
+            let mut k: taddr = 0;
+            while k < variants.len() {
+                out.push_str(" (");
+                out.push_str(&variants[k].name);
+                let mut j: taddr = 0;
+                while j < variants[k].fields.len() {
+                    out.push_str(" ");
+                    out.push_str(&variants[k].fields[j]);
+                    j += 1;
+                }
+                out.push_str(")");
+                k += 1;
+            }
             out.push_str(")");
         }
     }
