@@ -297,3 +297,27 @@ fn an_impl_takes_no_pub_and_neither_does_a_method_of_one() {
     let e = build(&at).expect_err("a refusal");
     assert!(e.contains("found `pub`"), "{e}");
 }
+
+#[test]
+fn a_declaration_keeps_the_name_it_was_written_with() {
+    // §4 renames every item to its path, and the outside knows no modules:
+    // `putchar` is a symbol in a runtime written before this program, and
+    // `io.putchar` is not. A signature with no body names something out
+    // there, so it is the one item a module does not rename (G9.44).
+    let at = dir("declared");
+    write(
+        &at,
+        "main.tr",
+        "mod io;\nfn main() -> t27 { io::emit(65); 0 }\n",
+    );
+    write(
+        &at,
+        "io.tr",
+        "fn putchar(c: t9);\npub fn emit(c: t27) { putchar(c as t9); }\n",
+    );
+    let m = build(&at).expect("a program");
+    let defined: Vec<&str> = m.funcs.iter().map(|f| f.sig.name.as_str()).collect();
+    let outside: Vec<&str> = m.decls.iter().map(|d| d.name.as_str()).collect();
+    assert!(outside.contains(&"putchar"), "{outside:?}");
+    assert!(defined.contains(&"io.emit"), "{defined:?}");
+}

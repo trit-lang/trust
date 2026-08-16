@@ -2592,6 +2592,23 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.44 — a module renamed the outside.** Ch. 6 §4 said the symbol an item
+becomes is its path, with no exception, and Ch. 0 §3.1 says a function with
+no body is defined outside the language. Put a `fn getchar() -> t9;` in a
+module and the two rules together ask the linker for `input.getchar`, which
+nothing has ever defined — the program compiled, assembled, and failed at
+the last step with a name no source file contains.
+
+Found by moving seven copies of `read_all` into one module, which is the
+first time this repository had a declaration anywhere but a root.
+
+A declaration now keeps the name it was written with, and §4 says so. It
+does not name an item of this program; it names something the program is
+linked against, which was written first and knows nothing about its modules.
+Two modules may declare the same external function and they name the same
+one — a declaration is a claim about the outside, and two identical claims
+are one claim.
+
 **G9.43 — two lexers, two strings.** The corpus held no bare `_` and no
 escape inside a string, and both were wrong in the Trust lexer: `_` came
 back as an identifier where Ch. 0 §1.5 makes it punctuation, and a string

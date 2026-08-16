@@ -161,7 +161,11 @@ pub fn symbols(p: &Program) -> Vec<(String, String, bool)> {
                 continue;
             }
             let Some(name) = defines(item) else { continue };
-            out.push((word(item).to_string(), join(here, name), is_public(item)));
+            out.push((
+                word(item).to_string(),
+                symbol(item, here, name),
+                is_public(item),
+            ));
         }
     }
     out
@@ -336,6 +340,26 @@ fn join(path: &[String], name: &str) -> String {
     format!("{}.{name}", path.join("."))
 }
 
+/// Whether an item is a *declaration* — a signature whose definition is
+/// outside the language (§3.1).
+///
+/// It matters here because §4 renames every item to its path, and the
+/// outside does not know about modules: `putchar` is a symbol in a runtime
+/// written before this program existed, and `input.putchar` is not. A
+/// declaration therefore keeps the name it was written with, wherever it was
+/// written (G9.44).
+fn declared(i: &Item) -> bool {
+    matches!(i, Item::Fn(f) if f.body.is_none())
+}
+
+/// What an item is called once its module is part of its name (§4).
+fn symbol(i: &Item, here: &[String], name: &str) -> String {
+    match declared(i) {
+        true => name.to_string(),
+        false => join(here, name),
+    }
+}
+
 /// The name an item defines, or `None` for an `impl`, which defines none.
 fn defines(i: &Item) -> Option<&str> {
     match i {
@@ -478,7 +502,7 @@ fn world(p: &Program) -> World<'_> {
                 continue;
             }
             let Some(name) = defines(item) else { continue };
-            let full = join(here, name);
+            let full = symbol(item, here, name);
             mine.insert(name.to_string(), full.clone());
             w.public.insert(full.clone(), is_public(item));
             w.kinds.insert(full, kind_of(item));
@@ -524,6 +548,9 @@ fn inside(here: &[String], at: &[String]) -> bool {
 
 /// Give an item's own name its module path.
 fn rename_item(item: &mut Item, here: &[String]) {
+    if declared(item) {
+        return;
+    }
     match item {
         Item::Fn(f) => f.name = join(here, &f.name),
         Item::Struct(s) => s.name = join(here, &s.name),

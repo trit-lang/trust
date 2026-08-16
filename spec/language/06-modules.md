@@ -254,6 +254,17 @@ as `.` — `lang::lex::Span::width` becomes `lang.lex.Span.width` — because TI
 §1 admits `.` in an identifier and not `:`. A program in which two items would
 become the same TIR symbol is an error, reported by name.
 
+A **declaration** — a signature with no body (Ch. 0 §3.1) — is the exception,
+and keeps the name it was written with wherever it was written. It does not
+name an item of this program: it names something the program is linked
+against, which was written before this program existed and knows nothing
+about its modules. `putchar` is a symbol in a runtime; `io.putchar` is not.
+
+> **Informative.** Two modules may therefore declare the same external
+> function, and they name the same one. That is the intent — a declaration
+> is a claim about the outside, and two identical claims are one claim — and
+> it is why a declaration is not subject to the paragraph above.
+
 Monomorphization, vtables and drop glue are unchanged: they are described in
 Ch. 4 and Ch. 3 in terms of items, and an item's module is part of its name
 and of nothing else.

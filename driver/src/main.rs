@@ -30,6 +30,10 @@ usage:
                                        for a compiler that cannot open files
     trust modules <file.tr>            each module of it, and its token count
     trust file <file.tr>               every item in it, as a tree
+    trust symbols <file.tr>            every name the program defines
+    trust uses <file.tr>               what every `use` in it reaches
+    trust flat <file.tr>               the program as one list of items, with
+                                       every name resolved
 
     --time                             report what each phase of the compile
                                        cost, on stderr
@@ -137,6 +141,26 @@ fn main() -> ExitCode {
                 Err(why) => println!("{module} {written} ! {why}"),
             }
         }
+        return ExitCode::SUCCESS;
+    }
+
+    // Pass three of Ch. 6 §4: the whole program as one flat list of items,
+    // every name in it resolved. It is what the rest of the compiler has
+    // always been given, and it is the last question about this chapter that
+    // can be asked without asking about types.
+    if cmd == "flat" {
+        let program = lang::modules::load(std::path::Path::new(path));
+        if !program.errors.is_empty() {
+            for e in &program.errors {
+                eprintln!("trust: {}", e.message);
+            }
+            return ExitCode::FAILURE;
+        }
+        let (file, errors) = lang::modules::resolve(&program);
+        for e in &errors {
+            println!("error {}", e.message);
+        }
+        print_items(&file);
         return ExitCode::SUCCESS;
     }
 
@@ -378,7 +402,6 @@ fn print_item(src: &str) -> ExitCode {
 
 /// Every item of a file, one per line.
 fn print_file(src: &str) -> ExitCode {
-    use lang::ast::Item;
     let file = match lang::parse::parse(src) {
         Ok(f) => f,
         Err(e) => {
@@ -386,6 +409,14 @@ fn print_file(src: &str) -> ExitCode {
             return ExitCode::SUCCESS;
         }
     };
+    print_items(&file);
+    ExitCode::SUCCESS
+}
+
+/// Every item of a file, one per line — whether it was read from one file or
+/// resolved out of a program of them.
+fn print_items(file: &lang::ast::File) {
+    use lang::ast::Item;
     for item in &file.items {
         let mut out = String::new();
         match item {
@@ -435,7 +466,6 @@ fn print_file(src: &str) -> ExitCode {
         }
         println!("{out}");
     }
-    ExitCode::SUCCESS
 }
 
 /// A type as its text, which is all either parser keeps of one here.

@@ -30,7 +30,7 @@ pub enum Expr {
     /// `a[i]` (Ch. 3 §5.5).
     Index(Box<Expr>, Box<Expr>),
     /// `e as T` (§2.6). The type is the text it was written with.
-    Cast(Box<Expr>, String),
+    Cast(Box<Expr>, Ty),
     /// `e?` (Ch. 5 §6.2).
     Try(Box<Expr>),
     /// `()` — the one value of the unit type (Ch. 2 §1).
@@ -77,17 +77,37 @@ pub struct Block {
     pub tail: Option<Box<Expr>>,
 }
 
-/// One parameter: a name and its written type, kept as text because nothing
-/// here reads a type for anything but printing it.
-pub struct Param {
-    pub name: String,
-    pub ty: String,
+/// A written type (§3.4).
+///
+/// It was text until a resolver wanted to read one: a name inside a type is
+/// a path like any other (Ch. 6 §3.1), and a pass that rewrites paths cannot
+/// rewrite a string it would have to re-parse. A type is a tree now, and
+/// printing it back gives the characters it was written with.
+pub enum Ty {
+    /// A name, through the modules holding it: `t27`, `lex::Taken`.
+    Name(Vec<String>),
+    /// A name applied to arguments: `Vec<char>`, `Result<T, E>`.
+    App(Vec<String>, Vec<Ty>),
+    /// `&T` and `&mut T`; the flag is the `mut` (Ch. 3 §2.1).
+    Ref(Box<Ty>, bool),
+    /// `[T]` (Ch. 2 §4).
+    Slice(Box<Ty>),
+    /// `()`, which is a type and a value both (Ch. 2 §1).
+    Unit,
+    /// `Self`, inside an `impl` (Ch. 4 §1.2).
+    SelfTy,
 }
 
-/// One variant of an enum: a name, and its payload types as text (§3.3).
+/// One parameter: a name and its written type.
+pub struct Param {
+    pub name: String,
+    pub ty: Ty,
+}
+
+/// One variant of an enum: a name, and its payload types (§3.3).
 pub struct Variant {
     pub name: String,
-    pub fields: Vec<String>,
+    pub fields: Vec<Ty>,
 }
 
 /// A top-level item (§3).
@@ -110,12 +130,12 @@ pub enum What {
     /// `use a::b::c;` — the segments, in order (Ch. 6 §3.2).
     Use(Vec<String>),
     /// `type Name = T;` (Ch. 0 §3.6).
-    Alias(String, String),
+    Alias(String, Ty),
     /// `const NAME: T = e;`
-    Const(String, String, Expr),
-    /// `impl Trait for Type { … }`. The trait is empty for an inherent impl
+    Const(String, Ty, Expr),
+    /// `impl Trait for Type { … }`. There is no trait for an inherent impl
     /// (Ch. 4 §1.2), which is the difference a reader sees.
-    Impl(String, String, Vec<Fn>),
+    Impl(Option<Ty>, Ty, Vec<Fn>),
 }
 
 /// One arm: its patterns, its guard if it has one, and its value.
@@ -158,7 +178,7 @@ pub struct Field {
 pub struct Fn {
     pub name: String,
     pub params: Vec<Param>,
-    pub ret: String,
+    pub ret: Ty,
     /// The body, or nothing for a declaration — a signature whose definition
     /// is outside the language (§3.1).
     pub body: Option<Block>,
@@ -324,7 +344,7 @@ pub fn show(e: &Expr, out: &mut String) {
             out.push_str("(as ");
             show(&*inner, out);
             out.push_str(" ");
-            out.push_str(&ty);
+            show_ty(&ty, out);
             out.push_str(")");
         }
         Expr::Try(inner) => {
@@ -387,6 +407,53 @@ pub fn show(e: &Expr, out: &mut String) {
             }
             out.push_str(")");
         }
+    }
+}
+
+/// A type, written back out as the characters it was written with.
+pub fn show_ty(t: &Ty, out: &mut String) {
+    match t {
+        Ty::Name(segments) => show_path(&segments, out),
+        Ty::App(segments, args) => {
+            show_path(&segments, out);
+            out.push_str("<");
+            let mut i: taddr = 0;
+            while i < args.len() {
+                if i > 0 {
+                    out.push_str(",");
+                }
+                show_ty(&args[i], out);
+                i += 1;
+            }
+            out.push_str(">");
+        }
+        Ty::Ref(inner, mutable) => {
+            if mutable {
+                out.push_str("&mut ");
+            } else {
+                out.push_str("&");
+            }
+            show_ty(&*inner, out);
+        }
+        Ty::Slice(inner) => {
+            out.push_str("[");
+            show_ty(&*inner, out);
+            out.push_str("]");
+        }
+        Ty::Unit => out.push_str("()"),
+        Ty::SelfTy => out.push_str("Self"),
+    }
+}
+
+/// The segments of a path, with `::` between them.
+fn show_path(segments: &Vec<String>, out: &mut String) {
+    let mut i: taddr = 0;
+    while i < segments.len() {
+        if i > 0 {
+            out.push_str("::");
+        }
+        out.push_str(&segments[i]);
+        i += 1;
     }
 }
 
@@ -502,7 +569,7 @@ pub fn show_item(i: &Item, out: &mut String) {
                 }
                 out.push_str(&fields[k].name);
                 out.push_str(":");
-                out.push_str(&fields[k].ty);
+                show_ty(&fields[k].ty, out);
                 k += 1;
             }
             out.push_str("))");
@@ -517,7 +584,7 @@ pub fn show_item(i: &Item, out: &mut String) {
                 let mut j: taddr = 0;
                 while j < variants[k].fields.len() {
                     out.push_str(" ");
-                    out.push_str(&variants[k].fields[j]);
+                    show_ty(&variants[k].fields[j], out);
                     j += 1;
                 }
                 out.push_str(")");
@@ -546,25 +613,28 @@ pub fn show_item(i: &Item, out: &mut String) {
             out.push_str("(type ");
             out.push_str(&name);
             out.push_str(" ");
-            out.push_str(&ty);
+            show_ty(&ty, out);
             out.push_str(")");
         }
         What::Const(name, ty, value) => {
             out.push_str("(const ");
             out.push_str(&name);
             out.push_str(":");
-            out.push_str(&ty);
+            show_ty(&ty, out);
             out.push_str(" ");
             show(&value, out);
             out.push_str(")");
         }
         What::Impl(tr, ty, fns) => {
             out.push_str("(impl ");
-            if tr.len() > 0 {
-                out.push_str(&tr);
-                out.push_str(" for ");
+            match &tr {
+                Option::Some(t) => {
+                    show_ty(&t, out);
+                    out.push_str(" for ");
+                }
+                Option::None => {}
             }
-            out.push_str(&ty);
+            show_ty(&ty, out);
             let mut k: taddr = 0;
             while k < fns.len() {
                 out.push_str(" ");
@@ -573,6 +643,25 @@ pub fn show_item(i: &Item, out: &mut String) {
             }
             out.push_str(")");
         }
+    }
+}
+
+/// Whether an item is a *declaration* — a signature whose definition is
+/// outside the language (§3.1).
+///
+/// Ch. 6 §4 renames every item to its path, and the outside does not know
+/// about modules: `putchar` is a symbol in a runtime written before this
+/// program existed, and `input.putchar` is not. A declaration keeps the name
+/// it was written with, wherever it was written (G9.44).
+pub fn declared(w: &What) -> bool {
+    match w {
+        What::Function(f) => {
+            match &f.body {
+                Option::Some(b) => false,
+                Option::None => true,
+            }
+        }
+        _ => false,
     }
 }
 
@@ -617,11 +706,11 @@ pub fn show_fn(f: &Fn, out: &mut String) {
         }
         out.push_str(&f.params[i].name);
         out.push_str(":");
-        out.push_str(&f.params[i].ty);
+        show_ty(&f.params[i].ty, out);
         i += 1;
     }
     out.push_str(") ");
-    out.push_str(&f.ret);
+    show_ty(&f.ret, out);
     match &f.body {
         Option::Some(b) => {
             out.push_str(" ");

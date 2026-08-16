@@ -5,16 +5,15 @@
 // agreeing on it is agreeing on the shape rather than on the printing.
 
 mod ast;
+mod input;
 mod lex;
 mod parse;
 
 // The character port is the target's and not the language's (Ch. 5 §1.5),
 // and it answers in UTF-8 **code units** — so the text a `str` holds has to
 // be decoded from them (Ch. 5 §1.1).
-fn getchar() -> t9;
-
 fn main() -> t27 {
-    let src = read_all();
+    let src = input::read_all();
     let mut p = parse::Parser { src: src, at: 0, no_struct: false };
     match parse::expr(&mut p) {
         Result::Ok(e) => {
@@ -29,62 +28,6 @@ fn main() -> t27 {
             print_int(err.at as t27);
             println("");
             0
-        }
-    }
-}
-
-/// Everything on stdin, as text.
-///
-/// The port carries code units and answers −1 for "nothing yet" and −2 for
-/// "nothing ever" (ISA §2.2), which are different pieces of news.
-fn read_all() -> String {
-    let mut out: String = Vec::new();
-    loop {
-        let b = next_byte();
-        if b < 0 {
-            return out;
-        }
-        // UTF-8: the lead byte says how many continuations follow.
-        let extra = if b < 128 {
-            0
-        } else if b < 224 {
-            1
-        } else if b < 240 {
-            2
-        } else {
-            3
-        };
-        let mut v = if extra == 0 {
-            b
-        } else if extra == 1 {
-            b - 192
-        } else if extra == 2 {
-            b - 224
-        } else {
-            b - 240
-        };
-        let mut k = 0;
-        while k < extra {
-            let c = next_byte();
-            if c < 0 {
-                return out;
-            }
-            v = v * 64 + (c - 128);
-            k += 1;
-        }
-        out.push(char::try_from(v).unwrap());
-    }
-}
-
-/// One code unit, or −1 when the input has ended.
-fn next_byte() -> t27 {
-    loop {
-        let c = getchar() as t27;
-        if c == 0 - 2 {
-            return 0 - 1;
-        }
-        if c >= 0 {
-            return c;
         }
     }
 }
