@@ -423,6 +423,12 @@ Across the whole route: **3 233 721 → 2 315 340, −28.4%**, against a floor o
 2 249 471 measured by deleting the checks outright — **93% recovered**, with
 66 000 instructions of genuinely undecidable checks left.
 
+And then what the checks had been keeping alive. An elided check leaves the
+length it read with no reader, and the allocator spilled it: HPL wrote 141 410
+words to its frame and read 31 940 back. A load from a slot that never escapes
+cannot fault, so an unused one is removable (G8.23). **2 315 340 → 2 059 024,
+−11.1%**, and frame traffic from 7.9% to 2.6%.
+
 What is left is discharging a predicate at the *call site* rather than
 trapping in the callee, which needs a proof language and is reserved in §2.8.
 

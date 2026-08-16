@@ -2944,6 +2944,42 @@ quadratic scan (G8.17), and this. Every one was found by measuring rather
 than by reading, and the two that were reverted cost less than the one that
 was not.
 
+**G8.23 — an elided check leaves a dead load, and the allocator was spilling
+it.** After G8.22 the profile of HPL had changed shape entirely — `br3` from
+20.4% of everything executed to 5.4% — and a new thing was at the top:
+**`st.word sp` at 6.11%, against `ld.word sp` at 1.38%.** Four words written
+to the frame for every one read back is not what spilling looks like.
+
+Reading the hot loop said why in three lines:
+
+```text
+f.factor.body.46:
+    ld.word a1, 0(a7)
+    ld.word t2, 3(a7)        ; the length
+    st.word t2, 102(sp)      ; spilled, every iteration
+f.factor.idx.lo.57:          ; the check that read it — gone
+```
+
+`102(sp)` is written once in the whole function and **never read**. The length
+had one consumer and G8.22 removed it; the load stayed, so the allocator
+dutifully spilled a value nothing would ever want.
+
+The load stayed because `is_removable` says a `load` never is — a load can
+fault, and removing a fault changes what a program does. But a load from a
+slot whose address **never leaves the function** cannot fault: it is this
+function's own memory, of a size it chose. The same `slot_bases` G8.22 needed
+answers this too, and an unused such load is now removed.
+
+**HPL: 2 315 340 → 2 059 024, −11.1%**, and frame traffic falls from 7.9% of
+everything executed to **2.6%** — `st.word sp` from 141 410 to 13 317. Every
+other measurement moved with it: an adaptor chain −4%, a range loop −4%, a
+loop over a slice with a call in it −9%.
+
+*What this says about the order of things.* Removing the checks was worth
+−28%; removing what the checks had been keeping alive was worth another −11%
+on top, and neither could have been found before the other. A profile after
+each change, not a plan before them.
+
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but
 Ch. 1 and Ch. 2 live at `spec/01-types.md` and `spec/02-composites.md`. The

@@ -907,6 +907,16 @@ fn equiv(
 /// Iterated, because deleting one instruction is what makes the next one
 /// dead.
 pub fn remove_dead(f: &mut Function) {
+    // A load from a slot whose address never leaves the function cannot
+    // fault: it is this function's own memory, of a size it chose. So an
+    // unused one is removable, where a load through an address from anywhere
+    // else is not.
+    //
+    // It matters because eliding a bounds check leaves the length it read
+    // with no reader, and the register allocator then spills a value nothing
+    // will ever load back — HPL wrote 141 410 words to its frame and read
+    // 31 940 of them.
+    let owned = slot_bases(f);
     loop {
         let mut live: BTreeSet<String> = BTreeSet::new();
         for b in &f.blocks {
@@ -928,7 +938,7 @@ pub fn remove_dead(f: &mut Function) {
             b.insts.retain(|inst| {
                 let wanted =
                     inst.results.is_empty() || inst.results.iter().any(|r| live.contains(r));
-                let keep = wanted || !is_removable(&inst.kind);
+                let keep = wanted || !is_removable(&inst.kind, &owned);
                 removed |= !keep;
                 keep
             });
@@ -940,7 +950,7 @@ pub fn remove_dead(f: &mut Function) {
 }
 
 /// Whether an instruction's only effect is its results.
-fn is_removable(k: &InstKind) -> bool {
+fn is_removable(k: &InstKind, owned: &BTreeMap<String, String>) -> bool {
     match k {
         // `shl` faults on a shift amount outside 0…26 whatever its flavor
         // (TRISC-27 §4.1), and a trapping flavor faults on overflow.
@@ -958,6 +968,10 @@ fn is_removable(k: &InstKind) -> bool {
         | InstKind::Select3 { .. }
         | InstKind::Slot { .. }
         | InstKind::Offset { .. } => true,
+        InstKind::Load {
+            p: Operand::Value(p),
+            ..
+        } => owned.contains_key(p),
         InstKind::Load { .. } | InstKind::Store { .. } | InstKind::Call { .. } => false,
     }
 }

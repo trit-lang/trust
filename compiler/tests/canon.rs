@@ -598,3 +598,32 @@ fn a_check_follows_from_two_facts() {
         b.term
     );
 }
+
+#[test]
+fn an_unused_load_from_a_slot_is_dead() {
+    // A load from a slot whose address never leaves the function cannot
+    // fault — it is this function's own memory, of a size it chose — so an
+    // unused one is removable, where a load through an address from anywhere
+    // else is not (TIR §6).
+    let m = tir::parse_module(
+        "tir 0.1 target \"tritium\"\n\n\
+         fn @main(%outside: ptr) -> t27 {\n\
+         ^entry:\n\
+         %mine = slot tryte[3]\n\
+         store t27 const t27 7, %mine\n\
+         %a = load t27 %mine\n\
+         %b = load t27 %outside\n\
+         ret const t27 0\n\
+         }\n",
+    )
+    .expect("parses");
+    let mut f = m.funcs[0].clone();
+    tir::remove_dead(&mut f);
+    let text = tir::print_module(&tir::Module {
+        funcs: vec![f],
+        ..m.clone()
+    });
+    // `%a` goes; `%b` stays, because nothing here knows what `%outside` is.
+    assert!(!text.contains("%a = load"), "{text}");
+    assert!(text.contains("%b = load"), "{text}");
+}
