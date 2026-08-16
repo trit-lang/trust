@@ -228,3 +228,43 @@ fn a_diverging_first_arm_does_not_speak_for_the_others() {
                fn main() -> t27 { go().len() as t27 }\n";
     assert_eq!(refusal(src), None);
 }
+
+#[test]
+fn a_value_cannot_be_moved_out_of_a_reference_by_indexing() {
+    // G9.27 refused `take(*r)`; this is the same hole one projection along.
+    // Reading `h.v[i]` through a `&mut Holder` moves the element, and the
+    // local that gets marked is the one holding the *reference* — so the
+    // owner still dropped it, and so did the caller (G9.45).
+    let src = "struct Note { n: t27 }\n\
+               impl Drop for Note { fn drop(self) { } }\n\
+               struct Holder { v: Vec<Note>, at: taddr }\n\
+               fn take_one(h: &mut Holder) -> Note { h.v[h.at] }\n\
+               fn main() -> t27 { 0 }\n";
+    assert!(
+        refusal(src)
+            .expect("a refusal")
+            .contains("cannot move out of a reference"),
+    );
+}
+
+#[test]
+fn a_field_of_a_borrowed_struct_is_not_movable_either() {
+    let src = "struct Note { n: t27 }\n\
+               impl Drop for Note { fn drop(self) { } }\n\
+               struct Pair { a: Note, b: Note }\n\
+               fn steal(p: &Pair) -> Note { p.a }\n\
+               fn main() -> t27 { 0 }\n";
+    assert!(
+        refusal(src)
+            .expect("a refusal")
+            .contains("cannot move out of a reference"),
+    );
+}
+
+#[test]
+fn a_copyable_field_of_a_borrowed_struct_is_read_and_not_moved() {
+    let src = "struct Pair { a: t27, b: t27 }\n\
+               fn sum(p: &Pair) -> t27 { p.a + p.b }\n\
+               fn main() -> t27 { let p = Pair { a: 1, b: 2 }; sum(&p) }\n";
+    assert_eq!(refusal(src), None);
+}

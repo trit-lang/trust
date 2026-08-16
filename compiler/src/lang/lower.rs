@@ -5669,6 +5669,22 @@ impl Fn<'_> {
                 // Draft 0.1 tracks ownership per local rather than per place,
                 // so a move out of any part moves the whole: conservative,
                 // where doing nothing — which is what it did — was unsound.
+                // …unless the place is reached through a *reference*, in
+                // which case there is nothing here to move from and marking
+                // a local would mark the wrong one: the local holds the
+                // reference, and the owner is at the other end of it and
+                // will drop the value whether or not this read did. That is
+                // G9.27 again, one projection further along (G9.45).
+                if !self.types.is_copyable(&ty) && self.behind_reference(e)? {
+                    return err(
+                        span,
+                        format!(
+                            "cannot move out of a reference: reading a {ty} moves it, and \
+                             this one belongs to whatever the reference points at, which \
+                             will drop it either way (Ch. 3 §1.2)"
+                        ),
+                    );
+                }
                 match (&path, self.types.is_copyable(&ty)) {
                     (Some(p), true) => self.check_access(p, Access::Read, span)?,
                     (Some(p), false) => {
@@ -6039,6 +6055,24 @@ impl Fn<'_> {
 
     /// The type of a place, without emitting anything. `None` means the
     /// expression is not a place, not that it has no type.
+    /// Whether reading this place has to go through a reference.
+    ///
+    /// A `Box` does not count: it *owns* what it holds, so reading through
+    /// one moves the box, which is a local, and per-local tracking has that
+    /// covered. A reference owns nothing.
+    fn behind_reference(&mut self, e: &ast::Expr) -> R<bool> {
+        Ok(match e {
+            ast::Expr::Field(base, ..) | ast::Expr::Index(base, ..) => {
+                self.behind_reference(base)?
+                    || matches!(self.type_of_place(base)?, Some(Ty::Ref(..)))
+            }
+            ast::Expr::Deref(inner, _) => {
+                matches!(self.type_of_place(inner)?, Some(Ty::Ref(..)))
+            }
+            _ => false,
+        })
+    }
+
     fn type_of_place(&mut self, e: &ast::Expr) -> R<Option<Ty>> {
         let through_refs = |mut t: Ty| {
             while let Ty::Ref(inner, _) | Ty::Boxed(inner) = t.clone() {

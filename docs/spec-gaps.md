@@ -2592,6 +2592,43 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.45 — the same double free, one projection along.** G9.27 refused
+`take(*r)`: reading a non-`Copy` value through a reference moves it, and
+there is nothing there to move *from*. The field and index cases were said
+to be covered — "`E::Field` and `E::Index` beside this one have always
+checked" — and they were not. They checked *ownership of a local*, and when
+the place is reached through a reference the local they mark is the one
+holding the reference. The owner is at the other end and drops the value
+anyway.
+
+```
+fn take_one(h: &mut Holder) -> Note { h.v[h.at] }
+```
+
+compiled, and the ledger printed `drop 1` twice.
+
+The prelude's own iterator was written that way:
+
+```
+fn next(&mut self) -> Option<T> {
+    let x = self.v[self.at];          // moves out of a vector it borrows
+    self.at = self.at + 1;
+    Option::Some(x)
+}
+```
+
+so **every `for x in v` over a `Vec` of anything with a destructor dropped
+every element twice** — including every `String` in one. It is the worst bug
+this repository has had, and the drop ledger found it seven for seven.
+
+Two fixes, and the second follows from the first. A move out of a place
+reached through a reference is refused, which is G9.27's rule with the
+projections included. And `VecIter` is rewritten to `pop`, the one operation
+that hands an element *over* — the vector no longer owns what it gave away,
+so exactly one place does. Popping yields the last element first, so the
+vector is reversed once on the way in; that is O(n) with no comparisons, and
+the alternative is an iterator that cannot be written soundly at all.
+
 **G9.44 — a module renamed the outside.** Ch. 6 §4 said the symbol an item
 becomes is its path, with no exception, and Ch. 0 §3.1 says a function with
 no body is defined outside the language. Put a `fn getchar() -> t9;` in a

@@ -347,28 +347,35 @@ impl IntoIterator for &str {
 // separate type holding the vector and a position, exactly as `Chars` holds a
 // string and one.
 struct VecIter<T> {
-    at: taddr,
-    v: Vec<T>,
+    back: Vec<T>,
 }
 
+// `pop` is the only operation that hands an element over: it takes it *out*,
+// so the vector no longer owns it and exactly one place does. Draft 0.1 read
+// `self.v[self.at]` instead and left the vector owning what it had given
+// away, which dropped every element twice (G9.45).
 impl<T> Iterator for VecIter<T> {
     type Item = T;
     fn next(&mut self) -> Option<T> {
-        if self.at < self.v.len() {
-            let x = self.v[self.at];
-            self.at = self.at + 1;
-            Option::Some(x)
-        } else {
-            Option::None
-        }
+        self.back.pop()
     }
 }
 
+// Popping yields the last element first, so the vector is reversed once, on
+// the way in — O(n) with no comparison and no allocation beyond the one, and
+// the alternative is an iterator that cannot be written soundly at all.
 impl<T> IntoIterator for Vec<T> {
     type Item = T;
     type IntoIter = VecIter<T>;
     fn into_iter(self) -> VecIter<T> {
-        VecIter { at: 0, v: self }
+        let mut from = self;
+        let mut back: Vec<T> = Vec::new();
+        loop {
+            match from.pop() {
+                Option::Some(x) => back.push(x),
+                Option::None => return VecIter { back: back },
+            }
+        }
     }
 }
 
