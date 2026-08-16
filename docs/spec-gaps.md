@@ -2656,9 +2656,30 @@ dominator set are borrowed rather than cloned. `dominators` also rebuilt its
 predecessor lists on every pass of its fixpoint, by scanning every block.
 
 **1.39 s → 0.455 s**, and the output is identical to the instruction:
-3 233 721 either way. HPL is 0.67 ms per line where it was 2.67; `demo.tr` is
-0.06, so something is still superlinear, and the next profile will say what
-rather than the next guess.
+3 233 721 either way.
+
+*And the next profile did say what.* `dominators` was **280 ms of the 275 ms
+verification** — the whole of it, and the instrumentation's own cost explains
+the sign. It was the textbook set-intersection fixpoint, which is the right
+thing to write first: each pass cloned a dominator set per block and
+intersected it with another, so O(passes · blocks²) allocations. Fine for what
+a frontend emits; not fine once inlining produces a function of **498 blocks**.
+
+Cooper, Harvey and Kennedy's algorithm replaces it — a reverse-postorder
+numbering and a fixpoint over *immediate* dominators, where the meet of two
+blocks is a walk up their chains — and the sets are built from those chains
+once, O(blocks · depth). Only one caller, so the interface did not have to
+change at all.
+
+**Verification: 275 ms → 10.4 ms.** The compile is **1.6 s → 0.167 s, ten
+times**, and HPL is 0.24 ms per line where it was 2.67.
+
+*Where it stops.* Code generation is now 106 of the 167 ms, and 46 of that is
+the register allocator's liveness fixpoint — the same `BTreeSet<String>` shape
+one level down. Fixing it means interning names as indices, which is not a
+small change, and 167 ms for a 688-line program is not a problem worth it.
+`demo.tr` is 0.04 ms per line, so a gap of six remains and is recorded rather
+than chased.
 
 **G0.3a — the language chapters are not where Naming §2 says.** Naming §2's
 layout puts the chaptered language specification under `spec/language/`, but

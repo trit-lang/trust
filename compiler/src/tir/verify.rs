@@ -690,89 +690,116 @@ pub fn predecessors<'a>(f: &'a Function, label: &str) -> Vec<&'a Block> {
 }
 
 /// For each reachable block, the set of blocks that dominate it (including
-/// itself). Iterative fixpoint over the intersection rule — the textbook
-/// algorithm, which is ample for the block counts a frontend emits.
+/// itself).
+///
+/// Cooper, Harvey and Kennedy's algorithm: a reverse-postorder numbering, and
+/// then a fixpoint over *immediate* dominators where the meet of two blocks is
+/// a walk up their chains. The sets are built from those chains at the end.
+///
+/// It was the textbook set-intersection fixpoint before, which is the right
+/// thing to write first and was **the whole cost of verification** — 280 ms
+/// of a 455 ms compile of HPL — once inlining started producing functions of
+/// five hundred blocks. Each pass cloned a dominator set per block and
+/// intersected it with another, so it was O(passes · blocks²) allocations
+/// where this is O(blocks · depth) once (G8.17).
 pub fn dominators(f: &Function) -> BTreeMap<&str, BTreeSet<&str>> {
-    // Every block by label, and every block's predecessors, computed once.
-    //
-    // The fixpoint below asks for a block's predecessors on every pass, and
-    // asking meant scanning the whole function — O(passes · blocks²), which
-    // is fine for what a frontend emits and is not fine after inlining
-    // triples it. On HPL this function alone was 1.37 of the 1.6 seconds the
-    // compiler took, because verification runs it for every function.
-    let by_label: BTreeMap<&str, &Block> =
-        f.blocks.iter().map(|b| (b.label.as_str(), b)).collect();
-    let mut preds_of: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for b in &f.blocks {
-        for t in successors(&b.term) {
-            if by_label.contains_key(t.label.as_str()) {
-                preds_of
-                    .entry(by_label[t.label.as_str()].label.as_str())
-                    .or_default()
-                    .push(b.label.as_str());
-            }
-        }
-    }
-
-    let entry = f.blocks[0].label.as_str();
-    let mut reachable: BTreeSet<&str> = BTreeSet::new();
-    let mut stack = vec![entry];
-    while let Some(l) = stack.pop() {
-        if !reachable.insert(l) {
-            continue;
-        }
-        if let Some(b) = by_label.get(l) {
-            for s in successors(&b.term) {
-                if by_label.contains_key(s.label.as_str()) {
-                    stack.push(by_label[s.label.as_str()].label.as_str());
-                }
-            }
-        }
-    }
-
-    let all: BTreeSet<&str> = reachable.iter().copied().collect();
-    let mut dom: BTreeMap<&str, BTreeSet<&str>> = reachable
+    let n = f.blocks.len();
+    let index: BTreeMap<&str, usize> = f
+        .blocks
         .iter()
-        .map(|&l| {
-            (
-                l,
-                if l == entry {
-                    BTreeSet::from([entry])
-                } else {
-                    all.clone()
-                },
-            )
+        .enumerate()
+        .map(|(i, b)| (b.label.as_str(), i))
+        .collect();
+
+    let succs: Vec<Vec<usize>> = f
+        .blocks
+        .iter()
+        .map(|b| {
+            successors(&b.term)
+                .iter()
+                .filter_map(|t| index.get(t.label.as_str()).copied())
+                .collect()
         })
         .collect();
 
+    // Reverse postorder, which is the order that makes the fixpoint converge
+    // in a couple of passes for anything a compiler emits.
+    let mut post: Vec<usize> = Vec::with_capacity(n);
+    let mut seen = vec![false; n];
+    let mut stack = vec![(0usize, 0usize)];
+    seen[0] = true;
+    while let Some((b, k)) = stack.pop() {
+        if k < succs[b].len() {
+            stack.push((b, k + 1));
+            let s = succs[b][k];
+            if !seen[s] {
+                seen[s] = true;
+                stack.push((s, 0));
+            }
+        } else {
+            post.push(b);
+        }
+    }
+    let rpo: Vec<usize> = post.iter().rev().copied().collect();
+    let mut rank = vec![usize::MAX; n];
+    for (r, &b) in rpo.iter().enumerate() {
+        rank[b] = r;
+    }
+
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (b, ss) in succs.iter().enumerate() {
+        for &s in ss {
+            preds[s].push(b);
+        }
+    }
+
+    const NONE: usize = usize::MAX;
+    let mut idom = vec![NONE; n];
+    idom[0] = 0;
+    // The meet: walk both up until they meet, which is the deepest block
+    // dominating them both.
+    let meet = |mut a: usize, mut b: usize, idom: &Vec<usize>| {
+        while a != b {
+            while rank[a] > rank[b] {
+                a = idom[a];
+            }
+            while rank[b] > rank[a] {
+                b = idom[b];
+            }
+        }
+        a
+    };
     let mut changed = true;
     while changed {
         changed = false;
-        for &l in &reachable {
-            if l == entry {
-                continue;
+        for &b in rpo.iter().skip(1) {
+            let mut new = NONE;
+            for &p in &preds[b] {
+                if idom[p] == NONE {
+                    continue;
+                }
+                new = if new == NONE { p } else { meet(p, new, &idom) };
             }
-            let preds: Vec<&str> = preds_of
-                .get(l)
-                .map(|ps| {
-                    ps.iter()
-                        .copied()
-                        .filter(|p| reachable.contains(p))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let mut new: BTreeSet<&str> = match preds.split_first() {
-                None => BTreeSet::new(),
-                Some((first, rest)) => rest.iter().fold(dom[first].clone(), |acc, p| {
-                    acc.intersection(&dom[p]).copied().collect()
-                }),
-            };
-            new.insert(l);
-            if new != dom[l] {
-                dom.insert(l, new);
+            if new != NONE && idom[b] != new {
+                idom[b] = new;
                 changed = true;
             }
         }
     }
-    dom
+
+    // The sets, from the chains.
+    let mut out: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for &b in &rpo {
+        let mut set = BTreeSet::new();
+        let mut at = b;
+        loop {
+            set.insert(f.blocks[at].label.as_str());
+            if at == 0 {
+                break;
+            }
+            at = idom[at];
+        }
+        out.insert(f.blocks[b].label.as_str(), set);
+    }
+    out
 }

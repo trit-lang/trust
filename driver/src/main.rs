@@ -20,6 +20,9 @@ usage:
     trust run <file.tr> [--stats]      compile, link the runtime, execute
     trust asm <file.tr>                print the assembly it would run
 
+    --time                             report what each phase of the compile
+                                       cost, on stderr
+
 `run` exits with the program's own status, so it composes with a shell the
 way any other program does. `--stats` reports instructions retired (ISA §2.3)
 on stderr, which is the number every measurement in docs/ is quoted in.
@@ -36,6 +39,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
     let stats = args.iter().any(|a| a == "--stats");
+    let timed = args.iter().any(|a| a == "--time");
 
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -45,7 +49,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let asm = match assemble_source(&src, path) {
+    let asm = match assemble_source(&src, path, timed) {
         Ok(a) => a,
         Err(code) => return code,
     };
@@ -69,7 +73,19 @@ fn main() -> ExitCode {
 }
 
 /// Source to assembly, by the pipeline TIR §6 describes.
-fn assemble_source(src: &str, path: &str) -> Result<String, ExitCode> {
+fn assemble_source(src: &str, path: &str, timed: bool) -> Result<String, ExitCode> {
+    // A phase timer that costs nothing when it is not asked for. The
+    // discipline it enforces is in docs/status.md §10: the two guesses that
+    // preceded the last profile were both wrong, and both were about code
+    // written the same day.
+    let mut at = std::time::Instant::now();
+    let mut lap = |name: &str| {
+        if timed {
+            eprintln!("{name:9} {:>8.1?}", at.elapsed());
+        }
+        at = std::time::Instant::now();
+    };
+
     let module = match lang::compile(src) {
         Ok(m) => m,
         Err(errs) => {
@@ -80,17 +96,22 @@ fn assemble_source(src: &str, path: &str) -> Result<String, ExitCode> {
             return Err(ExitCode::FAILURE);
         }
     };
+    lap("frontend");
     let errs = tir::verify(&module);
     if !errs.is_empty() {
         eprintln!("trust: the frontend emitted ill-formed TIR: {errs:?}");
         return Err(ExitCode::FAILURE);
     }
+    lap("verify1");
 
     let target = tir::TargetDesc::tritium();
     let module = tir::canonicalize_module(&module);
+    lap("canon1");
     let mut module = tir::inline_module(&module);
     tir::drop_uncalled(&mut module, &["main"]);
+    lap("inline");
     let module = tir::canonicalize_module(&module);
+    lap("canon2");
 
     let legalized = match tir::legalize_module(&module, &target) {
         Ok(m) => m,
@@ -99,6 +120,7 @@ fn assemble_source(src: &str, path: &str) -> Result<String, ExitCode> {
             return Err(ExitCode::FAILURE);
         }
     };
+    lap("legalize");
     // TIR §6's post-condition. The backend is entitled to assume it, so it is
     // checked here rather than trusted, exactly as the tests do.
     let errs = tir::verify_legalized(&legalized, &target);
@@ -107,6 +129,7 @@ fn assemble_source(src: &str, path: &str) -> Result<String, ExitCode> {
         return Err(ExitCode::FAILURE);
     }
 
+    lap("verify2");
     let mut asm = match codegen::compile(&legalized, "main") {
         Ok(a) => a,
         Err(e) => {
@@ -114,6 +137,7 @@ fn assemble_source(src: &str, path: &str) -> Result<String, ExitCode> {
             return Err(ExitCode::FAILURE);
         }
     };
+    lap("codegen");
     asm.push_str(RUNTIME);
     Ok(asm)
 }
