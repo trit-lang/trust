@@ -65,7 +65,7 @@ pub struct Found {
 pub fn gather(w: &mut World, here: &str, item: &ast::Item) {
     match &item.what {
         What::Mod(name) => {
-            let full = joined(here, &name);
+            let full = joined(here, name);
             w.modules.push(full);
         }
         _ => {
@@ -122,11 +122,11 @@ pub fn scope_of(w: &World, here: &str, items: &Vec<ast::Item>) -> Scope {
     while k < items.len() {
         match &items[k].what {
             What::Mod(name) => {
-                let full = joined(here, &name);
+                let full = joined(here, name);
                 sc.mods.push(Binding { name: name.to_string(), full: full });
             }
             What::Use(segments) => {
-                match lookup(w, here, "", &segments) {
+                match lookup(w, here, "", segments) {
                     Result::Ok(found) => {
                         // Taken apart before the branch: a field moved on one
                         // path and not the other is refused, and this is a

@@ -36,7 +36,7 @@ fn main() -> t27 {
         let mut k: taddr = 0;
         while k < files[f].len() {
             match &files[f][k].what {
-                ast::What::Use(segments) => report(&w, &mods[f].path, &here, &segments),
+                ast::What::Use(segments) => report(&w, &mods[f].path, &here, segments),
                 _ => {}
             }
             k += 1;

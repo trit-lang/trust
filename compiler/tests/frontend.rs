@@ -3607,9 +3607,14 @@ fn a_borrowed_binding_can_be_read_but_not_taken() {
 
 #[test]
 fn taking_a_borrowed_binding_says_why_it_cannot() {
-    // The first version of this rule reused `mark_moved`, which says the
-    // place is *uninitialized* — so a program that only read `p.id` was told
-    // `p` had been moved out of. The refusal has to be its own.
+    // A binding through a reference is not a value of that type — it is the
+    // *place*, which is a reference (G9.50). So taking it is refused by the
+    // type rule and the diagnostic says which two types were meant, which
+    // is more than the rule it replaced could say.
+    //
+    // The rule before that reused `mark_moved`, which says the place is
+    // *uninitialized*, so a program that only read `p.id` was told `p` had
+    // been moved out of.
     let msg = error(
         "struct Port { id: t27 } \
          impl Drop for Port { fn drop(self) { } } \
@@ -3622,8 +3627,8 @@ fn taking_a_borrowed_binding_says_why_it_cannot() {
          } \
          fn main() -> t27 { 0 }",
     );
-    assert!(msg.contains("borrowed"), "{msg}");
-    assert!(msg.contains("cannot be moved out of"), "{msg}");
+    assert!(msg.contains("&Port"), "{msg}");
+    assert!(msg.contains("expected Port"), "{msg}");
 }
 
 #[test]

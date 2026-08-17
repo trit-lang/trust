@@ -4072,6 +4072,9 @@ struct Fn<'a> {
     /// Ch. 3 §1.4 means by the body running before the fields.
     destructor_of: Option<String>,
     counter: u32,
+    /// Whether the scrutinee being matched was reached through a `&mut`,
+    /// which decides what a binding through it is a place *of* (G9.50).
+    match_mut: bool,
     /// Set once the current block has been terminated.
     done: bool,
 }
@@ -4243,6 +4246,7 @@ fn function(
         ),
         destructor_of,
         counter: 0,
+        match_mut: false,
         done: false,
     };
 
@@ -11026,11 +11030,21 @@ impl Fn<'_> {
         // copies of storage the referent still owns, and dropping one would
         // free a tree somebody is still holding.
         let mut borrowed = false;
-        while let Ty::Ref(target, _) | Ty::Boxed(target) = ty.clone() {
+        let outer_mut = self.match_mut;
+        self.match_mut = false;
+        while let Ty::Ref(..) | Ty::Boxed(_) = ty.clone() {
+            // A `Box` owns what it holds, so reaching through one is a place
+            // the box gives exclusively; a reference gives what it says.
+            let (target, m) = match ty.clone() {
+                Ty::Ref(t, m) => (t, m),
+                Ty::Boxed(t) => (t, true),
+                _ => unreachable!("just matched"),
+            };
             if target.is_unsized() {
                 break;
             }
             borrowed = true;
+            self.match_mut = m;
             // `v` is the reference itself, which is an address. An
             // aggregate's value *is* its address, so dereferencing one is a
             // retype; a scalar has to be loaded.
@@ -11039,15 +11053,21 @@ impl Fn<'_> {
             }
             ty = *target;
         }
+        // Restored on the way out, so a `match` inside an arm of another
+        // does not inherit what the outer one was matching through.
         if let Ty::Enum(name) = ty.clone() {
-            return self.match_enum(&name, v, arms, expected, borrowed, dest, span);
+            let out = self.match_enum(&name, v, arms, expected, borrowed, dest, span);
+            self.match_mut = outer_mut;
+            return out;
         }
         // A struct has one shape, so a pattern for it cannot fail and cannot
         // be one of several. That is what makes it worth having: it takes
         // the struct apart in a single move, which per-local ownership can
         // express and `let a = p.x; let b = p.y;` cannot (G9.46).
         if let Ty::Struct(name) = ty.clone() {
-            return self.match_struct(&name, v, arms, expected, borrowed, dest, span);
+            let out = self.match_struct(&name, v, arms, expected, borrowed, dest, span);
+            self.match_mut = outer_mut;
+            return out;
         }
         if !ty.is_scalar() {
             return err(span, format!("cannot match on {ty}"));
@@ -11530,10 +11550,35 @@ impl Fn<'_> {
         match pat {
             ast::Pattern::Wild(_) => Ok(()),
             ast::Pattern::Bind(bound, _) => {
-                let v = self.load_from(addr, ty);
                 // A binding read out of borrowed storage never owns: the
                 // referent still does, and two owners of one allocation is
                 // the bug this whole chapter exists to make impossible.
+                //
+                // What it *is* depends on what it holds. A scalar is copied,
+                // because a copy of one is the same value and nothing can be
+                // lost. Anything that owns something is bound as the
+                // **place** it names — a `&mut T` where the scrutinee was
+                // exclusive, a `&T` otherwise — because a copy of a `Vec` is
+                // a second header over one allocation, and a write through
+                // it goes nowhere at all (G9.50).
+                if borrowed && !self.types.is_copyable(ty) {
+                    // A `Box` is an address, so a place *of* a box is the
+                    // box itself: binding `&Box<T>` would make `*rest` the
+                    // box and `&*rest` a reference to one. The place a
+                    // reader means is what it holds.
+                    let (target, at) = match peel(ty) {
+                        Ty::Boxed(inner) => {
+                            let inner = (**inner).clone();
+                            let v = self.load_from(addr.clone(), ty);
+                            (inner, v)
+                        }
+                        _ => (ty.clone(), addr),
+                    };
+                    let r = Ty::Ref(Box::new(target), self.match_mut);
+                    let local = self.declare(bound, r.clone(), false);
+                    return self.store_at(&local.slot, 0, &r, at, span);
+                }
+                let v = self.load_from(addr, ty);
                 let local = if borrowed {
                     self.declare_borrowed(bound, ty.clone())
                 } else {

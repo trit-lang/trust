@@ -382,6 +382,16 @@ p @ Sign::Neg          // binding the whole while matching
 An or-pattern's alternatives must bind the same names at the same types.
 `|` is available for this because §2.5 declined to spend it on `tmax`.
 
+A `match` on a **reference** matches what it points at, and what its
+bindings are follows from what they hold. A scalar is copied — a copy of one
+is the same value. Anything that owns something is bound as the **place**:
+`&T` where the scrutinee was `&T`, `&mut T` where it was `&mut T`. A copy
+would be a second owner of one allocation, which Ch. 3 §1.1 does not allow,
+and a copy that is not one is a copy a write disappears into.
+
+A binding through a `Box` is a reference to what the box holds. The box is
+an address, so a reference to the box is not the place a reader means.
+
 A `match` must be exhaustive (Ch. 2 §5). Over a `trit` that means three arms,
 or fewer plus a wildcard; over an enum it means every variant. Exhaustiveness
 is checked, not assumed.

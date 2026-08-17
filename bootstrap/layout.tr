@@ -186,7 +186,7 @@ pub fn of(defs: &Vec<Def>, t: &Ty, depth: taddr) -> Result<Layout, String> {
             Result::Err("a generic type is not laid out here".to_string())
         }
         Ty::Name(segments) => {
-            let name = joined(&segments);
+            let name = joined(segments);
             named(defs, &name, depth)
         }
     }

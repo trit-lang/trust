@@ -2617,11 +2617,22 @@ there is no double free. What is lost is the write, and the language has no
 way to say so. That is exactly the shape Ch. 7's design note calls the
 failure with no diagnostic attached.
 
-Not yet decided, and recorded rather than fixed. The two answers are: bind a
-**place** through a reference, so `v` is `&mut Vec<t27>` and the write goes
-where it was written; or **refuse** writing to a binding that came from a
-borrowed scrutinee. The first is what a reader expects and what Rust does;
-the second is smaller and is the rule this project's other refusals follow.
+Settled by binding the **place**. Through a reference, a binding of a type
+that owns something is a `&mut T` or a `&T` — whichever the scrutinee was
+reached through — so the write goes where it was written. A *scalar* is
+still copied, because a copy of one is the same value and there is nothing
+in it to lose.
+
+Two consequences worth stating. A binding through a `Box` is a reference to
+what the box holds and not to the box: `&Box<T>` would make `*rest` the box
+and `&*rest` a reference to one, which is not the place a reader means.
+And taking such a binding by value is now refused by the *type* rule —
+"argument has type `&Held`, expected `Held`" — which says more than the
+rule it replaced, whose message was about ownership.
+
+The cost is a `&` that is no longer written: `match &x { V(n) => f(&n) }`
+was `f` of a copy and is now `f` of a reference to a reference. Every one of
+those in `bootstrap/` was a place the program said `&` twice about.
 
 **G9.49 — a count that could not be represented turned §6 off.** Ch. 2 §6
 niche-encodes an enum when its one payload has invalid representations to

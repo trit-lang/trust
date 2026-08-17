@@ -169,7 +169,9 @@ fn a_pattern_reaches_through_a_box() {
 fn what_a_pattern_takes_through_a_box_is_borrowed() {
     // The box still owns what is inside it and will drop it. A binding that
     // owned it too would be the second owner — which is G9.27's double free
-    // written as a pattern.
+    // written as a pattern. What such a binding *is* is the place, so the
+    // refusal is now the type rule saying which two types were meant
+    // (G9.50).
     let src = "struct Held { n: t27 }\n\
                fn drop(self: Held) { print_int(self.n); }\n\
                fn take(h: Held) -> t27 { h.n }\n\
@@ -180,7 +182,8 @@ fn what_a_pattern_takes_through_a_box_is_borrowed() {
                }\n\
                fn main() -> t27 { go(E::None) }\n";
     let why = refusal(src).expect("refused");
-    assert!(why.contains("cannot be moved out of"), "{why}");
+    assert!(why.contains("&Held"), "{why}");
+    assert!(why.contains("expected Held"), "{why}");
 }
 
 #[test]
@@ -367,5 +370,25 @@ fn a_field_put_back_makes_the_value_whole_again() {
                fn whole(p: Pair) { }\n\
                fn f(p: Pair) { let mut q = p; take(q.a); q.a = Note { n: 9 }; whole(q); }\n\
                fn main() -> t27 { 0 }\n";
+    assert_eq!(refusal(src), None);
+}
+
+#[test]
+fn a_write_through_a_matched_binding_lands() {
+    // Matching through a reference used to read the bindings out as
+    // *copies*, so `v.push(1)` pushed into a second header over the same
+    // allocation and the program did nothing — compiled, ran, and lost the
+    // write (G9.50). A binding through a reference is the place now.
+    let src = "enum Holder { Nothing, Some(Vec<t27>) }\n\
+               fn add(h: &mut Holder) {\n\
+               \x20   match h { Holder::Some(v) => { v.push(1); } Holder::Nothing => {} }\n\
+               }\n\
+               fn main() -> t27 {\n\
+               \x20   let mut v: Vec<t27> = Vec::new();\n\
+               \x20   v.push(7);\n\
+               \x20   let mut h = Holder::Some(v);\n\
+               \x20   add(&mut h);\n\
+               \x20   match h { Holder::Some(v) => v.len() as t27, Holder::Nothing => 0 }\n\
+               }\n";
     assert_eq!(refusal(src), None);
 }

@@ -262,11 +262,11 @@ pub fn level(op: &str) -> taddr {
 pub fn show(e: &Expr, out: &mut String) {
     match e {
         Expr::Int(v) => push_int(out, v),
-        Expr::Name(n) => out.push_str(&n),
+        Expr::Name(n) => out.push_str(n),
         Expr::Group(inner) => show(&*inner, out),
         Expr::Unary(op, a) => {
             out.push_str("(");
-            out.push_str(&op);
+            out.push_str(op);
             out.push_str(" ");
             show(&*a, out);
             out.push_str(")");
@@ -288,7 +288,7 @@ pub fn show(e: &Expr, out: &mut String) {
         }
         Expr::For(name, iter, b) => {
             out.push_str("(for ");
-            out.push_str(&name);
+            out.push_str(name);
             out.push_str(" ");
             show(&*iter, out);
             out.push_str(" ");
@@ -307,21 +307,21 @@ pub fn show(e: &Expr, out: &mut String) {
             show_block(&*b, out);
             out.push_str(")");
         }
-        Expr::Return(v) => show_jump("return", &v, out),
-        Expr::Break(v) => show_jump("break", &v, out),
+        Expr::Return(v) => show_jump("return", v, out),
+        Expr::Break(v) => show_jump("break", v, out),
         Expr::Continue => out.push_str("(continue)"),
         Expr::Field(base, name) => {
             out.push_str("(field ");
             show(&*base, out);
             out.push_str(" ");
-            out.push_str(&name);
+            out.push_str(name);
             out.push_str(")");
         }
         Expr::Method(base, name, args) => {
             out.push_str("(method ");
             show(&*base, out);
             out.push_str(" ");
-            out.push_str(&name);
+            out.push_str(name);
             let mut i: taddr = 0;
             while i < args.len() {
                 out.push_str(" ");
@@ -332,7 +332,7 @@ pub fn show(e: &Expr, out: &mut String) {
         }
         Expr::Assign(op, a, b) => {
             out.push_str("(");
-            out.push_str(&op);
+            out.push_str(op);
             out.push_str(" ");
             show(&*a, out);
             out.push_str(" ");
@@ -341,7 +341,7 @@ pub fn show(e: &Expr, out: &mut String) {
         }
         Expr::Binary(op, a, b) => {
             out.push_str("(");
-            out.push_str(&op);
+            out.push_str(op);
             out.push_str(" ");
             show(&*a, out);
             out.push_str(" ");
@@ -350,7 +350,7 @@ pub fn show(e: &Expr, out: &mut String) {
         }
         Expr::Call(f, args) => {
             out.push_str("(call ");
-            out.push_str(&f);
+            out.push_str(f);
             let mut i: taddr = 0;
             while i < args.len() {
                 out.push_str(" ");
@@ -361,7 +361,7 @@ pub fn show(e: &Expr, out: &mut String) {
         }
         Expr::Str(text) => {
             out.push_str("(str ");
-            out.push_str(&text);
+            out.push_str(text);
             out.push_str(")");
         }
         Expr::Bool(b) => {
@@ -396,7 +396,7 @@ pub fn show(e: &Expr, out: &mut String) {
             out.push_str("(as ");
             show(&*inner, out);
             out.push_str(" ");
-            show_ty(&ty, out);
+            show_ty(ty, out);
             out.push_str(")");
         }
         Expr::Try(inner) => {
@@ -433,7 +433,7 @@ pub fn show(e: &Expr, out: &mut String) {
                 match &arms[i].guard {
                     Option::Some(g) => {
                         out.push_str(" (when ");
-                        show(&g, out);
+                        show(g, out);
                         out.push_str(")");
                     }
                     Option::None => {}
@@ -447,7 +447,7 @@ pub fn show(e: &Expr, out: &mut String) {
         }
         Expr::Aggregate(path, fields) => {
             out.push_str("(agg ");
-            out.push_str(&path);
+            out.push_str(path);
             let mut i: taddr = 0;
             while i < fields.len() {
                 out.push_str(" (");
@@ -473,7 +473,7 @@ pub fn show_generics(gs: &Vec<Generic>, out: &mut String) {
         }
         match &gs[i] {
             Generic::Type(name, bounds) => {
-                out.push_str(&name);
+                out.push_str(name);
                 let mut k: taddr = 0;
                 while k < bounds.len() {
                     if k == 0 {
@@ -487,9 +487,9 @@ pub fn show_generics(gs: &Vec<Generic>, out: &mut String) {
             }
             Generic::Const(name, ty) => {
                 out.push_str("const ");
-                out.push_str(&name);
+                out.push_str(name);
                 out.push_str(":");
-                show_ty(&ty, out);
+                show_ty(ty, out);
             }
         }
         i += 1;
@@ -531,9 +531,9 @@ pub fn show_bound(b: &Bound, out: &mut String) {
 /// A type, written back out as the characters it was written with.
 pub fn show_ty(t: &Ty, out: &mut String) {
     match t {
-        Ty::Name(segments) => show_path(&segments, out),
+        Ty::Name(segments) => show_path(segments, out),
         Ty::App(segments, args) => {
-            show_path(&segments, out);
+            show_path(segments, out);
             out.push_str("<");
             let mut i: taddr = 0;
             while i < args.len() {
@@ -579,7 +579,7 @@ fn show_path(segments: &Vec<String>, out: &mut String) {
 pub fn show_pattern(p: &Pattern, out: &mut String) {
     match p {
         Pattern::Wild => out.push_str("_"),
-        Pattern::Bind(n) => out.push_str(&n),
+        Pattern::Bind(n) => out.push_str(n),
         Pattern::Int(v) => push_int(out, v),
         Pattern::Bool(b) => {
             if b {
@@ -590,7 +590,7 @@ pub fn show_pattern(p: &Pattern, out: &mut String) {
         }
         Pattern::Aggregate(path, fields) => {
             out.push_str("(pat ");
-            out.push_str(&path);
+            out.push_str(path);
             let mut i: taddr = 0;
             while i < fields.len() {
                 out.push_str(" (");
@@ -655,9 +655,9 @@ pub fn show_stmt(s: &Stmt, out: &mut String) {
     match s {
         Stmt::LetPattern(pat, e) => {
             out.push_str("(let-pat ");
-            show_pattern(&pat, out);
+            show_pattern(pat, out);
             out.push_str(" ");
-            show(&e, out);
+            show(e, out);
             out.push_str(")");
         }
         Stmt::Let(mutable, name, e) => {
@@ -666,14 +666,14 @@ pub fn show_stmt(s: &Stmt, out: &mut String) {
             } else {
                 out.push_str("(let ");
             }
-            out.push_str(&name);
+            out.push_str(name);
             out.push_str(" ");
-            show(&e, out);
+            show(e, out);
             out.push_str(")");
         }
         Stmt::Do(e) => {
             out.push_str("(do ");
-            show(&e, out);
+            show(e, out);
             out.push_str(")");
         }
     }
@@ -694,13 +694,13 @@ pub fn show_item(i: &Item, out: &mut String) {
         d += 1;
     }
     match &i.what {
-        What::Function(f) => show_fn(&f, out),
+        What::Function(f) => show_fn(f, out),
         What::Struct(name, gs, fields) => {
             out.push_str("(struct ");
-            out.push_str(&name);
+            out.push_str(name);
             out.push_str(" ");
             if gs.len() > 0 {
-                show_generics(&gs, out);
+                show_generics(gs, out);
                 out.push_str(" ");
             }
             out.push_str("(");
@@ -718,10 +718,10 @@ pub fn show_item(i: &Item, out: &mut String) {
         }
         What::Enum(name, gs, variants) => {
             out.push_str("(enum ");
-            out.push_str(&name);
+            out.push_str(name);
             if gs.len() > 0 {
                 out.push_str(" ");
-                show_generics(&gs, out);
+                show_generics(gs, out);
             }
             let mut k: taddr = 0;
             while k < variants.len() {
@@ -740,7 +740,7 @@ pub fn show_item(i: &Item, out: &mut String) {
         }
         What::Trait(name, params, supers, assoc, fns) => {
             out.push_str("(trait ");
-            out.push_str(&name);
+            out.push_str(name);
             if params.len() > 0 {
                 out.push_str(" <");
                 let mut i: taddr = 0;
@@ -776,7 +776,7 @@ pub fn show_item(i: &Item, out: &mut String) {
         }
         What::Mod(name) => {
             out.push_str("(mod ");
-            out.push_str(&name);
+            out.push_str(name);
             out.push_str(")");
         }
         What::Use(segments) => {
@@ -793,34 +793,34 @@ pub fn show_item(i: &Item, out: &mut String) {
         }
         What::Alias(name, ty) => {
             out.push_str("(type ");
-            out.push_str(&name);
+            out.push_str(name);
             out.push_str(" ");
-            show_ty(&ty, out);
+            show_ty(ty, out);
             out.push_str(")");
         }
         What::Const(name, ty, value) => {
             out.push_str("(const ");
-            out.push_str(&name);
+            out.push_str(name);
             out.push_str(":");
-            show_ty(&ty, out);
+            show_ty(ty, out);
             out.push_str(" ");
-            show(&value, out);
+            show(value, out);
             out.push_str(")");
         }
         What::Impl(gs, tr, ty, fns) => {
             out.push_str("(impl ");
             if gs.len() > 0 {
-                show_generics(&gs, out);
+                show_generics(gs, out);
                 out.push_str(" ");
             }
             match &tr {
                 Option::Some(t) => {
-                    show_ty(&t, out);
+                    show_ty(t, out);
                     out.push_str(" for ");
                 }
                 Option::None => {}
             }
-            show_ty(&ty, out);
+            show_ty(ty, out);
             let mut k: taddr = 0;
             while k < fns.len() {
                 out.push_str(" ");
@@ -914,7 +914,7 @@ pub fn show_fn(f: &Fn, out: &mut String) {
     match &f.body {
         Option::Some(b) => {
             out.push_str(" ");
-            show_block(&b, out);
+            show_block(b, out);
         }
         Option::None => {}
     }
