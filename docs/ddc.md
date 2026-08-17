@@ -177,11 +177,45 @@ Each step is checkable on its own, and none of them is only for DDC.
    *Begun.* `bootstrap/lower.tr` emits parameters, a `let` of a scalar,
    Ch. 1's arithmetic, all six comparisons and `<=>`, calls, `return`, a
    tail, `if`/`else` and `while` — and `scripts/bootstrap.sh` compares it
-   against `trustc build` character for character, names included. What is
-   left is aggregates, `match`, and the drops Ch. 3 §1.4 puts at the end of
-   a scope. A function it does not lower yet is left out rather than lowered
-   wrongly, which is what keeps the comparison honest while the slice is
-   still small.
+   against `trustc build` character for character, names included. A function
+   it does not lower yet is left out rather than lowered wrongly, which is
+   what keeps the comparison honest while the slice is still small.
+
+   What is left is aggregates, `match`, and the drops Ch. 3 §1.4 puts at the
+   end of a scope, and the first of those is bigger than it looks. This is
+   what one costs:
+
+   ```
+   struct P { x: t27, y: t9 }
+   fn make(a: t27) -> P { P { x: a, y: 1 } }
+   fn read(p: P) -> t27 { p.x }
+   ```
+   ```
+   fn @make(%sret: ptr, %a: t27) {          ← the answer is a parameter
+       …
+       store t27 %v.2, %sret
+       %p.3 = offset %sret, const t27 3     ← Ch. 2's offsets, in the TIR
+       store t9 const t9 1, %p.3
+       ret
+   }
+   fn @read(%p: ptr) -> t27 {               ← and so is an aggregate argument
+       %p.slot.1 = slot tryte[6]
+       …                                     ← copied in, field by field
+   }
+   ```
+
+   Three things arrive at once: a function whose answer is an aggregate takes
+   the storage for it as a parameter (`sret`); an aggregate parameter is a
+   `ptr` and is copied into a slot of its own on entry, field by field; and
+   every field offset is Ch. 2's, which `bootstrap/sizes.tr` already computes
+   and agrees about — so that half is done and this is where it gets used.
+
+   There is a fourth, and it is only visible in the counter. In `fn both(a)
+   { let p = P { … }; … }` the numbers run 1, 3, 4, 5 and **2 is missing**:
+   the aggregate was built in a temporary and the binding *renamed* that
+   temporary rather than copying out of it, which is what makes `let p = P {
+   … }` cost nothing. A second implementation has to make the same
+   temporary, and skip the same number.
 4. **Run the double compile.** `scripts/ddc.sh`: build `stage1` with
    `trustc`, build `stage2` with `stage1`, demand `stage2 == stage1`. Report
    the two hashes whether or not they match, because a number that is only
