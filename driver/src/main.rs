@@ -495,6 +495,14 @@ fn show_fn(f: &lang::ast::FnItem, out: &mut String) {
         Some(t) => written_ty(t),
         None => "()".to_string(),
     });
+    // What the caller must have established (Ch. 4 §2.8). It is written in
+    // the same `where` clause as the type bounds and is a different kind of
+    // thing, so it is printed as one.
+    for p in &f.requires {
+        out.push_str(" (requires ");
+        show_expr(p, out);
+        out.push(')');
+    }
     if let Some(body) = &f.body {
         out.push(' ');
         show_block(body, out);

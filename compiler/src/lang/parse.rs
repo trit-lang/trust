@@ -779,10 +779,15 @@ impl Parser {
                     let pred = self.expr();
                     self.no_struct = saved;
                     requires.push(pred?);
-                    if self.eat_op(",") {
-                        continue;
+                    if !self.eat_op(",") {
+                        return Ok(requires);
                     }
-                    return Ok(requires);
+                    // A trailing comma before the body, which a bound has
+                    // always been allowed and a predicate was not.
+                    if self.at_op("{") {
+                        return Ok(requires);
+                    }
+                    continue;
                 }
             }
             if let Tok::Lifetime(_) = self.peek() {

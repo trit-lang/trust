@@ -217,6 +217,9 @@ pub struct Field {
 pub struct Fn {
     pub name: String,
     pub generics: Vec<Generic>,
+    /// What the caller must have established, written in the same `where`
+    /// clause as the type bounds and checked once on entry (Ch. 4 §2.8).
+    pub requires: Vec<Expr>,
     pub params: Vec<Param>,
     pub ret: Ty,
     /// The body, or nothing for a declaration — a signature whose definition
@@ -901,6 +904,13 @@ pub fn show_fn(f: &Fn, out: &mut String) {
     }
     out.push_str(") ");
     show_ty(&f.ret, out);
+    let mut r: taddr = 0;
+    while r < f.requires.len() {
+        out.push_str(" (requires ");
+        show(&f.requires[r], out);
+        out.push_str(")");
+        r += 1;
+    }
     match &f.body {
         Option::Some(b) => {
             out.push_str(" ");

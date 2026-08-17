@@ -770,6 +770,12 @@ pub fn function(p: &mut Parser) -> Result<ast::Fn, lex::Error> {
         p.at = next;
         ret = type_name(p)?;
     }
+    // `where` comes after the return type and before the body. Its type
+    // bounds belong to the parameters they name, and are folded into them:
+    // `fn f<T>(…) where T: Eq` and `fn f<T: Eq>(…)` are one function.
+    let clause = where_clause(p)?;
+    let generics = merge_bounds(generics, clause.bounds)?;
+    let requires = clause.requires;
     // A function with no body is a declaration (§3.1): the signature is the
     // whole item, and what defines it is outside the language.
     let t2 = peek(p)?;
@@ -783,6 +789,7 @@ pub fn function(p: &mut Parser) -> Result<ast::Fn, lex::Error> {
         return Result::Ok(ast::Fn {
             name: name,
             generics: generics,
+            requires: requires,
             params: params,
             ret: ret,
             body: Option::None,
@@ -792,6 +799,7 @@ pub fn function(p: &mut Parser) -> Result<ast::Fn, lex::Error> {
     Result::Ok(ast::Fn {
         name: name,
         generics: generics,
+        requires: requires,
         params: params,
         ret: ret,
         body: Option::Some(body),
@@ -2028,4 +2036,183 @@ fn trait_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
             });
         }
     }
+}
+
+/// What a `where` clause said: predicates, and bounds for named parameters.
+pub struct Where {
+    pub requires: Vec<Expr>,
+    pub bounds: Vec<Extra>,
+}
+
+/// Bounds a `where` clause put on one type parameter.
+pub struct Extra {
+    pub name: String,
+    pub bounds: Vec<ast::Bound>,
+}
+
+/// `where T: Bound, n > 0` (Ch. 4 §2.6, §2.8).
+///
+/// A bound names a type parameter of this item and belongs to it; a
+/// predicate is an expression and is kept apart. They are told from each
+/// other by what follows the first name: a `:` makes it a bound.
+///
+/// What it finds is *answered* rather than written into the parameter list.
+/// Reaching into a `Vec` through a `&mut` and pushing to what a pattern
+/// bound would push to a copy (G9.50), and a function that answers cannot
+/// make that mistake.
+fn where_clause(p: &mut Parser) -> Result<Where, lex::Error> {
+    let mut requires: Vec<Expr> = Vec::new();
+    let mut bounds: Vec<Extra> = Vec::new();
+    let t = peek(p)?;
+    let next = t.at;
+    let has = match &t.tok {
+        Tok::Kw(k) => k.same("where"),
+        _ => false,
+    };
+    if !has {
+        return Result::Ok(Where { requires: requires, bounds: bounds });
+    }
+    p.at = next;
+    loop {
+        let t2 = peek(p)?;
+        let at2 = t2.at;
+        match &t2.tok {
+            // A lifetime bound is erased with the rest of them (§3.2).
+            Tok::Lifetime(l) => {
+                p.at = at2;
+                skip_lifetime_bounds(p)?;
+            }
+            _ => {
+                if bound_ahead(p)? {
+                    let name = ident(p)?;
+                    let these = bound_list(p)?;
+                    bounds.push(Extra { name: name, bounds: these });
+                } else {
+                    // A predicate is followed by the body's `{`, so a struct
+                    // literal is off here for the reason it is off in an
+                    // `if` condition (§5.3).
+                    requires.push(no_struct_expr(p)?);
+                }
+            }
+        }
+        let t3 = peek(p)?;
+        let at3 = t3.at;
+        let comma = match &t3.tok {
+            Tok::Op(o) => o.same(","),
+            _ => false,
+        };
+        if !comma {
+            return Result::Ok(Where { requires: requires, bounds: bounds });
+        }
+        p.at = at3;
+        let t4 = peek(p)?;
+        let opens = match &t4.tok {
+            Tok::Op(o) => o.same("{"),
+            _ => false,
+        };
+        if opens {
+            return Result::Ok(Where { requires: requires, bounds: bounds });
+        }
+    }
+}
+
+/// Whether what comes next is `name:` — a bound rather than a predicate.
+fn bound_ahead(p: &mut Parser) -> Result<bool, lex::Error> {
+    let start = p.at;
+    let t = peek(p)?;
+    let at = t.at;
+    let named = match &t.tok {
+        Tok::Ident(n) => true,
+        _ => false,
+    };
+    if !named {
+        return Result::Ok(false);
+    }
+    p.at = at;
+    let t2 = peek(p)?;
+    let colon = match &t2.tok {
+        Tok::Op(o) => o.same(":"),
+        _ => false,
+    };
+    p.at = start;
+    Result::Ok(colon)
+}
+
+/// Fold a `where` clause's bounds into the parameters they name.
+///
+/// `fn f<T>(…) where T: Eq` and `fn f<T: Eq>(…)` are one function, so the
+/// two lists become one. It is done by value, a bound at a time: a `Vec`
+/// reached through a `&mut` that a pattern bound is a copy (G9.50), and a
+/// list that is consumed and answered cannot be the wrong one.
+fn merge_bounds(
+    gs: Vec<ast::Generic>,
+    extra: Vec<Extra>,
+) -> Result<Vec<ast::Generic>, lex::Error> {
+    let mut out = gs;
+    for e in extra {
+        let at = index_of(&out, &e.name);
+        if at < 0 {
+            return Result::Err(lex::Error {
+                at: 0,
+                message: "not a type parameter of this item".to_string(),
+            });
+        }
+        out = with_bounds(out, at, e.bounds);
+    }
+    Result::Ok(out)
+}
+
+/// Which parameter is called this, or −1.
+fn index_of(gs: &Vec<ast::Generic>, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < gs.len() {
+        let hit = match &gs[i] {
+            ast::Generic::Type(n, bs) => n.same(name),
+            ast::Generic::Const(n, ty) => false,
+        };
+        if hit {
+            return i;
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
+/// The same list with `more` added to the parameter at `at`.
+fn with_bounds(
+    gs: Vec<ast::Generic>,
+    at: taddr,
+    more: Vec<ast::Bound>,
+) -> Vec<ast::Generic> {
+    // Popped rather than moved: a value moved inside a loop would be moved
+    // again on the next turn, and this one is wanted on exactly one.
+    let mut held = more;
+    let mut out: Vec<ast::Generic> = Vec::new();
+    let mut i: taddr = 0;
+    for g in gs {
+        match g {
+            ast::Generic::Type(name, bs) => {
+                let mut list = bs;
+                if i == at {
+                    let mut back: Vec<ast::Bound> = Vec::new();
+                    loop {
+                        match held.pop() {
+                            Option::Some(b) => back.push(b),
+                            Option::None => break,
+                        }
+                    }
+                    loop {
+                        match back.pop() {
+                            Option::Some(b) => list.push(b),
+                            Option::None => break,
+                        }
+                    }
+                }
+                out.push(ast::Generic::Type(name, list));
+            }
+            other => out.push(other),
+        }
+        i += 1;
+    }
+    out
 }

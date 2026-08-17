@@ -1,0 +1,24 @@
+trait Show { fn show(&self) -> t27; }
+fn one<T>(x: T) -> t27 where T: Show { x.show() }
+fn two<T, U>(x: T, y: U) -> t27
+where
+    T: Show + Eq,
+    U: Show,
+{
+    x.show() + y.show()
+}
+fn guarded(n: taddr, m: taddr) -> taddr
+where
+    n > 0,
+    m > n,
+{
+    m - n
+}
+fn mixed<T>(x: T, n: taddr) -> t27
+where
+    T: Show,
+    n > 0,
+{
+    x.show()
+}
+fn main() -> t27 { 0 }

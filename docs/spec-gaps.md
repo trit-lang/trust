@@ -2592,6 +2592,37 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.50 — a write through a matched binding goes nowhere.** Matching a
+value moves it and the arm's bindings own what it held; matching *through a
+reference* moves nothing, so the bindings are read out of storage the
+referent still owns. They are read out as **copies**, and a copy is not the
+place:
+
+```
+fn add(h: &mut Holder) {
+    match h {
+        Holder::Some(v) => { v.push(1); }   // pushes into a copy
+        Holder::Nothing => {}
+    }
+}
+```
+
+compiles, runs, and does nothing. Found writing a `where` clause into a
+parameter list in Trust, where the obvious spelling —
+`match &mut gs[i] { Generic::Type(_, bs) => bs.push(b) }` — silently kept
+the list it was given.
+
+Nothing is unsound: `declare_borrowed` means such a binding never drops, so
+there is no double free. What is lost is the write, and the language has no
+way to say so. That is exactly the shape Ch. 7's design note calls the
+failure with no diagnostic attached.
+
+Not yet decided, and recorded rather than fixed. The two answers are: bind a
+**place** through a reference, so `v` is `&mut Vec<t27>` and the write goes
+where it was written; or **refuse** writing to a binding that came from a
+borrowed scrutinee. The first is what a reader expects and what Rust does;
+the second is smaller and is the rule this project's other refusals follow.
+
 **G9.49 — a count that could not be represented turned §6 off.** Ch. 2 §6
 niche-encodes an enum when its one payload has invalid representations to
 spare. The engine asked two questions: does the payload have `needed`

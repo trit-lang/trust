@@ -273,13 +273,23 @@ fn rw_fn(w: &World, a: &mut At, f: ast::Fn, module: &str, keep: bool) -> ast::Fn
     let written = f.name;
     let name = if keep { written } else { joined(module, &written) };
     let params = rw_params_binding(w, a, f.params);
+    // A predicate names the parameters, so it is rewritten with them in
+    // scope and before the body (Ch. 4 §2.8).
+    let requires = rw_exprs(w, a, f.requires);
     let ret = rw_ty(w, a, f.ret);
     let body: Option<ast::Block> = match f.body {
         Option::Some(b) => Option::Some(rw_block(w, a, b)),
         Option::None => Option::None,
     };
     unbind(a, mark);
-    ast::Fn { name: name, generics: f.generics, params: params, ret: ret, body: body }
+    ast::Fn {
+        name: name,
+        generics: f.generics,
+        requires: requires,
+        params: params,
+        ret: ret,
+        body: body,
+    }
 }
 
 /// The fields of a struct: types rewritten, names left alone.
