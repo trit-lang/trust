@@ -2592,6 +2592,23 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.54 — an editor could not be told what a pattern binds.** A `let`'s
+name is recorded with its type, which is what hover answers with; a
+*pattern's* bindings were not. So `let P { a, b } = p;` and `for x in …` —
+both added this week, both bindings like any other — gave an editor nothing,
+and `for` gave it nothing even before, because its binding is a pattern in
+the desugaring.
+
+One place: a pattern's `Bind` records the span it was written at and the
+type it turned out to be, which is also where the reference case is decided,
+so a binding through a `&mut` is shown as the `&mut T` it is rather than as
+what it points at (G9.50).
+
+Found by asking, feature by feature, which of the week's additions the LSP
+had been told about. The answer was: the parser's, because the index reads
+the AST; and none of the lowering's, because those are told by `Noted` and
+nothing had added to it.
+
 **G9.53 — a program could not name a function the prelude names.** Ch. 6
 §3.3: a program's item shadows a prelude item of the same name, everywhere
 in the program. `merged` does that, and drops the prelude's. What did not

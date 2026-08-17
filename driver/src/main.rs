@@ -752,6 +752,11 @@ fn print_bindings(what: &str, b: &lang::ast::Block, types: &lang::lower::Noted) 
                 pattern,
                 ..
             } => {
+                // A `let` with a pattern binds what the *pattern* binds.
+                // Those are reported to an editor (they are noted) and not
+                // here: the second implementation infers types and does not
+                // yet infer a pattern's, and a report neither can check is
+                // a report worth nothing.
                 if pattern.is_none() {
                     let ty = types.exact(*name_span).unwrap_or("?");
                     println!("{what} {name} {ty}");

@@ -4680,3 +4680,22 @@ fn a_program_may_name_a_function_the_prelude_names() {
         "the program's `sum` is the program's"
     );
 }
+
+#[test]
+fn an_editor_is_told_what_a_pattern_binds() {
+    // `let n = 1;` does not say what `n` is, and neither does `P { a, b }`
+    // or `for x in …`. Both are bindings, and both are what an editor is
+    // asked about — so both are recorded, which only the first was.
+    let src = "struct P { a: t27, b: t9 }\n\
+               fn f(p: P) -> t27 {\n\
+               \x20   let P { a, b } = p;\n\
+               \x20   for x in 0..3 { }\n\
+               \x20   a\n\
+               }\n\
+               fn main() -> t27 { 0 }\n";
+    let types = lang::analyze(src).types;
+    let at = |needle: &str| src.find(needle).expect("in the source") as u32;
+    assert_eq!(types.at(at("a, b }")), Some("t27"), "the first field");
+    assert_eq!(types.at(at("b } = p")), Some("t9"), "the second");
+    assert_eq!(types.at(at("x in 0..3")), Some("t27"), "the loop's binding");
+}

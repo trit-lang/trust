@@ -11579,7 +11579,17 @@ impl Fn<'_> {
         }
         match pat {
             ast::Pattern::Wild(_) => Ok(()),
-            ast::Pattern::Bind(bound, _) => {
+            ast::Pattern::Bind(bound, at) => {
+                // What a pattern binds is a binding like any other, and an
+                // editor asked about one wants the same answer: `let n = 1;`
+                // does not say what `n` is and neither does `E::S(n)`.
+                let shown = match borrowed && !self.types.is_copyable(ty) {
+                    true => Ty::Ref(Box::new(ty.clone()), self.match_mut),
+                    false => ty.clone(),
+                };
+                if let Some(sink) = self.noted {
+                    sink.borrow_mut().note(*at, &shown);
+                }
                 // A binding read out of borrowed storage never owns: the
                 // referent still does, and two owners of one allocation is
                 // the bug this whole chapter exists to make impossible.
