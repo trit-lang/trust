@@ -1,0 +1,26 @@
+// The places a checker most wants to be lazy about: through references,
+// through indexes, and where a value has to be a place at all.
+struct Node { n: t27, next: Vec<t27> }
+enum Kind { A, B(t27) }
+
+fn deref_right(r: &t27) -> t27 { *r }
+fn deref_wrong(r: &t27) -> bool { *r }
+fn borrow_right(n: t27) -> t27 { let r: &t27 = &n; *r }
+fn borrow_wrong(n: t27) -> t27 { let r: &bool = &n; 0 }
+
+fn index_right(v: &Vec<t27>) -> t27 { v[0] }
+fn index_wrong(v: &Vec<t27>) -> bool { v[0] }
+
+fn field_right(x: &Node) -> t27 { x.n }
+fn field_wrong(x: &Node) -> bool { x.n }
+fn field_deep_right(x: &Node) -> taddr { x.next.len() }
+fn field_deep_wrong(x: &Node) -> t27 { x.next.len() }
+
+fn cast_right(n: t27) -> t9 { n as t9 }
+fn cast_wrong(n: t27) -> t9 { n as taddr }
+
+fn unary_right(b: bool) -> bool { !b }
+fn unary_wrong(n: t27) -> t27 { !n }
+
+fn variant_right() -> Kind { Kind::B(1) }
+fn variant_wrong() -> Kind { Kind::B }

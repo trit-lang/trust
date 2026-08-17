@@ -385,10 +385,34 @@ fn walk_expr(w: &mut World, what: &str, e: &ast::Expr) {
                 Option::Some(x) => walk_expr(w, what, x),
                 Option::None => {}
             }
+            // A condition is a `bool` and nothing else is (§5.3): a trit
+            // is three-valued and a number is not a question.
+            let cond = type_of(w, c);
+            let want = named("bool");
+            if !agrees(&want, &cond) {
+                w.refused = true;
+            }
+            // Both branches answer the same thing, since the `if` answers
+            // one of them and does not know which.
+            let then = block_type(w, t);
+            match o {
+                Option::Some(x) => {
+                    let other = type_of(w, x);
+                    if !agrees(&then, &other) && !agrees(&other, &then) {
+                        w.refused = true;
+                    }
+                }
+                Option::None => {}
+            }
         }
         ast::Expr::While(c, b) => {
             walk_expr(w, what, c);
             walk_block(w, what, b);
+            let cond = type_of(w, c);
+            let want = named("bool");
+            if !agrees(&want, &cond) {
+                w.refused = true;
+            }
         }
         ast::Expr::Loop(b) => walk_block(w, what, b),
         ast::Expr::For(name, it, b) => {
@@ -414,17 +438,50 @@ fn walk_expr(w: &mut World, what: &str, e: &ast::Expr) {
                 walk_expr(w, what, &arms[i].body);
                 i += 1;
             }
+            // Every arm answers the same thing, for the same reason both
+            // branches of an `if` do (§5.4).
+            if arms.len() > 0 {
+                let first = type_of(w, &arms[0].body);
+                let mut k: taddr = 1;
+                while k < arms.len() {
+                    let here = type_of(w, &arms[k].body);
+                    if !agrees(&first, &here) && !agrees(&here, &first) {
+                        w.refused = true;
+                    }
+                    k += 1;
+                }
+            }
         }
         ast::Expr::Binary(op, a, b) => {
             walk_expr(w, what, a);
             walk_expr(w, what, b);
+            // An operator is a claim about both sides: there are no
+            // implicit conversions, so `t27 + t9` is two types (§2.1).
+            let left = type_of(w, a);
+            let right = type_of(w, b);
+            if !agrees(&left, &right) && !agrees(&right, &left) {
+                w.refused = true;
+            }
         }
         ast::Expr::Assign(op, a, b) => {
             walk_expr(w, what, a);
             walk_expr(w, what, b);
         }
         ast::Expr::Group(a) => walk_expr(w, what, a),
-        ast::Expr::Unary(op, a) => walk_expr(w, what, a),
+        ast::Expr::Unary(op, a) => {
+            walk_expr(w, what, a);
+            // `!` is the logical negation and applies to a `bool`; there is
+            // no bitwise one to share the symbol with (Ch. 1 §2.5). It is a
+            // different refusal from a type that does not match, and the
+            // Rust side reports it as one.
+            if op.same("!") {
+                let inner = type_of(w, a);
+                let want = named("bool");
+                if !agrees(&want, &inner) {
+                    w.other = true;
+                }
+            }
+        }
         ast::Expr::Borrow(a, m) => walk_expr(w, what, a),
         ast::Expr::Deref(a) => walk_expr(w, what, a),
         ast::Expr::Try(a) => walk_expr(w, what, a),
@@ -433,6 +490,16 @@ fn walk_expr(w: &mut World, what: &str, e: &ast::Expr) {
         ast::Expr::Index(a, b) => {
             walk_expr(w, what, a);
             walk_expr(w, what, b);
+        }
+        // A variant is written with its payload or it is not that variant:
+        // `Kind::B` where `B` carries one is a different refusal.
+        ast::Expr::Aggregate(path, fields) => {
+            let mut i: taddr = 0;
+            while i < fields.len() {
+                walk_expr(w, what, &fields[i].value);
+                i += 1;
+            }
+            check_aggregate(w, path, fields);
         }
         ast::Expr::Method(r, name, args) => {
             walk_expr(w, what, r);
@@ -487,6 +554,23 @@ fn check_call(w: &mut World, name: &str, args: &Vec<ast::Expr>) {
             w.refused = true;
         }
         i += 1;
+    }
+}
+
+/// Whether a variant was written with the payload it carries (§3.3).
+fn check_aggregate(w: &mut World, path: &str, fields: &Vec<ast::Field>) {
+    let segments = split_path(path);
+    if segments.len() < 2 {
+        return;
+    }
+    let owner = segments[0].to_string();
+    let variant = segments[1].to_string();
+    let at = variant_at(w, &owner, &variant);
+    if at < 0 {
+        return;
+    }
+    if w.variants[at].fields.len() != fields.len() {
+        w.other = true;
     }
 }
 

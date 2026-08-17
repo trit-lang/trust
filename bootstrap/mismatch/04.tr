@@ -1,0 +1,16 @@
+// An operator is a claim about both sides; a branch, about the other branch.
+struct Span { lo: taddr, hi: taddr }
+
+fn ops_right(n: t27, m: t27) -> t27 { n + m }
+fn ops_wrong_width(n: t27, m: t9) -> t27 { n + m }
+fn ops_wrong_shape(n: t27, s: Span) -> t27 { n + s }
+fn compare_right(n: t27, m: t27) -> bool { n < m }
+fn compare_wrong(n: t27, b: bool) -> bool { n < b }
+
+fn cond_right(b: bool) -> t27 { if b { 1 } else { 2 } }
+fn cond_wrong(n: t27) -> t27 { if n { 1 } else { 2 } }
+fn while_wrong(n: t27) -> t27 { while n { } 0 }
+
+fn arms_right(n: t27) -> t27 { match n { 0 => 1, _ => 2 } }
+fn arms_wrong(n: t27) -> t27 { match n { 0 => 1, _ => true } }
+fn branch_wrong(b: bool) -> t27 { if b { 1 } else { true } }
