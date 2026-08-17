@@ -62,6 +62,9 @@ pub struct Method {
 
 /// What the file defines, and what is in scope where the walk has reached.
 pub struct World {
+    /// `type Name = T;` — only a name (Ch. 0 §3.6), so a name is what it
+    /// is taken off before anything else asks what a type is.
+    pub aliases: Vec<Binding>,
     pub fields: Vec<Field>,
     pub sigs: Vec<Sig>,
     pub methods: Vec<Method>,
@@ -75,6 +78,7 @@ fn main() -> t27 {
     match parse::file(&mut p) {
         Result::Ok(items) => {
             let mut w = World {
+                aliases: Vec::new(),
                 fields: Vec::new(),
                 sigs: Vec::new(),
                 methods: Vec::new(),
@@ -82,6 +86,13 @@ fn main() -> t27 {
                 locals: Vec::new(),
             };
             prelude(&mut w);
+            // Aliases first: one may be written after what uses it, and
+            // nothing below should ever see a name that is only a name.
+            let mut a: taddr = 0;
+            while a < items.len() {
+                gather_alias(&mut w, &items[a]);
+                a += 1;
+            }
             let mut i: taddr = 0;
             while i < items.len() {
                 gather(&mut w, &items[i]);
@@ -103,16 +114,27 @@ fn main() -> t27 {
     }
 }
 
+/// The aliases, which are read before anything else (Ch. 0 §3.6).
+fn gather_alias(w: &mut World, item: &ast::Item) {
+    match &item.what {
+        ast::What::Alias(name, ty) => {
+            w.aliases.push(Binding { name: name.to_string(), ty: copy_ty(ty) });
+        }
+        _ => {}
+    }
+}
+
 /// What one item defines, for the passes that follow.
 fn gather(w: &mut World, item: &ast::Item) {
     match &item.what {
         ast::What::Struct(name, gs, fields) => {
             let mut i: taddr = 0;
             while i < fields.len() {
+                let t = expand(w, &fields[i].ty);
                 w.fields.push(Field {
                     owner: name.to_string(),
                     name: fields[i].name.to_string(),
-                    ty: copy_ty(&fields[i].ty),
+                    ty: t,
                 });
                 i += 1;
             }
@@ -132,7 +154,7 @@ fn gather(w: &mut World, item: &ast::Item) {
                 let mut fields: Vec<ast::Ty> = Vec::new();
                 let mut k: taddr = 0;
                 while k < variants[i].fields.len() {
-                    fields.push(copy_ty(&variants[i].fields[k]));
+                    fields.push(expand(w, &variants[i].fields[k]));
                     k += 1;
                 }
                 w.variants.push(Variant {
@@ -153,10 +175,11 @@ fn gather(w: &mut World, item: &ast::Item) {
             let owner = head_of(ty);
             let mut i: taddr = 0;
             while i < fns.len() {
+                let ret = expand(w, &fns[i].ret);
                 w.methods.push(Method {
                     owner: owner.to_string(),
                     name: fns[i].name.to_string(),
-                    ret: copy_ty(&fns[i].ret),
+                    ret: ret,
                 });
                 i += 1;
             }
@@ -165,14 +188,11 @@ fn gather(w: &mut World, item: &ast::Item) {
             let mut params: Vec<ast::Ty> = Vec::new();
             let mut i: taddr = 0;
             while i < f.params.len() {
-                params.push(copy_ty(&f.params[i].ty));
+                params.push(expand(w, &f.params[i].ty));
                 i += 1;
             }
-            w.sigs.push(Sig {
-                name: f.name.to_string(),
-                params: params,
-                ret: copy_ty(&f.ret),
-            });
+            let ret = expand(w, &f.ret);
+            w.sigs.push(Sig { name: f.name.to_string(), params: params, ret: ret });
         }
         _ => {}
     }
@@ -200,10 +220,8 @@ fn walk_fn(w: &mut World, f: &ast::Fn, body: &ast::Block) {
     let mark = w.locals.len();
     let mut i: taddr = 0;
     while i < f.params.len() {
-        w.locals.push(Binding {
-            name: f.params[i].name.to_string(),
-            ty: copy_ty(&f.params[i].ty),
-        });
+        let t = expand(w, &f.params[i].ty);
+        w.locals.push(Binding { name: f.params[i].name.to_string(), ty: t });
         i += 1;
     }
     walk_block(w, &f.name, body);
@@ -219,7 +237,7 @@ fn walk_block(w: &mut World, what: &str, b: &ast::Block) {
                 // A written type is the answer; inference is for the `let`
                 // that does not say (§5.2).
                 let t = match written {
-                    Option::Some(x) => copy_ty(x),
+                    Option::Some(x) => expand(w, x),
                     Option::None => type_of(w, value),
                 };
                 print(what);
@@ -351,7 +369,7 @@ pub fn type_of(w: &mut World, e: &ast::Expr) -> ast::Ty {
         ast::Expr::Unit => ast::Ty::Unit,
         ast::Expr::Name(n) => look_up(w, n),
         ast::Expr::Group(a) => type_of(w, a),
-        ast::Expr::Cast(a, t) => copy_ty(t),
+        ast::Expr::Cast(a, t) => expand(w, t),
         ast::Expr::Borrow(a, m) => ast::Ty::Ref(Box::new(type_of(w, a)), m),
         ast::Expr::Deref(a) => {
             let inner = type_of(w, a);
@@ -378,6 +396,13 @@ pub fn type_of(w: &mut World, e: &ast::Expr) -> ast::Ty {
             }
         }
         ast::Expr::Assign(op, a, b) => ast::Ty::Unit,
+        // `e?` is the value when there is one and a return when there is
+        // not, so what it *is* is the first argument of either answer
+        // (Ch. 5 §6.2).
+        ast::Expr::Try(a) => {
+            let whole = type_of(w, a);
+            first_argument(&whole)
+        }
         ast::Expr::Field(a, name) => {
             let whole = type_of(w, a);
             let base = strip(&whole);
@@ -462,7 +487,7 @@ fn block_type(w: &mut World, b: &ast::Block) -> ast::Ty {
         match &b.stmts[i] {
             ast::Stmt::Let(mutable, name, written, value) => {
                 let t = match written {
-                    Option::Some(x) => copy_ty(x),
+                    Option::Some(x) => expand(w, x),
                     Option::None => type_of(w, value),
                 };
                 w.locals.push(Binding { name: name.to_string(), ty: t });
@@ -644,6 +669,12 @@ fn split_path(path: &str) -> Vec<String> {
 /// being read, and a checker that did not know them would answer nothing
 /// about the two answers every fallible function gives.
 fn prelude(w: &mut World) {
+    // Ch. 0 §3.6 and Ch. 5 §1.1: a `String` is a `Vec<char>` and is one
+    // name for it, not a type of its own.
+    w.aliases.push(Binding {
+        name: "String".to_string(),
+        ty: ast::Ty::App(path_of("Vec"), one_ty(named("char"))),
+    });
     let mut t: Vec<String> = Vec::new();
     t.push("T".to_string());
     w.variants.push(Variant {
@@ -703,6 +734,20 @@ fn method_type(w: &mut World, on: &ast::Ty, name: &str) -> ast::Ty {
         return named("bool");
     }
     ast::Ty::Unit
+}
+
+/// The first type argument of `Option<T>` or `Result<T, E>`.
+fn first_argument(t: &ast::Ty) -> ast::Ty {
+    match t {
+        ast::Ty::App(segments, args) => {
+            let head = joined(segments);
+            if (head.same("Option") || head.same("Result")) && args.len() > 0 {
+                return copy_ty(&args[0]);
+            }
+            ast::Ty::Unit
+        }
+        _ => ast::Ty::Unit,
+    }
 }
 
 /// What indexing gives: a `Vec`'s element, a slice's, a string's character.
@@ -780,6 +825,37 @@ fn one_ty(t: ast::Ty) -> Vec<ast::Ty> {
     let mut out: Vec<ast::Ty> = Vec::new();
     out.push(t);
     out
+}
+
+/// A type with every alias taken off (Ch. 0 §3.6). An alias is a name for
+/// a type and never a type, so nothing below here should ever see one.
+fn expand(w: &World, t: &ast::Ty) -> ast::Ty {
+    match t {
+        ast::Ty::Name(segments) => {
+            let name = joined(segments);
+            let mut i: taddr = 0;
+            while i < w.aliases.len() {
+                if w.aliases[i].name.same(&name) {
+                    let inner = copy_ty(&w.aliases[i].ty);
+                    return expand(w, &inner);
+                }
+                i += 1;
+            }
+            copy_ty(t)
+        }
+        ast::Ty::App(segments, args) => {
+            let mut out: Vec<ast::Ty> = Vec::new();
+            let mut i: taddr = 0;
+            while i < args.len() {
+                out.push(expand(w, &args[i]));
+                i += 1;
+            }
+            ast::Ty::App(copy_names(segments), out)
+        }
+        ast::Ty::Ref(inner, m) => ast::Ty::Ref(Box::new(expand(w, inner)), m),
+        ast::Ty::Slice(inner) => ast::Ty::Slice(Box::new(expand(w, inner))),
+        _ => copy_ty(t),
+    }
 }
 
 /// A type, copied. There is no `Clone` here and a type is a tree.

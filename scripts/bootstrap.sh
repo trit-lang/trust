@@ -192,7 +192,12 @@ done
 # Ch. 4: what type every binding turned out to have. A `let` is where
 # inference is visible — it is the thing `let n = 1;` does not say.
 t=0
-for f in bootstrap/typed/*.tr; do
+# The corpus, and then the modules of `bootstrap/` that are whole files on
+# their own: a type is a fact about a file, so the ones that declare no
+# module can be asked directly, and they are the largest Trust programs
+# there are to ask about.
+for f in bootstrap/typed/*.tr bootstrap/ast.tr bootstrap/input.tr \
+         bootstrap/bundle.tr bootstrap/lex.tr; do
     rust=$("$trust" types "$f")
     mine=$("$trust" run bootstrap/types.tr < "$f")
     if [ "$rust" != "$mine" ]; then
