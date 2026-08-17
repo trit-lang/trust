@@ -1,0 +1,17 @@
+struct Pair<A, B> { a: A, b: B }
+enum Either<L, R> { Left(L), Right(R) }
+trait Show { fn show(&self) -> t27; }
+fn first<A, B>(p: Pair<A, B>) -> A { let Pair { a, b } = p; a }
+fn bounded<T: Show + Eq, U: Ord>(x: T, y: U) -> t27 { x.show() }
+fn assoc<I: Iterator<Item = t27>>(it: I) -> t27 { 0 }
+fn counted<const N: taddr, T>(x: T) -> taddr { N }
+impl<A, B> Pair<A, B> {
+    fn swap(self) -> Pair<B, A> {
+        let Pair { a, b } = self;
+        Pair { a: b, b: a }
+    }
+}
+impl<T: Show> Show for Either<T, T> {
+    fn show(&self) -> t27 { 0 }
+}
+fn main() -> t27 { 0 }

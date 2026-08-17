@@ -643,6 +643,47 @@ fn let_stmt(p: &mut Parser) -> Result<ast::Stmt, lex::Error> {
         }
         _ => {}
     }
+    // `let P { a, b } = e;` and `let (a, b) = e;` take the value apart, and
+    // what they bind is the pattern's (§4). A struct pattern is told from a
+    // name by the `{` after it; a tuple one by opening with `(`.
+    let t0 = peek(p)?;
+    let at0 = t0.at;
+    let tuple = match &t0.tok {
+        Tok::Op(o) => o.same("("),
+        _ => false,
+    };
+    let structured = match &t0.tok {
+        Tok::Ident(n) => {
+            let save = p.at;
+            p.at = at0;
+            let t1 = peek(p)?;
+            let braced = match &t1.tok {
+                Tok::Op(o) => o.same("{"),
+                _ => false,
+            };
+            p.at = save;
+            braced
+        }
+        _ => false,
+    };
+    if !mutable && (tuple || structured) {
+        let pat = pattern(p)?;
+        // A written type is read and dropped here as it is anywhere else.
+        let t2 = peek(p)?;
+        let at2 = t2.at;
+        let has_ty = match &t2.tok {
+            Tok::Op(o) => o.same(":"),
+            _ => false,
+        };
+        if has_ty {
+            p.at = at2;
+            let _ = type_name(p)?;
+        }
+        expect_op(p, "=")?;
+        let e = expr(p)?;
+        expect_op(p, ";")?;
+        return Result::Ok(ast::Stmt::LetPattern(pat, e));
+    }
     // `let _ = e;` binds nothing and is how a value is discarded (§5.2).
     // The wildcard is punctuation, not a name, so it is read here.
     let t1 = peek(p)?;
@@ -679,6 +720,7 @@ fn let_stmt(p: &mut Parser) -> Result<ast::Stmt, lex::Error> {
 pub fn function(p: &mut Parser) -> Result<ast::Fn, lex::Error> {
     expect_kw(p, "fn")?;
     let name = ident(p)?;
+    let generics = generic_params(p)?;
     expect_op(p, "(")?;
     let mut params: Vec<ast::Param> = Vec::new();
     loop {
@@ -740,6 +782,7 @@ pub fn function(p: &mut Parser) -> Result<ast::Fn, lex::Error> {
         p.at = at2;
         return Result::Ok(ast::Fn {
             name: name,
+            generics: generics,
             params: params,
             ret: ret,
             body: Option::None,
@@ -748,6 +791,7 @@ pub fn function(p: &mut Parser) -> Result<ast::Fn, lex::Error> {
     let body = block(p)?;
     Result::Ok(ast::Fn {
         name: name,
+        generics: generics,
         params: params,
         ret: ret,
         body: Option::Some(body),
@@ -1065,6 +1109,9 @@ fn what(p: &mut Parser) -> Result<ast::What, lex::Error> {
     if word.same("impl") {
         return impl_item(p);
     }
+    if word.same("trait") {
+        return trait_item(p);
+    }
     Result::Err(lex::Error { at: p.at, message: "expected an item".to_string() })
 }
 
@@ -1072,6 +1119,7 @@ fn what(p: &mut Parser) -> Result<ast::What, lex::Error> {
 fn struct_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
     expect_kw(p, "struct")?;
     let name = ident(p)?;
+    let generics = generic_params(p)?;
     let mut fields: Vec<ast::Param> = Vec::new();
     let t = peek(p)?;
     let next = t.at;
@@ -1081,7 +1129,7 @@ fn struct_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
     };
     if unit {
         p.at = next;
-        return Result::Ok(ast::What::Struct(name, fields));
+        return Result::Ok(ast::What::Struct(name, generics, fields));
     }
     expect_op(p, "{")?;
     loop {
@@ -1093,7 +1141,7 @@ fn struct_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
         };
         if done {
             p.at = at2;
-            return Result::Ok(ast::What::Struct(name, fields));
+            return Result::Ok(ast::What::Struct(name, generics, fields));
         }
         let t3 = peek(p)?;
         let at3 = t3.at;
@@ -1125,6 +1173,7 @@ fn struct_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
 fn enum_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
     expect_kw(p, "enum")?;
     let name = ident(p)?;
+    let generics = generic_params(p)?;
     expect_op(p, "{")?;
     let mut variants: Vec<ast::Variant> = Vec::new();
     loop {
@@ -1136,7 +1185,7 @@ fn enum_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
         };
         if done {
             p.at = next;
-            return Result::Ok(ast::What::Enum(name, variants));
+            return Result::Ok(ast::What::Enum(name, generics, variants));
         }
         let vname = ident(p)?;
         let mut fields: Vec<ast::Ty> = Vec::new();
@@ -1213,6 +1262,7 @@ fn use_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
 /// difference is the `for` and nothing before it.
 fn impl_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
     expect_kw(p, "impl")?;
+    let generics = generic_params(p)?;
     // Both halves are read as types and only then told apart, because the
     // difference is the `for` and nothing before it.
     let first = type_name(p)?;
@@ -1240,7 +1290,7 @@ fn impl_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
         };
         if done {
             p.at = at2;
-            return Result::Ok(ast::What::Impl(tr, ty, fns));
+            return Result::Ok(ast::What::Impl(generics, tr, ty, fns));
         }
         // An `impl` block takes no `pub`, and neither does anything in one:
         // its methods are as visible as the block, which is as visible as the
@@ -1631,6 +1681,295 @@ fn parenthesized(p: &mut Parser) -> Result<Expr, lex::Error> {
         } else {
             expect_op(p, ")")?;
             return Result::Ok(Expr::Tuple(items));
+        }
+    }
+}
+
+/// `<T, U: Bound + Other, const N: taddr>`, or nothing at all (Ch. 4 §2.1).
+///
+/// A lifetime is read and dropped wherever one may appear: they are erased
+/// (Ch. 3 §3.2), and a parser that refused them would refuse programs the
+/// language accepts.
+fn generic_params(p: &mut Parser) -> Result<Vec<ast::Generic>, lex::Error> {
+    let mut out: Vec<ast::Generic> = Vec::new();
+    let t = peek(p)?;
+    let next = t.at;
+    let opens = match t.tok {
+        Tok::Op(o) => o.same("<"),
+        _ => false,
+    };
+    if !opens {
+        return Result::Ok(out);
+    }
+    p.at = next;
+    loop {
+        let t2 = peek(p)?;
+        let at2 = t2.at;
+        // Borrowed rather than taken: the token is asked two questions and
+        // a move would leave nothing to ask the second (Ch. 3 §1.2).
+        let done = match &t2.tok {
+            Tok::Op(o) => o.same(">") || o.same(">>"),
+            _ => false,
+        };
+        if done {
+            close_angle(p)?;
+            return Result::Ok(out);
+        }
+        match t2.tok {
+            Tok::Lifetime(l) => {
+                p.at = at2;
+                // `'a: 'b` outlives, and is erased with the rest of them.
+                skip_lifetime_bounds(p)?;
+            }
+            Tok::Kw(k) => {
+                if !k.same("const") {
+                    return Result::Err(lex::Error {
+                        at: p.at,
+                        message: "expected a generic parameter".to_string(),
+                    });
+                }
+                p.at = at2;
+                let name = ident(p)?;
+                expect_op(p, ":")?;
+                let ty = type_name(p)?;
+                out.push(ast::Generic::Const(name, ty));
+            }
+            _ => {
+                let name = ident(p)?;
+                let bounds = bound_list(p)?;
+                out.push(ast::Generic::Type(name, bounds));
+            }
+        }
+        let t3 = peek(p)?;
+        let at3 = t3.at;
+        let comma = match t3.tok {
+            Tok::Op(o) => o.same(","),
+            _ => false,
+        };
+        if comma {
+            p.at = at3;
+        }
+    }
+}
+
+/// `: A + B<t9> + C<Item = t27>`, or nothing.
+fn bound_list(p: &mut Parser) -> Result<Vec<ast::Bound>, lex::Error> {
+    let mut out: Vec<ast::Bound> = Vec::new();
+    let t = peek(p)?;
+    let next = t.at;
+    let colon = match t.tok {
+        Tok::Op(o) => o.same(":"),
+        _ => false,
+    };
+    if !colon {
+        return Result::Ok(out);
+    }
+    p.at = next;
+    loop {
+        let t2 = peek(p)?;
+        let at2 = t2.at;
+        match t2.tok {
+            // A lifetime bound — `T: 'a` — is erased with the rest.
+            Tok::Lifetime(l) => {
+                p.at = at2;
+            }
+            _ => {
+                out.push(one_bound(p)?);
+            }
+        }
+        let t3 = peek(p)?;
+        let at3 = t3.at;
+        let more = match t3.tok {
+            Tok::Op(o) => o.same("+"),
+            _ => false,
+        };
+        if !more {
+            return Result::Ok(out);
+        }
+        p.at = at3;
+    }
+}
+
+/// One bound: a trait, and what it carries (Ch. 4 §1.7).
+fn one_bound(p: &mut Parser) -> Result<ast::Bound, lex::Error> {
+    let name = ident(p)?;
+    let mut args: Vec<ast::Ty> = Vec::new();
+    let mut assoc: Vec<ast::Named> = Vec::new();
+    let t = peek(p)?;
+    let next = t.at;
+    let opens = match t.tok {
+        Tok::Op(o) => o.same("<"),
+        _ => false,
+    };
+    if !opens {
+        return Result::Ok(ast::Bound { name: name, args: args, assoc: assoc });
+    }
+    p.at = next;
+    loop {
+        let t2 = peek(p)?;
+        let at2 = t2.at;
+        let done = match t2.tok {
+            Tok::Op(o) => o.same(">") || o.same(">>"),
+            _ => false,
+        };
+        if done {
+            close_angle(p)?;
+            return Result::Ok(ast::Bound { name: name, args: args, assoc: assoc });
+        }
+        // `Item = t27` binds what the implementation chose; anything else is
+        // an argument saying which implementation is meant.
+        let binding = looks_like_binding(p)?;
+        if binding {
+            let key = ident(p)?;
+            expect_op(p, "=")?;
+            let ty = type_name(p)?;
+            assoc.push(ast::Named { name: key, ty: ty });
+        } else {
+            args.push(type_name(p)?);
+        }
+        let t3 = peek(p)?;
+        let at3 = t3.at;
+        let comma = match t3.tok {
+            Tok::Op(o) => o.same(","),
+            _ => false,
+        };
+        if comma {
+            p.at = at3;
+        }
+    }
+}
+
+/// Whether what comes next is `name = …` rather than a type.
+fn looks_like_binding(p: &mut Parser) -> Result<bool, lex::Error> {
+    let start = p.at;
+    let t = peek(p)?;
+    let at = t.at;
+    let named = match t.tok {
+        Tok::Ident(n) => true,
+        _ => false,
+    };
+    if !named {
+        return Result::Ok(false);
+    }
+    p.at = at;
+    let t2 = peek(p)?;
+    let assigns = match t2.tok {
+        Tok::Op(o) => o.same("="),
+        _ => false,
+    };
+    p.at = start;
+    Result::Ok(assigns)
+}
+
+/// `'a: 'b + 'c`, all of which is erased (Ch. 3 §3.2).
+fn skip_lifetime_bounds(p: &mut Parser) -> Result<(), lex::Error> {
+    let t = peek(p)?;
+    let next = t.at;
+    let colon = match t.tok {
+        Tok::Op(o) => o.same(":"),
+        _ => false,
+    };
+    if !colon {
+        return Result::Ok(());
+    }
+    p.at = next;
+    loop {
+        let t2 = peek(p)?;
+        let at2 = t2.at;
+        match t2.tok {
+            Tok::Lifetime(l) => {
+                p.at = at2;
+            }
+            _ => return Result::Ok(()),
+        }
+        let t3 = peek(p)?;
+        let at3 = t3.at;
+        let more = match t3.tok {
+            Tok::Op(o) => o.same("+"),
+            _ => false,
+        };
+        if !more {
+            return Result::Ok(());
+        }
+        p.at = at3;
+    }
+}
+
+/// `trait Name<T>: Super { … }` (Ch. 4 §1.1).
+///
+/// A trait's body holds method signatures — with a body or without — and
+/// associated type and constant names. A `pub` on any of them is an error
+/// for the same reason it is on an `impl`'s method: they are as visible as
+/// the trait (Ch. 6 §2.2).
+fn trait_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
+    expect_kw(p, "trait")?;
+    let name = ident(p)?;
+    let mut params: Vec<String> = Vec::new();
+    let t = peek(p)?;
+    let next = t.at;
+    let generic = match t.tok {
+        Tok::Op(o) => o.same("<"),
+        _ => false,
+    };
+    if generic {
+        p.at = next;
+        loop {
+            let t2 = peek(p)?;
+            let at2 = t2.at;
+            let done = match &t2.tok {
+                Tok::Op(o) => o.same(">") || o.same(">>"),
+                _ => false,
+            };
+            if done {
+                close_angle(p)?;
+                break;
+            }
+            params.push(ident(p)?);
+            let t3 = peek(p)?;
+            let at3 = t3.at;
+            let comma = match t3.tok {
+                Tok::Op(o) => o.same(","),
+                _ => false,
+            };
+            if comma {
+                p.at = at3;
+            }
+        }
+    }
+    let mut supers: Vec<String> = Vec::new();
+    let bounds = bound_list(p)?;
+    for b in bounds {
+        supers.push(b.name);
+    }
+    expect_op(p, "{")?;
+    let mut assoc: Vec<String> = Vec::new();
+    let mut fns: Vec<ast::Fn> = Vec::new();
+    loop {
+        let t4 = peek(p)?;
+        let at4 = t4.at;
+        let done = match &t4.tok {
+            Tok::Op(o) => o.same("}"),
+            _ => false,
+        };
+        if done {
+            p.at = at4;
+            return Result::Ok(ast::What::Trait(name, params, supers, assoc, fns));
+        }
+        let word = match &t4.tok {
+            Tok::Kw(k) => k.to_string(),
+            _ => "".to_string(),
+        };
+        if word.same("type") {
+            p.at = at4;
+            assoc.push(ident(p)?);
+            expect_op(p, ";")?;
+        } else if word.same("fn") {
+            fns.push(function(p)?);
+        } else {
+            return Result::Err(lex::Error {
+                at: p.at,
+                message: "expected `fn` or `type` in a trait".to_string(),
+            });
         }
     }
 }

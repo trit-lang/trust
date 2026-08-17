@@ -1,0 +1,6 @@
+struct Box2<T> { v: T }
+enum Opt<T> { None, Some(T) }
+fn id<T: Eq + Ord>(x: T) -> T { x }
+fn n<const N: taddr>() -> taddr { N }
+impl<T> Box2<T> { fn get(self) -> T { self.v } }
+fn main() -> t27 { 0 }

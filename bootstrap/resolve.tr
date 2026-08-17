@@ -220,11 +220,11 @@ pub fn rewrite(w: &World, a: &mut At, item: ast::Item) -> ast::Item {
     let module = a.here.to_string();
     let what = match item.what {
         What::Function(f) => What::Function(rw_fn(w, a, f, &module, declared)),
-        What::Struct(name, fields) => {
+        What::Struct(name, gs, fields) => {
             let full = joined(&module, &name);
-            What::Struct(full, rw_params(w, a, fields))
+            What::Struct(full, gs, rw_params(w, a, fields))
         }
-        What::Enum(name, variants) => {
+        What::Enum(name, gs, variants) => {
             let full = joined(&module, &name);
             let mut out: Vec<ast::Variant> = Vec::new();
             for v in variants {
@@ -233,7 +233,7 @@ pub fn rewrite(w: &World, a: &mut At, item: ast::Item) -> ast::Item {
                 let fields = rw_tys(w, a, v.fields);
                 out.push(ast::Variant { name: v.name, fields: fields });
             }
-            What::Enum(full, out)
+            What::Enum(full, gs, out)
         }
         What::Alias(name, ty) => {
             let full = joined(&module, &name);
@@ -244,7 +244,7 @@ pub fn rewrite(w: &World, a: &mut At, item: ast::Item) -> ast::Item {
             let t = rw_ty(w, a, ty);
             What::Const(full, t, rw_expr(w, a, value))
         }
-        What::Impl(tr, ty, fns) => {
+        What::Impl(gs, tr, ty, fns) => {
             let t: Option<Ty> = match tr {
                 Option::Some(x) => Option::Some(rw_ty(w, a, x)),
                 Option::None => Option::None,
@@ -256,7 +256,7 @@ pub fn rewrite(w: &World, a: &mut At, item: ast::Item) -> ast::Item {
                 // it is reached through the type, which carries the path.
                 out.push(rw_fn(w, a, f, "", true));
             }
-            What::Impl(t, s, out)
+            What::Impl(gs, t, s, out)
         }
         other => other,
     };
@@ -275,7 +275,7 @@ fn rw_fn(w: &World, a: &mut At, f: ast::Fn, module: &str, keep: bool) -> ast::Fn
         Option::None => Option::None,
     };
     unbind(a, mark);
-    ast::Fn { name: name, params: params, ret: ret, body: body }
+    ast::Fn { name: name, generics: f.generics, params: params, ret: ret, body: body }
 }
 
 /// The fields of a struct: types rewritten, names left alone.
@@ -388,6 +388,13 @@ fn rw_block(w: &World, a: &mut At, b: ast::Block) -> ast::Block {
                 let v = rw_expr(w, a, value);
                 a.locals.push(name.to_string());
                 stmts.push(ast::Stmt::Let(mutable, name, v));
+            }
+            ast::Stmt::LetPattern(pat, value) => {
+                // Same order as a `let` with a name: the value is written
+                // before anything the pattern binds is in scope.
+                let v = rw_expr(w, a, value);
+                let p = rw_pattern(w, a, pat);
+                stmts.push(ast::Stmt::LetPattern(p, v));
             }
             ast::Stmt::Do(e) => stmts.push(ast::Stmt::Do(rw_expr(w, a, e))),
         }

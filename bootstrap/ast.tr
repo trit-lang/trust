@@ -71,6 +71,8 @@ pub enum Expr {
 pub enum Stmt {
     /// `let mut? name = expr;`
     Let(bool, String, Expr),
+    /// `let P { a, b } = expr;` — what it binds is the pattern's (§4).
+    LetPattern(Pattern, Expr),
     /// An expression evaluated for its effect.
     Do(Expr),
 }
@@ -102,6 +104,31 @@ pub enum Ty {
     SelfTy,
 }
 
+/// One bound: a trait's name, its type arguments, and what it binds
+/// (Ch. 4 §1.7). `From<t9>` is a different requirement from `From<t27>`,
+/// which is the whole reason a trait may carry parameters.
+pub struct Bound {
+    pub name: String,
+    pub args: Vec<Ty>,
+    /// `Iterator<Item = t27>`: a binding says what the implementation chose,
+    /// where an argument says which implementation is meant.
+    pub assoc: Vec<Named>,
+}
+
+/// A name bound to a type, which is what an associated binding is.
+pub struct Named {
+    pub name: String,
+    pub ty: Ty,
+}
+
+/// One generic parameter (Ch. 4 §2.1).
+pub enum Generic {
+    /// `T: Bound + Other`.
+    Type(String, Vec<Bound>),
+    /// `const N: taddr` (§2.4).
+    Const(String, Ty),
+}
+
 /// One parameter: a name and its written type.
 pub struct Param {
     pub name: String,
@@ -125,10 +152,10 @@ pub struct Item {
 
 pub enum What {
     Function(Fn),
-    /// `struct Name { field: T, … }`, or a unit struct with no fields.
-    Struct(String, Vec<Param>),
-    /// `enum Name { A, B(T), … }`.
-    Enum(String, Vec<Variant>),
+    /// `struct Name<T> { field: T, … }`, or a unit struct with no fields.
+    Struct(String, Vec<Generic>, Vec<Param>),
+    /// `enum Name<T> { A, B(T), … }`.
+    Enum(String, Vec<Generic>, Vec<Variant>),
     /// `mod m;` — a module, which is a file (Ch. 6 §1).
     Mod(String),
     /// `use a::b::c;` — the segments, in order (Ch. 6 §3.2).
@@ -139,7 +166,10 @@ pub enum What {
     Const(String, Ty, Expr),
     /// `impl Trait for Type { … }`. There is no trait for an inherent impl
     /// (Ch. 4 §1.2), which is the difference a reader sees.
-    Impl(Option<Ty>, Ty, Vec<Fn>),
+    Impl(Vec<Generic>, Option<Ty>, Ty, Vec<Fn>),
+    /// `trait Name<T>: Super { … }` (Ch. 4 §1.1): its type parameters, its
+    /// supertraits, its associated type names, and its methods.
+    Trait(String, Vec<String>, Vec<String>, Vec<String>, Vec<Fn>),
 }
 
 /// One arm: its patterns, its guard if it has one, and its value.
@@ -181,6 +211,7 @@ pub struct Field {
 
 pub struct Fn {
     pub name: String,
+    pub generics: Vec<Generic>,
     pub params: Vec<Param>,
     pub ret: Ty,
     /// The body, or nothing for a declaration — a signature whose definition
@@ -423,6 +454,72 @@ pub fn show(e: &Expr, out: &mut String) {
     }
 }
 
+/// A generic parameter list, written out. Nothing at all when there is
+/// none, which is what a program that names no type parameter reads as.
+pub fn show_generics(gs: &Vec<Generic>, out: &mut String) {
+    out.push_str("<");
+    let mut i: taddr = 0;
+    while i < gs.len() {
+        if i > 0 {
+            out.push_str(" ");
+        }
+        match &gs[i] {
+            Generic::Type(name, bounds) => {
+                out.push_str(&name);
+                let mut k: taddr = 0;
+                while k < bounds.len() {
+                    if k == 0 {
+                        out.push_str(":");
+                    } else {
+                        out.push_str("+");
+                    }
+                    show_bound(&bounds[k], out);
+                    k += 1;
+                }
+            }
+            Generic::Const(name, ty) => {
+                out.push_str("const ");
+                out.push_str(&name);
+                out.push_str(":");
+                show_ty(&ty, out);
+            }
+        }
+        i += 1;
+    }
+    out.push_str(">");
+}
+
+/// One bound, written out.
+pub fn show_bound(b: &Bound, out: &mut String) {
+    out.push_str(&b.name);
+    if b.args.len() == 0 && b.assoc.len() == 0 {
+        return;
+    }
+    out.push_str("<");
+    let mut first = true;
+    let mut i: taddr = 0;
+    while i < b.args.len() {
+        if !first {
+            out.push_str(",");
+        }
+        first = false;
+        show_ty(&b.args[i], out);
+        i += 1;
+    }
+    let mut k: taddr = 0;
+    while k < b.assoc.len() {
+        if !first {
+            out.push_str(",");
+        }
+        first = false;
+        out.push_str(&b.assoc[k].name);
+        out.push_str("=");
+        show_ty(&b.assoc[k].ty, out);
+        k += 1;
+    }
+    out.push_str(">");
+}
+
 /// A type, written back out as the characters it was written with.
 pub fn show_ty(t: &Ty, out: &mut String) {
     match t {
@@ -548,6 +645,13 @@ pub fn show_block(b: &Block, out: &mut String) {
 
 pub fn show_stmt(s: &Stmt, out: &mut String) {
     match s {
+        Stmt::LetPattern(pat, e) => {
+            out.push_str("(let-pat ");
+            show_pattern(&pat, out);
+            out.push_str(" ");
+            show(&e, out);
+            out.push_str(")");
+        }
         Stmt::Let(mutable, name, e) => {
             if mutable {
                 out.push_str("(let-mut ");
@@ -571,10 +675,15 @@ pub fn show_stmt(s: &Stmt, out: &mut String) {
 pub fn show_item(i: &Item, out: &mut String) {
     match &i.what {
         What::Function(f) => show_fn(&f, out),
-        What::Struct(name, fields) => {
+        What::Struct(name, gs, fields) => {
             out.push_str("(struct ");
             out.push_str(&name);
-            out.push_str(" (");
+            out.push_str(" ");
+            if gs.len() > 0 {
+                show_generics(&gs, out);
+                out.push_str(" ");
+            }
+            out.push_str("(");
             let mut k: taddr = 0;
             while k < fields.len() {
                 if k > 0 {
@@ -587,9 +696,13 @@ pub fn show_item(i: &Item, out: &mut String) {
             }
             out.push_str("))");
         }
-        What::Enum(name, variants) => {
+        What::Enum(name, gs, variants) => {
             out.push_str("(enum ");
             out.push_str(&name);
+            if gs.len() > 0 {
+                out.push_str(" ");
+                show_generics(&gs, out);
+            }
             let mut k: taddr = 0;
             while k < variants.len() {
                 out.push_str(" (");
@@ -602,6 +715,42 @@ pub fn show_item(i: &Item, out: &mut String) {
                 }
                 out.push_str(")");
                 k += 1;
+            }
+            out.push_str(")");
+        }
+        What::Trait(name, params, supers, assoc, fns) => {
+            out.push_str("(trait ");
+            out.push_str(&name);
+            if params.len() > 0 {
+                out.push_str(" <");
+                let mut i: taddr = 0;
+                while i < params.len() {
+                    if i > 0 {
+                        out.push_str(" ");
+                    }
+                    out.push_str(&params[i]);
+                    i += 1;
+                }
+                out.push_str(">");
+            }
+            let mut k: taddr = 0;
+            while k < supers.len() {
+                out.push_str(" :");
+                out.push_str(&supers[k]);
+                k += 1;
+            }
+            let mut j: taddr = 0;
+            while j < assoc.len() {
+                out.push_str(" (type ");
+                out.push_str(&assoc[j]);
+                out.push_str(")");
+                j += 1;
+            }
+            let mut m: taddr = 0;
+            while m < fns.len() {
+                out.push_str(" ");
+                show_fn(&fns[m], out);
+                m += 1;
             }
             out.push_str(")");
         }
@@ -638,8 +787,12 @@ pub fn show_item(i: &Item, out: &mut String) {
             show(&value, out);
             out.push_str(")");
         }
-        What::Impl(tr, ty, fns) => {
+        What::Impl(gs, tr, ty, fns) => {
             out.push_str("(impl ");
+            if gs.len() > 0 {
+                show_generics(&gs, out);
+                out.push_str(" ");
+            }
             match &tr {
                 Option::Some(t) => {
                     show_ty(&t, out);
@@ -683,13 +836,14 @@ pub fn declared(w: &What) -> bool {
 pub fn defines(w: &What) -> Option<String> {
     match w {
         What::Function(f) => Option::Some(f.name.to_string()),
-        What::Struct(name, fields) => Option::Some(name.to_string()),
-        What::Enum(name, variants) => Option::Some(name.to_string()),
+        What::Struct(name, gs, fields) => Option::Some(name.to_string()),
+        What::Enum(name, gs, variants) => Option::Some(name.to_string()),
         What::Alias(name, ty) => Option::Some(name.to_string()),
         What::Const(name, ty, value) => Option::Some(name.to_string()),
         What::Mod(name) => Option::Some(name.to_string()),
         What::Use(segments) => Option::None,
-        What::Impl(tr, ty, fns) => Option::None,
+        What::Impl(gs, tr, ty, fns) => Option::None,
+        What::Trait(name, params, supers, assoc, fns) => Option::Some(name.to_string()),
     }
 }
 
@@ -697,13 +851,14 @@ pub fn defines(w: &What) -> Option<String> {
 pub fn kind(w: &What) -> String {
     match w {
         What::Function(f) => "fn".to_string(),
-        What::Struct(name, fields) => "struct".to_string(),
-        What::Enum(name, variants) => "enum".to_string(),
+        What::Struct(name, gs, fields) => "struct".to_string(),
+        What::Enum(name, gs, variants) => "enum".to_string(),
         What::Alias(name, ty) => "type".to_string(),
         What::Const(name, ty, value) => "const".to_string(),
         What::Mod(name) => "mod".to_string(),
         What::Use(segments) => "use".to_string(),
-        What::Impl(tr, ty, fns) => "impl".to_string(),
+        What::Impl(gs, tr, ty, fns) => "impl".to_string(),
+        What::Trait(name, params, supers, assoc, fns) => "trait".to_string(),
     }
 }
 
@@ -711,7 +866,12 @@ pub fn kind(w: &What) -> String {
 pub fn show_fn(f: &Fn, out: &mut String) {
     out.push_str("(fn ");
     out.push_str(&f.name);
-    out.push_str(" (");
+    out.push_str(" ");
+    if f.generics.len() > 0 {
+        show_generics(&f.generics, out);
+        out.push_str(" ");
+    }
+    out.push_str("(");
     let mut i: taddr = 0;
     while i < f.params.len() {
         if i > 0 {

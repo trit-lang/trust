@@ -425,8 +425,65 @@ fn print_expr(src: &str) -> ExitCode {
 }
 
 /// One function, as a tree.
+/// A generic parameter list, or nothing when there is none (Ch. 4 §2.1).
+fn show_generics(gs: &[lang::ast::GenericParam], out: &mut String) {
+    use lang::ast::GenericParam;
+    if gs.is_empty() {
+        return;
+    }
+    out.push('<');
+    for (i, g) in gs.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        match g {
+            GenericParam::Type { name, bounds } => {
+                out.push_str(name);
+                for (k, b) in bounds.iter().enumerate() {
+                    out.push(if k == 0 { ':' } else { '+' });
+                    show_bound(b, out);
+                }
+            }
+            GenericParam::Const { name, ty } => {
+                out.push_str(&format!("const {name}:{}", written_ty(ty)));
+            }
+        }
+    }
+    out.push('>');
+}
+
+/// One bound: a trait, its type arguments, and what it binds (Ch. 4 §1.7).
+fn show_bound(b: &lang::ast::Bound, out: &mut String) {
+    out.push_str(&b.name);
+    if b.args.is_empty() && b.assoc.is_empty() {
+        return;
+    }
+    out.push('<');
+    let mut first = true;
+    for a in &b.args {
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        out.push_str(&written_ty(a));
+    }
+    for (k, v) in &b.assoc {
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        out.push_str(&format!("{k}={}", written_ty(v)));
+    }
+    out.push('>');
+}
+
 fn show_fn(f: &lang::ast::FnItem, out: &mut String) {
-    out.push_str(&format!("(fn {} (", f.name));
+    out.push_str(&format!("(fn {} ", f.name));
+    if !f.generics.is_empty() {
+        show_generics(&f.generics, out);
+        out.push(' ');
+    }
+    out.push('(');
     for (i, p) in f.params.iter().enumerate() {
         if i > 0 {
             out.push(' ');
@@ -485,7 +542,12 @@ fn print_items(file: &lang::ast::File) {
         match item {
             Item::Fn(f) => show_fn(f, &mut out),
             Item::Struct(s) => {
-                out.push_str(&format!("(struct {} (", s.name));
+                out.push_str(&format!("(struct {} ", s.name));
+                if !s.generics.is_empty() {
+                    show_generics(&s.generics, &mut out);
+                    out.push(' ');
+                }
+                out.push('(');
                 for (i, f) in s.fields.iter().enumerate() {
                     if i > 0 {
                         out.push(' ');
@@ -496,12 +558,36 @@ fn print_items(file: &lang::ast::File) {
             }
             Item::Enum(e) => {
                 out.push_str(&format!("(enum {}", e.name));
+                if !e.generics.is_empty() {
+                    out.push(' ');
+                    show_generics(&e.generics, &mut out);
+                }
                 for v in &e.variants {
                     out.push_str(&format!(" ({}", v.name));
                     for f in &v.fields {
                         out.push_str(&format!(" {}", written_ty(&f.ty)));
                     }
                     out.push(')');
+                }
+                out.push(')');
+            }
+            Item::Trait(t) => {
+                out.push_str(&format!("(trait {}", t.name));
+                if !t.params.is_empty() {
+                    out.push_str(&format!(" <{}>", t.params.join(" ")));
+                }
+                for s in &t.supertraits {
+                    out.push_str(&format!(" :{s}"));
+                }
+                for a in &t.assoc {
+                    out.push_str(&format!(" (type {a})"));
+                }
+                for (n, ty) in &t.consts {
+                    out.push_str(&format!(" (const {n}:{})", written_ty(ty)));
+                }
+                for m in &t.methods {
+                    out.push(' ');
+                    show_fn(m, &mut out);
                 }
                 out.push(')');
             }
@@ -515,10 +601,24 @@ fn print_items(file: &lang::ast::File) {
             }
             Item::Impl(i) => {
                 out.push_str("(impl ");
+                if !i.generics.is_empty() {
+                    show_generics(&i.generics, &mut out);
+                    out.push(' ');
+                }
                 if let Some(t) = &i.trait_name {
-                    out.push_str(&format!("{t} for "));
+                    out.push_str(t);
+                    if !i.trait_args.is_empty() {
+                        let args: Vec<String> =
+                            i.trait_args.iter().map(written_ty).collect();
+                        out.push_str(&format!("<{}>", args.join(",")));
+                    }
+                    out.push_str(" for ");
                 }
                 out.push_str(&i.self_ty);
+                if !i.self_args.is_empty() {
+                    let args: Vec<String> = i.self_args.iter().map(written_ty).collect();
+                    out.push_str(&format!("<{}>", args.join(",")));
+                }
                 for m in &i.methods {
                     out.push(' ');
                     show_fn(m, &mut out);
@@ -589,8 +689,19 @@ fn show_block(b: &lang::ast::Block, out: &mut String) {
                 mutable,
                 name,
                 value,
+                pattern,
                 ..
             } => {
+                // A `let` with a pattern binds what the *pattern* binds; the
+                // name is the compiler's and names nothing a reader wrote.
+                if let Some(p) = pattern {
+                    out.push_str("(let-pat ");
+                    show_pattern(p, out);
+                    out.push(' ');
+                    show_expr(value, out);
+                    out.push(')');
+                    continue;
+                }
                 out.push_str(if *mutable { "(let-mut " } else { "(let " });
                 // `let _` is given an invented name (Ch. 0 §5.2), which is
                 // this compiler's business and not the tree's.
