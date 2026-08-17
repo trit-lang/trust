@@ -1,0 +1,15 @@
+fn d(a: t27, b: t27) -> t27 { a / b }
+fn m(a: t27, b: t27) -> t27 { a % b }
+fn sl(a: t27, b: t27) -> t27 { a << b }
+fn sr(a: t27, b: t27) -> t27 { a >> b }
+fn ng(a: t27) -> t27 { 0 - a }
+fn nt(a: bool) -> bool { !a }
+fn an(a: bool, b: bool) -> bool { a && b }
+fn cast(a: t27) -> t9 { a as t9 }
+fn up(a: t9) -> t27 { a as t27 }
+fn or(a: bool, b: bool) -> bool { a || b }
+fn chained(a: bool, b: bool, c: bool) -> bool { a && b || c }
+fn wide(a: t9) -> taddr { a as taddr }
+fn narrow(a: taddr) -> t9 { a as t9 }
+fn same(a: t27) -> taddr { a as taddr }
+fn mixed(a: t27, b: t27) -> t27 { (a / b) % (a << 1) }

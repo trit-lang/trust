@@ -1121,6 +1121,86 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             Value { text: out, ty: "t27".to_string() }
         }
         ast::Expr::Group(inner) => value(e, inner, want),
+        // `e as T` — narrower is a `trunc` and wider is a `widen`; the same
+        // width is no instruction at all (§2.6).
+        ast::Expr::Cast(a, t) => {
+            let to = tir_ty(t);
+            if to.same("?") {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let from = value(e, a, "");
+            if e.stuck {
+                return unknown_value();
+            }
+            if from.ty.same(&to) {
+                return Value { text: from.text, ty: to };
+            }
+            let word = if trytes(&to) < trytes(&from.ty) {
+                "trunc".to_string()
+            } else {
+                "widen".to_string()
+            };
+            let prefix = if word.same("trunc") {
+                "t".to_string()
+            } else {
+                "w".to_string()
+            };
+            let name = fresh(e, &prefix);
+            let mut line: String = Vec::new();
+            line.push_str("    ");
+            line.push_str(&name);
+            line.push_str(" = ");
+            line.push_str(&word);
+            line.push_str(" ");
+            line.push_str(&from.ty);
+            line.push_str(" ");
+            line.push_str(&from.text);
+            line.push_str(" -> ");
+            line.push_str(&to);
+            e.insts.push(line);
+            Value { text: name, ty: to }
+        }
+        // `!b` is `1 - b` at one trit wide, and wrapping because there is
+        // nothing for it to overflow (Ch. 1 §6).
+        ast::Expr::Unary(op, a) => {
+            if !op.same("!") {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let inner = value(e, a, "t1");
+            if e.stuck {
+                return unknown_value();
+            }
+            let name = fresh(e, "n");
+            let mut line: String = Vec::new();
+            line.push_str("    ");
+            line.push_str(&name);
+            line.push_str(" = sub.wrap t1 const t1 1, ");
+            line.push_str(&inner.text);
+            e.insts.push(line);
+            Value { text: name, ty: "t1".to_string() }
+        }
+        // `!b` is `1 - b` at one trit wide, and wrapping because there is
+        // nothing for it to overflow (Ch. 1 §6).
+        ast::Expr::Unary(op, a) => {
+            if !op.same("!") {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let inner = value(e, a, "t1");
+            if e.stuck {
+                return unknown_value();
+            }
+            let name = fresh(e, "n");
+            let mut line: String = Vec::new();
+            line.push_str("    ");
+            line.push_str(&name);
+            line.push_str(" = sub.wrap t1 const t1 1, ");
+            line.push_str(&inner.text);
+            e.insts.push(line);
+            Value { text: name, ty: "t1".to_string() }
+        }
         ast::Expr::Name(n) => {
             let at = local_at(e, n);
             if at < 0 {
@@ -1146,6 +1226,9 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             Value { text: name, ty: ty }
         }
         ast::Expr::Binary(op, a, b) => {
+            if op.same("&&") || op.same("||") {
+                return short_circuit(e, op, a, b);
+            }
             let left = value(e, a, want);
             let right = value(e, b, &left.ty);
             if e.stuck {
@@ -1760,6 +1843,53 @@ fn unknown_value() -> Value {
     Value { text: "?".to_string(), ty: "?".to_string() }
 }
 
+/// `&&` and `||` do not evaluate the second side unless they must (§2.3):
+/// the answer starts as the first side, and the second is reached only where
+/// it can change it.
+fn short_circuit(e: &mut Emit, op: &str, a: &ast::Expr, b: &ast::Expr) -> Value {
+            let first = value(e, a, "t1");
+            if e.stuck {
+                return unknown_value();
+            }
+            let held = slot_for(e, "tmp", "t1");
+            store_into(e, "t1", &first.text, &held);
+            let rhs = label(e, "sc.rhs");
+            let join = label(e, "sc.join");
+            let short = label(e, "sc.short");
+            let mut br: String = Vec::new();
+            br.push_str("    br2 ");
+            br.push_str(&first.text);
+            br.push_str(", ");
+            if op.same("&&") {
+                br.push_str(&rhs);
+                br.push_str(", ");
+                br.push_str(&short);
+            } else {
+                br.push_str(&short);
+                br.push_str(", ");
+                br.push_str(&rhs);
+            }
+            e.insts.push(br);
+            start(e, &short);
+            jump(e, &join);
+            start(e, &rhs);
+            let second = value(e, b, "t1");
+            if e.stuck {
+                return unknown_value();
+            }
+            store_into(e, "t1", &second.text, &held);
+            jump(e, &join);
+            start(e, &join);
+            let name = fresh(e, "v");
+            let mut line: String = Vec::new();
+            line.push_str("    ");
+            line.push_str(&name);
+            line.push_str(" = load t1 ");
+            line.push_str(&held);
+            e.insts.push(line);
+            return Value { text: name, ty: "t1".to_string() };
+}
+
 /// The TIR instruction for an operator, or `?` for one not lowered yet.
 ///
 /// Ch. 1 §5: the trapping flavour is what a written `+` means, since an
@@ -1804,6 +1934,19 @@ fn arith(op: &str) -> String {
         "sub.trap".to_string()
     } else if op.same("*") {
         "mul.trap".to_string()
+    } else if op.same("/") {
+        // Division rounds to nearest with ties away from zero and cannot
+        // overflow, since `MIN == -MAX` (Ch. 1 §4): there is no flavour to
+        // choose and nothing to trap on.
+        "div".to_string()
+    } else if op.same("%") {
+        "rem".to_string()
+    } else if op.same("<<") {
+        "shl.trap".to_string()
+    } else if op.same(">>") {
+        // An exact division by a power of three, with no tie case, so it
+        // needs no rounding fixup and cannot overflow either.
+        "shr".to_string()
     } else {
         "?".to_string()
     }
