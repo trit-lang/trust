@@ -245,7 +245,28 @@ Each step is checkable on its own, and none of them is only for DDC.
 
    What stands between here and `stage1` is **generics** — §2.5's
    monomorphization. The prelude's plumbing is done and its bodies are
-   generic, so the two arrive together.
+   generic, so the two arrive together. The shape, written down before it is
+   written:
+
+   ```
+   fn id<T>(x: T) -> T { x }
+   fn main() -> t27 { let a = id(1); let b = id(0t); … }
+   ```
+   ```
+   %r.1 = call @id.t27(const t27 1) -> t27
+   %r.3 = call @id.trit(const t1 0) -> t1
+   …
+   fn @id.trit(%x: t1) -> t1 { … }     ← the instantiations, after `main`
+   fn @id.t27(%x: t27) -> t27 { … }    ← and in the order they were queued
+   ```
+
+   Four things: an instantiation is named `id.trit` by Ch. 6 §4's rule, and
+   the argument is the *written* type (`trit`, not `t1`); the key is the
+   argument types and a body is emitted once per distinct key; the queue is
+   drained after the ordinary functions, so the instantiations come last;
+   and the type a call instantiates at is what Ch. 4 §2.3 infers from the
+   arguments — which the Trust checker already does for a variant's payload
+   and would do here for a call's.
 4. **Run the double compile.** `scripts/ddc.sh`: build `stage1` with
    `trustc`, build `stage2` with `stage1`, demand `stage2 == stage1`. Report
    the two hashes whether or not they match, because a number that is only
