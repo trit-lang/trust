@@ -84,23 +84,39 @@ pub struct Value {
     pub ty: String,
 }
 
-/// The TIR type a written type has (§1). A `bool` and a `trit` are both one
-/// trit wide, and `taddr` and `char` are words.
+/// The name a written type has, which is what the emitter carries.
+///
+/// The *written* one, not TIR's: `trit` and `bool` are both one trit wide
+/// and a monomorphization has to tell them apart — `id.trit` is not
+/// `id.t1` (Ch. 6 §4). What TIR calls it is asked for where TIR is written,
+/// by `tir_of`, so there is one truth and it is this one.
 pub fn tir_ty(t: &ast::Ty) -> String {
     match t {
         ast::Ty::Name(segments) => {
             let n = joined(segments);
-            if n.same("t9") {
-                "t9".to_string()
-            } else if n.same("bool") || n.same("trit") {
-                "t1".to_string()
-            } else if n.same("t27") || n.same("taddr") || n.same("char") {
-                "t27".to_string()
+            if n.same("t9") || n.same("bool") || n.same("trit") || n.same("t27")
+                || n.same("taddr") || n.same("char")
+            {
+                n
             } else {
                 "?".to_string()
             }
         }
         _ => "?".to_string(),
+    }
+}
+
+/// What TIR calls a type of this name (§1). A `bool` and a `trit` are both
+/// one trit wide, and `taddr` and `char` are words.
+pub fn tir_of(name: &str) -> String {
+    if name.same("t9") {
+        "t9".to_string()
+    } else if name.same("bool") || name.same("trit") {
+        "t1".to_string()
+    } else if name.same("t27") || name.same("taddr") || name.same("char") {
+        "t27".to_string()
+    } else {
+        name.to_string()
     }
 }
 
@@ -179,7 +195,8 @@ fn slot_for(e: &mut Emit, name: &str, ty: &str) -> String {
     line.push_str("    ");
     line.push_str(&slot);
     line.push_str(" = slot tryte[");
-    push_int(&mut line, trytes(ty));
+    let wide = tir_of(ty);
+    push_int(&mut line, trytes(&wide));
     line.push_str("]");
     e.slots.push(line);
     e.locals.push(Slot {
@@ -298,11 +315,13 @@ pub fn function(
         header.push_str("%");
         header.push_str(&name);
         header.push_str(": ");
-        header.push_str(&ty);
+        let shown = tir_of(&ty);
+        header.push_str(&shown);
         let slot = slot_for(&mut e, &name, &ty);
         let mut store: String = Vec::new();
         store.push_str("    store ");
-        store.push_str(&ty);
+        let shown = tir_of(&ty);
+        store.push_str(&shown);
         store.push_str(" %");
         store.push_str(&name);
         store.push_str(", ");
@@ -321,7 +340,8 @@ pub fn function(
             return false;
         }
         header.push_str(" -> ");
-        header.push_str(&ret);
+        let shown_ret = tir_of(&ret);
+        header.push_str(&shown_ret);
     }
     header.push_str(" {");
 
@@ -472,13 +492,15 @@ fn copy_in(e: &mut Emit, name: &str, at: taddr) -> bool {
             load.push_str("    ");
             load.push_str(&v);
             load.push_str(" = load ");
-            load.push_str(&ty);
+            let shown = tir_of(&ty);
+            load.push_str(&shown);
             load.push_str(" ");
             load.push_str(&src);
             e.insts.push(load);
             let dst = offset_of(e, &slot, at_off);
             store_into(e, &ty, &v, &dst);
-            at_off = at_off + (trytes(&ty) as taddr);
+            let wide = tir_of(&ty);
+            at_off = at_off + (trytes(&wide) as taddr);
         }
         return true;
     }
@@ -495,7 +517,8 @@ fn copy_in(e: &mut Emit, name: &str, at: taddr) -> bool {
         load.push_str("    ");
         load.push_str(&v);
         load.push_str(" = load ");
-        load.push_str(&ty);
+        let shown = tir_of(&ty);
+        load.push_str(&shown);
         load.push_str(" ");
         load.push_str(&src);
         e.insts.push(load);
@@ -602,7 +625,8 @@ fn copy_between(e: &mut Emit, from: &str, to: &str, owner: &str) {
         load.push_str("    ");
         load.push_str(&v);
         load.push_str(" = load ");
-        load.push_str(&ty);
+        let shown = tir_of(&ty);
+        load.push_str(&shown);
         load.push_str(" ");
         load.push_str(&src);
         e.insts.push(load);
@@ -706,7 +730,8 @@ fn bind_payload(
         load.push_str("    ");
         load.push_str(&got);
         load.push_str(" = load ");
-        load.push_str(&ty);
+        let shown = tir_of(&ty);
+        load.push_str(&shown);
         load.push_str(" ");
         load.push_str(&src);
         e.insts.push(load);
@@ -816,7 +841,8 @@ fn at_here(line: &str, at: taddr, what: &str) -> bool {
 fn store_into(e: &mut Emit, ty: &str, what: &str, where_: &str) {
     let mut line: String = Vec::new();
     line.push_str("    store ");
-    line.push_str(ty);
+    let shown = tir_of(ty);
+    line.push_str(&shown);
     line.push_str(" ");
     line.push_str(what);
     line.push_str(", ");
@@ -901,7 +927,8 @@ pub fn destructor(
         load.push_str("    ");
         load.push_str(&v);
         load.push_str(" = load ");
-        load.push_str(&ty);
+        let shown = tir_of(&ty);
+        load.push_str(&shown);
         load.push_str(" ");
         load.push_str(&src);
         e.insts.push(load);
@@ -1048,7 +1075,8 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
             let slot = slot_for(e, name, &ty);
             let mut line: String = Vec::new();
             line.push_str("    store ");
-            line.push_str(&ty);
+            let shown = tir_of(&ty);
+            line.push_str(&shown);
             line.push_str(" ");
             line.push_str(&val.text);
             line.push_str(", ");
@@ -1132,7 +1160,8 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             };
             let mut out: String = Vec::new();
             out.push_str("const ");
-            out.push_str(&ty);
+            let shown = tir_of(&ty);
+            out.push_str(&shown);
             out.push_str(" ");
             push_int(&mut out, v);
             Value { text: out, ty: ty }
@@ -1172,10 +1201,14 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             if e.stuck {
                 return unknown_value();
             }
-            if from.ty.same(&to) {
+            // A cast between two names TIR spells the same way is no
+            // instruction at all: `t27 as taddr` is a word either way.
+            let to_wide = tir_of(&to);
+            let from_wide = tir_of(&from.ty);
+            if to_wide.same(&from_wide) {
                 return Value { text: from.text, ty: to };
             }
-            let word = if trytes(&to) < trytes(&from.ty) {
+            let word = if trytes(&to_wide) < trytes(&from_wide) {
                 "trunc".to_string()
             } else {
                 "widen".to_string()
@@ -1192,11 +1225,12 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             line.push_str(" = ");
             line.push_str(&word);
             line.push_str(" ");
-            line.push_str(&from.ty);
+            let shown_from = tir_of(&from.ty);
+            line.push_str(&shown_from);
             line.push_str(" ");
             line.push_str(&from.text);
             line.push_str(" -> ");
-            line.push_str(&to);
+            line.push_str(&to_wide);
             e.insts.push(line);
             Value { text: name, ty: to }
         }
@@ -1258,7 +1292,8 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             line.push_str("    ");
             line.push_str(&name);
             line.push_str(" = load ");
-            line.push_str(&ty);
+            let shown = tir_of(&ty);
+            line.push_str(&shown);
             line.push_str(" ");
             line.push_str(&slot);
             e.insts.push(line);
@@ -1293,7 +1328,8 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 line.push_str("    ");
                 line.push_str(&c);
                 line.push_str(" = cmp ");
-                line.push_str(&ty);
+                let shown = tir_of(&ty);
+                line.push_str(&shown);
                 line.push_str(" ");
                 line.push_str(&left.text);
                 line.push_str(", ");
@@ -1330,7 +1366,8 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             line.push_str(" = ");
             line.push_str(&word);
             line.push_str(" ");
-            line.push_str(&ty);
+            let shown = tir_of(&ty);
+            line.push_str(&shown);
             line.push_str(" ");
             line.push_str(&left.text);
             line.push_str(", ");
@@ -1391,7 +1428,8 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             line.push_str("    ");
             line.push_str(&name);
             line.push_str(" = load ");
-            line.push_str(&ty);
+            let shown = tir_of(&ty);
+            line.push_str(&shown);
             line.push_str(" ");
             line.push_str(&held);
             e.insts.push(line);
@@ -1451,7 +1489,8 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             load.push_str("    ");
             load.push_str(&v);
             load.push_str(" = load ");
-            load.push_str(&ty);
+            let shown = tir_of(&ty);
+            load.push_str(&shown);
             load.push_str(" ");
             load.push_str(&src);
             e.insts.push(load);
@@ -1615,7 +1654,8 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             line.push_str("    ");
             line.push_str(&name);
             line.push_str(" = load ");
-            line.push_str(&ty);
+            let shown = tir_of(&ty);
+            line.push_str(&shown);
             line.push_str(" ");
             line.push_str(&held);
             e.insts.push(line);
@@ -1698,7 +1738,8 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 k += 1;
             }
             line.push_str(") -> ");
-            line.push_str(&ty);
+            let shown = tir_of(&ty);
+            line.push_str(&shown);
             e.insts.push(line);
             Value { text: out, ty: ty }
         }
@@ -1731,7 +1772,8 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 k += 1;
             }
             line.push_str(") -> ");
-            line.push_str(&ty);
+            let shown = tir_of(&ty);
+            line.push_str(&shown);
             e.insts.push(line);
             Value { text: name, ty: ty }
         }
