@@ -142,6 +142,37 @@ Each step is checkable on its own, and none of them is only for DDC.
 3. **Lower to TIR** in Trust, compared against `trustc build` the way every
    other pass is compared: same input, same module, character for character.
    This is the step that makes `stage1` exist.
+
+   What that comparison is, exactly, now that the rest is in place:
+
+   ```
+   $ trustc build tiny.tr
+   tir 0.1 target "tritium"
+
+   fn @add(%a: t27, %b: t27) -> t27 {
+   ^entry:
+       %a.slot.1 = slot tryte[3]
+       %b.slot.2 = slot tryte[3]
+       store t27 %a, %a.slot.1
+       store t27 %b, %b.slot.2
+       %v.3 = load t27 %a.slot.1
+       %v.4 = load t27 %b.slot.2
+       %a.5 = add.trap t27 %v.3, %v.4
+       ret %a.5
+   }
+   ```
+
+   The second implementation has to reproduce **the names too** — `%v.3`,
+   `%a.5` — because equality is on the text. That is a stricter demand than
+   it looks and it is the right one: the counter is per function and
+   deterministic, so two implementations that agree about the *order* of
+   what they emit agree about the names for free, and two that do not are
+   two that emit different code. A comparison that normalized the names away
+   would be a comparison that could not see the difference.
+
+   The order to build it in is the order this file's corpus grew: scalars
+   and arithmetic first, then calls, then blocks and `br3`, then aggregates,
+   then the drops Ch. 3 §1.4 puts at the end of a scope.
 4. **Run the double compile.** `scripts/ddc.sh`: build `stage1` with
    `trustc`, build `stage2` with `stage1`, demand `stage2 == stage1`. Report
    the two hashes whether or not they match, because a number that is only
