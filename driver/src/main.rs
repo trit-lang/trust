@@ -144,6 +144,38 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // Ch. 4, reported: what type every binding in the file's own functions
+    // turned out to have. A `let` is where inference is visible — it is the
+    // thing `let n = 1;` does not say — and it needs no module machinery,
+    // so the question is asked of one file.
+    if cmd == "types" {
+        let Ok(src) = std::fs::read_to_string(path) else {
+            eprintln!("trust: cannot read {path}");
+            return ExitCode::FAILURE;
+        };
+        let analysis = lang::analyze(&src);
+        let file = match lang::parse::parse(&src) {
+            Ok(f) => f,
+            Err(e) => {
+                println!("error {}", e.span.lo);
+                return ExitCode::SUCCESS;
+            }
+        };
+        for item in &file.items {
+            let lang::ast::Item::Fn(f) = item else {
+                continue;
+            };
+            // A generic function is typed once per instantiation, so there
+            // is no one answer to print (Ch. 4 §2.5).
+            if !f.generics.is_empty() {
+                continue;
+            }
+            let Some(body) = &f.body else { continue };
+            print_bindings(&f.name, body, &analysis.types);
+        }
+        return ExitCode::SUCCESS;
+    }
+
     // Ch. 2, reported: what every nominal type the program defines is laid
     // out as. Sizes and offsets are facts about types and need no inference,
     // which makes this the first part of the middle a second implementation
@@ -645,6 +677,68 @@ fn print_items(file: &lang::ast::File) {
     }
 }
 
+/// Every `let` in a block, in source order, and what its name turned out to
+/// be. A `let` with a pattern is not here: what it binds is the pattern's,
+/// and nothing records those yet.
+fn print_bindings(what: &str, b: &lang::ast::Block, types: &lang::lower::Noted) {
+    use lang::ast::Stmt;
+    for stmt in &b.stmts {
+        match stmt {
+            Stmt::Let {
+                name,
+                name_span,
+                value,
+                pattern,
+                ..
+            } => {
+                if pattern.is_none() {
+                    let ty = types.exact(*name_span).unwrap_or("?");
+                    println!("{what} {name} {ty}");
+                }
+                bindings_in_expr(what, value, types);
+            }
+            Stmt::Expr(e) => bindings_in_expr(what, e, types),
+        }
+    }
+    if let Some(t) = &b.tail {
+        bindings_in_expr(what, t, types);
+    }
+}
+
+/// The blocks an expression holds, in source order.
+fn bindings_in_expr(what: &str, e: &lang::ast::Expr, types: &lang::lower::Noted) {
+    use lang::ast::Expr;
+    match e {
+        Expr::Block(b) => print_bindings(what, b, types),
+        Expr::If(c, then, other, _) => {
+            bindings_in_expr(what, c, types);
+            print_bindings(what, then, types);
+            if let Some(o) = other {
+                bindings_in_expr(what, o, types);
+            }
+        }
+        Expr::While(c, b, _) => {
+            bindings_in_expr(what, c, types);
+            print_bindings(what, b, types);
+        }
+        Expr::For(_, _, it, b, _) => {
+            bindings_in_expr(what, it, types);
+            print_bindings(what, b, types);
+        }
+        Expr::Loop(b, _) => print_bindings(what, b, types),
+        Expr::Match(sc, arms, _) => {
+            bindings_in_expr(what, sc, types);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    bindings_in_expr(what, g, types);
+                }
+                bindings_in_expr(what, &arm.body, types);
+            }
+        }
+        other => lang::for_each_child(other, &mut |c| bindings_in_expr(what, c, types)),
+    }
+}
+
 /// A type as its text, which is all either parser keeps of one here.
 /// How a discriminant is stored, in one word (Ch. 2 §5).
 fn tag_word(t: &trustc::layout::Tag) -> String {
@@ -722,6 +816,7 @@ fn show_block(b: &lang::ast::Block, out: &mut String) {
             Stmt::Let {
                 mutable,
                 name,
+                ty,
                 value,
                 pattern,
                 ..
@@ -743,6 +838,12 @@ fn show_block(b: &lang::ast::Block, out: &mut String) {
                     true => "_",
                     false => name,
                 });
+                // The written type, when there is one: `let n = 1;` does not
+                // say what `n` is and `let n: t9 = 1;` does.
+                if let Some(t) = ty {
+                    out.push(':');
+                    out.push_str(&written_ty(t));
+                }
                 out.push(' ');
                 show_expr(value, out);
                 out.push(')');

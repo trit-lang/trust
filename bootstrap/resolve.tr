@@ -395,13 +395,18 @@ fn rw_block(w: &World, a: &mut At, b: ast::Block) -> ast::Block {
     let mut stmts: Vec<ast::Stmt> = Vec::new();
     for s in b.stmts {
         match s {
-            ast::Stmt::Let(mutable, name, value) => {
+            ast::Stmt::Let(mutable, name, written, value) => {
                 // A `let`'s value is written before its name is bound, so
                 // `let x = x;` names the outer one — the rule everywhere
-                // else, and why this order matters.
+                // else, and why this order matters. The written type is a
+                // type like any other and is rewritten too.
+                let t: Option<Ty> = match written {
+                    Option::Some(x) => Option::Some(rw_ty(w, a, x)),
+                    Option::None => Option::None,
+                };
                 let v = rw_expr(w, a, value);
                 a.locals.push(name.to_string());
-                stmts.push(ast::Stmt::Let(mutable, name, v));
+                stmts.push(ast::Stmt::Let(mutable, name, t, v));
             }
             ast::Stmt::LetPattern(pat, value) => {
                 // Same order as a `let` with a name: the value is written

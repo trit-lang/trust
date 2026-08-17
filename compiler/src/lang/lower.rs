@@ -1425,7 +1425,8 @@ fn writes_name(e: &ast::Expr, name: &str) -> bool {
 }
 
 /// Visit an expression's immediate sub-expressions.
-fn for_each_child(e: &ast::Expr, f: &mut impl FnMut(&ast::Expr)) {
+/// Visit an expression's immediate sub-expressions, without changing them.
+pub fn for_each_child(e: &ast::Expr, f: &mut impl FnMut(&ast::Expr)) {
     use ast::Expr::*;
     match e {
         Char(..) | Str(..) => {}
@@ -3407,6 +3408,63 @@ fn mangle(name: &str, args: &[Ty]) -> String {
 }
 
 /// Resolve every nominal type in the file and hand them to the layout engine.
+/// Lay one nominal type out, or say why it cannot yet.
+fn lay_out_item(item: &ast::Item, types: &Types) -> R<()> {
+    match item {
+        ast::Item::Struct(st) if st.generics.is_empty() => {
+            let fields: Vec<(String, Ty)> = st
+                .fields
+                .iter()
+                .map(|f| {
+                    let ty = resolve_ty(&f.ty, types)?;
+                    check_sized(&ty, f.ty.span(), &format!("the field `{}`", f.name))?;
+                    Ok((f.name.clone(), ty))
+                })
+                .collect::<R<_>>()?;
+            types.db.borrow_mut().struct_(
+                &st.name,
+                repr_of(st.repr),
+                fields
+                    .iter()
+                    .map(|(n, t)| (n.as_str(), t.layout_ty()))
+                    .collect(),
+            );
+            types.structs.borrow_mut().insert(st.name.clone(), fields);
+        }
+        ast::Item::Enum(en) if en.generics.is_empty() => {
+            let mut infos = Vec::new();
+            let mut variants = Vec::new();
+            for v in &en.variants {
+                let fields: Vec<(String, Ty)> = v
+                    .fields
+                    .iter()
+                    .map(|f| Ok((f.name.clone(), resolve_ty(&f.ty, types)?)))
+                    .collect::<R<_>>()?;
+                variants.push(layout::Variant {
+                    name: v.name.clone(),
+                    fields: fields
+                        .iter()
+                        .map(|(n, t)| (n.clone(), t.layout_ty()))
+                        .collect(),
+                    discriminant: v.discriminant,
+                });
+                infos.push(VariantInfo {
+                    name: v.name.clone(),
+                    fields,
+                });
+            }
+            types
+                .db
+                .borrow_mut()
+                .enum_(&en.name, repr_of(en.repr), variants);
+            types.enums.borrow_mut().insert(en.name.clone(), infos);
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
 fn build_types(file: &ast::File) -> R<Types> {
     let mut types = Types {
         db: RefCell::new(layout::TypeDb::new()),
@@ -3490,57 +3548,29 @@ fn build_types(file: &ast::File) -> R<Types> {
         }
     }
 
-    for item in &file.items {
-        match item {
-            ast::Item::Struct(st) if st.generics.is_empty() => {
-                let fields: Vec<(String, Ty)> = st
-                    .fields
-                    .iter()
-                    .map(|f| {
-                        let ty = resolve_ty(&f.ty, &types)?;
-                        check_sized(&ty, f.ty.span(), &format!("the field `{}`", f.name))?;
-                        Ok((f.name.clone(), ty))
-                    })
-                    .collect::<R<_>>()?;
-                types.db.borrow_mut().struct_(
-                    &st.name,
-                    repr_of(st.repr),
-                    fields
-                        .iter()
-                        .map(|(n, t)| (n.as_str(), t.layout_ty()))
-                        .collect(),
-                );
-                types.structs.borrow_mut().insert(st.name.clone(), fields);
+    // Laid out in whatever order succeeds, and not in the order written.
+    // A field of type `Option<T>` instantiates `Option` there and then, and
+    // that needs `T`'s layout — so an item written before the type it names
+    // failed, which Ch. 0 §3 says cannot happen: every item in a file is
+    // visible to every other whatever the order (G9.51).
+    //
+    // Retried while any of them makes progress, so a forward reference is
+    // resolved by the round after the one that defines it. A cycle without
+    // an indirection makes no progress and is reported as itself.
+    let mut pending: Vec<&ast::Item> = file.items.iter().collect();
+    let mut last: Option<Error> = None;
+    while !pending.is_empty() {
+        let before = pending.len();
+        let mut again = Vec::new();
+        for item in pending {
+            if let Err(e) = lay_out_item(item, &types) {
+                last = Some(e);
+                again.push(item);
             }
-            ast::Item::Enum(en) if en.generics.is_empty() => {
-                let mut infos = Vec::new();
-                let mut variants = Vec::new();
-                for v in &en.variants {
-                    let fields: Vec<(String, Ty)> = v
-                        .fields
-                        .iter()
-                        .map(|f| Ok((f.name.clone(), resolve_ty(&f.ty, &types)?)))
-                        .collect::<R<_>>()?;
-                    variants.push(layout::Variant {
-                        name: v.name.clone(),
-                        fields: fields
-                            .iter()
-                            .map(|(n, t)| (n.clone(), t.layout_ty()))
-                            .collect(),
-                        discriminant: v.discriminant,
-                    });
-                    infos.push(VariantInfo {
-                        name: v.name.clone(),
-                        fields,
-                    });
-                }
-                types
-                    .db
-                    .borrow_mut()
-                    .enum_(&en.name, repr_of(en.repr), variants);
-                types.enums.borrow_mut().insert(en.name.clone(), infos);
-            }
-            _ => {}
+        }
+        pending = again;
+        if pending.len() == before {
+            return Err(last.expect("a failure, since nothing moved"));
         }
     }
 

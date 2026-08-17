@@ -4642,3 +4642,21 @@ fn a_match_whose_every_arm_leaves_has_no_join() {
                fn main() -> t27 { 0 }\n";
     assert!(lang::compile(src).is_ok(), "{:?}", lang::compile(src).err());
 }
+
+#[test]
+fn a_type_may_be_named_before_it_is_written() {
+    // Ch. 0 §3: every item in a file is visible to every other whatever the
+    // order. A field of type `Option<T>` instantiates `Option` where it is
+    // written, and that wanted `T`'s layout — so an item written before the
+    // type it names was refused, which the order rule says cannot happen.
+    // Types are laid out in whatever order succeeds now (G9.51).
+    let src = "enum S { A(Option<T>), B }\nenum T { X }\nfn main() -> t27 { 0 }\n";
+    assert!(lang::compile(src).is_ok(), "{:?}", lang::compile(src).err());
+}
+
+#[test]
+fn a_cycle_without_an_indirection_is_still_refused() {
+    let src = "struct A { b: B }\nstruct B { a: A }\nfn main() -> t27 { 0 }\n";
+    let e = error(src);
+    assert!(e.contains("contains itself without indirection"), "{e}");
+}

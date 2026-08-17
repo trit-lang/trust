@@ -1,0 +1,556 @@
+// Ch. 4, in Trust: what type every binding in a function turned out to have.
+//
+//     trust run bootstrap/types.tr < file.tr
+//
+// One line per `let` — `<function> <name> <type>` — in source order, which
+// is what `trust types` prints. A `let` is where inference is visible: it is
+// the thing `let n = 1;` does not say, and the whole of what a checker knows
+// about an expression has to be right for the answer to be.
+//
+// It types a *file*, not a program: the question needs no module machinery,
+// and asking it of one file keeps the spans and the scopes to one place.
+//
+// What it does not do yet is generics. A generic function is typed once per
+// instantiation (Ch. 4 §2.5), so there is no one answer to print, and both
+// implementations skip one.
+
+mod ast;
+mod input;
+mod lex;
+mod parse;
+
+/// One name in scope, and what it is.
+pub struct Binding {
+    pub name: String,
+    pub ty: ast::Ty,
+}
+
+/// One field of one struct, flattened: nothing here needs them grouped.
+pub struct Field {
+    pub owner: String,
+    pub name: String,
+    pub ty: ast::Ty,
+}
+
+/// A function's signature, which is all a call needs.
+pub struct Sig {
+    pub name: String,
+    pub params: Vec<ast::Ty>,
+    pub ret: ast::Ty,
+}
+
+/// What the file defines, and what is in scope where the walk has reached.
+pub struct World {
+    pub fields: Vec<Field>,
+    pub sigs: Vec<Sig>,
+    /// Every variant of every enum, as `Enum::Variant`, and its enum.
+    pub variants: Vec<Binding>,
+    pub locals: Vec<Binding>,
+}
+
+fn main() -> t27 {
+    let src = input::read_all();
+    let mut p = parse::Parser { src: src, at: 0, no_struct: false };
+    match parse::file(&mut p) {
+        Result::Ok(items) => {
+            let mut w = World {
+                fields: Vec::new(),
+                sigs: Vec::new(),
+                variants: Vec::new(),
+                locals: Vec::new(),
+            };
+            let mut i: taddr = 0;
+            while i < items.len() {
+                gather(&mut w, &items[i]);
+                i += 1;
+            }
+            let mut k: taddr = 0;
+            while k < items.len() {
+                walk_item(&mut w, &items[k]);
+                k += 1;
+            }
+            0
+        }
+        Result::Err(err) => {
+            print("error ");
+            print_int(err.at as t27);
+            println("");
+            0
+        }
+    }
+}
+
+/// What one item defines, for the passes that follow.
+fn gather(w: &mut World, item: &ast::Item) {
+    match &item.what {
+        ast::What::Struct(name, gs, fields) => {
+            let mut i: taddr = 0;
+            while i < fields.len() {
+                w.fields.push(Field {
+                    owner: name.to_string(),
+                    name: fields[i].name.to_string(),
+                    ty: copy_ty(&fields[i].ty),
+                });
+                i += 1;
+            }
+        }
+        ast::What::Enum(name, gs, variants) => {
+            let mut i: taddr = 0;
+            while i < variants.len() {
+                let mut full: String = Vec::new();
+                full.push_str(name);
+                full.push_str("::");
+                full.push_str(&variants[i].name);
+                w.variants.push(Binding { name: full, ty: named(name) });
+                i += 1;
+            }
+        }
+        ast::What::Function(f) => {
+            let mut params: Vec<ast::Ty> = Vec::new();
+            let mut i: taddr = 0;
+            while i < f.params.len() {
+                params.push(copy_ty(&f.params[i].ty));
+                i += 1;
+            }
+            w.sigs.push(Sig {
+                name: f.name.to_string(),
+                params: params,
+                ret: copy_ty(&f.ret),
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Every `let` in an item's functions, and what it turned out to be.
+fn walk_item(w: &mut World, item: &ast::Item) {
+    match &item.what {
+        ast::What::Function(f) => {
+            // A generic function is typed once per instantiation, so there
+            // is no one answer to print (Ch. 4 §2.5).
+            if f.generics.len() > 0 {
+                return;
+            }
+            match &f.body {
+                Option::Some(b) => walk_fn(w, f, b),
+                Option::None => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+fn walk_fn(w: &mut World, f: &ast::Fn, body: &ast::Block) {
+    let mark = w.locals.len();
+    let mut i: taddr = 0;
+    while i < f.params.len() {
+        w.locals.push(Binding {
+            name: f.params[i].name.to_string(),
+            ty: copy_ty(&f.params[i].ty),
+        });
+        i += 1;
+    }
+    walk_block(w, &f.name, body);
+    unbind(w, mark);
+}
+
+fn walk_block(w: &mut World, what: &str, b: &ast::Block) {
+    let mark = w.locals.len();
+    let mut i: taddr = 0;
+    while i < b.stmts.len() {
+        match &b.stmts[i] {
+            ast::Stmt::Let(mutable, name, written, value) => {
+                // A written type is the answer; inference is for the `let`
+                // that does not say (§5.2).
+                let t = match written {
+                    Option::Some(x) => copy_ty(x),
+                    Option::None => type_of(w, value),
+                };
+                print(what);
+                print(" ");
+                print(name);
+                print(" ");
+                let mut out: String = Vec::new();
+                ast::show_ty(&t, &mut out);
+                println(&out);
+                // The value's own blocks come after, because a `let` is
+                // reported where it is written and what is inside it is
+                // written after it.
+                walk_expr(w, what, value);
+                w.locals.push(Binding { name: name.to_string(), ty: t });
+            }
+            // What a pattern binds is the pattern's, and nothing records
+            // those yet — on either side.
+            ast::Stmt::LetPattern(pat, value) => {
+                let t = type_of(w, value);
+            }
+            ast::Stmt::Do(e) => walk_expr(w, what, e),
+        }
+        i += 1;
+    }
+    match &b.tail {
+        Option::Some(e) => walk_expr(w, what, e),
+        Option::None => {}
+    }
+    unbind(w, mark);
+}
+
+/// The blocks an expression holds, in source order.
+fn walk_expr(w: &mut World, what: &str, e: &ast::Expr) {
+    match e {
+        ast::Expr::Nested(b) => walk_block(w, what, b),
+        ast::Expr::If(c, t, o) => {
+            walk_expr(w, what, c);
+            walk_block(w, what, t);
+            match o {
+                Option::Some(x) => walk_expr(w, what, x),
+                Option::None => {}
+            }
+        }
+        ast::Expr::While(c, b) => {
+            walk_expr(w, what, c);
+            walk_block(w, what, b);
+        }
+        ast::Expr::Loop(b) => walk_block(w, what, b),
+        ast::Expr::For(name, it, b) => {
+            walk_expr(w, what, it);
+            walk_block(w, what, b);
+        }
+        ast::Expr::Match(s, arms) => {
+            walk_expr(w, what, s);
+            let mut i: taddr = 0;
+            while i < arms.len() {
+                match &arms[i].guard {
+                    Option::Some(g) => walk_expr(w, what, g),
+                    Option::None => {}
+                }
+                walk_expr(w, what, &arms[i].body);
+                i += 1;
+            }
+        }
+        ast::Expr::Binary(op, a, b) => {
+            walk_expr(w, what, a);
+            walk_expr(w, what, b);
+        }
+        ast::Expr::Assign(op, a, b) => {
+            walk_expr(w, what, a);
+            walk_expr(w, what, b);
+        }
+        ast::Expr::Group(a) => walk_expr(w, what, a),
+        ast::Expr::Unary(op, a) => walk_expr(w, what, a),
+        ast::Expr::Borrow(a, m) => walk_expr(w, what, a),
+        ast::Expr::Deref(a) => walk_expr(w, what, a),
+        ast::Expr::Try(a) => walk_expr(w, what, a),
+        ast::Expr::Cast(a, t) => walk_expr(w, what, a),
+        ast::Expr::Field(a, name) => walk_expr(w, what, a),
+        ast::Expr::Index(a, b) => {
+            walk_expr(w, what, a);
+            walk_expr(w, what, b);
+        }
+        ast::Expr::Method(r, name, args) => {
+            walk_expr(w, what, r);
+            let mut i: taddr = 0;
+            while i < args.len() {
+                walk_expr(w, what, &args[i]);
+                i += 1;
+            }
+        }
+        ast::Expr::Call(name, args) => {
+            let mut i: taddr = 0;
+            while i < args.len() {
+                walk_expr(w, what, &args[i]);
+                i += 1;
+            }
+        }
+        ast::Expr::Return(v) => walk_optional(w, what, v),
+        ast::Expr::Break(v) => walk_optional(w, what, v),
+        _ => {}
+    }
+}
+
+fn walk_optional(w: &mut World, what: &str, v: &Option<Box<ast::Expr>>) {
+    match v {
+        Option::Some(e) => walk_expr(w, what, e),
+        Option::None => {}
+    }
+}
+
+/// What an expression is.
+pub fn type_of(w: &mut World, e: &ast::Expr) -> ast::Ty {
+    match e {
+        // An integer with nothing to say otherwise is a word (§5.2).
+        ast::Expr::Int(v) => named("t27"),
+        ast::Expr::Char(v) => named("char"),
+        ast::Expr::Trit(v) => named("trit"),
+        ast::Expr::Bool(b) => named("bool"),
+        ast::Expr::Str(s) => ast::Ty::Ref(Box::new(named("str")), false),
+        ast::Expr::Unit => ast::Ty::Unit,
+        ast::Expr::Name(n) => look_up(w, n),
+        ast::Expr::Group(a) => type_of(w, a),
+        ast::Expr::Cast(a, t) => copy_ty(t),
+        ast::Expr::Borrow(a, m) => ast::Ty::Ref(Box::new(type_of(w, a)), m),
+        ast::Expr::Deref(a) => {
+            let inner = type_of(w, a);
+            target_of(&inner)
+        }
+        ast::Expr::Unary(op, a) => {
+            if op.same("!") {
+                named("bool")
+            } else {
+                type_of(w, a)
+            }
+        }
+        ast::Expr::Binary(op, a, b) => {
+            if ast::level(op) <= 4 {
+                // Comparison and the two logical operators answer `bool`;
+                // `<=>` answers a `trit` (Ch. 1 §4).
+                if op.same("<=>") {
+                    named("trit")
+                } else {
+                    named("bool")
+                }
+            } else {
+                type_of(w, a)
+            }
+        }
+        ast::Expr::Assign(op, a, b) => ast::Ty::Unit,
+        ast::Expr::Field(a, name) => {
+            let whole = type_of(w, a);
+            let base = strip(&whole);
+            let owner = head_of(&base);
+            field_type(w, &owner, name)
+        }
+        ast::Expr::Index(a, i) => {
+            let whole = type_of(w, a);
+            let base = strip(&whole);
+            element_of(&base)
+        }
+        ast::Expr::Call(name, args) => return_of(w, name),
+        ast::Expr::Method(r, name, args) => {
+            let whole = type_of(w, r);
+            let on = strip(&whole);
+            method_type(w, &on, name)
+        }
+        ast::Expr::Aggregate(path, fields) => aggregate_type(w, path),
+        ast::Expr::Nested(b) => block_type(w, b),
+        ast::Expr::If(c, t, o) => block_type(w, t),
+        ast::Expr::Match(s, arms) => {
+            if arms.len() == 0 {
+                return ast::Ty::Unit;
+            }
+            type_of(w, &arms[0].body)
+        }
+        _ => ast::Ty::Unit,
+    }
+}
+
+/// A block's type is its tail's, or `()` when it has none (§5.1).
+///
+/// Its statements are typed on the way: the tail may name what a `let`
+/// inside it bound, and a scope that was not entered has nothing to say
+/// about `{ let inner = n * 2; inner }`.
+fn block_type(w: &mut World, b: &ast::Block) -> ast::Ty {
+    let mark = w.locals.len();
+    let mut i: taddr = 0;
+    while i < b.stmts.len() {
+        match &b.stmts[i] {
+            ast::Stmt::Let(mutable, name, written, value) => {
+                let t = match written {
+                    Option::Some(x) => copy_ty(x),
+                    Option::None => type_of(w, value),
+                };
+                w.locals.push(Binding { name: name.to_string(), ty: t });
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let out = match &b.tail {
+        Option::Some(e) => type_of(w, e),
+        Option::None => ast::Ty::Unit,
+    };
+    unbind(w, mark);
+    out
+}
+
+/// What a name in scope is, or `()` when nothing here is called that.
+fn look_up(w: &mut World, name: &str) -> ast::Ty {
+    let mut i = w.locals.len();
+    while i > 0 {
+        i -= 1;
+        if w.locals[i].name.same(name) {
+            return copy_ty(&w.locals[i].ty);
+        }
+    }
+    ast::Ty::Unit
+}
+
+/// The type of a field of a named struct.
+fn field_type(w: &mut World, owner: &str, name: &str) -> ast::Ty {
+    let mut i: taddr = 0;
+    while i < w.fields.len() {
+        if w.fields[i].owner.same(owner) && w.fields[i].name.same(name) {
+            return copy_ty(&w.fields[i].ty);
+        }
+        i += 1;
+    }
+    ast::Ty::Unit
+}
+
+/// What a function of this name answers with.
+fn return_of(w: &mut World, name: &str) -> ast::Ty {
+    let mut i: taddr = 0;
+    while i < w.sigs.len() {
+        if w.sigs[i].name.same(name) {
+            return copy_ty(&w.sigs[i].ret);
+        }
+        i += 1;
+    }
+    ast::Ty::Unit
+}
+
+/// `Kind::Rect(2, 3)` is a value of `Kind`; `Point { x: 1 }` is one of
+/// `Point`. Both are written the same way and told apart by the `::`.
+fn aggregate_type(w: &mut World, path: &str) -> ast::Ty {
+    let mut i: taddr = 0;
+    while i < w.variants.len() {
+        if w.variants[i].name.same(path) {
+            return copy_ty(&w.variants[i].ty);
+        }
+        i += 1;
+    }
+    named(path)
+}
+
+/// The methods the language writes, by receiver (Ch. 5 §2).
+fn method_type(w: &mut World, on: &ast::Ty, name: &str) -> ast::Ty {
+    if name.same("len") {
+        return named("taddr");
+    }
+    if name.same("is_empty") {
+        return named("bool");
+    }
+    if name.same("push") || name.same("clear") || name.same("reserve") {
+        return ast::Ty::Unit;
+    }
+    if name.same("to_string") {
+        return ast::Ty::App(path_of("Vec"), one_ty(named("char")));
+    }
+    if name.same("same") || name.same("starts_with") || name.same("contains") {
+        return named("bool");
+    }
+    ast::Ty::Unit
+}
+
+/// What indexing gives: a `Vec`'s element, a slice's, a string's character.
+fn element_of(t: &ast::Ty) -> ast::Ty {
+    match t {
+        ast::Ty::App(segments, args) => {
+            if args.len() == 1 {
+                return copy_ty(&args[0]);
+            }
+            ast::Ty::Unit
+        }
+        ast::Ty::Slice(inner) => copy_ty(inner),
+        ast::Ty::Name(segments) => {
+            if joined(segments).same("str") {
+                named("char")
+            } else {
+                ast::Ty::Unit
+            }
+        }
+        _ => ast::Ty::Unit,
+    }
+}
+
+/// What a reference points at.
+fn target_of(t: &ast::Ty) -> ast::Ty {
+    match t {
+        ast::Ty::Ref(inner, m) => copy_ty(inner),
+        _ => ast::Ty::Unit,
+    }
+}
+
+/// A type with its references taken off, which is what a `.` reaches
+/// through (Ch. 3 §2.3).
+fn strip(t: &ast::Ty) -> ast::Ty {
+    match t {
+        ast::Ty::Ref(inner, m) => strip(inner),
+        _ => copy_ty(t),
+    }
+}
+
+/// The name at the head of a type, or nothing for one that has none.
+fn head_of(t: &ast::Ty) -> String {
+    match t {
+        ast::Ty::Name(segments) => joined(segments),
+        ast::Ty::App(segments, args) => joined(segments),
+        _ => "".to_string(),
+    }
+}
+
+fn joined(segments: &Vec<String>) -> String {
+    let mut out: String = Vec::new();
+    let mut i: taddr = 0;
+    while i < segments.len() {
+        if i > 0 {
+            out.push_str("::");
+        }
+        out.push_str(&segments[i]);
+        i += 1;
+    }
+    out
+}
+
+fn named(name: &str) -> ast::Ty {
+    ast::Ty::Name(path_of(name))
+}
+
+fn path_of(name: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    out.push(name.to_string());
+    out
+}
+
+fn one_ty(t: ast::Ty) -> Vec<ast::Ty> {
+    let mut out: Vec<ast::Ty> = Vec::new();
+    out.push(t);
+    out
+}
+
+/// A type, copied. There is no `Clone` here and a type is a tree.
+fn copy_ty(t: &ast::Ty) -> ast::Ty {
+    match t {
+        ast::Ty::Name(segments) => ast::Ty::Name(copy_names(segments)),
+        ast::Ty::App(segments, args) => {
+            let mut out: Vec<ast::Ty> = Vec::new();
+            let mut i: taddr = 0;
+            while i < args.len() {
+                out.push(copy_ty(&args[i]));
+                i += 1;
+            }
+            ast::Ty::App(copy_names(segments), out)
+        }
+        ast::Ty::Ref(inner, m) => ast::Ty::Ref(Box::new(copy_ty(inner)), m),
+        ast::Ty::Slice(inner) => ast::Ty::Slice(Box::new(copy_ty(inner))),
+        ast::Ty::Unit => ast::Ty::Unit,
+        ast::Ty::SelfTy => ast::Ty::SelfTy,
+    }
+}
+
+fn copy_names(from: &Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < from.len() {
+        out.push(from[i].to_string());
+        i += 1;
+    }
+    out
+}
+
+/// Forget every local bound since the mark.
+fn unbind(w: &mut World, mark: taddr) {
+    while w.locals.len() > mark {
+        w.locals.pop();
+    }
+}

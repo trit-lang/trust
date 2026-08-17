@@ -8,6 +8,11 @@
 /// An expression.
 pub enum Expr {
     Int(t27),
+    /// `'x'` — its scalar value, which is what it is (Ch. 5 §1.4). It
+    /// prints as a number, as an integer does, and it is a `char`.
+    Char(t27),
+    /// `0t`, `1t`, `-1t` — a `trit` (§1.4).
+    Trit(t27),
     Name(String),
     /// A binary operator and its two sides (§2.1).
     Binary(String, Box<Expr>, Box<Expr>),
@@ -67,22 +72,6 @@ pub enum Expr {
     Continue,
 }
 
-/// A statement (§5.2).
-pub enum Stmt {
-    /// `let mut? name = expr;`
-    Let(bool, String, Expr),
-    /// `let P { a, b } = expr;` — what it binds is the pattern's (§4).
-    LetPattern(Pattern, Expr),
-    /// An expression evaluated for its effect.
-    Do(Expr),
-}
-
-/// A block: statements, then an optional trailing expression (§5.1).
-pub struct Block {
-    pub stmts: Vec<Stmt>,
-    pub tail: Option<Box<Expr>>,
-}
-
 /// A written type (§3.4).
 ///
 /// It was text until a resolver wanted to read one: a name inside a type is
@@ -102,6 +91,23 @@ pub enum Ty {
     Unit,
     /// `Self`, inside an `impl` (Ch. 4 §1.2).
     SelfTy,
+}
+
+/// A statement (§5.2).
+pub enum Stmt {
+    /// `let mut? name: T? = expr;` — the type when one was written, which
+    /// is the thing `let n = 1;` leaves for inference (§5.2).
+    Let(bool, String, Option<Ty>, Expr),
+    /// `let P { a, b } = expr;` — what it binds is the pattern's (§4).
+    LetPattern(Pattern, Expr),
+    /// An expression evaluated for its effect.
+    Do(Expr),
+}
+
+/// A block: statements, then an optional trailing expression (§5.1).
+pub struct Block {
+    pub stmts: Vec<Stmt>,
+    pub tail: Option<Box<Expr>>,
 }
 
 /// One bound: a trait's name, its type arguments, and what it binds
@@ -262,6 +268,8 @@ pub fn level(op: &str) -> taddr {
 pub fn show(e: &Expr, out: &mut String) {
     match e {
         Expr::Int(v) => push_int(out, v),
+        Expr::Char(v) => push_int(out, v),
+        Expr::Trit(v) => push_int(out, v),
         Expr::Name(n) => out.push_str(n),
         Expr::Group(inner) => show(&*inner, out),
         Expr::Unary(op, a) => {
@@ -660,13 +668,20 @@ pub fn show_stmt(s: &Stmt, out: &mut String) {
             show(e, out);
             out.push_str(")");
         }
-        Stmt::Let(mutable, name, e) => {
+        Stmt::Let(mutable, name, ty, e) => {
             if mutable {
                 out.push_str("(let-mut ");
             } else {
                 out.push_str("(let ");
             }
             out.push_str(name);
+            match ty {
+                Option::Some(t) => {
+                    out.push_str(":");
+                    show_ty(t, out);
+                }
+                Option::None => {}
+            }
             out.push_str(" ");
             show(e, out);
             out.push_str(")");

@@ -959,6 +959,8 @@ pub struct Analysis {
     pub types: lower::Noted,
 }
 
+pub use lower::for_each_child;
+
 /// Compile for an editor's sake.
 ///
 /// Only the file's own functions are recorded: the prelude is parsed as its

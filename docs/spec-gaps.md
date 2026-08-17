@@ -2592,6 +2592,29 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.51 — an item could not name a type written after it.** Ch. 0 §3 says
+every item in a file is visible to every other whatever the order. A field
+of type `Option<T>` instantiates `Option` where it is written, and that
+wants `T`'s layout — so
+
+```
+enum S { A(Option<T>), B }
+enum T { X }
+```
+
+was refused with "`Option` cannot be laid out here: `T` is not a type in
+scope", which the order rule says cannot happen. Swapping the two lines
+compiled.
+
+Found writing the type checker in Trust, where `Stmt::Let` gained an
+`Option<Ty>` and `Ty` happened to be declared below it.
+
+Types are laid out in whatever order succeeds now: each is tried, the ones
+that fail are tried again, and the rounds stop when one makes no progress —
+at which point what is left is reported as itself. A cycle with no
+indirection still makes no progress and is still refused by Ch. 2 §8, which
+is the case the retry must not paper over.
+
 **G9.50 — a write through a matched binding goes nowhere.** Matching a
 value moves it and the arm's bindings own what it held; matching *through a
 reference* moves nothing, so the bindings are read out of storage the

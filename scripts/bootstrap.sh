@@ -189,5 +189,19 @@ for f in bootstrap/layouts/*.tr; do
     l=$((l + $(printf '%s\n' "$rust" | wc -l)))
 done
 
-printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d modules of whole programs, %d names defined, %d names resolved, %d items rewritten, %d types laid out — all agreed\n' \
-    "$n" "$r" "$e" "$i" "$w" "$b" "$m" "$y" "$u" "$z" "$l"
+# Ch. 4: what type every binding turned out to have. A `let` is where
+# inference is visible — it is the thing `let n = 1;` does not say.
+t=0
+for f in bootstrap/typed/*.tr; do
+    rust=$("$trust" types "$f")
+    mine=$("$trust" run bootstrap/types.tr < "$f")
+    if [ "$rust" != "$mine" ]; then
+        echo "bootstrap: the two disagree about the types in $f" >&2
+        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -6 >&2
+        exit 1
+    fi
+    t=$((t + $(printf '%s\n' "$rust" | wc -l)))
+done
+
+printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d modules of whole programs, %d names defined, %d names resolved, %d items rewritten, %d types laid out, %d bindings typed — all agreed\n' \
+    "$n" "$r" "$e" "$i" "$w" "$b" "$m" "$y" "$u" "$z" "$l" "$t"

@@ -1,0 +1,37 @@
+struct Point { x: t27, y: taddr }
+
+fn scalars() -> t27 {
+    let a = 1;
+    let b: t9 = 2;
+    let c = true;
+    let d = 'x';
+    let e = 0t;
+    let f = "hi";
+    let g = a + 1;
+    let h = a == 1;
+    let i = a as taddr;
+    0
+}
+
+fn places(p: &Point, v: &Vec<t27>) -> t27 {
+    let a = p.x;
+    let b = p.y;
+    let c = v.len();
+    let d = &p.x;
+    let e = *d;
+    let f = v[0];
+    0
+}
+
+fn blocks(n: t27) -> t27 {
+    let a = if n > 0 { 1 } else { 0 - 1 };
+    let b = { let inner = n * 2; inner };
+    while n > 0 {
+        let c = n;
+    }
+    loop {
+        let d = 1;
+        break;
+    }
+    0
+}

@@ -263,8 +263,8 @@ pub fn primary(p: &mut Parser) -> Result<Expr, lex::Error> {
     p.at = t.at;
     match t.tok {
         Tok::Int(v) => Result::Ok(Expr::Int(v)),
-        Tok::TritLit(v) => Result::Ok(Expr::Int(v)),
-        Tok::CharLit(v) => Result::Ok(Expr::Int(v)),
+        Tok::TritLit(v) => Result::Ok(Expr::Trit(v)),
+        Tok::CharLit(v) => Result::Ok(Expr::Char(v)),
         Tok::Str(text) => Result::Ok(Expr::Str(text)),
         Tok::Ident(n) => path_expr(p, n),
         Tok::Op(o) => {
@@ -698,22 +698,24 @@ fn let_stmt(p: &mut Parser) -> Result<ast::Stmt, lex::Error> {
     } else {
         ident(p)?
     };
-    // A written type is read and dropped: nothing here does anything with
-    // one, and pretending otherwise would be a second thing to keep right.
+    // The written type is kept: it is what `let n: t9 = 1;` says and
+    // `let n = 1;` leaves for inference to answer (§5.2).
     let t2 = peek(p)?;
     let at2 = t2.at;
     let has_ty = match t2.tok {
         Tok::Op(o) => o.same(":"),
         _ => false,
     };
-    if has_ty {
+    let written: Option<ast::Ty> = if has_ty {
         p.at = at2;
-        let _ = type_name(p)?;
-    }
+        Option::Some(type_name(p)?)
+    } else {
+        Option::None
+    };
     expect_op(p, "=")?;
     let e = expr(p)?;
     expect_op(p, ";")?;
-    Result::Ok(ast::Stmt::Let(mutable, name, e))
+    Result::Ok(ast::Stmt::Let(mutable, name, written, e))
 }
 
 /// `fn name(a: T, …) -> R { … }` (§3.1).
