@@ -74,38 +74,67 @@ element of a place, or the target of a dereference. `p`, `p.x`, `xs[i]` and
 
 Moving out of a place leaves *that place* uninitialized, not the whole
 variable: after `let a = p.x;` where `p.x` moves, `p.y` remains usable and `p`
-as a whole does not.
+as a whole does not. What is left is dropped at the end of the scope, a field
+at a time; writing to `p.x` puts it back, and `p` is whole again.
+
+Three things are refused, and each is refused rather than approximated:
+
+- **A field moved on one path of a branch and not the other.** Whether the
+  field is there afterwards would have to be decided at run time, and the
+  flag that does that decides for a whole local rather than for a part of
+  one. Refusing is not the same as leaking: on the other path the field is
+  still owned, and nothing would drop it.
+- **A field moved inside a loop**, which would be moved again on the next
+  turn — the same argument §4.1 makes about a whole local.
+- **Reading the whole of a value a field has gone from.** It is not a value
+  any more; its parts are.
+
+A move through an *index* or through a *reference* moves the whole
+conservatively, because what is left of `v[i]` is not a set of names — and
+in the reference's case, is refused outright:
+
+> A non-copyable value cannot be moved out of a place reached through a
+> reference. There is nothing there to move *from*: the value belongs to
+> whatever the reference points at, which will drop it either way.
 
 **A `match` binding is a place, and who owns it depends on the scrutinee.**
 Matching a *value* moves it, so an arm's bindings receive what it held and are
 dropped at the end of the arm — an arm is a scope like any other (§1.4).
-Matching through a *reference* moves nothing: the bindings name storage the
-referent still owns, so they may be **read and borrowed from but not moved
-out of**, and nothing drops them.
+Matching through a *reference* moves nothing, and what the bindings *are*
+follows from what they hold (Ch. 0 §4):
+
+- A value of copyable type is **copied**. A copy of one is the same value and
+  there is nothing in it to lose.
+- Anything else is bound as the **place**: `&T` where the scrutinee was `&T`,
+  `&mut T` where it was `&mut T`. A copy would be a second owner of one
+  allocation, which §1.1 does not allow — and a copy that is *not* an owner
+  is a copy a write disappears into.
 
 ```
 match h {                       // h : &Holder
     Holder::Has(p) => p.id,     // fine — a read through the borrow
     …
 }
-match h {
-    Holder::Has(p) => { let taken: Port = p; … }   // rejected: not yours
+match h {                       // h : &mut Holder
+    Holder::Has(v) => v.push(1),   // fine — `v` is the place, `&mut Vec<T>`
+    …
+}
+match h {                       // h : &Holder
+    Holder::Has(p) => { let taken: Port = p; … }   // rejected: `p` is `&Port`
     …
 }
 ```
 
-The two questions "must this be dropped" and "may this be read" have the same
-answer for every place but this one, which is why they are stated separately
-here. A borrowed binding is initialized — reading it is not a use of something
-uninitialized — and it is not an owner.
+The last is refused by the ordinary type rule, and the diagnostic says which
+two types were meant. Draft 0.1 refused it as an *ownership* error and said
+so about a program that was only reading; a binding that is what it is needs
+no rule of its own.
 
-*Reserved:* binding **by reference**, so that the second example above could
-be written by naming what it is rather than being refused. That is Rust's
-match ergonomics, and it needs the binding's type to become `&T` — and with
-it a **deref coercion**, since a binding at `&Box<T>` is then handed to
-things that want `&T`. That is a third implicit conversion, and this chapter
-declines to add one as a side effect of a change to `match`. Draft 0.1
-refuses the move instead, which is sound and less convenient.
+A binding through a `Box` is a reference to **what the box holds**, not to
+the box. A box is an address, so `&Box<T>` would make `*rest` the box and
+`&*rest` a reference to one, which is not the place a reader means — and it
+is why this needs no deref coercion, which is the third implicit conversion
+this chapter would otherwise have had to admit.
 
 ### 1.4 Destructors
 

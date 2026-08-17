@@ -265,6 +265,13 @@ about its modules. `putchar` is a symbol in a runtime; `io.putchar` is not.
 > is a claim about the outside, and two identical claims are one claim — and
 > it is why a declaration is not subject to the paragraph above.
 
+A **monomorphization** is named the same way: the head and its arguments,
+with `.` between them, so `Option<taddr>` is `Option.taddr`. The scheme does
+not say where one argument ends and the next begins, and does not need to —
+Ch. 4 §2.1 gives a type one arity, so `Holder.Option.t27` can only be read
+one way. Anything that changed that would make two types one name, and is a
+reason to change the scheme rather than the program.
+
 Monomorphization, vtables and drop glue are unchanged: they are described in
 Ch. 4 and Ch. 3 in terms of items, and an item's module is part of its name
 and of nothing else.

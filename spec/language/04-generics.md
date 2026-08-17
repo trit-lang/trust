@@ -981,6 +981,12 @@ means
 }
 ```
 
+The desugaring happens at **lowering**, not at parsing: a `for` is a `for` in
+the tree, and what points at one — a diagnostic, an editor, a second
+implementation — points at what was written rather than at a `match` nobody
+wrote and a binding named after a counter. Sugar is a statement about
+meaning, not an instruction about when to lose the words.
+
 The desugaring uses only Ch. 0 constructs, which is the point: `for` adds no
 control flow the language did not have. Ch. 0 §5.5 said "a loop over an array
 is a `while` and an index, which is also what it lowers to" — that remains
@@ -1068,8 +1074,9 @@ one else can write for you.
 - **The `?` operator and an error-propagation trait.** §5.8.
 - **`Hash`, `Debug`, `Display`, `Default`.** Library traits; two of them need
   text, which Ch. 0 §1.4 defers.
-- **Trait method resolution across modules.** §1.3 states the rule that
-  modules will inherit; the imports themselves are still reserved.
+- **Trait method resolution across modules.** §1.3 states the rule, and
+  Ch. 6 supplies the modules: a trait is in scope where its module is, and
+  a `use` brings it there like anything else.
 - **Negative impls beyond `!Copy`.** §5.1 defines the one the language needs
   and does not generalize it.
 - **`AddAssign` and its relatives.** §5.4 explains what their absence costs: a

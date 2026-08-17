@@ -174,6 +174,14 @@ radix pays layout dividends:
 - A `trit` occupies a tryte using 3 patterns → 19 680 niches.
 - References (Ch. 3) exclude the null address → at least 1 niche.
 
+The question asked of a payload is whether **one scalar in it** has enough
+invalid values to tell the variants apart — not whether the payload as a
+whole has that many. The two differ: a twelve-tryte payload has 3^108
+patterns, a number no implementation carries, and asking about the whole
+payload means asking a question whose answer cannot be represented. Asking
+about the scalar keeps the arithmetic small, and the scalar is where the
+discriminant would go in any case.
+
 Consequences the standard library relies on and user code may rely on
 (these are **guaranteed** for `repr(lang)`, elevating them from
 implementation detail to spec):

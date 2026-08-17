@@ -235,9 +235,14 @@ same rule, and the same reason, as Rust's.
 
 ## 3. Items
 
-An item is a top-level definition. Draft 0.1 has one file and no module
-system: `mod`, `use` and `pub` are reserved (§1.3), and every item in the file
-is visible to every other regardless of order.
+An item is a top-level definition. Every item in a file is visible to every
+other regardless of order — which is a rule about *order* and not about
+declaration: a type may be named by an item written above it, and a function
+may be called by one.
+
+A program is a tree of files, and which files and what each may reach into
+are Ch. 6's: `mod`, `use` and `pub` were reserved by §1.3 for it and are
+keywords now.
 
 ### 3.1 Functions
 
@@ -312,8 +317,9 @@ struct Header { magic: t27, len: t9 }
 ```
 
 An attribute is `#[` name `]` or `#[` name `(` arguments `)` `]`, and attaches
-to the item that follows it. Draft 0.1 defines exactly one: `repr`, taking
-`lang` or `linear` (Ch. 2 §1). Every other attribute name is reserved.
+to the item that follows it. Draft 0.1 defines exactly two: `repr`, taking
+`lang` or `linear` (Ch. 2 §1), and `derive` (Ch. 4 §6). Every other
+attribute name is reserved.
 
 Attributes appear on items only. In particular the overflow profile of Ch. 1
 §4 — trapping in checked builds, wrapping in release — is a property of the
@@ -327,12 +333,15 @@ trit    bool    t9    t27    taddr    ()
 [T; N]            // array, N a constant expression
 (T, U)            // tuple
 &T                // reference (Ch. 3)
+[T]               // slice (Ch. 3 §5)
 Name              // a struct or enum
-Name<T>           // reserved: generics are Ch. 4
+Name<T>           // one applied to arguments (Ch. 4 §2)
+Name::Other       // one named through the module holding it (Ch. 6 §3.1)
+Self              // inside an `impl` (Ch. 4 §1.2)
 ```
 
-`&T` and `Name<T>` are written here so the grammar is complete; their meaning
-is Chapters 3 and 4's, and a draft 0.1 compiler may reject them.
+`&T`, `[T]` and `Name<T>` are written here so the grammar is complete; what
+they *mean* is Chapters 3, 4 and 6's.
 
 ### 3.6 Type aliases
 
@@ -648,12 +657,13 @@ path        := ident ( '::' ( ident | '<' type,* '>' ) )*    -- Ch. 4 §2.3
   in §6, because a reader asking "can I write this?" should not have to read
   four chapters to find out.
 - **References and borrowing beyond `&T`'s spelling.** Chapter 3.
-- **Modules, visibility, multiple files.** `mod`, `use` and `pub` are
-  reserved.
-- **Closures.** Reserved; `|` would need re-examining if they arrive, which
-  §2.5 already leaves room for.
-- **Macros.** Reserved. `println!` does not exist and will not until there is
-  something for it to print.
+- **Modules, visibility, multiple files.** Chapter 6.
+- **Closures.** Chapter 4 §4. `|` needed the re-examining §2.5 left room
+  for, and got exactly it: `||` in expression position is two parameter
+  delimiters and not the logical-or.
+- **Macros.** Chapter 7. `println` exists and is a *function*, not a macro —
+  a format string taken apart at compile time is what Ch. 5 §7 reserves and
+  Ch. 7 §7 does not unreserve.
 - **`for` loops.** §5.5.
 - **Per-item overflow control.** §3.4.
 
