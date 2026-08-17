@@ -217,10 +217,16 @@ Each step is checkable on its own, and none of them is only for DDC.
    … }` cost nothing. A second implementation has to make the same
    temporary, and skip the same number.
 
-   *All four are done.* What is left of this step is `match` — the tag, the
-   three-way branch, and what a pattern binds — and the drops Ch. 3 §1.4 puts
-   at the end of a scope, which is the last thing between here and a compiler
-   that can compile itself.
+   *All four are done*, and so are `match` and the drops. What the Trust
+   lowering emits now is the whole of the language it reads, minus generics:
+   scalars and arithmetic, all six comparisons, calls, `if`, `while`,
+   aggregates by value and by pointer, `match` with its payload bindings,
+   and the destructor calls Ch. 3 §1.4 puts at the end of a scope — with the
+   `impl Drop` body emitted as the `@drop.T` it becomes.
+
+   What stands between here and `stage1` is no longer a *kind* of thing: it
+   is generics (§2.5's monomorphization), the prelude, and modules, which is
+   the same list as "compile `bootstrap/` itself".
 4. **Run the double compile.** `scripts/ddc.sh`: build `stage1` with
    `trustc`, build `stage2` with `stage1`, demand `stage2 == stage1`. Report
    the two hashes whether or not they match, because a number that is only

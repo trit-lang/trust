@@ -479,6 +479,21 @@ fn argument_fields(p: &mut Parser) -> Result<Vec<ast::Field>, lex::Error> {
                 if o.same(")") {
                     return Result::Ok(out);
                 }
+                // A trailing comma closes the list, as it does in a call by
+                // one name: the two paths had drifted, and an argument on
+                // its own line ends with one.
+                if o.same(",") {
+                    let t2 = peek(p)?;
+                    let at2 = t2.at;
+                    let closes = match &t2.tok {
+                        Tok::Op(c) => c.same(")"),
+                        _ => false,
+                    };
+                    if closes {
+                        p.at = at2;
+                        return Result::Ok(out);
+                    }
+                }
                 if !o.same(",") {
                     return Result::Err(lex::Error {
                         at: p.at,

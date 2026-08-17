@@ -1,0 +1,14 @@
+struct N { id: t9 }
+impl Drop for N { fn drop(self) { } }
+struct Wide { a: t9, b: taddr }
+impl Drop for Wide { fn drop(self) { } }
+
+fn one(a: t9) -> t9 { let n = N { id: a }; n.id }
+fn two(a: t9) -> t9 { let n = N { id: a }; let m = N { id: 1 }; n.id }
+fn none(a: t9) -> t9 { a }
+fn wider(a: t9, b: taddr) -> taddr { let w = Wide { a: a, b: b }; w.b }
+fn mixed(a: t9) -> t9 {
+    let n = N { id: a };
+    let w = Wide { a: a, b: 1 };
+    n.id
+}

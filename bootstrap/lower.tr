@@ -70,6 +70,10 @@ pub struct Emit {
     /// The nominal types the file defines, for the offsets Ch. 2 gives
     /// them. It is the same engine `bootstrap/sizes.tr` is held to.
     pub defs: Vec<layout::Def>,
+    /// Which types have a destructor, by name (Ch. 3 §1.4).
+    pub drops: Vec<String>,
+    /// The locals this scope is responsible for dropping, innermost last.
+    pub owned: Vec<Slot>,
 }
 
 /// A value in TIR: either a name or a constant, as it is written.
@@ -195,6 +199,7 @@ pub fn function(
     sigs: Vec<Sig>,
     params: Vec<Sig>,
     defs: Vec<layout::Def>,
+    drops: Vec<String>,
     out: &mut String,
 ) -> bool {
     let mut e = Emit {
@@ -209,6 +214,8 @@ pub fn function(
         label: "^entry:".to_string(),
         blocks: Vec::new(),
         defs: defs,
+        drops: drops,
+        owned: Vec::new(),
     };
 
     // A parameter arrives as a value and is given storage at once, so that
@@ -349,6 +356,10 @@ fn def_at(defs: &Vec<layout::Def>, name: &str) -> taddr {
 }
 
 /// The head of a written type, or nothing for one that has no name.
+pub fn written_head(t: &ast::Ty) -> String {
+    head_of(t)
+}
+
 fn head_of(t: &ast::Ty) -> String {
     match t {
         ast::Ty::Name(segments) => joined(segments),
@@ -674,6 +685,33 @@ fn forget(e: &mut Emit, mark: taddr) {
     }
 }
 
+/// Call the destructor of everything this scope owns, innermost first.
+fn drop_all(e: &mut Emit) {
+    let mut i = e.owned.len();
+    while i > 0 {
+        i -= 1;
+        let mut line: String = Vec::new();
+        line.push_str("    call @drop.");
+        line.push_str(&e.owned[i].ty);
+        line.push_str("(");
+        line.push_str(&e.owned[i].slot);
+        line.push_str(")");
+        e.insts.push(line);
+    }
+}
+
+/// Whether a list holds this exact name.
+fn holds_name(names: &Vec<String>, name: &str) -> bool {
+    let mut i: taddr = 0;
+    while i < names.len() {
+        if names[i].same(name) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Give a name a different one, wherever it was written.
 ///
 /// The only name a lowering ever changes its mind about: an aggregate is
@@ -748,6 +786,136 @@ fn store_into(e: &mut Emit, ty: &str, what: &str, where_: &str) {
     e.insts.push(line);
 }
 
+/// `impl Drop for T` — the destructor, which is a function named after the
+/// type it is written on (Ch. 3 §1.4).
+///
+/// Its `self` is owned, so it takes the flag an owned local takes, and it
+/// takes it *before* the value arrives: what the flag says is whether the
+/// fields are still there, and they are from the moment the function is
+/// entered.
+pub fn destructor(
+    f: &ast::Fn,
+    owner: &str,
+    sigs: Vec<Sig>,
+    params: Vec<Sig>,
+    defs: Vec<layout::Def>,
+    drops: Vec<String>,
+    out: &mut String,
+) -> bool {
+    let mut e = Emit {
+        slots: Vec::new(),
+        insts: Vec::new(),
+        locals: Vec::new(),
+        next: 1,
+        stuck: false,
+        sigs: sigs,
+        done: false,
+        params: params,
+        label: "^entry:".to_string(),
+        blocks: Vec::new(),
+        defs: defs,
+        drops: drops,
+        owned: Vec::new(),
+    };
+    let at = def_at(&e.defs, owner);
+    if at < 0 {
+        return false;
+    }
+    let self_ty = ast::Ty::Name(one_name(owner));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => return false,
+    };
+    let mut slot: String = Vec::new();
+    slot.push_str("%self.slot.");
+    push_int(&mut slot, e.next);
+    e.next = e.next + 1;
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&slot);
+    line.push_str(" = slot tryte[");
+    push_int(&mut line, l.size as t27);
+    line.push_str("]");
+    e.slots.push(line);
+    let flag = fresh(&mut e, "self.owns");
+    let mut held: String = Vec::new();
+    held.push_str("    ");
+    held.push_str(&flag);
+    held.push_str(" = slot tryte[1]");
+    e.slots.push(held);
+    store_into(&mut e, "t1", "const t1 1", &flag);
+    e.locals.push(Slot {
+        name: "self".to_string(),
+        slot: slot.to_string(),
+        ty: owner.to_string(),
+    });
+    let mut i: taddr = 0;
+    while i < l.offsets.len() {
+        let ty = tir_ty(&e.defs[at].fields[i]);
+        if ty.same("?") {
+            return false;
+        }
+        let src = offset_of(&mut e, "%self", l.offsets[i]);
+        let dst = offset_of(&mut e, &slot, l.offsets[i]);
+        let v = fresh(&mut e, "v");
+        let mut load: String = Vec::new();
+        load.push_str("    ");
+        load.push_str(&v);
+        load.push_str(" = load ");
+        load.push_str(&ty);
+        load.push_str(" ");
+        load.push_str(&src);
+        e.insts.push(load);
+        store_into(&mut e, &ty, &v, &dst);
+        i += 1;
+    }
+
+    let body = match &f.body {
+        Option::Some(b) => b,
+        Option::None => return false,
+    };
+    let mut k: taddr = 0;
+    while k < body.stmts.len() {
+        stmt(&mut e, &body.stmts[k], "");
+        k += 1;
+    }
+    match &body.tail {
+        Option::Some(x) => return false,
+        Option::None => {}
+    }
+    e.insts.push("    ret".to_string());
+    if e.stuck {
+        return false;
+    }
+
+    start(&mut e, "^");
+    out.push_str("fn @drop.");
+    out.push_str(owner);
+    out.push_str("(%self: ptr) {\n");
+    let mut n: taddr = 0;
+    while n < e.blocks.len() {
+        out.push_str(&e.blocks[n].label);
+        out.push_str("\n");
+        if n == 0 {
+            let mut j: taddr = 0;
+            while j < e.slots.len() {
+                out.push_str(&e.slots[j]);
+                out.push_str("\n");
+                j += 1;
+            }
+        }
+        let mut m: taddr = 0;
+        while m < e.blocks[n].insts.len() {
+            out.push_str(&e.blocks[n].insts[m]);
+            out.push_str("\n");
+            m += 1;
+        }
+        n += 1;
+    }
+    out.push_str("}\n");
+    true
+}
+
 /// A function's body: its statements, then what it answers with.
 fn block(e: &mut Emit, b: &ast::Block, ret: &str, unit: bool) {
     let mut i: taddr = 0;
@@ -761,6 +929,9 @@ fn block(e: &mut Emit, b: &ast::Block, ret: &str, unit: bool) {
             if e.stuck {
                 return;
             }
+            // The value first and the drops after it: what is answered is
+            // read while it is still there (Ch. 3 §1.4).
+            drop_all(e);
             let mut line: String = Vec::new();
             line.push_str("    ret ");
             line.push_str(&v.text);
@@ -798,6 +969,7 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
             }
             let which = def_at(&e.defs, &val.ty);
             if which >= 0 {
+                let owns = holds_name(&e.drops, &val.ty);
                 // The temporary *is* the binding's storage: it was made for
                 // this value and nothing else names it, so it is renamed
                 // rather than copied out of.
@@ -806,11 +978,32 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                 prefix.push_str(".slot");
                 let slot = fresh(e, &prefix);
                 rename(e, &val.text, &slot);
+                let kept = slot.to_string();
                 e.locals.push(Slot {
                     name: name.to_string(),
                     slot: slot,
                     ty: val.ty.to_string(),
                 });
+                // A local whose type has a destructor is dropped when its
+                // scope ends unless it was moved out of, and a flag is what
+                // says which — a branch may decide (Ch. 3 §1.4).
+                if owns {
+                    let mut prefix: String = Vec::new();
+                    prefix.push_str(name);
+                    prefix.push_str(".owns");
+                    let flag = fresh(e, &prefix);
+                    let mut line: String = Vec::new();
+                    line.push_str("    ");
+                    line.push_str(&flag);
+                    line.push_str(" = slot tryte[1]");
+                    e.slots.push(line);
+                    store_into(e, "t1", "const t1 1", &flag);
+                    e.owned.push(Slot {
+                        name: name.to_string(),
+                        slot: kept,
+                        ty: val.ty.to_string(),
+                    });
+                }
                 return;
             }
             let slot = slot_for(e, name, &ty);
@@ -1439,6 +1632,32 @@ fn copy_names(from: &Vec<String>) -> Vec<String> {
     let mut i: taddr = 0;
     while i < from.len() {
         out.push(from[i].to_string());
+        i += 1;
+    }
+    out
+}
+
+/// Which types have a destructor: the ones an `impl Drop` is written for
+/// (Ch. 3 §1.4). A type containing one has a destructor too, and that is
+/// not read here yet.
+pub fn destructors(items: &Vec<ast::Item>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < items.len() {
+        match &items[i].what {
+            ast::What::Impl(gs, tr, ty, fns) => {
+                match tr {
+                    Option::Some(t) => {
+                        let name = head_of(t);
+                        if name.same("Drop") {
+                            out.push(head_of(ty));
+                        }
+                    }
+                    Option::None => {}
+                }
+            }
+            _ => {}
+        }
         i += 1;
     }
     out

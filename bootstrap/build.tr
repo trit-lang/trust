@@ -20,6 +20,8 @@ fn main() -> t27 {
     match parse::file(&mut p) {
         Result::Ok(items) => {
             println("tir 0.1 target \"tritium\"");
+            // Ordinary functions first and destructors after them, which
+            // is the order the module is written in.
             let mut i: taddr = 0;
             while i < items.len() {
                 match &items[i].what {
@@ -27,8 +29,9 @@ fn main() -> t27 {
                         let sigs = lower::signatures(&items);
                         let params = lower::parameters(&items);
                         let defs = lower::definitions(&items);
+                        let drops = lower::destructors(&items);
                         let mut out: String = Vec::new();
-                        if lower::function(f, sigs, params, defs, &mut out) {
+                        if lower::function(f, sigs, params, defs, drops, &mut out) {
                             println("");
                             print(&out);
                         }
@@ -36,6 +39,40 @@ fn main() -> t27 {
                     _ => {}
                 }
                 i += 1;
+            }
+            let mut d: taddr = 0;
+            while d < items.len() {
+                match &items[d].what {
+                    ast::What::Impl(gs, tr, ty, fns) => {
+                        match tr {
+                            Option::Some(t) => {
+                                let named = lower::written_head(t);
+                                let owner = lower::written_head(ty);
+                                let mut k: taddr = 0;
+                                while k < fns.len() {
+                                    let sigs = lower::signatures(&items);
+                                    let params = lower::parameters(&items);
+                                    let defs = lower::definitions(&items);
+                                    let drops = lower::destructors(&items);
+                                    let mut out: String = Vec::new();
+                                    if named.same("Drop")
+                                        && lower::destructor(
+                                            &fns[k], &owner, sigs, params, defs, drops,
+                                            &mut out,
+                                        )
+                                    {
+                                        println("");
+                                        print(&out);
+                                    }
+                                    k += 1;
+                                }
+                            }
+                            Option::None => {}
+                        }
+                    }
+                    _ => {}
+                }
+                d += 1;
             }
             0
         }
