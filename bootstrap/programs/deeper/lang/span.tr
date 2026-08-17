@@ -1,0 +1,5 @@
+pub struct Span { pub lo: t27, pub hi: t27 }
+
+pub fn width(s: Span) -> t27 { s.hi - s.lo }
+
+pub fn unused(n: t27) -> t27 { n }

@@ -244,5 +244,20 @@ for f in bootstrap/lowered/*.tr; do
     g=$((g + $(printf '%s\n' "$rust" | wc -l)))
 done
 
-printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d modules of whole programs, %d names defined, %d names resolved, %d items rewritten, %d types laid out, %d bindings typed, %d functions checked, %d lines of TIR — all agreed\n' \
-    "$n" "$r" "$e" "$i" "$w" "$b" "$m" "$y" "$u" "$z" "$l" "$t" "$c" "$g"
+# A whole *program* as TIR: Ch. 6's three passes and then the lowering, cut
+# down to what `main` reaches — a function nothing calls is a function the
+# program does not contain, and the two have to agree about which.
+q=0
+for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr; do
+    rust=$("$trust" build "$root")
+    mine=$("$trust" bundle "$root" | "$trust" run bootstrap/program.tr)
+    if [ "$rust" != "$mine" ]; then
+        echo "bootstrap: the two lower the program at $root differently" >&2
+        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10 >&2
+        exit 1
+    fi
+    q=$((q + $(printf '%s\n' "$rust" | wc -l)))
+done
+
+printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d modules of whole programs, %d names defined, %d names resolved, %d items rewritten, %d types laid out, %d bindings typed, %d functions checked, %d lines of TIR, %d of whole programs — all agreed\n' \
+    "$n" "$r" "$e" "$i" "$w" "$b" "$m" "$y" "$u" "$z" "$l" "$t" "$c" "$g" "$q"

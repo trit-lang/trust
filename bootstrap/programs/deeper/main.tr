@@ -1,0 +1,9 @@
+mod lang;
+mod util;
+
+use lang::span;
+
+fn main() -> t27 {
+    let s = span::Span { lo: 1, hi: 4 };
+    span::width(s) + util::twice(2)
+}

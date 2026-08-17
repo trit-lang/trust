@@ -224,9 +224,17 @@ Each step is checkable on its own, and none of them is only for DDC.
    and the destructor calls Ch. 3 §1.4 puts at the end of a scope — with the
    `impl Drop` body emitted as the `@drop.T` it becomes.
 
-   What stands between here and `stage1` is no longer a *kind* of thing: it
-   is generics (§2.5's monomorphization), the prelude, and modules, which is
-   the same list as "compile `bootstrap/` itself".
+   *Modules are done too.* `bootstrap/program.tr` reads a bundle, runs Ch. 6
+   §4's three passes, lowers the flat list they produce, and cuts it down to
+   what `main` reaches — a function nothing calls is a function the program
+   does not contain, and the two implementations agree about which those are.
+
+   What stands between here and `stage1` is generics (§2.5's
+   monomorphization) and the prelude. The second needs a decision before it
+   needs code: `bootstrap/` has no copy of the prelude's source, and the
+   choice is between the driver handing it over in the bundle — one copy,
+   and a compiler that cannot be built without the driver — and a copy in
+   `bootstrap/`, which is a second thing to keep the same as the first.
 4. **Run the double compile.** `scripts/ddc.sh`: build `stage1` with
    `trustc`, build `stage2` with `stage1`, demand `stage2 == stage1`. Report
    the two hashes whether or not they match, because a number that is only
