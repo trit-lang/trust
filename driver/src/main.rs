@@ -26,8 +26,9 @@ usage:
                                        print its tree
     trust item <file.tr>               read the file as one function and
                                        print its tree
-    trust bundle <file.tr>             the whole module tree as one text,
-                                       for a compiler that cannot open files
+    trust bundle <file.tr> [--prelude] the whole module tree as one text,
+                                       for a compiler that cannot open files;
+                                       with the prelude when asked
     trust build <file.tr>              the whole program as TIR
     trust modules <file.tr>            each module of it, and its token count
     trust file <file.tr>               every item in it, as a tree
@@ -335,6 +336,19 @@ fn main() -> ExitCode {
                 eprintln!("trust: {}", e.message);
             }
             return ExitCode::FAILURE;
+        }
+        // The prelude, when it is asked for. It is not a module and has no
+        // path (Ch. 6 §3.3), so it is sent under a name no module path can
+        // be: `#` is not an identifier character.
+        //
+        // One copy, here, rather than a second in `bootstrap/`. A compiler
+        // written in Trust is handed the library it compiles against for
+        // the same reason it is handed the files: finding them is a fact
+        // about a build, and a second copy is a second thing to keep the
+        // same as the first.
+        if args.iter().any(|a| a == "--prelude") {
+            println!("mod #prelude {}", lang::PRELUDE.chars().count());
+            print!("{}", lang::PRELUDE);
         }
         for source in &program.sources {
             // Length-prefixed and in characters, which is what a `str` is

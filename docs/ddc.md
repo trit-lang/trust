@@ -229,12 +229,19 @@ Each step is checkable on its own, and none of them is only for DDC.
    what `main` reaches — a function nothing calls is a function the program
    does not contain, and the two implementations agree about which those are.
 
-   What stands between here and `stage1` is generics (§2.5's
-   monomorphization) and the prelude. The second needs a decision before it
-   needs code: `bootstrap/` has no copy of the prelude's source, and the
-   choice is between the driver handing it over in the bundle — one copy,
-   and a compiler that cannot be built without the driver — and a copy in
-   `bootstrap/`, which is a second thing to keep the same as the first.
+   The prelude is **handed over**, not copied: `trust bundle … --prelude`
+   sends it as a section under `#prelude`, a name no module path can be, and
+   `bootstrap/program.tr` merges it as Ch. 6 §3.3 says — the prelude's items
+   first, and an item the program defines replaces the one of that name.
+   That is one copy of the library's source rather than two, and the price
+   is that this compiler is handed the library it compiles against for the
+   same reason it is handed the files.
+
+   What stands between here and `stage1` is **generics** — §2.5's
+   monomorphization, and with it the `impl` methods and the `/` and `%` the
+   prelude's own bodies use. The plumbing for the prelude is done and the
+   thing it plumbs is not yet compilable: `floor_div` divides, and division
+   is one of the operators the lowering has not reached.
 4. **Run the double compile.** `scripts/ddc.sh`: build `stage1` with
    `trustc`, build `stage2` with `stage1`, demand `stage2 == stage1`. Report
    the two hashes whether or not they match, because a number that is only
