@@ -2592,6 +2592,23 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.52 — two type arguments, one name.** A monomorphization is named by
+its head and its arguments with `.` between them, which is how Ch. 6 §4
+writes a path and for the same reason: TIR §1 admits a `.` in an identifier
+and not a `<`. The scheme does not say where one argument ends and the next
+begins, so `Holder<Option<t27>>` and a two-parameter `Holder<Option, t27>`
+would both be `Holder.Option.t27`.
+
+Nothing is wrong today — a program with both would need two types of the
+same head and different arity, which Ch. 4 §2.1 does not allow. It is
+recorded because it is a property of the *name* and not of the program, and
+the first thing that changes it — a generic type reachable through two
+paths, a trait with a type parameter used as an argument — makes two
+different types indistinguishable in the TIR.
+
+Found by writing Ch. 4 in Trust: the second implementation prints the same
+name, and only because it makes the same ambiguity.
+
 **G9.51 — an item could not name a type written after it.** Ch. 0 §3 says
 every item in a file is visible to every other whatever the order. A field
 of type `Option<T>` instantiates `Option` where it is written, and that

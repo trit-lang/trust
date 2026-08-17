@@ -1,0 +1,26 @@
+struct Span { lo: taddr, hi: taddr }
+
+fn find(v: &Vec<t27>, n: t27) -> Option<taddr> { Option::None }
+fn read(n: t27) -> Result<t27, Span> { Result::Ok(n) }
+
+fn options(v: &Vec<t27>) -> t27 {
+    let a = find(v, 1);
+    let b = read(2);
+    let c = Span { lo: 0, hi: 1 };
+    let d = Option::Some(3);
+    let e: Result<t27, Span> = Result::Ok(4);
+    let f = Option::Some(Span { lo: 0, hi: 1 });
+    0
+}
+
+fn loops(v: Vec<t27>, s: &str) -> t27 {
+    let mut total = 0;
+    for x in v {
+        let inner = x + 1;
+        total += inner;
+    }
+    for c in s {
+        let n = c as t27;
+    }
+    total
+}

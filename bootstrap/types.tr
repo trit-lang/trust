@@ -39,6 +39,19 @@ pub struct Sig {
     pub ret: ast::Ty,
 }
 
+/// One variant, and what its enum is.
+///
+/// A generic enum's variant carries the enum's parameters, so what
+/// `Option::Some(3)` is depends on what `3` is: the payload's declared
+/// types are matched against the arguments' and the answer is the enum with
+/// those (Ch. 4 §2.3).
+pub struct Variant {
+    pub owner: String,
+    pub params: Vec<String>,
+    pub name: String,
+    pub fields: Vec<ast::Ty>,
+}
+
 /// One method, and the type it is written on. A method is reached through
 /// its receiver, so the receiver's head is half of its name (Ch. 4 §1.2).
 pub struct Method {
@@ -52,8 +65,7 @@ pub struct World {
     pub fields: Vec<Field>,
     pub sigs: Vec<Sig>,
     pub methods: Vec<Method>,
-    /// Every variant of every enum, as `Enum::Variant`, and its enum.
-    pub variants: Vec<Binding>,
+    pub variants: Vec<Variant>,
     pub locals: Vec<Binding>,
 }
 
@@ -69,6 +81,7 @@ fn main() -> t27 {
                 variants: Vec::new(),
                 locals: Vec::new(),
             };
+            prelude(&mut w);
             let mut i: taddr = 0;
             while i < items.len() {
                 gather(&mut w, &items[i]);
@@ -105,13 +118,29 @@ fn gather(w: &mut World, item: &ast::Item) {
             }
         }
         ast::What::Enum(name, gs, variants) => {
+            let mut params: Vec<String> = Vec::new();
+            let mut g: taddr = 0;
+            while g < gs.len() {
+                match &gs[g] {
+                    ast::Generic::Type(n, bounds) => params.push(n.to_string()),
+                    ast::Generic::Const(n, ty) => {}
+                }
+                g += 1;
+            }
             let mut i: taddr = 0;
             while i < variants.len() {
-                let mut full: String = Vec::new();
-                full.push_str(name);
-                full.push_str("::");
-                full.push_str(&variants[i].name);
-                w.variants.push(Binding { name: full, ty: named(name) });
+                let mut fields: Vec<ast::Ty> = Vec::new();
+                let mut k: taddr = 0;
+                while k < variants[i].fields.len() {
+                    fields.push(copy_ty(&variants[i].fields[k]));
+                    k += 1;
+                }
+                w.variants.push(Variant {
+                    owner: name.to_string(),
+                    params: copy_names(&params),
+                    name: variants[i].name.to_string(),
+                    fields: fields,
+                });
                 i += 1;
             }
         }
@@ -198,7 +227,7 @@ fn walk_block(w: &mut World, what: &str, b: &ast::Block) {
                 print(name);
                 print(" ");
                 let mut out: String = Vec::new();
-                ast::show_ty(&t, &mut out);
+                show_type(&t, &mut out);
                 println(&out);
                 // The value's own blocks come after, because a `let` is
                 // reported where it is written and what is inside it is
@@ -241,7 +270,15 @@ fn walk_expr(w: &mut World, what: &str, e: &ast::Expr) {
         ast::Expr::Loop(b) => walk_block(w, what, b),
         ast::Expr::For(name, it, b) => {
             walk_expr(w, what, it);
+            // The binding is what the loop walks over, one at a time, and
+            // is in scope for the body (Ch. 4 §5.7).
+            let over = type_of(w, it);
+            let bare = strip(&over);
+            let each = element_of(&bare);
+            let mark = w.locals.len();
+            w.locals.push(Binding { name: name.to_string(), ty: each });
             walk_block(w, what, b);
+            unbind(w, mark);
         }
         ast::Expr::Match(s, arms) => {
             walk_expr(w, what, s);
@@ -358,7 +395,7 @@ pub fn type_of(w: &mut World, e: &ast::Expr) -> ast::Ty {
             let on = strip(&whole);
             method_type(w, &on, name)
         }
-        ast::Expr::Aggregate(path, fields) => aggregate_type(w, path),
+        ast::Expr::Aggregate(path, fields) => aggregate_type(w, path, fields),
         ast::Expr::Nested(b) => block_type(w, b),
         ast::Expr::If(c, t, o) => block_type(w, t),
         ast::Expr::Match(s, arms) => {
@@ -368,6 +405,48 @@ pub fn type_of(w: &mut World, e: &ast::Expr) -> ast::Ty {
             type_of(w, &arms[0].body)
         }
         _ => ast::Ty::Unit,
+    }
+}
+
+/// A type, as the name it has once it is one type and not a family.
+///
+/// A generic type is *monomorphized* (Ch. 4 §2.5): `Option<taddr>` becomes
+/// one type whose name is its head and its arguments with `.` between them,
+/// which is how Ch. 6 §4 writes a path and for the same reason — TIR §1
+/// admits a `.` in an identifier and not a `<`.
+///
+/// A `Vec` is the exception because it is not a family the program can
+/// instantiate: it is one type the language writes, and it keeps its name.
+pub fn show_type(t: &ast::Ty, out: &mut String) {
+    match t {
+        ast::Ty::App(segments, args) => {
+            let head = joined(segments);
+            if head.same("Vec") {
+                ast::show_ty(t, out);
+                return;
+            }
+            out.push_str(&head);
+            let mut i: taddr = 0;
+            while i < args.len() {
+                out.push_str(".");
+                show_type(&args[i], out);
+                i += 1;
+            }
+        }
+        ast::Ty::Ref(inner, mutable) => {
+            if mutable {
+                out.push_str("&mut ");
+            } else {
+                out.push_str("&");
+            }
+            show_type(inner, out);
+        }
+        ast::Ty::Slice(inner) => {
+            out.push_str("[");
+            show_type(inner, out);
+            out.push_str("]");
+        }
+        _ => ast::show_ty(t, out),
     }
 }
 
@@ -438,15 +517,162 @@ fn return_of(w: &mut World, name: &str) -> ast::Ty {
 
 /// `Kind::Rect(2, 3)` is a value of `Kind`; `Point { x: 1 }` is one of
 /// `Point`. Both are written the same way and told apart by the `::`.
-fn aggregate_type(w: &mut World, path: &str) -> ast::Ty {
+fn aggregate_type(w: &mut World, path: &str, fields: &Vec<ast::Field>) -> ast::Ty {
+    let segments = split_path(path);
+    if segments.len() < 2 {
+        return named(path);
+    }
+    let owner = segments[0].to_string();
+    let variant = segments[1].to_string();
+    let at = variant_at(w, &owner, &variant);
+    if at < 0 {
+        return named(&owner);
+    }
+    if w.variants[at].params.len() == 0 {
+        return named(&owner);
+    }
+    // What the parameters are is what the payload turned out to be.
+    let params = copy_names(&w.variants[at].params);
+    let mut bound: Vec<Binding> = Vec::new();
+    let mut i: taddr = 0;
+    while i < fields.len() && i < w.variants[at].fields.len() {
+        let declared = copy_ty(&w.variants[at].fields[i]);
+        let actual = type_of(w, &fields[i].value);
+        bind_params(&params, &declared, &actual, &mut bound);
+        i += 1;
+    }
+    let mut args: Vec<ast::Ty> = Vec::new();
+    let mut k: taddr = 0;
+    while k < params.len() {
+        args.push(bound_or_unit(&bound, &params[k]));
+        k += 1;
+    }
+    ast::Ty::App(path_of(&owner), args)
+}
+
+/// Which variant of which enum, or −1.
+fn variant_at(w: &World, owner: &str, variant: &str) -> taddr {
     let mut i: taddr = 0;
     while i < w.variants.len() {
-        if w.variants[i].name.same(path) {
-            return copy_ty(&w.variants[i].ty);
+        if w.variants[i].owner.same(owner) && w.variants[i].name.same(variant) {
+            return i;
         }
         i += 1;
     }
-    named(path)
+    0 - 1
+}
+
+/// Match a declared type against what was passed, binding the parameters
+/// it names on the way (Ch. 4 §2.3).
+fn bind_params(
+    params: &Vec<String>,
+    declared: &ast::Ty,
+    actual: &ast::Ty,
+    out: &mut Vec<Binding>,
+) {
+    match declared {
+        ast::Ty::Name(segments) => {
+            let name = joined(segments);
+            if holds_name(params, &name) {
+                out.push(Binding { name: name, ty: copy_ty(actual) });
+            }
+        }
+        ast::Ty::Ref(inner, m) => {
+            match actual {
+                ast::Ty::Ref(other, n) => bind_params(params, inner, other, out),
+                _ => {}
+            }
+        }
+        ast::Ty::App(segments, args) => {
+            match actual {
+                ast::Ty::App(other, given) => {
+                    let mut i: taddr = 0;
+                    while i < args.len() && i < given.len() {
+                        bind_params(params, &args[i], &given[i], out);
+                        i += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+fn holds_name(names: &Vec<String>, name: &str) -> bool {
+    let mut i: taddr = 0;
+    while i < names.len() {
+        if names[i].same(name) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn bound_or_unit(bound: &Vec<Binding>, name: &str) -> ast::Ty {
+    let mut i: taddr = 0;
+    while i < bound.len() {
+        if bound[i].name.same(name) {
+            return copy_ty(&bound[i].ty);
+        }
+        i += 1;
+    }
+    ast::Ty::Unit
+}
+
+/// A path written `a::b`, as its segments.
+fn split_path(path: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur: String = Vec::new();
+    let mut i: taddr = 0;
+    while i < path.len() {
+        if path[i] == ':' && i + 1 < path.len() && path[i + 1] == ':' {
+            out.push(cur);
+            cur = Vec::new();
+            i += 2;
+        } else {
+            cur.push(path[i]);
+            i += 1;
+        }
+    }
+    out.push(cur);
+    out
+}
+
+/// The two enums Ch. 5 §6 makes language types. They are not in the file
+/// being read, and a checker that did not know them would answer nothing
+/// about the two answers every fallible function gives.
+fn prelude(w: &mut World) {
+    let mut t: Vec<String> = Vec::new();
+    t.push("T".to_string());
+    w.variants.push(Variant {
+        owner: "Option".to_string(),
+        params: copy_names(&t),
+        name: "None".to_string(),
+        fields: Vec::new(),
+    });
+    w.variants.push(Variant {
+        owner: "Option".to_string(),
+        params: copy_names(&t),
+        name: "Some".to_string(),
+        fields: one_ty(named("T")),
+    });
+    let mut te: Vec<String> = Vec::new();
+    te.push("T".to_string());
+    te.push("E".to_string());
+    w.variants.push(Variant {
+        owner: "Result".to_string(),
+        params: copy_names(&te),
+        name: "Ok".to_string(),
+        fields: one_ty(named("T")),
+    });
+    w.variants.push(Variant {
+        owner: "Result".to_string(),
+        params: copy_names(&te),
+        name: "Err".to_string(),
+        fields: one_ty(named("E")),
+    });
 }
 
 /// The methods the language writes, by receiver (Ch. 5 §2).
@@ -490,6 +716,7 @@ fn element_of(t: &ast::Ty) -> ast::Ty {
         }
         ast::Ty::Slice(inner) => copy_ty(inner),
         ast::Ty::Name(segments) => {
+            // A `str` is characters, and walking one gives them (Ch. 5 §1.1).
             if joined(segments).same("str") {
                 named("char")
             } else {

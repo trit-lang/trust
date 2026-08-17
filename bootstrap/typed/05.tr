@@ -1,0 +1,20 @@
+// Where a variant's type argument comes from the payload (Ch. 4 §2.3).
+struct Span { lo: taddr, hi: taddr }
+enum Holder<T> { Empty, One(T), Two(T, T) }
+enum Pairing<A, B> { Left(A), Right(B), Both(A, B) }
+
+fn variants() -> t27 {
+    let a = Holder::One(1);
+    let b = Holder::Two('x', 'y');
+    let c = Pairing::Both(1, true);
+    let d: Pairing<Span, bool> = Pairing::Left(Span { lo: 0, hi: 1 });
+    let e = Holder::One(Option::Some(2));
+    let f = Option::Some(Holder::One(0t));
+    0
+}
+
+fn through(v: &Vec<t27>) -> Option<taddr> {
+    let a = Option::Some(v.len());
+    let b = Option::Some(v[0]);
+    a
+}
