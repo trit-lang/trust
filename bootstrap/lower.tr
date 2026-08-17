@@ -1,0 +1,592 @@
+// TIR, in Trust: the module a program lowers to (TIR §1).
+//
+// The first slice of the compiler's *back* half, and the one that makes
+// `stage1` exist (docs/ddc.md §4). It answers with the same canonical text
+// `trustc build` prints — names included, `%v.3` and `%a.5` as much as the
+// instructions, because equality is on the text and a comparison that
+// normalized the names away could not see two implementations emitting
+// different code.
+//
+// What it lowers so far: a function's parameters, a `let` of a scalar, the
+// arithmetic of Ch. 1, a call, a `return`, and a tail. Not yet: control
+// flow, comparisons, aggregates, and the drops Ch. 3 §1.4 puts at the end
+// of a scope — in that order, which is the order the corpus grew.
+
+use ast;
+use ast::Ty;
+
+/// The signatures of the file, so a call knows what it answers with. Set
+/// before any function is lowered, since a call may name one written later.
+pub struct Sig {
+    pub name: String,
+    pub ret: String,
+}
+
+/// One local: the name it was written with, its slot, and its type.
+pub struct Slot {
+    pub name: String,
+    pub slot: String,
+    pub ty: String,
+}
+
+/// A function being emitted.
+///
+/// Slots are kept apart from instructions because TIR prints them first,
+/// whatever order they were made in — a slot is storage and storage has no
+/// place in the order of what runs.
+pub struct Emit {
+    pub slots: Vec<String>,
+    pub insts: Vec<String>,
+    pub locals: Vec<Slot>,
+    /// One counter for slots and values both, which is what makes two
+    /// implementations that agree about the order agree about the names.
+    pub next: t27,
+    /// Whether anything could not be lowered, in which case nothing is
+    /// printed for this function rather than something wrong.
+    pub stuck: bool,
+    /// What every function in the file answers with: a call is the one
+    /// thing a function cannot work out from itself.
+    pub sigs: Vec<Sig>,
+    /// Whether the block being lowered has already left, in which case
+    /// nothing after it is reached and no `ret` is added at its end.
+    pub done: bool,
+    /// What the parameters of each function are, so an argument knows what
+    /// width a literal written for it should be.
+    pub params: Vec<Sig>,
+}
+
+/// A value in TIR: either a name or a constant, as it is written.
+pub struct Value {
+    pub text: String,
+    pub ty: String,
+}
+
+/// The TIR type a written type has (§1). A `bool` and a `trit` are both one
+/// trit wide, and `taddr` and `char` are words.
+pub fn tir_ty(t: &ast::Ty) -> String {
+    match t {
+        ast::Ty::Name(segments) => {
+            let n = joined(segments);
+            if n.same("t9") {
+                "t9".to_string()
+            } else if n.same("bool") || n.same("trit") {
+                "t1".to_string()
+            } else if n.same("t27") || n.same("taddr") || n.same("char") {
+                "t27".to_string()
+            } else {
+                "?".to_string()
+            }
+        }
+        _ => "?".to_string(),
+    }
+}
+
+/// How many trytes a TIR type takes (Ch. 2 §1).
+pub fn trytes(ty: &str) -> t27 {
+    if ty.same("t9") || ty.same("t1") {
+        1
+    } else {
+        3
+    }
+}
+
+/// A fresh name, `%<prefix>.<n>`, and the counter moves on.
+fn fresh(e: &mut Emit, prefix: &str) -> String {
+    let mut out: String = Vec::new();
+    out.push_str("%");
+    out.push_str(prefix);
+    out.push_str(".");
+    push_int(&mut out, e.next);
+    e.next = e.next + 1;
+    out
+}
+
+/// A slot for a local, made where the value that fills it is ready.
+fn slot_for(e: &mut Emit, name: &str, ty: &str) -> String {
+    let mut prefix: String = Vec::new();
+    prefix.push_str(name);
+    prefix.push_str(".slot");
+    let slot = fresh(e, &prefix);
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&slot);
+    line.push_str(" = slot tryte[");
+    push_int(&mut line, trytes(ty));
+    line.push_str("]");
+    e.slots.push(line);
+    e.locals.push(Slot {
+        name: name.to_string(),
+        slot: slot.to_string(),
+        ty: ty.to_string(),
+    });
+    slot
+}
+
+/// Which local is called this, or −1.
+fn local_at(e: &Emit, name: &str) -> taddr {
+    let mut i = e.locals.len();
+    while i > 0 {
+        i -= 1;
+        if e.locals[i].name.same(name) {
+            return i as taddr;
+        }
+    }
+    0 - 1
+}
+
+/// One function, as the text TIR prints it, or nothing when something in it
+/// is not lowered yet.
+pub fn function(f: &ast::Fn, sigs: Vec<Sig>, params: Vec<Sig>, out: &mut String) -> bool {
+    let mut e = Emit {
+        slots: Vec::new(),
+        insts: Vec::new(),
+        locals: Vec::new(),
+        next: 1,
+        stuck: false,
+        sigs: sigs,
+        done: false,
+        params: params,
+    };
+
+    // A parameter arrives as a value and is given storage at once, so that
+    // everything below reads it the same way a local is read.
+    let mut header: String = Vec::new();
+    header.push_str("fn @");
+    header.push_str(&f.name);
+    header.push_str("(");
+    let mut i: taddr = 0;
+    while i < f.params.len() {
+        if i > 0 {
+            header.push_str(", ");
+        }
+        let ty = tir_ty(&f.params[i].ty);
+        if ty.same("?") {
+            return false;
+        }
+        header.push_str("%");
+        header.push_str(&f.params[i].name);
+        header.push_str(": ");
+        header.push_str(&ty);
+        let slot = slot_for(&mut e, &f.params[i].name, &ty);
+        let mut store: String = Vec::new();
+        store.push_str("    store ");
+        store.push_str(&ty);
+        store.push_str(" %");
+        store.push_str(&f.params[i].name);
+        store.push_str(", ");
+        store.push_str(&slot);
+        e.insts.push(store);
+        i += 1;
+    }
+    header.push_str(")");
+    let ret = tir_ty(&f.ret);
+    let unit = match &f.ret {
+        ast::Ty::Unit => true,
+        _ => false,
+    };
+    if !unit {
+        if ret.same("?") {
+            return false;
+        }
+        header.push_str(" -> ");
+        header.push_str(&ret);
+    }
+    header.push_str(" {");
+
+    let body = match &f.body {
+        Option::Some(b) => b,
+        Option::None => return false,
+    };
+    block(&mut e, body, &ret, unit);
+    if e.stuck {
+        return false;
+    }
+
+    out.push_str(&header);
+    out.push_str("\n^entry:\n");
+    let mut k: taddr = 0;
+    while k < e.slots.len() {
+        out.push_str(&e.slots[k]);
+        out.push_str("\n");
+        k += 1;
+    }
+    let mut j: taddr = 0;
+    while j < e.insts.len() {
+        out.push_str(&e.insts[j]);
+        out.push_str("\n");
+        j += 1;
+    }
+    out.push_str("}\n");
+    true
+}
+
+/// A function's body: its statements, then what it answers with.
+fn block(e: &mut Emit, b: &ast::Block, ret: &str, unit: bool) {
+    let mut i: taddr = 0;
+    while i < b.stmts.len() {
+        stmt(e, &b.stmts[i], ret);
+        i += 1;
+    }
+    match &b.tail {
+        Option::Some(x) => {
+            let v = value(e, x, ret);
+            if e.stuck {
+                return;
+            }
+            let mut line: String = Vec::new();
+            line.push_str("    ret ");
+            line.push_str(&v.text);
+            e.insts.push(line);
+        }
+        Option::None => {
+            // A block that already left does not leave twice.
+            if !e.done {
+                e.insts.push("    ret".to_string());
+            }
+        }
+    }
+}
+
+fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
+    match s {
+        ast::Stmt::Let(mutable, name, written, v) => {
+            let hint = match written {
+                Option::Some(t) => tir_ty(t),
+                Option::None => "".to_string(),
+            };
+            let val = value(e, v, &hint);
+            if e.stuck {
+                return;
+            }
+            // The slot is made *after* the value is ready, which is what
+            // decides the number it gets.
+            let ty = match written {
+                Option::Some(t) => tir_ty(t),
+                Option::None => val.ty.to_string(),
+            };
+            if ty.same("?") {
+                e.stuck = true;
+                return;
+            }
+            let slot = slot_for(e, name, &ty);
+            let mut line: String = Vec::new();
+            line.push_str("    store ");
+            line.push_str(&ty);
+            line.push_str(" ");
+            line.push_str(&val.text);
+            line.push_str(", ");
+            line.push_str(&slot);
+            e.insts.push(line);
+        }
+        ast::Stmt::Do(x) => {
+            match x {
+                // `return e;` as a statement is the whole of what follows.
+                ast::Expr::Return(v) => {
+                    match v {
+                        Option::Some(inner) => {
+                            let val = value(e, inner, ret);
+                            if e.stuck {
+                                return;
+                            }
+                            let mut line: String = Vec::new();
+                            line.push_str("    ret ");
+                            line.push_str(&val.text);
+                            e.insts.push(line);
+                            e.done = true;
+                        }
+                        Option::None => {
+                            e.insts.push("    ret".to_string());
+                            e.done = true;
+                        }
+                    }
+                }
+                _ => {
+                    let v = value(e, x, "");
+                    let _ = v;
+                }
+            }
+        }
+        _ => {
+            e.stuck = true;
+        }
+    }
+}
+
+/// What an expression is, as a TIR value.
+fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
+    match x {
+        // A literal takes its width from what is around it (Ch. 0 §5.2),
+        // and is a word where nothing says.
+        ast::Expr::Int(v) => {
+            let ty = if want.len() > 0 && !want.same("?") {
+                want.to_string()
+            } else {
+                "t27".to_string()
+            };
+            let mut out: String = Vec::new();
+            out.push_str("const ");
+            out.push_str(&ty);
+            out.push_str(" ");
+            push_int(&mut out, v);
+            Value { text: out, ty: ty }
+        }
+        ast::Expr::Bool(b) => {
+            let mut out: String = Vec::new();
+            out.push_str("const t1 ");
+            if b {
+                out.push_str("1");
+            } else {
+                out.push_str("0");
+            }
+            Value { text: out, ty: "t1".to_string() }
+        }
+        ast::Expr::Trit(v) => {
+            let mut out: String = Vec::new();
+            out.push_str("const t1 ");
+            push_int(&mut out, v);
+            Value { text: out, ty: "t1".to_string() }
+        }
+        ast::Expr::Char(v) => {
+            let mut out: String = Vec::new();
+            out.push_str("const t27 ");
+            push_int(&mut out, v);
+            Value { text: out, ty: "t27".to_string() }
+        }
+        ast::Expr::Group(inner) => value(e, inner, want),
+        ast::Expr::Name(n) => {
+            let at = local_at(e, n);
+            if at < 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let ty = e.locals[at].ty.to_string();
+            let slot = e.locals[at].slot.to_string();
+            let name = fresh(e, "v");
+            let mut line: String = Vec::new();
+            line.push_str("    ");
+            line.push_str(&name);
+            line.push_str(" = load ");
+            line.push_str(&ty);
+            line.push_str(" ");
+            line.push_str(&slot);
+            e.insts.push(line);
+            Value { text: name, ty: ty }
+        }
+        ast::Expr::Binary(op, a, b) => {
+            let left = value(e, a, want);
+            let right = value(e, b, &left.ty);
+            if e.stuck {
+                return unknown_value();
+            }
+            let word = arith(op);
+            if word.same("?") {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let ty = left.ty.to_string();
+            let name = fresh(e, "a");
+            let mut line: String = Vec::new();
+            line.push_str("    ");
+            line.push_str(&name);
+            line.push_str(" = ");
+            line.push_str(&word);
+            line.push_str(" ");
+            line.push_str(&ty);
+            line.push_str(" ");
+            line.push_str(&left.text);
+            line.push_str(", ");
+            line.push_str(&right.text);
+            e.insts.push(line);
+            Value { text: name, ty: ty }
+        }
+        ast::Expr::Call(callee, args) => {
+            let mut texts: Vec<String> = Vec::new();
+            let mut i: taddr = 0;
+            while i < args.len() {
+                let each = param_type(e, callee, i);
+                let v = value(e, &args[i], &each);
+                if e.stuck {
+                    return unknown_value();
+                }
+                texts.push(v.text);
+                i += 1;
+            }
+            let ty = call_type(e, callee);
+            let name = fresh(e, "r");
+            let mut line: String = Vec::new();
+            line.push_str("    ");
+            line.push_str(&name);
+            line.push_str(" = call @");
+            line.push_str(callee);
+            line.push_str("(");
+            let mut k: taddr = 0;
+            while k < texts.len() {
+                if k > 0 {
+                    line.push_str(", ");
+                }
+                line.push_str(&texts[k]);
+                k += 1;
+            }
+            line.push_str(") -> ");
+            line.push_str(&ty);
+            e.insts.push(line);
+            Value { text: name, ty: ty }
+        }
+        _ => {
+            e.stuck = true;
+            unknown_value()
+        }
+    }
+}
+
+/// The parameter types of every function, as one comma-joined string each.
+pub fn parameters(items: &Vec<ast::Item>) -> Vec<Sig> {
+    let mut out: Vec<Sig> = Vec::new();
+    let mut i: taddr = 0;
+    while i < items.len() {
+        match &items[i].what {
+            ast::What::Function(f) => {
+                let mut all: String = Vec::new();
+                let mut k: taddr = 0;
+                while k < f.params.len() {
+                    if k > 0 {
+                        all.push(',');
+                    }
+                    let each = tir_ty(&f.params[k].ty);
+                    all.push_str(&each);
+                    k += 1;
+                }
+                out.push(Sig { name: f.name.to_string(), ret: all });
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+pub fn signatures(items: &Vec<ast::Item>) -> Vec<Sig> {
+    let mut out: Vec<Sig> = Vec::new();
+    let mut i: taddr = 0;
+    while i < items.len() {
+        match &items[i].what {
+            ast::What::Function(f) => {
+                out.push(Sig {
+                    name: f.name.to_string(),
+                    ret: tir_ty(&f.ret),
+                });
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// What the parameter at this position of that function is.
+fn param_type(e: &Emit, name: &str, at: taddr) -> String {
+    let mut i: taddr = 0;
+    while i < e.params.len() {
+        if e.params[i].name.same(name) {
+            let parts = split_types(&e.params[i].ret);
+            if at < parts.len() {
+                return parts[at].to_string();
+            }
+            return "".to_string();
+        }
+        i += 1;
+    }
+    "".to_string()
+}
+
+/// The parameter types of a signature, which are kept as one string with
+/// `,` between them so that a `Sig` needs no second list.
+fn split_types(all: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur: String = Vec::new();
+    let mut i: taddr = 0;
+    while i < all.len() {
+        if all[i] == ',' {
+            out.push(cur);
+            cur = Vec::new();
+        } else {
+            cur.push(all[i]);
+        }
+        i += 1;
+    }
+    if cur.len() > 0 {
+        out.push(cur);
+    }
+    out
+}
+
+fn call_type(e: &mut Emit, name: &str) -> String {
+    let mut i: taddr = 0;
+    while i < e.sigs.len() {
+        if e.sigs[i].name.same(name) {
+            return e.sigs[i].ret.to_string();
+        }
+        i += 1;
+    }
+    e.stuck = true;
+    "?".to_string()
+}
+
+fn unknown_value() -> Value {
+    Value { text: "?".to_string(), ty: "?".to_string() }
+}
+
+/// The TIR instruction for an operator, or `?` for one not lowered yet.
+///
+/// Ch. 1 §5: the trapping flavour is what a written `+` means, since an
+/// overflow that wraps silently is the thing the chapter refuses.
+fn arith(op: &str) -> String {
+    if op.same("+") {
+        "add.trap".to_string()
+    } else if op.same("-") {
+        "sub.trap".to_string()
+    } else if op.same("*") {
+        "mul.trap".to_string()
+    } else {
+        "?".to_string()
+    }
+}
+
+fn joined(segments: &Vec<String>) -> String {
+    let mut out: String = Vec::new();
+    let mut i: taddr = 0;
+    while i < segments.len() {
+        if i > 0 {
+            out.push_str("::");
+        }
+        out.push_str(&segments[i]);
+        i += 1;
+    }
+    out
+}
+
+/// A number, written out. `/` and `%` are symmetric (Ch. 1 §4), so the
+/// correction is written here as it is everywhere else.
+fn push_int(out: &mut String, v: t27) {
+    let mut n = v;
+    if n < 0 {
+        out.push('-');
+        n = 0 - n;
+    }
+    if n == 0 {
+        out.push('0');
+        return;
+    }
+    let mut digits: Vec<char> = Vec::new();
+    while n > 0 {
+        let d = n % 10;
+        let fixed = if d < 0 { d + 10 } else { d };
+        digits.push(char::try_from(48 + fixed).unwrap());
+        n = (n - fixed) / 10;
+    }
+    let mut i = digits.len();
+    while i > 0 {
+        i -= 1;
+        out.push(digits[i]);
+    }
+}

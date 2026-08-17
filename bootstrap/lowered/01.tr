@@ -1,0 +1,2 @@
+fn add(a: t27, b: t27) -> t27 { a + b }
+fn main() -> t27 { add(1, 2) }

@@ -173,6 +173,13 @@ Each step is checkable on its own, and none of them is only for DDC.
    The order to build it in is the order this file's corpus grew: scalars
    and arithmetic first, then calls, then blocks and `br3`, then aggregates,
    then the drops Ch. 3 §1.4 puts at the end of a scope.
+
+   *Begun.* `bootstrap/lower.tr` emits the first slice — parameters, a `let`
+   of a scalar, Ch. 1's arithmetic, a call, a `return`, a tail — and
+   `scripts/bootstrap.sh` compares it against `trustc build` character for
+   character, names included. A function it does not lower yet is left out
+   rather than lowered wrongly, which is what keeps the comparison honest
+   while the slice is small.
 4. **Run the double compile.** `scripts/ddc.sh`: build `stage1` with
    `trustc`, build `stage2` with `stage1`, demand `stage2 == stage1`. Report
    the two hashes whether or not they match, because a number that is only

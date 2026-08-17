@@ -25,8 +25,9 @@
 set -eu
 
 cd "$(dirname "$0")/.."
-cargo build --quiet --release -p trust
+cargo build --quiet --release -p trust -p trustc
 trust=target/release/trust
+trustc=target/release/trustc
 
 n=0
 for f in bootstrap/corpus/*.tr; do
@@ -227,5 +228,21 @@ for f in bootstrap/mismatch/*.tr bootstrap/typed/*.tr bootstrap/ast.tr \
     c=$((c + $(printf '%s\n' "$rust" | wc -l)))
 done
 
-printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d modules of whole programs, %d names defined, %d names resolved, %d items rewritten, %d types laid out, %d bindings typed, %d functions checked — all agreed\n' \
-    "$n" "$r" "$e" "$i" "$w" "$b" "$m" "$y" "$u" "$z" "$l" "$t" "$c"
+# TIR: the module a program lowers to, character for character — names
+# included, since equality is on the text (docs/ddc.md §4). This is the pass
+# that makes `stage1` exist, and it is the first slice of it: scalars, the
+# arithmetic of Ch. 1, calls, `return` and a tail.
+g=0
+for f in bootstrap/lowered/*.tr; do
+    rust=$("$trustc" build "$f")
+    mine=$("$trust" run bootstrap/build.tr < "$f")
+    if [ "$rust" != "$mine" ]; then
+        echo "bootstrap: the two lower $f differently" >&2
+        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10 >&2
+        exit 1
+    fi
+    g=$((g + $(printf '%s\n' "$rust" | wc -l)))
+done
+
+printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d modules of whole programs, %d names defined, %d names resolved, %d items rewritten, %d types laid out, %d bindings typed, %d functions checked, %d lines of TIR — all agreed\n' \
+    "$n" "$r" "$e" "$i" "$w" "$b" "$m" "$y" "$u" "$z" "$l" "$t" "$c" "$g"

@@ -1,0 +1,16 @@
+fn f(a: t27, b: t9) -> t27 {
+    let x = a + 1;
+    let y: t9 = b;
+    return x;
+}
+fn g() -> t9 { 7 }
+fn h(a: t27) -> t27 { f(a, g()) }
+fn u(a: t27) { }
+fn widths(a: taddr, b: bool, c: char, d: trit) -> taddr {
+    let x = a * 2;
+    let y = a - 1;
+    x
+}
+fn t() -> bool { true }
+fn n() -> trit { 0t }
+fn nested(a: t27) -> t27 { (a + 1) * (a - 2) }

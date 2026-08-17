@@ -1,0 +1,47 @@
+// The TIR a program lowers to, printed as `trustc build` prints it.
+//
+//     trust run bootstrap/build.tr < file.tr
+//
+// One file, because a type and a lowering are facts about a file and the
+// module machinery is asked elsewhere. A function this does not lower yet is
+// left out rather than lowered wrongly, which is why the corpus is what it
+// is and not the whole of `bootstrap/`.
+
+mod ast;
+mod input;
+mod lex;
+mod lower;
+mod parse;
+
+fn main() -> t27 {
+    let src = input::read_all();
+    let mut p = parse::Parser { src: src, at: 0, no_struct: false };
+    match parse::file(&mut p) {
+        Result::Ok(items) => {
+            println("tir 0.1 target \"tritium\"");
+            let mut i: taddr = 0;
+            while i < items.len() {
+                match &items[i].what {
+                    ast::What::Function(f) => {
+                        let sigs = lower::signatures(&items);
+                        let params = lower::parameters(&items);
+                        let mut out: String = Vec::new();
+                        if lower::function(f, sigs, params, &mut out) {
+                            println("");
+                            print(&out);
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            0
+        }
+        Result::Err(err) => {
+            print("error ");
+            print_int(err.at as t27);
+            println("");
+            0
+        }
+    }
+}
