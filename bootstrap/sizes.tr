@@ -128,10 +128,16 @@ fn show_tag(t: &layout::Tag) {
 }
 
 /// A resolved item, as a definition the layout engine can read.
+/// A generic type is not among them: it is one type per instantiation
+/// (Ch. 4 §2.5) and none of them is called what is written, so there is
+/// nothing here to lay out and `trust layout` prints nothing for one either.
 fn collect(defs: &mut Vec<layout::Def>, item: ast::Item) {
     let linear = item.linear;
     match item.what {
         ast::What::Struct(name, gs, fields) => {
+            if gs.len() > 0 {
+                return;
+            }
             let mut tys: Vec<ast::Ty> = Vec::new();
             let mut names: Vec<String> = Vec::new();
             for f in fields {
@@ -151,6 +157,9 @@ fn collect(defs: &mut Vec<layout::Def>, item: ast::Item) {
             });
         }
         ast::What::Enum(name, gs, variants) => {
+            if gs.len() > 0 {
+                return;
+            }
             let mut tys: Vec<ast::Ty> = Vec::new();
             let mut counts: Vec<taddr> = Vec::new();
             let mut discs: Vec<t27> = Vec::new();

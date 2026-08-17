@@ -80,11 +80,23 @@ out rather than looked up.
 
 ### 3.2 `bootstrap/` compiles Trust — **in progress**
 
-It reads the language (lexer, parser, Ch. 6's three passes), and it answers
-Ch. 2 and the beginnings of Ch. 4. It does not yet lower to TIR, so there is
-no `stage1` to build. The order of the remaining work is the order of the
-chapters: finish Ch. 4's checking, then lowering, then the backend TIR
-already has.
+It reads the language (lexer, parser, Ch. 6's three passes), it answers
+Ch. 2 and Ch. 4's checking, and it **lowers to TIR** — every pass compared
+against `trustc` character for character, and the lowering compared
+including the names, since equality is on the text.
+
+What it lowers is the whole of the language it reads except one thing:
+**generic types**. `struct Pair<T>` and the impls written on them are not
+instantiated, and that is what the prelude's `Vec`, `Option` and `String`
+are — so a program that uses the library is still refused, and
+`bootstrap/`'s own source is such a program. Generic *functions* are done
+(§4 step 3), which was the larger half and the one the naming rules were
+in.
+
+So there is still no `stage1`: it needs a compiler that can compile
+`bootstrap/`, and `bootstrap/` is written in the part of Trust that is
+left. The remaining order is generic types, then the library, then the
+backend TIR already has.
 
 ### 3.3 The comparison has something to compare — **not started**
 
@@ -243,10 +255,9 @@ Each step is checkable on its own, and none of them is only for DDC.
    the first argument. `Drop` is the one impl whose method is named after
    the *type* instead.
 
-   What stands between here and `stage1` is **generics** — §2.5's
-   monomorphization. The prelude's plumbing is done and its bodies are
-   generic, so the two arrive together. The shape, written down before it is
-   written:
+   **Generics are done** — §2.5's monomorphization, which is what the last
+   of the ordinary language needed. The shape, written down before it was
+   written and unchanged by writing it:
 
    ```
    fn id<T>(x: T) -> T { x }
@@ -260,37 +271,83 @@ Each step is checkable on its own, and none of them is only for DDC.
    fn @id.t27(%x: t27) -> t27 { … }    ← and in the order they were queued
    ```
 
-   The emitter carries the written type now, which is what the key needs.
-   What is left is five coordinated pieces, and none of them needs a
-   decision:
+   The five pieces, as they were built:
 
    - a `Family` per generic function — its type parameters, its parameters'
      written types, and its own — so a call can work out which instantiation
      it means;
    - a `Job` queue on the emitter: the function's name and the written types
-     its parameters turned out to be, deduplicated;
+     its parameters turned out to be. It is **append-only**, and what
+     deduplicates is that a key already asked for is never asked for again;
    - inference at the call: match each declared parameter type against the
      argument's written type, which is the same matching the checker already
      does for a variant's payload;
    - `function()` taking a **key** — the type arguments in declaration order
      — which it substitutes for the type parameters as it reads the
-     signature, and appends to the name;
-   - the driver draining the queue after the ordinary functions and the
-     impls, which is where the instantiations go.
+     signature *and the body*, and appends to the name;
+   - `lower::instantiations()` draining the queue after the ordinary
+     functions and the impls, which is where the instantiations go.
 
-   The limit to state when it lands: substituting the *signature* is enough
-   for a body that mentions its type parameters nowhere else, and a body
-   that does — a cast to `T`, an aggregate of `T` — needs the substitution
-   to reach the body too. Until it does, such a body must be left out rather
-   than lowered wrongly, which is the rule G9.55 and G9.56 were both about.
+   Two things about the draining turned out to be part of what agrees, and
+   neither is visible in a design that only says "drain the queue".
 
-   Four things: an instantiation is named `id.trit` by Ch. 6 §4's rule, and
-   the argument is the *written* type (`trit`, not `t1`); the key is the
-   argument types and a body is emitted once per distinct key; the queue is
-   drained after the ordinary functions, so the instantiations come last;
-   and the type a call instantiates at is what Ch. 4 §2.3 infers from the
-   arguments — which the Trust checker already does for a variant's payload
-   and would do here for a call's.
+   The queue is a **stack**: the instantiation emitted next is the one asked
+   for most recently, so the instantiations come out in the reverse of the
+   order the calls asked for them, and one a generic body asks for while it
+   is being emitted comes out ahead of everything that was already waiting.
+   And the deduplication is at the moment a key is *asked for*, not at the
+   moment it is emitted — those two give different orders as soon as two
+   functions ask for the same two keys in opposite orders, and only the
+   first is the other implementation's.
+
+   Four more, all of them the same rule about names: an instantiation is
+   named `id.trit` by Ch. 6 §4, and the argument is the *written* type
+   (`trit`, not `t1`) — which is why the emitter had to stop calling a `bool`
+   and a `trit` both `t1` before any of this could be right; the key is the
+   argument types and a body is emitted once per distinct key; a name across
+   a module is the path, so `util::id` instantiates as `@util.id.t27`; and
+   the type a call instantiates at is what Ch. 4 §2.3 infers from the
+   arguments.
+
+   **What is refused**, and each is refused rather than emitted wrongly:
+
+   - a type parameter the parameters do not name. `fn narrow<T>(x: t27) -> T`
+     is chosen by what the *binding* wants, and this infers from arguments
+     only, so a call to one is left out;
+   - a `const` parameter (§2.4). A key here is type arguments and nothing
+     else, and a family whose members are told apart by a value needs a key
+     that can say so, so such a family is not one this instantiates at all;
+   - a type argument TIR has no spelling for — an aggregate — because an
+     aggregate is passed as a pointer and answered through an `sret`, and a
+     key that stood for one would name a function with a different shape;
+   - two arguments written where one type parameter was named that are not
+     the same type — `max(1, 0t)`. There is no key that is the right one,
+     and Ch. 4 §2.3 is what refuses it; `trustc` refuses it in the checker,
+     and this refuses it where it would otherwise have picked the first and
+     emitted a call whose second argument is the wrong width;
+   - generic *types*: `struct Pair<T>`, and **every** method of an
+     `impl<T> Pair<T>` — including one whose own signature has no parameter
+     in it, because `trustc` names it `@Pair.size.t27` all the same: the
+     *impl's* parameter becomes the method's key, which is the next thing
+     this has to learn. That is what the prelude's `Vec` is, which is why
+     the prelude still does not lower and why the library is not yet what
+     this compiles. The refusal reaches back into Ch. 2: neither
+     implementation lays out what is written for a generic type, which
+     `bootstrap/layouts/05.tr` now holds them to.
+
+   Generic **methods** on an ordinary type are done and are the same
+   machinery: a family under `C.with`, whose receiver is an argument the
+   call did not write and which therefore infers nothing. That one is worth
+   naming because it was found the way G9.55 and G9.56 were — by writing
+   the first program that uses it before writing the feature — and it
+   failed the same way: not by refusing, but by emitting `call @C.plus(…)`
+   under a name nothing defines.
+
+   The limit that was stated in advance — that substituting the signature is
+   not enough for a body that names its own type parameters — was met by
+   substituting in the body too: the emitter carries the key, so `let y: T`
+   and `x as T` are read under it. What is left of that limit is the list
+   above, and every item on it is a refusal.
 4. **Run the double compile.** `scripts/ddc.sh`: build `stage1` with
    `trustc`, build `stage2` with `stage1`, demand `stage2 == stage1`. Report
    the two hashes whether or not they match, because a number that is only

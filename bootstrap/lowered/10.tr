@@ -1,0 +1,61 @@
+// Generics — one function per instantiation, and none of them is the one
+// that was written (Ch. 4 §2.5).
+//
+// What is being held to the other implementation here is more than the
+// bodies: the *names* the instantiations get, which type argument each call
+// works out, and the order the queue gives them back — a stack, so a body
+// that asks for one of its own is emitted before what was waiting behind it.
+
+fn id<T>(x: T) -> T {
+    x
+}
+
+fn twice<T>(x: T) -> T {
+    id(id(x))
+}
+
+fn pick<A, B>(a: A, b: B) -> A {
+    a
+}
+
+fn max<T>(a: T, b: T) -> T {
+    if a < b { b } else { a }
+}
+
+fn keep<T>(x: T) -> T {
+    let y: T = x;
+    y
+}
+
+fn widened<T>(x: T) -> t27 {
+    x as t27
+}
+
+struct C { n: t27 }
+
+impl C {
+    // A generic *method*: a family under the name a call to it uses, whose
+    // receiver is an argument the call did not write and infers nothing.
+    fn with<T>(&self, d: T) -> T { d }
+    fn ignore<T>(&self, d: T) -> t27 { self.n }
+}
+
+fn main() -> t27 {
+    // Two calls at the same type are one function, and the second is not
+    // queued: a key asked for once is never asked for again.
+    let a = id(1);
+    let b = id(0t);
+    let c = id(1);
+    let d = twice(2);
+    let e = pick(3, 1t);
+    let f = pick('x', 4);
+    let g = max(5, 6);
+    let h = max(1t, 0t);
+    let i = keep(7);
+    let j = widened(8);
+    let obj = C { n: 9 };
+    let k = obj.with(1t);
+    let l = obj.with(10);
+    let m = obj.ignore('z');
+    a
+}

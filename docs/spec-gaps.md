@@ -2592,6 +2592,97 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.59 — a generic method called under a name nothing defines, and a
+generic type laid out as though it were one.** The third, fourth and fifth
+times in three rounds that the implementation did something instead of
+refusing, and the reason they are worth a number of their own is that the
+fix for the previous two did not prevent any of them.
+
+When generic *functions* were left out (G9.55), a call to one was made stuck
+because `signatures()` gave a generic function's answer as `?`. The same
+function collects `impl` methods, and there the check was not repeated — so
+`fn plus<T>(&self, d: T) -> t27`, whose answer is a type with no parameter
+in it, had an answer, and the call came out as
+
+```
+%r.3 = call @C.plus(%c.slot.2, const t27 2) -> t27
+```
+
+while `trustc` emitted `@C.plus.t27`. Not a missing function: a **wrongly
+named** one, which the linker cannot catch because the caller and the
+definition disagree in the one direction that leaves both looking valid.
+
+Looking for a second place where that name is made found a **fourth** and a
+**fifth**. The fourth is a method of an `impl<T> Pair<T>`, whose own
+signature has no parameter in it at all. `fn size(&self) -> t27` on a parameterized impl is still one
+function per instantiation of the *type*, and `trustc` calls it
+`@Pair.size.t27`; this emitted `@Pair.size`. It is refused now, along with
+every other method of an impl with parameters of its own, because
+instantiating a type is not something this does yet.
+
+The fifth is the same mistake one pass earlier and is not about a name at
+all: `bootstrap/sizes.tr` **laid out** `struct Holder<T> { n: t27, held: T }`
+and reported `Holder ! no such type`, and `struct R<T> { a: t27 }` as
+`R size=3 align=3 +0`. `trust layout` prints nothing for either, because a
+generic type is not a type and there is nothing there to lay out. Two
+implementations disagreeing about Ch. 2 is worse than either of them being
+wrong about Ch. 4, since Ch. 2 is the part that needs no inference and was
+supposed to be the easy agreement. `bootstrap/layouts/05.tr` is that file
+now, and both print nothing for the three generic types in it.
+
+The rule the five of them share, stated as generally as it goes: a check
+that something is not what it looks like has to be made everywhere that kind
+of thing is made, and *what is written* is made in four places here — two
+signature tables, a definition table, and a layout pass. The check is
+there now — and generic methods on an ordinary type are instantiated rather
+than refused, so it is no longer the only thing between the emitter and a
+wrong name.
+
+**G9.58 — nothing says what order the instantiations come out in.**
+Monomorphization (Ch. 4 §2.5) says a generic function is one function per
+distinct set of type arguments, and Ch. 6 §4 says what each one is called.
+Neither says the order they are **emitted** in, and for a compiler with one
+implementation that is not a question anyone has to answer.
+
+It is a question here. Two implementations are compared character for
+character, so the order of the functions in the module is part of what
+agrees, and it is decided by something no chapter mentions: whether the
+queue of pending instantiations is a stack or a line, and whether a repeated
+key is discarded when it is asked for or when it is emitted. The four
+combinations give up to four different modules, and every one of them is a
+correct compilation of the program.
+
+`trustc` pops the most recent and discards at the asking, so `bootstrap/`
+does too. That is a decision copied from an implementation, not derived from
+the spec, and it is recorded here because a second implementation written
+from the spec alone would have no way to arrive at it — which is exactly the
+kind of thing a diverse parent is supposed to be free to differ about
+(`docs/ddc.md` §3.4). Either the order should be specified, or the
+comparison should be told that this part of it is not normative. The first
+is cheaper and is what the code assumes.
+
+**G9.57 — a `bool` and a `trit` were both `t1`, and a key could not tell
+them apart.** The Trust emitter carries the type a program *wrote*, not the
+one TIR spells, precisely so that Ch. 6 §4's `id.trit` is not `id.t1`. It
+carried it everywhere except where values are made: a `true`, a `0t`, a
+`'a'`, a comparison and a `<=>` all reported TIR's name for their type
+instead of their own.
+
+Nothing depended on the difference until monomorphization did. `id(true)`
+and `id(0t)` would have named the same instantiation — `@id.t1` — and it
+would have been emitted once, with a body from whichever call came first;
+`trustc` emits two, `@id.bool` and `@id.trit`. A wrong *name* is worse than
+a missing one, because a missing one is a linker error and a wrong one is a
+program.
+
+The fix is one line in each of five places, and the reason it is a gap entry
+rather than a commit message is what it says about the invariant: the
+emitter has two vocabularies for the same thing, and the rule that keeps
+them apart — the written one is carried, TIR's is asked for at the moment
+TIR is written — is not written down anywhere the compiler can check. It is
+now stated at `tir_ty` in `bootstrap/lower.tr`, which is the only place it
+could be.
+
 **G9.56 — two addresses compared instead of two values.** `a == b` on a
 type the program defines is a call to what `derive(Eq)` wrote (Ch. 4 §6).
 The Trust lowering emitted `cmp K %a.slot, %b.slot` — a scalar comparison

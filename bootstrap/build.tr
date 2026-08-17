@@ -21,17 +21,18 @@ fn main() -> t27 {
         Result::Ok(items) => {
             println("tir 0.1 target \"tritium\"");
             // Ordinary functions first and destructors after them, which
-            // is the order the module is written in.
+            // is the order the module is written in, and the instantiations
+            // of Ch. 4 §2.5 last, because a call is what asks for one.
+            let mut queued: Vec<lower::Job> = Vec::new();
             let mut i: taddr = 0;
             while i < items.len() {
                 match &items[i].what {
                     ast::What::Function(f) => {
-                        let sigs = lower::signatures(&items);
-                        let params = lower::parameters(&items);
-                        let defs = lower::definitions(&items);
-                        let drops = lower::destructors(&items);
                         let mut out: String = Vec::new();
-                        if lower::function(f, sigs, params, defs, drops, "".to_string(), &mut out) {
+                        if lower::function(
+                            f, lower::context(&items), "".to_string(),
+                            Vec::new(), &mut queued, &mut out)
+                        {
                             println("");
                             print(&out);
                         }
@@ -51,21 +52,23 @@ fn main() -> t27 {
                         };
                         let mut k: taddr = 0;
                         while k < fns.len() {
-                            let sigs = lower::signatures(&items);
-                            let params = lower::parameters(&items);
-                            let defs = lower::definitions(&items);
-                            let drops = lower::destructors(&items);
                             let mut out: String = Vec::new();
                             // `Drop` is the one impl whose method becomes a
                             // function named after the *type* and not after
                             // the method (Ch. 3 §1.4).
-                            let made = if named.same("Drop") {
+                            // An impl with parameters of its own is one impl per
+                            // instantiation of the type, and its methods are named
+                            // after that — which is a type this does not instantiate.
+                            let made = if !lower::plain_impl(gs) {
+                                false
+                            } else if named.same("Drop") {
                                 lower::destructor(
-                                    &fns[k], &owner, sigs, params, defs, drops, &mut out)
+                                    &fns[k], &owner, lower::context(&items), &mut out)
                             } else {
                                 lower::function(
-                                    &fns[k], sigs, params, defs, drops,
-                                    owner.to_string(), &mut out)
+                                    &fns[k], lower::context(&items),
+                                    owner.to_string(), Vec::new(),
+                                    &mut queued, &mut out)
                             };
                             if made {
                                 println("");
@@ -77,6 +80,13 @@ fn main() -> t27 {
                     _ => {}
                 }
                 d += 1;
+            }
+            let made = lower::instantiations(&items, &mut queued);
+            let mut z: taddr = 0;
+            while z < made.len() {
+                println("");
+                print(&made[z].text);
+                z += 1;
             }
             0
         }

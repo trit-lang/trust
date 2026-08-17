@@ -1,0 +1,17 @@
+// A module of generic functions, so the instantiations are asked for
+// across a module boundary: what is queued is the *path* a name resolves
+// to (Ch. 6 §4), and the two implementations have to agree about that too.
+
+pub fn id<T>(x: T) -> T { x }
+
+pub fn max<T>(a: T, b: T) -> T { if a < b { b } else { a } }
+
+pub fn unused<T>(x: T) -> T { x }
+
+pub struct Box { n: t27 }
+
+impl Box {
+    // A generic method across a module: the name a call to it uses is the
+    // path of the type it is written on, and the key goes after that.
+    fn take<T>(&self, d: T) -> T { d }
+}

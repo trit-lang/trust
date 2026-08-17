@@ -1,0 +1,16 @@
+// A generic type is not a type. It is one type per instantiation (Ch. 4
+// §2.5), none of them is called what is written here, and neither
+// implementation lays out what is written — so what both print for this
+// file is *nothing* about `Pair`, `Holder` or `Either`, and the two
+// concrete types below.
+struct Pair<T> { a: T, b: T }
+
+struct Holder<T> { n: t27, held: T }
+
+enum Either<A, B> { Left(A), Right(B) }
+
+struct Plain { a: t27, b: t9 }
+
+enum Flag { Off, On(t9) }
+
+fn main() -> t27 { 0 }

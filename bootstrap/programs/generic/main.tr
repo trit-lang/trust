@@ -1,0 +1,12 @@
+mod util;
+
+fn twice(n: t27) -> t27 { util::id(n) + util::id(n) }
+
+fn main() -> t27 {
+    let bx = util::Box { n: 3 };
+    let t = bx.take(1t);
+    let u = bx.take(4);
+    let a = util::max(1, 2);
+    let b = util::max(0t, 1t);
+    twice(a)
+}

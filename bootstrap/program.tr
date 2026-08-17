@@ -127,16 +127,16 @@ fn main() -> t27 {
     println("tir 0.1 target \"tritium\"");
 
     let mut out: Vec<Emitted> = Vec::new();
+    let mut queued: Vec<lower::Job> = Vec::new();
     let mut k: taddr = 0;
     while k < items.len() {
         match &items[k].what {
             ast::What::Function(fun) => {
-                let sigs = lower::signatures(&items);
-                let params = lower::parameters(&items);
-                let defs = lower::definitions(&items);
-                let drops = lower::destructors(&items);
                 let mut text: String = Vec::new();
-                if lower::function(fun, sigs, params, defs, drops, "".to_string(), &mut text) {
+                if lower::function(
+                    fun, lower::context(&items), "".to_string(),
+                    Vec::new(), &mut queued, &mut text)
+                {
                     let calls = callees(&text);
                     out.push(Emitted { name: fun.name.to_string(), text: text, calls: calls });
                 }
@@ -156,20 +156,22 @@ fn main() -> t27 {
                 };
                 let mut m: taddr = 0;
                 while m < fns.len() {
-                    let sigs = lower::signatures(&items);
-                    let params = lower::parameters(&items);
-                    let defs = lower::definitions(&items);
-                    let drops = lower::destructors(&items);
                     let mut text: String = Vec::new();
                     // `Drop` is the one impl whose method becomes a function
                     // named after the *type* and not after the method.
-                    let made = if named.same("Drop") {
+                    // An impl with parameters of its own is one impl per
+                    // instantiation of the type, and its methods are named
+                    // after that — which is a type this does not instantiate.
+                    let made = if !lower::plain_impl(gs) {
+                        false
+                    } else if named.same("Drop") {
                         lower::destructor(
-                            &fns[m], &owner, sigs, params, defs, drops, &mut text)
+                            &fns[m], &owner, lower::context(&items), &mut text)
                     } else {
                         lower::function(
-                            &fns[m], sigs, params, defs, drops,
-                            owner.to_string(), &mut text)
+                            &fns[m], lower::context(&items),
+                            owner.to_string(), Vec::new(),
+                            &mut queued, &mut text)
                     };
                     if made {
                         let mut full: String = Vec::new();
@@ -190,6 +192,21 @@ fn main() -> t27 {
             _ => {}
         }
         d += 1;
+    }
+
+    // The instantiations, after the ordinary functions and the impls: what
+    // a program asks for is known once every call in it has been read
+    // (Ch. 4 §2.5).
+    let made = lower::instantiations(&items, &mut queued);
+    let mut z: taddr = 0;
+    while z < made.len() {
+        let calls = callees(&made[z].text);
+        out.push(Emitted {
+            name: made[z].name.to_string(),
+            text: made[z].text.to_string(),
+            calls: calls,
+        });
+        z += 1;
     }
 
     let live = reachable(&out);
