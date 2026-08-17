@@ -35,6 +35,12 @@ pub struct Family {
     /// Its type parameters, in declaration order — which is the order a key
     /// is in, and the only thing that makes a key readable back.
     pub tyvars: Vec<String>,
+    /// How many of them the *receiver* decides. A method of an
+    /// `impl<T> Pair<T>` is a family whose first parameter is not written
+    /// anywhere a call can see: it is whatever the receiver turned out to
+    /// be, so it is read off the receiver's own instantiation and the rest
+    /// are inferred from the arguments as usual.
+    pub from_self: taddr,
     /// The written head of each parameter's type, `,`-joined: a type
     /// parameter's own name wherever that is what was written.
     pub params: String,
@@ -47,6 +53,42 @@ pub struct Family {
 pub struct Job {
     pub name: String,
     pub key: Vec<String>,
+}
+
+/// What a mangled name was made from.
+///
+/// `Holder.Pair.t27` cannot be read back into a head and its arguments —
+/// the dots do not say where one stops — so what made it is remembered
+/// rather than parsed. A method of a parameterized impl needs exactly that
+/// reading: which instantiation its receiver is.
+pub struct Inst {
+    pub full: String,
+    pub base: String,
+    pub key: Vec<String>,
+}
+
+/// What a function answers with, as it was written.
+///
+/// `sigs` carries the name TIR gives an answer and has none for an
+/// aggregate, because TIR does not answer with one — it is written into
+/// storage the caller provides (TIR §3). So the caller needs the type
+/// itself, to know how much storage that is.
+pub struct RetTy {
+    pub name: String,
+    pub ty: ast::Ty,
+}
+
+/// A generic type as it was written (Ch. 4 §2.5).
+///
+/// A type with parameters is not a type; it is one type per instantiation,
+/// and none of them is called what is written. Its fields still name its
+/// parameters here, because what makes a member of the family is reading
+/// them again under a key. A type written with no parameters is a family of
+/// one and is its own member, which is what `definitions` takes out.
+pub struct TyFamily {
+    pub name: String,
+    pub tyvars: Vec<String>,
+    pub def: layout::Def,
 }
 
 /// One function that was emitted: the name TIR knows it by, and its text.
@@ -66,6 +108,8 @@ pub struct Cx {
     pub defs: Vec<layout::Def>,
     pub drops: Vec<String>,
     pub families: Vec<Family>,
+    pub tyfams: Vec<TyFamily>,
+    pub rets: Vec<RetTy>,
 }
 
 /// One local: the name it was written with, its slot, and its type.
@@ -133,6 +177,20 @@ pub struct Emit {
     /// is read under the key too, and not only the signature.
     pub tyvars: Vec<String>,
     pub key: Vec<String>,
+    /// The generic types of the file. `defs` holds the members that have
+    /// been asked for; this holds what the rest are made from.
+    pub tyfams: Vec<TyFamily>,
+    /// What each function answers with, as written, for the storage a
+    /// caller has to provide when the answer is an aggregate.
+    pub rets: Vec<RetTy>,
+    /// Every instantiation of a type made so far, with what it was made
+    /// from — the reading a mangled name cannot be parsed back into.
+    pub instances: Vec<Inst>,
+    /// The instantiations being made right now, so that a type reaching
+    /// itself is refused rather than read for ever. Nothing is taken off
+    /// it: by the time one finishes, its name is in `defs`, and that is
+    /// what every later ask finds first.
+    pub making: Vec<String>,
 }
 
 /// A value in TIR: either a name or a constant, as it is written.
@@ -295,7 +353,8 @@ fn slot_for(e: &mut Emit, name: &str, ty: &str) -> String {
     line.push_str(&slot);
     line.push_str(" = slot tryte[");
     let wide = tir_of(ty);
-    push_int(&mut line, trytes(&wide));
+    let size = sized(e, &wide);
+    push_int(&mut line, size);
     line.push_str("]");
     e.slots.push(line);
     e.locals.push(Slot {
@@ -304,6 +363,20 @@ fn slot_for(e: &mut Emit, name: &str, ty: &str) -> String {
         ty: ty.to_string(),
     });
     slot
+}
+
+/// How many trytes storage of this type takes: Ch. 2's answer where the
+/// type is one the program defines, and TIR's where it is a scalar.
+fn sized(e: &Emit, ty: &str) -> t27 {
+    let at = def_at(&e.defs, ty);
+    if at < 0 {
+        return trytes(ty);
+    }
+    let self_ty = ast::Ty::Name(one_name(ty));
+    match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(l) => l.size as t27,
+        Result::Err(why) => trytes(ty),
+    }
 }
 
 /// Which local is called this, or −1.
@@ -324,6 +397,7 @@ pub fn function(
     f: &ast::Fn,
     cx: Cx,
     owner: String,
+    outer: Vec<String>,
     key: Vec<String>,
     queued: &mut Vec<Job>,
     out: &mut String,
@@ -334,7 +408,15 @@ pub fn function(
     // *key* is what says this reading is an instantiation — the type
     // arguments, in declaration order — so what is refused here is a family
     // read without one, and a key that does not fit the family it is for.
-    let tyvars = generic_names(&f.generics);
+    // The receiver's parameters come first: a method of an
+    // `impl<T> Pair<T>` is read under `T` and then under its own.
+    let mut tyvars = copy_names(&outer);
+    let own = generic_names(&f.generics);
+    let mut g: taddr = 0;
+    while g < own.len() {
+        tyvars.push(own[g].to_string());
+        g += 1;
+    }
     if tyvars.len() != key.len() {
         return false;
     }
@@ -357,7 +439,30 @@ pub fn function(
         jobs: copy_jobs(queued),
         tyvars: copy_names(&tyvars),
         key: copy_names(&key),
+        tyfams: cx.tyfams,
+        rets: cx.rets,
+        instances: Vec::new(),
+        making: Vec::new(),
     };
+
+    settle(&mut e);
+
+    // What `self` points at is the receiver's *instantiation*, not the
+    // family: `&self` in an `impl<T> Pair<T>` reads the fields of the
+    // `Pair.t27` this one is for.
+    if outer.len() > 0 {
+        let mut mine: Vec<String> = Vec::new();
+        let mut o: taddr = 0;
+        while o < outer.len() {
+            mine.push(key[o].to_string());
+            o += 1;
+        }
+        let held = instantiate(&mut e, &owner, &mine);
+        if held.len() == 0 {
+            return false;
+        }
+        e.self_ty = held;
+    }
 
     // A parameter arrives as a value and is given storage at once, so that
     // everything below reads it the same way a local is read.
@@ -379,8 +484,10 @@ pub fn function(
     header.push_str("(");
     // A function whose answer is an aggregate is given the storage for it,
     // because a value that big is not carried in a register (TIR §3).
-    let written = head_of(&f.ret);
-    let answer = subst(&tyvars, &key, &written);
+    // An application is a type once it is instantiated (Ch. 4 §2.5), so
+    // asking what the answer *is* is what makes `Pair<t27>` exist.
+    let written = subst_ty(&mut e, &tyvars, &key, &f.ret);
+    let answer = nominal(&mut e, &written);
     let sret = def_at(&e.defs, &answer) >= 0;
     if sret {
         header.push_str("%sret: ptr");
@@ -396,9 +503,6 @@ pub fn function(
         // address, and reading through it is a load and then the field's own
         // (Ch. 3 §2.2). An aggregate *value* is copied in; an address is not.
         if name.same("self") && is_reference(&f.params[i].ty) {
-            if i > 0 || sret {
-                header.push_str(", ");
-            }
             header.push_str("%self: ptr");
             let slot = slot_for(&mut e, "self", "ptr");
             let mut store: String = Vec::new();
@@ -412,8 +516,8 @@ pub fn function(
             // An aggregate arrives as a pointer and is copied into storage
             // of its own on entry, field by field: what a function is given
             // is the caller's and what it holds is its own (Ch. 3 §1.1).
-            let written = head_of(&f.params[i].ty);
-            let owner = subst(&tyvars, &key, &written);
+            let written = subst_ty(&mut e, &tyvars, &key, &f.params[i].ty);
+            let owner = nominal(&mut e, &written);
             let at = def_at(&e.defs, &owner);
             if at < 0 {
                 return false;
@@ -632,28 +736,8 @@ fn copy_in(e: &mut Emit, name: &str, at: taddr) -> bool {
         }
         return true;
     }
-    let mut i: taddr = 0;
-    while i < l.offsets.len() {
-        let ty = tir_ty(&e.defs[at].fields[i]);
-        if ty.same("?") {
-            return false;
-        }
-        let src = offset_of(e, &from, l.offsets[i]);
-        let dst = offset_of(e, &slot, l.offsets[i]);
-        let v = fresh(e, "v");
-        let mut load: String = Vec::new();
-        load.push_str("    ");
-        load.push_str(&v);
-        load.push_str(" = load ");
-        let shown = tir_of(&ty);
-        load.push_str(&shown);
-        load.push_str(" ");
-        load.push_str(&src);
-        e.insts.push(load);
-        store_into(e, &ty, &v, &dst);
-        i += 1;
-    }
-    true
+    let owner = e.defs[at].name.to_string();
+    copy_fields(e, &from, &slot, &owner)
 }
 
 fn one_name(name: &str) -> Vec<String> {
@@ -675,7 +759,12 @@ fn aggregate_body(e: &mut Emit, b: &ast::Block, owner: &str) {
             match x {
                 // Built where it is wanted, rather than built and copied.
                 ast::Expr::Aggregate(path, fields) => {
-                    fill(e, "%sret", path, fields);
+                    let made = aggregate_type(e, path, fields);
+                    if made.len() == 0 {
+                        e.stuck = true;
+                        return;
+                    }
+                    fill(e, "%sret", &made, fields);
                 }
                 _ => {
                     let v = value(e, x, "");
@@ -715,6 +804,22 @@ fn fill(e: &mut Emit, dest: &str, path: &str, fields: &Vec<ast::Field>) {
             e.stuck = true;
             return;
         }
+        // A field that is itself an aggregate has no value to store: it
+        // is built where it can be and copied into place field by field.
+        let held = name_head(&e.defs[which].fields[index]);
+        if def_at(&e.defs, &held) >= 0 {
+            let v = value(e, &fields[i].value, &held);
+            if e.stuck {
+                return;
+            }
+            let at = offset_of(e, dest, l.offsets[index]);
+            if !copy_fields(e, &v.text, &at, &held) {
+                e.stuck = true;
+                return;
+            }
+            i += 1;
+            continue;
+        }
         let ty = tir_ty(&e.defs[which].fields[index]);
         // The value first, then where it goes: that order is what decides
         // the numbers, and the numbers are what the comparison is on.
@@ -730,24 +835,46 @@ fn fill(e: &mut Emit, dest: &str, path: &str, fields: &Vec<ast::Field>) {
 
 /// Copy one aggregate into another, field by field.
 fn copy_between(e: &mut Emit, from: &str, to: &str, owner: &str) {
+    if !copy_fields(e, from, to, owner) {
+        e.stuck = true;
+    }
+}
+
+/// One aggregate copied into another, field by field — and a field that is
+/// itself an aggregate by *its* fields, which is the whole of what makes a
+/// nested one work.
+///
+/// The offsets are taken from the pointer to the field and not recomputed
+/// from the base, so `w.p.b` is `offset (offset %w, 3), 3`. That is one
+/// instruction more than it needs to be and it is what the other
+/// implementation emits, and equality is on the text.
+fn copy_fields(e: &mut Emit, from: &str, to: &str, owner: &str) -> bool {
     let which = def_at(&e.defs, owner);
     if which < 0 {
-        e.stuck = true;
-        return;
+        return false;
     }
     let self_ty = ast::Ty::Name(one_name(owner));
     let l = match layout::of(&e.defs, &self_ty, 0) {
         Result::Ok(x) => x,
-        Result::Err(why) => {
-            e.stuck = true;
-            return;
-        }
+        Result::Err(why) => return false,
     };
     let mut i: taddr = 0;
     while i < l.offsets.len() {
-        let ty = tir_ty(&e.defs[which].fields[i]);
+        let held = name_head(&e.defs[which].fields[i]);
+        let inner = def_at(&e.defs, &held);
         let src = offset_of(e, from, l.offsets[i]);
         let dst = offset_of(e, to, l.offsets[i]);
+        if inner >= 0 {
+            if !copy_fields(e, &src, &dst, &held) {
+                return false;
+            }
+            i += 1;
+            continue;
+        }
+        let ty = tir_ty(&e.defs[which].fields[i]);
+        if ty.same("?") {
+            return false;
+        }
         let v = fresh(e, "v");
         let mut load: String = Vec::new();
         load.push_str("    ");
@@ -761,6 +888,7 @@ fn copy_between(e: &mut Emit, from: &str, to: &str, owner: &str) {
         store_into(e, &ty, &v, &dst);
         i += 1;
     }
+    true
 }
 
 /// A block written as a branch's arm: its statements, then its value.
@@ -1013,7 +1141,12 @@ pub fn destructor(
         jobs: Vec::new(),
         tyvars: Vec::new(),
         key: Vec::new(),
+        tyfams: cx.tyfams,
+        rets: cx.rets,
+        instances: Vec::new(),
+        making: Vec::new(),
     };
+    settle(&mut e);
     let at = def_at(&e.defs, owner);
     if at < 0 {
         return false;
@@ -1632,6 +1765,12 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
         // `let` then *renames* rather than copying out of — which is what
         // makes `let p = P { … }` cost nothing (Ch. 3 §1.1).
         ast::Expr::Aggregate(path, fields) => {
+            let made = aggregate_type(e, path, fields);
+            if made.len() == 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let path = &made;
             let which = def_at(&e.defs, path);
             if which < 0 {
                 e.stuck = true;
@@ -1645,7 +1784,11 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                     return unknown_value();
                 }
             };
-            let held = fresh(e, "agg");
+            // Storage for a value with nowhere else to be. Named as a
+            // temporary and not as an aggregate, because a `let` renames it
+            // to the binding's and everything else leaves it as it is —
+            // which is where the name shows.
+            let held = fresh(e, "tmp.slot");
             let mut line: String = Vec::new();
             line.push_str("    ");
             line.push_str(&held);
@@ -1842,9 +1985,33 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             full.push_str(name);
             // A generic method is a family like any other; what tells it
             // from a free one is that its receiver is already an argument.
-            let fam = family_at(e, &full);
+            // Where the receiver is an *instantiation*, the family is the
+            // one written on the type it instantiates — `Pair.first`, not
+            // `Pair.t27.first` — and its own key starts with the
+            // receiver's (Ch. 4 §2.5).
+            let inst = inst_at(e, &owner);
+            let base = if inst < 0 {
+                owner.to_string()
+            } else {
+                e.instances[inst].base.to_string()
+            };
+            let none: Vec<String> = Vec::new();
+            let given = if inst < 0 {
+                none
+            } else {
+                copy_names(&e.instances[inst].key)
+            };
+            let mut under: String = Vec::new();
+            under.push_str(&base);
+            under.push_str(".");
+            under.push_str(name);
+            let fam = family_at(e, &under);
             if fam >= 0 {
-                return generic_call(e, fam, &full, &slot, args);
+                return generic_call(e, fam, &under, &slot, &given, args);
+            }
+            let big = returned_aggregate(e, &full);
+            if big.len() > 0 {
+                return aggregate_call(e, &full, &big, &slot, args);
             }
             let mut texts: Vec<String> = Vec::new();
             let mut i: taddr = 0;
@@ -1887,7 +2054,15 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             // (Ch. 4 §2.3).
             let fam = family_at(e, callee);
             if fam >= 0 {
-                return generic_call(e, fam, callee, "", args);
+                let none: Vec<String> = Vec::new();
+                return generic_call(e, fam, callee, "", &none, args);
+            }
+            // A call whose answer is an aggregate is given the storage for
+            // it, and the storage is taken before the arguments are — which
+            // is what decides the numbers (TIR §3).
+            let big = returned_aggregate(e, callee);
+            if big.len() > 0 {
+                return aggregate_call(e, callee, &big, "", args);
             }
             let mut texts: Vec<String> = Vec::new();
             let mut i: taddr = 0;
@@ -1930,15 +2105,31 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
 }
 
 /// The nominal types the file defines, as the layout engine reads them.
+///
+/// A generic type is not among them: it is one type per instantiation
+/// (Ch. 4 §2.5), and none of them is called what is written. It is a
+/// *family*, and `instantiate` makes its members as they are asked for.
 pub fn definitions(items: &Vec<ast::Item>) -> Vec<layout::Def> {
+    let fams = type_families(items);
     let mut out: Vec<layout::Def> = Vec::new();
+    let mut i: taddr = 0;
+    while i < fams.len() {
+        if fams[i].tyvars.len() == 0 {
+            out.push(copy_def(&fams[i].def));
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Every struct and enum of the file, with the parameters each was written
+/// with — none for most of them, which is what makes those types as they
+/// stand and the rest families.
+pub fn type_families(items: &Vec<ast::Item>) -> Vec<TyFamily> {
+    let mut out: Vec<TyFamily> = Vec::new();
     let mut i: taddr = 0;
     while i < items.len() {
         match &items[i].what {
-            // A generic type is not a type: it is one per instantiation
-            // (Ch. 4 §2.5), and none of them is called what is written
-            // here. Nothing instantiates a type yet, so a definition with
-            // parameters is left out and every use of one is refused.
             ast::What::Struct(name, gs, fields) => {
                 let mut tys: Vec<ast::Ty> = Vec::new();
                 let mut names: Vec<String> = Vec::new();
@@ -1948,8 +2139,10 @@ pub fn definitions(items: &Vec<ast::Item>) -> Vec<layout::Def> {
                     tys.push(copy_ty(&fields[k].ty));
                     k += 1;
                 }
-                if gs.len() == 0 {
-                    out.push(layout::Def {
+                out.push(TyFamily {
+                    name: name.to_string(),
+                    tyvars: generic_names(gs),
+                    def: layout::Def {
                         name: name.to_string(),
                         is_enum: false,
                         linear: items[i].linear,
@@ -1957,8 +2150,8 @@ pub fn definitions(items: &Vec<ast::Item>) -> Vec<layout::Def> {
                         field_names: names,
                         counts: Vec::new(),
                         discriminants: Vec::new(),
-                    });
-                }
+                    },
+                });
             }
             ast::What::Enum(name, gs, variants) => {
                 let mut tys: Vec<ast::Ty> = Vec::new();
@@ -1981,8 +2174,10 @@ pub fn definitions(items: &Vec<ast::Item>) -> Vec<layout::Def> {
                     next = next + 1;
                     v += 1;
                 }
-                if gs.len() == 0 {
-                    out.push(layout::Def {
+                out.push(TyFamily {
+                    name: name.to_string(),
+                    tyvars: generic_names(gs),
+                    def: layout::Def {
                         name: name.to_string(),
                         is_enum: true,
                         linear: items[i].linear,
@@ -1990,7 +2185,35 @@ pub fn definitions(items: &Vec<ast::Item>) -> Vec<layout::Def> {
                         field_names: names,
                         counts: counts,
                         discriminants: discs,
-                    });
+                    },
+                });
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// What every function answers with, as it was written.
+pub fn returns(items: &Vec<ast::Item>) -> Vec<RetTy> {
+    let mut out: Vec<RetTy> = Vec::new();
+    let mut i: taddr = 0;
+    while i < items.len() {
+        match &items[i].what {
+            ast::What::Function(f) => {
+                out.push(RetTy { name: f.name.to_string(), ty: copy_ty(&f.ret) });
+            }
+            ast::What::Impl(gs, tr, ty, fns) => {
+                let owner = written_head(ty);
+                let mut k: taddr = 0;
+                while k < fns.len() {
+                    let mut full: String = Vec::new();
+                    full.push_str(&owner);
+                    full.push_str(".");
+                    full.push_str(&fns[k].name);
+                    out.push(RetTy { name: full, ty: copy_ty(&fns[k].ret) });
+                    k += 1;
                 }
             }
             _ => {}
@@ -1998,6 +2221,338 @@ pub fn definitions(items: &Vec<ast::Item>) -> Vec<layout::Def> {
         i += 1;
     }
     out
+}
+
+/// The aggregate a call answers with, made if this is the first ask — or
+/// nothing where the answer is not one.
+///
+/// This is where a call learns it has to provide storage: TIR answers with
+/// a value or with nothing, and a value that big is not one (TIR §3).
+fn returned_aggregate(e: &mut Emit, name: &str) -> String {
+    let mut i: taddr = 0;
+    while i < e.rets.len() {
+        if e.rets[i].name.same(name) {
+            let written = copy_ty(&e.rets[i].ty);
+            let none: Vec<String> = Vec::new();
+            let empty: Vec<String> = Vec::new();
+            let made = subst_ty(e, &none, &empty, &written);
+            let full = nominal(e, &made);
+            if full.len() > 0 && def_at(&e.defs, &full) >= 0 {
+                return full;
+            }
+            return "".to_string();
+        }
+        i += 1;
+    }
+    "".to_string()
+}
+
+/// Which type a literal `Pair { … }` builds: the member of the family its
+/// fields say it is (Ch. 4 §2.3), made if this is the first ask.
+///
+/// A type written with no parameters is a family of one and is its own
+/// answer, which is every aggregate that was written before this.
+fn aggregate_type(e: &mut Emit, path: &str, fields: &Vec<ast::Field>) -> String {
+    if def_at(&e.defs, path) >= 0 {
+        return path.to_string();
+    }
+    let at = tyfamily_at(e, path);
+    if at < 0 {
+        return "".to_string();
+    }
+    let mut key: Vec<String> = Vec::new();
+    let mut t: taddr = 0;
+    while t < e.tyfams[at].tyvars.len() {
+        let each = e.tyfams[at].tyvars[t].to_string();
+        let mut found: String = Vec::new();
+        let mut clash = false;
+        let mut i: taddr = 0;
+        while i < fields.len() {
+            let which = tyfield_at(e, at, &fields[i].name);
+            if which >= 0 {
+                let declared = name_head(&e.tyfams[at].def.fields[which]);
+                if declared.same(&each) {
+                    let got = guess_ty(e, &fields[i].value);
+                    if got.len() == 0 {
+                        clash = true;
+                    } else if found.len() == 0 {
+                        found = got;
+                    } else if !found.same(&got) {
+                        clash = true;
+                    }
+                }
+            }
+            i += 1;
+        }
+        if clash || found.len() == 0 {
+            return "".to_string();
+        }
+        key.push(found);
+        t += 1;
+    }
+    instantiate(e, path, &key)
+}
+
+/// Which field of a family is called this, or −1.
+fn tyfield_at(e: &Emit, at: taddr, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < e.tyfams[at].def.field_names.len() {
+        if e.tyfams[at].def.field_names[i].same(name) {
+            return i;
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
+/// What type an expression will turn out to be, without lowering it.
+///
+/// Only asked where a *type argument* has to be worked out before the
+/// values that decide it are emitted, and answered only for the shapes
+/// where the answer needs nothing but the expression: a literal is what
+/// §5.2 says a literal is, and a name is what it was bound as. Anything
+/// else answers nothing, and nothing is what refuses the instantiation.
+fn guess_ty(e: &mut Emit, x: &ast::Expr) -> String {
+    match x {
+        ast::Expr::Int(v) => "t27".to_string(),
+        ast::Expr::Bool(b) => "bool".to_string(),
+        ast::Expr::Trit(v) => "trit".to_string(),
+        ast::Expr::Char(v) => "char".to_string(),
+        ast::Expr::Group(inner) => guess_ty(e, inner),
+        ast::Expr::Name(n) => {
+            let at = local_at(e, n);
+            if at < 0 {
+                "".to_string()
+            } else {
+                e.locals[at].ty.to_string()
+            }
+        }
+        // A call answers with what its signature says, which is a fact
+        // about the file and needs nothing lowered. A call to a *generic*
+        // function answers with whatever that call works out, which is not
+        // one of those.
+        ast::Expr::Call(callee, args) => {
+            if family_at(e, callee) >= 0 {
+                return "".to_string();
+            }
+            let big = returned_aggregate(e, callee);
+            if big.len() > 0 {
+                return big;
+            }
+            let mut i: taddr = 0;
+            while i < e.sigs.len() {
+                if e.sigs[i].name.same(callee) {
+                    let ret = e.sigs[i].ret.to_string();
+                    if ret.same("?") {
+                        return "".to_string();
+                    }
+                    return ret;
+                }
+                i += 1;
+            }
+            "".to_string()
+        }
+        _ => "".to_string(),
+    }
+}
+
+/// A definition, copied. `defs` grows as instantiations are asked for, and
+/// what a family is made of has to survive being read more than once.
+fn copy_def(d: &layout::Def) -> layout::Def {
+    let mut tys: Vec<ast::Ty> = Vec::new();
+    let mut i: taddr = 0;
+    while i < d.fields.len() {
+        tys.push(copy_ty(&d.fields[i]));
+        i += 1;
+    }
+    let mut counts: Vec<taddr> = Vec::new();
+    let mut k: taddr = 0;
+    while k < d.counts.len() {
+        counts.push(d.counts[k]);
+        k += 1;
+    }
+    let mut discs: Vec<t27> = Vec::new();
+    let mut j: taddr = 0;
+    while j < d.discriminants.len() {
+        discs.push(d.discriminants[j]);
+        j += 1;
+    }
+    layout::Def {
+        name: d.name.to_string(),
+        is_enum: d.is_enum,
+        linear: d.linear,
+        fields: tys,
+        field_names: copy_names(&d.field_names),
+        counts: counts,
+        discriminants: discs,
+    }
+}
+
+/// Which family of types is called this, or −1.
+fn tyfamily_at(e: &Emit, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < e.tyfams.len() {
+        if e.tyfams[i].name.same(name) {
+            return i;
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
+/// The nominal type a written type denotes, making it if this is the first
+/// place that asked — or nothing for a type that names none.
+///
+/// `Pair<t27>` is `Pair.t27`, one type, laid out from `Pair`'s fields read
+/// with `t27` for `T`. The name is Ch. 6 §4's, the same one a
+/// monomorphized function gets, and for the same reason: TIR admits a `.`
+/// in an identifier and not a `<`.
+fn nominal(e: &mut Emit, t: &ast::Ty) -> String {
+    match t {
+        ast::Ty::Name(segments) => joined(segments),
+        ast::Ty::App(segments, args) => {
+            let head = joined(segments);
+            let mut key: Vec<String> = Vec::new();
+            let mut i: taddr = 0;
+            while i < args.len() {
+                let each = nominal(e, &args[i]);
+                if each.len() == 0 {
+                    return "".to_string();
+                }
+                key.push(each);
+                i += 1;
+            }
+            instantiate(e, &head, &key)
+        }
+        _ => "".to_string(),
+    }
+}
+
+/// One member of a family of types, made if it is not there already, and
+/// answered with the name it is known by — or nothing where there is no
+/// such family, the key does not fit it, or it reaches itself.
+fn instantiate(e: &mut Emit, head: &str, key: &Vec<String>) -> String {
+    let full = mangled(head, key);
+    if def_at(&e.defs, &full) >= 0 {
+        return full;
+    }
+    let at = tyfamily_at(e, head);
+    if at < 0 {
+        return "".to_string();
+    }
+    if e.tyfams[at].tyvars.len() != key.len() || key.len() == 0 {
+        return "".to_string();
+    }
+    // A type that reaches itself without an indirection has no size (Ch. 2
+    // §8), and one that reaches itself *through* an indirection is a size
+    // the reference already has — so neither needs reading twice.
+    if holds_name(&e.making, &full) {
+        return "".to_string();
+    }
+    e.making.push(full.to_string());
+    let tyvars = copy_names(&e.tyfams[at].tyvars);
+    let source = copy_def(&e.tyfams[at].def);
+    let mut fields: Vec<ast::Ty> = Vec::new();
+    let mut i: taddr = 0;
+    while i < source.fields.len() {
+        fields.push(subst_ty(e, &tyvars, key, &source.fields[i]));
+        i += 1;
+    }
+    let mut made = copy_def(&source);
+    made.name = full.to_string();
+    made.fields = fields;
+    e.defs.push(made);
+    e.instances.push(Inst {
+        full: full.to_string(),
+        base: head.to_string(),
+        key: copy_names(key),
+    });
+    full
+}
+
+/// Read every definition's fields once more, now that instantiating is
+/// possible.
+///
+/// A field written `Pair<t27>` is the type `Pair.t27`, and Ch. 2 lays out a
+/// type and not a family — so until this has run, a struct with a generic
+/// field has no layout and every use of it is refused. It runs once per
+/// function because that is where the table it needs lives.
+fn settle(e: &mut Emit) {
+    let mut out: Vec<layout::Def> = Vec::new();
+    let none: Vec<String> = Vec::new();
+    let empty: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < e.defs.len() {
+        let source = copy_def(&e.defs[i]);
+        let mut fields: Vec<ast::Ty> = Vec::new();
+        let mut k: taddr = 0;
+        while k < source.fields.len() {
+            fields.push(subst_ty(e, &none, &empty, &source.fields[k]));
+            k += 1;
+        }
+        let mut made = copy_def(&source);
+        made.fields = fields;
+        out.push(made);
+        i += 1;
+    }
+    e.defs = out;
+}
+
+/// Which instantiation of a type this name is, or −1.
+fn inst_at(e: &Emit, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < e.instances.len() {
+        if e.instances[i].full.same(name) {
+            return i;
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
+/// A written type read under a key: a parameter stands for what the
+/// instantiation put there, and an application becomes the one name its
+/// member is known by (Ch. 4 §2.5).
+///
+/// A type it cannot make is left as it was written, which is a type the
+/// layout engine says it does not lay out — so a use of it is refused
+/// rather than laid out as something else.
+fn subst_ty(
+    e: &mut Emit,
+    tyvars: &Vec<String>,
+    key: &Vec<String>,
+    t: &ast::Ty,
+) -> ast::Ty {
+    match t {
+        ast::Ty::Name(segments) => {
+            let written = joined(segments);
+            let n = subst(tyvars, key, &written);
+            ast::Ty::Name(one_name(&n))
+        }
+        ast::Ty::App(segments, args) => {
+            let head = joined(segments);
+            let mut inner: Vec<String> = Vec::new();
+            let mut i: taddr = 0;
+            while i < args.len() {
+                let each = subst_ty(e, tyvars, key, &args[i]);
+                let name = nominal(e, &each);
+                if name.len() == 0 {
+                    return copy_ty(t);
+                }
+                inner.push(name);
+                i += 1;
+            }
+            let full = instantiate(e, &head, &inner);
+            if full.len() == 0 {
+                return copy_ty(t);
+            }
+            ast::Ty::Name(one_name(&full))
+        }
+        ast::Ty::Ref(held, m) => ast::Ty::Ref(Box::new(subst_ty(e, tyvars, key, held)), m),
+        ast::Ty::Slice(held) => ast::Ty::Slice(Box::new(subst_ty(e, tyvars, key, held))),
+        ast::Ty::Unit => ast::Ty::Unit,
+        ast::Ty::SelfTy => ast::Ty::SelfTy,
+    }
 }
 
 /// A type, copied. There is no `Clone` here and a type is a tree.
@@ -2220,6 +2775,8 @@ pub fn context(items: &Vec<ast::Item>) -> Cx {
         defs: definitions(items),
         drops: destructors(items),
         families: families(items),
+        tyfams: type_families(items),
+        rets: returns(items),
     }
 }
 
@@ -2235,36 +2792,47 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
     while i < items.len() {
         match &items[i].what {
             ast::What::Function(f) => {
-                if is_family(f) {
+                if is_family(f, 0) {
                     out.push(Family {
                         name: f.name.to_string(),
                         tyvars: generic_names(&f.generics),
+                        from_self: 0,
                         params: written_params(&f.params),
                         ret: name_head(&f.ret),
                     });
                 }
             }
             // A generic *method* is a family too, under the name a call to
-            // it uses (Ch. 4 §1.2). An `impl` with parameters of its own is
-            // not: what those stand for is decided by the type the impl is
-            // written on, which is a question this does not ask yet.
+            // it uses (Ch. 4 §1.2) — and so is every method of an `impl`
+            // with parameters of its own, because those are decided by the
+            // receiver and the method is one function per instantiation of
+            // it just the same.
             ast::What::Impl(gs, tr, ty, fns) => {
                 let named = match tr {
                     Option::Some(t) => written_head(t),
                     Option::None => "".to_string(),
                 };
-                if plain_impl(gs) && !named.same("Drop") {
+                let outer = self_parameters(gs, ty);
+                if !named.same("Drop") {
                     let owner = written_head(ty);
                     let mut k: taddr = 0;
                     while k < fns.len() {
-                        if is_family(&fns[k]) {
+                        if is_family(&fns[k], outer.len()) {
                             let mut full: String = Vec::new();
                             full.push_str(&owner);
                             full.push_str(".");
                             full.push_str(&fns[k].name);
+                            let mut tyvars = copy_names(&outer);
+                            let own = generic_names(&fns[k].generics);
+                            let mut g: taddr = 0;
+                            while g < own.len() {
+                                tyvars.push(own[g].to_string());
+                                g += 1;
+                            }
                             out.push(Family {
                                 name: full,
-                                tyvars: generic_names(&fns[k].generics),
+                                tyvars: tyvars,
+                                from_self: outer.len() as taddr,
                                 params: written_params(&fns[k].params),
                                 ret: name_head(&fns[k].ret),
                             });
@@ -2291,10 +2859,45 @@ pub fn plain_impl(gs: &Vec<ast::Generic>) -> bool {
     gs.len() == 0
 }
 
-/// Whether this function is a family: written with type parameters, all of
-/// them types, and with a body to read again under a key.
-fn is_family(f: &ast::Fn) -> bool {
-    if f.generics.len() == 0 {
+/// The parameters an `impl`'s *self type* binds, in the order the receiver's
+/// instantiation gives them — or none where the two are not written to
+/// match.
+///
+/// `impl<T> Pair<T>` binds `T` to whatever the receiver's first argument
+/// turned out to be, and that is only readable off the receiver where the
+/// self type is the impl's parameters, in order, and nothing else.
+/// `impl<A, B> Either<B, A>` is not, and its methods are left out rather
+/// than instantiated at the wrong argument.
+fn self_parameters(gs: &Vec<ast::Generic>, ty: &ast::Ty) -> Vec<String> {
+    let none: Vec<String> = Vec::new();
+    if gs.len() == 0 {
+        return none;
+    }
+    let want = generic_names(gs);
+    match ty {
+        ast::Ty::App(segments, args) => {
+            if args.len() != want.len() {
+                return none;
+            }
+            let mut i: taddr = 0;
+            while i < args.len() {
+                let each = name_head(&args[i]);
+                if !each.same(&want[i]) {
+                    return none;
+                }
+                i += 1;
+            }
+            want
+        }
+        _ => none,
+    }
+}
+
+/// Whether this function is a family: all of whose type parameters are
+/// types, with a body to read again under a key, and with at least one
+/// parameter to read it under — its own, or the receiver's.
+fn is_family(f: &ast::Fn, outer: taddr) -> bool {
+    if f.generics.len() + outer == 0 {
         return false;
     }
     let mut g: taddr = 0;
@@ -2377,11 +2980,18 @@ fn generic_call(
     fam: taddr,
     callee: &str,
     recv: &str,
+    given: &Vec<String>,
     args: &Vec<ast::Expr>,
 ) -> Value {
     // A method's receiver is its first argument and is not written as one,
-    // so it is not among the declared types and infers nothing.
+    // so it is not among the declared types and infers nothing — except
+    // for the parameters it *is* the answer to, which arrive as `given`.
     let skip: taddr = if recv.len() > 0 { 1 } else { 0 };
+    if given.len() != e.families[fam].from_self {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let front = copy_names(&e.families[fam].tyvars);
     let declared = split_types(&e.families[fam].params);
     if declared.len() != args.len() {
         e.stuck = true;
@@ -2391,7 +3001,15 @@ fn generic_call(
     let mut kinds: Vec<String> = Vec::new();
     let mut i: taddr = 0;
     while i < args.len() {
-        let each = param_type(e, callee, i + skip);
+        // A parameter the receiver already decided is written for at that
+        // type, so a literal there takes its width from it and not from
+        // §5.2's default.
+        let told = subst(&front, given, &declared[i]);
+        let each = if told.same(&declared[i]) {
+            param_type(e, callee, i + skip)
+        } else {
+            told
+        };
         let v = value(e, &args[i], &each);
         if e.stuck {
             return unknown_value();
@@ -2404,8 +3022,8 @@ fn generic_call(
     // argument written where it was named turned out to be. A parameter
     // named nowhere is a parameter the arguments cannot say anything about,
     // and a key that is not a type TIR can spell is not one this emits.
-    let mut key: Vec<String> = Vec::new();
-    let mut t: taddr = 0;
+    let mut key: Vec<String> = copy_names(given);
+    let mut t: taddr = key.len();
     while t < e.families[fam].tyvars.len() {
         let each = e.families[fam].tyvars[t].to_string();
         let mut found: String = Vec::new();
@@ -2463,6 +3081,51 @@ fn generic_call(
     Value { text: name, ty: ret }
 }
 
+/// A call that answers with an aggregate: the caller makes the storage, the
+/// call is given it as its first argument, and the value *is* that storage
+/// (TIR §3).
+fn aggregate_call(
+    e: &mut Emit,
+    callee: &str,
+    owner: &str,
+    recv: &str,
+    args: &Vec<ast::Expr>,
+) -> Value {
+    let skip: taddr = if recv.len() > 0 { 1 } else { 0 };
+    let held = slot_for(e, "tmp", owner);
+    let mut texts: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < args.len() {
+        let each = param_type(e, callee, i + skip);
+        let v = value(e, &args[i], &each);
+        if e.stuck {
+            return unknown_value();
+        }
+        texts.push(v.text);
+        i += 1;
+    }
+    let mut line: String = Vec::new();
+    line.push_str("    call @");
+    line.push_str(callee);
+    line.push_str("(");
+    // The storage first and the receiver after it: `%sret` is what the
+    // function is for, and the receiver is its first ordinary argument.
+    line.push_str(&held);
+    if recv.len() > 0 {
+        line.push_str(", ");
+        line.push_str(recv);
+    }
+    let mut k: taddr = 0;
+    while k < texts.len() {
+        line.push_str(", ");
+        line.push_str(&texts[k]);
+        k += 1;
+    }
+    line.push_str(")");
+    e.insts.push(line);
+    Value { text: held, ty: owner.to_string() }
+}
+
 /// Ask for an instantiation, unless it has been asked for already. The list
 /// is append-only for that reason: what makes the queue drain is that a key
 /// is queued once and no second call can queue it again.
@@ -2513,6 +3176,197 @@ fn pending_at(jobs: &Vec<Job>, done: &Vec<String>) -> taddr {
     0 - 1
 }
 
+/// Every function a file contains, in the order TIR prints them and cut
+/// down to what `main` reaches.
+///
+/// One copy for a file and for a whole program both: a module is a list of
+/// items whatever produced it (Ch. 6 §4), and two drivers that emitted it
+/// twice would be two things to keep in step. `bootstrap/build.tr` not
+/// pruning while `bootstrap/program.tr` did was exactly that.
+pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
+    let mut out: Vec<Made> = Vec::new();
+    let mut queued: Vec<Job> = Vec::new();
+    // Ordinary functions first, then the impls, then the instantiations of
+    // Ch. 4 §2.5 — a call is what asks for one, so they are known last.
+    let mut k: taddr = 0;
+    while k < items.len() {
+        match &items[k].what {
+            ast::What::Function(f) => {
+                let mut text: String = Vec::new();
+                if function(
+                    f, context(items), "".to_string(), Vec::new(),
+                    Vec::new(), &mut queued, &mut text)
+                {
+                    out.push(Made { name: f.name.to_string(), text: text });
+                }
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    let mut d: taddr = 0;
+    while d < items.len() {
+        match &items[d].what {
+            ast::What::Impl(gs, tr, ty, fns) => {
+                let owner = written_head(ty);
+                let named = match tr {
+                    Option::Some(t) => written_head(t),
+                    Option::None => "".to_string(),
+                };
+                let mut m: taddr = 0;
+                while m < fns.len() {
+                    let mut text: String = Vec::new();
+                    // `Drop` is the one impl whose method becomes a
+                    // function named after the *type* and not after the
+                    // method (Ch. 3 §1.4). An impl with parameters of its
+                    // own has no method that is one function, so what is
+                    // written here is none of them.
+                    let made = if !plain_impl(gs) {
+                        false
+                    } else if named.same("Drop") {
+                        destructor(&fns[m], &owner, context(items), &mut text)
+                    } else {
+                        function(
+                            &fns[m], context(items), owner.to_string(),
+                            Vec::new(), Vec::new(), &mut queued, &mut text)
+                    };
+                    if made {
+                        let mut full: String = Vec::new();
+                        if named.same("Drop") {
+                            full.push_str("drop.");
+                            full.push_str(&owner);
+                        } else {
+                            full.push_str(&owner);
+                            full.push_str(".");
+                            full.push_str(&fns[m].name);
+                        }
+                        out.push(Made { name: full, text: text });
+                    }
+                    m += 1;
+                }
+            }
+            _ => {}
+        }
+        d += 1;
+    }
+    let extra = instantiations(items, &mut queued);
+    let mut z: taddr = 0;
+    while z < extra.len() {
+        out.push(Made {
+            name: extra[z].name.to_string(),
+            text: extra[z].text.to_string(),
+        });
+        z += 1;
+    }
+
+    let live = reachable(&out);
+    let mut kept: Vec<Made> = Vec::new();
+    let mut n: taddr = 0;
+    while n < out.len() {
+        if holds_name(&live, &out[n].name) {
+            kept.push(Made {
+                name: out[n].name.to_string(),
+                text: out[n].text.to_string(),
+            });
+        }
+        n += 1;
+    }
+    kept
+}
+
+/// Which functions a program contains: the ones `main` reaches, or all of
+/// them where there is no `main` and every function is its own root.
+///
+/// A function nothing calls is a function the program does not contain, and
+/// the two implementations have to agree about which those are — so this is
+/// asked of one file the same way it is asked of a whole program.
+pub fn reachable(made: &Vec<Made>) -> Vec<String> {
+    let mut live: Vec<String> = Vec::new();
+    let mut queue: Vec<String> = Vec::new();
+    let mut has_main = false;
+    let mut i: taddr = 0;
+    while i < made.len() {
+        if made[i].name.same("main") {
+            has_main = true;
+        }
+        i += 1;
+    }
+    if has_main {
+        queue.push("main".to_string());
+    } else {
+        let mut k: taddr = 0;
+        while k < made.len() {
+            queue.push(made[k].name.to_string());
+            k += 1;
+        }
+    }
+    loop {
+        match queue.pop() {
+            Option::Some(name) => {
+                if !holds_name(&live, &name) {
+                    let at = made_at(made, &name);
+                    live.push(name);
+                    if at >= 0 {
+                        let calls = callees(&made[at].text);
+                        let mut c: taddr = 0;
+                        while c < calls.len() {
+                            queue.push(calls[c].to_string());
+                            c += 1;
+                        }
+                    }
+                }
+            }
+            Option::None => return live,
+        }
+    }
+}
+
+/// Which emitted function is called that, or −1.
+fn made_at(made: &Vec<Made>, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < made.len() {
+        if made[i].name.same(name) {
+            return i;
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
+/// Every `call @name` in a function's text.
+///
+/// Read back out of what was written rather than collected while writing:
+/// what a function calls is what its text says it calls, and a second list
+/// would be a second thing to keep right.
+pub fn callees(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    let want = "call @";
+    while i + want.len() < text.len() {
+        let mut hit = true;
+        let mut k: taddr = 0;
+        while k < want.len() {
+            if text[i + k] != want[k] {
+                hit = false;
+            }
+            k += 1;
+        }
+        if hit {
+            let mut name: String = Vec::new();
+            let mut j = i + want.len();
+            while j < text.len() && text[j] != '(' {
+                name.push(text[j]);
+                j += 1;
+            }
+            out.push(name);
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Every instantiation the queue asks for, drained: the members of each
 /// family that this program contains (Ch. 4 §2.5).
 ///
@@ -2538,12 +3392,13 @@ pub fn instantiations(items: &Vec<ast::Item>, queued: &mut Vec<Job>) -> Vec<Made
                 ast::What::Function(f) => {
                     if !ok && f.name.same(&name) && f.generics.len() > 0 {
                         ok = function(
-                            f, context(items), "".to_string(),
+                            f, context(items), "".to_string(), Vec::new(),
                             copy_names(&key), queued, &mut text);
                     }
                 }
                 ast::What::Impl(gs, tr, ty, fns) => {
-                    let owner = if plain_impl(gs) {
+                    let outer = self_parameters(gs, ty);
+                    let owner = if gs.len() == outer.len() {
                         written_head(ty)
                     } else {
                         "".to_string()
@@ -2554,10 +3409,11 @@ pub fn instantiations(items: &Vec<ast::Item>, queued: &mut Vec<Job>) -> Vec<Made
                         m.push_str(&owner);
                         m.push_str(".");
                         m.push_str(&fns[k].name);
-                        if !ok && m.same(&name) && fns[k].generics.len() > 0 {
+                        if !ok && m.same(&name) && is_family(&fns[k], outer.len()) {
                             ok = function(
                                 &fns[k], context(items), owner.to_string(),
-                                copy_names(&key), queued, &mut text);
+                                copy_names(&outer), copy_names(&key),
+                                queued, &mut text);
                         }
                         k += 1;
                     }

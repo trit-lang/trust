@@ -2592,6 +2592,47 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.60 — three more of the same, found by writing a generic type.**
+Generic *types* (Ch. 4 §2.5) turned out to be cheaper than the functions
+were: an instantiation shows in no name at all — `fn make(x) -> Pair<t27>`
+is `@make` — and `Pair.t27` is only a size and a set of offsets Ch. 2
+already decides. A name is needed in exactly one place, a method of an
+`impl<T> Pair<T>`, which G9.59 had already found.
+
+What it cost instead was three things that were wrong before it and that
+nothing had looked at, because no corpus program had reached them.
+
+*An aggregate temporary was named `%agg.N` and not `%tmp.slot.N`.* Every
+aggregate literal in the corpus was either bound by a `let`, which
+**renames** the temporary to the binding's storage, or written straight
+into `%sret`. `read(P { a: 1, b: 2 })` is neither, and there the name shows:
+the two implementations pick the same *number* and different words for it.
+
+*A field that is itself an aggregate was stored and not copied.*
+`W { n: 1, p: P { … } }` emitted `store ? %agg.3, %sret` — TIR that is not
+TIR, from asking `tir_ty` for a type it has no spelling for and writing
+down the answer. An aggregate has no value to store (TIR §3); it is built
+where it can be and copied field by field, and a field of *that* which is
+an aggregate again by its own fields. The same recursion was missing where
+an aggregate parameter is copied in on entry.
+
+*`bootstrap/build.tr` did not prune and `bootstrap/program.tr` did.* A
+function nothing calls is a function the program does not contain, and
+`trustc build` cuts a *file* down to what `main` reaches exactly as it cuts
+a program down. One driver had that and the other did not, so any corpus
+file with a `main` and an unreachable function would have disagreed —
+`bootstrap/lowered/01.tr` and `10.tr` both have a `main` and were saved
+only by every function in them being reachable. Both drivers call one
+`lower::module` now, which is the fix that makes the class of mistake
+impossible rather than the instance of it.
+
+The pattern across G9.55 to here is worth stating once more, because it has
+now held eight times: what is not exercised is not checked, and a
+comparison against a second implementation only compares what some program
+makes both of them do. Every one of these was found by writing the first
+program that uses a feature *before* writing the feature, and reading what
+came out. None was found by reading the code.
+
 **G9.59 — a generic method called under a name nothing defines, and a
 generic type laid out as though it were one.** The third, fourth and fifth
 times in three rounds that the implementation did something instead of

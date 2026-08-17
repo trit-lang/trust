@@ -1,0 +1,64 @@
+// Generic *types* — one type per instantiation, like a generic function
+// (Ch. 4 §2.5), except that none of it shows in a name: `Pair<t27>` is
+// `Pair.t27` where a name is needed, and everywhere else it is just a size
+// and a set of offsets that Ch. 2 already decides.
+//
+// Where a name *is* needed is a method: an `impl<T> Pair<T>` is one impl
+// per instantiation, and `trustc` names even a method with no parameter in
+// its own signature `@Pair.width.t27`, because the impl's parameter is the
+// method's key.
+//
+// The file also holds the two things a generic type cannot be written
+// without: a call whose answer is an aggregate, which is given the storage
+// for it before its arguments are evaluated, and a method whose answer is
+// one, whose `%sret` comes before its receiver.
+
+struct Pair<T> { a: T, b: T }
+
+struct Holder<T> { n: t9, held: T }
+
+impl<T> Pair<T> {
+    fn first(&self) -> T { self.a }
+    fn width(&self) -> t27 { 2 }
+    fn echo(&self, v: T) -> T { v }
+}
+
+struct Wrap { p: Pair<t27> }
+
+impl Wrap {
+    fn held(&self) -> t27 { 0 }
+    fn made(&self) -> Pair<t27> { Pair { a: 1, b: 2 } }
+}
+
+fn made(x: t27) -> Pair<t27> { Pair { a: x, b: x } }
+
+fn read(p: Pair<t27>) -> t27 { p.a }
+
+fn narrow(p: Pair<trit>) -> trit { p.b }
+
+fn nested(h: Holder<Pair<t27>>) -> t9 { h.n }
+
+fn main() -> t27 {
+    // Instantiated by the literal, which says what its arguments are the
+    // way a call to a generic function does: from the values written.
+    let p = Pair { a: 1, b: 2 };
+    let q = Pair { a: 1t, b: 0t };
+    let h = Holder { n: 1, held: 3 };
+    let w = Wrap { p: p };
+
+    // The storage for an aggregate answer is taken before the argument is
+    // evaluated, which is what decides the numbers.
+    let k = 5;
+    let r = read(made(k + 1));
+
+    let s = w.made();
+    let small = Pair { a: 1t, b: 0t };
+    (q.first() as t27)
+        + w.held()
+        + r
+        + read(s)
+        + (narrow(small) as t27)
+        + (nested(Holder { n: 1, held: made(2) }) as t27)
+        + p.echo(9)
+        + p.width()
+}

@@ -6,7 +6,9 @@ fn main() -> t27 {
     let bx = util::Box { n: 3 };
     let t = bx.take(1t);
     let u = bx.take(4);
+    let c = util::wrap(9);
+    let d = util::Cell { held: 1t };
     let a = util::max(1, 2);
     let b = util::max(0t, 1t);
-    twice(a)
+    twice(a) + c.get() + c.width() + (d.get() as t27)
 }

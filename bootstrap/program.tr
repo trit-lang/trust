@@ -20,13 +20,6 @@ mod lower;
 mod parse;
 mod resolve;
 
-/// One function, emitted: its name, its text, and what it calls.
-pub struct Emitted {
-    pub name: String,
-    pub text: String,
-    pub calls: Vec<String>,
-}
-
 fn main() -> t27 {
     let src = input::read_all();
     let mods = bundle::split(&src);
@@ -126,187 +119,14 @@ fn main() -> t27 {
 
     println("tir 0.1 target \"tritium\"");
 
-    let mut out: Vec<Emitted> = Vec::new();
-    let mut queued: Vec<lower::Job> = Vec::new();
-    let mut k: taddr = 0;
-    while k < items.len() {
-        match &items[k].what {
-            ast::What::Function(fun) => {
-                let mut text: String = Vec::new();
-                if lower::function(
-                    fun, lower::context(&items), "".to_string(),
-                    Vec::new(), &mut queued, &mut text)
-                {
-                    let calls = callees(&text);
-                    out.push(Emitted { name: fun.name.to_string(), text: text, calls: calls });
-                }
-            }
-            _ => {}
-        }
-        k += 1;
-    }
-    let mut d: taddr = 0;
-    while d < items.len() {
-        match &items[d].what {
-            ast::What::Impl(gs, tr, ty, fns) => {
-                let owner = lower::written_head(ty);
-                let named = match tr {
-                    Option::Some(t) => lower::written_head(t),
-                    Option::None => "".to_string(),
-                };
-                let mut m: taddr = 0;
-                while m < fns.len() {
-                    let mut text: String = Vec::new();
-                    // `Drop` is the one impl whose method becomes a function
-                    // named after the *type* and not after the method.
-                    // An impl with parameters of its own is one impl per
-                    // instantiation of the type, and its methods are named
-                    // after that — which is a type this does not instantiate.
-                    let made = if !lower::plain_impl(gs) {
-                        false
-                    } else if named.same("Drop") {
-                        lower::destructor(
-                            &fns[m], &owner, lower::context(&items), &mut text)
-                    } else {
-                        lower::function(
-                            &fns[m], lower::context(&items),
-                            owner.to_string(), Vec::new(),
-                            &mut queued, &mut text)
-                    };
-                    if made {
-                        let mut full: String = Vec::new();
-                        if named.same("Drop") {
-                            full.push_str("drop.");
-                            full.push_str(&owner);
-                        } else {
-                            full.push_str(&owner);
-                            full.push_str(".");
-                            full.push_str(&fns[m].name);
-                        }
-                        let calls = callees(&text);
-                        out.push(Emitted { name: full, text: text, calls: calls });
-                    }
-                    m += 1;
-                }
-            }
-            _ => {}
-        }
-        d += 1;
-    }
-
-    // The instantiations, after the ordinary functions and the impls: what
-    // a program asks for is known once every call in it has been read
-    // (Ch. 4 §2.5).
-    let made = lower::instantiations(&items, &mut queued);
-    let mut z: taddr = 0;
-    while z < made.len() {
-        let calls = callees(&made[z].text);
-        out.push(Emitted {
-            name: made[z].name.to_string(),
-            text: made[z].text.to_string(),
-            calls: calls,
-        });
-        z += 1;
-    }
-
-    let live = reachable(&out);
+    let made = lower::module(&items);
     let mut n: taddr = 0;
-    while n < out.len() {
-        if resolve::holds(&live, &out[n].name) {
-            println("");
-            print(&out[n].text);
-        }
+    while n < made.len() {
+        println("");
+        print(&made[n].text);
         n += 1;
     }
     0
-}
-
-/// Which functions this program contains: the ones `main` reaches, or all of
-/// them where there is no `main` and every function is its own root.
-fn reachable(out: &Vec<Emitted>) -> Vec<String> {
-    let mut live: Vec<String> = Vec::new();
-    let mut queue: Vec<String> = Vec::new();
-    let mut has_main = false;
-    let mut i: taddr = 0;
-    while i < out.len() {
-        if out[i].name.same("main") {
-            has_main = true;
-        }
-        i += 1;
-    }
-    if has_main {
-        queue.push("main".to_string());
-    } else {
-        let mut k: taddr = 0;
-        while k < out.len() {
-            queue.push(out[k].name.to_string());
-            k += 1;
-        }
-    }
-    loop {
-        match queue.pop() {
-            Option::Some(name) => {
-                if !resolve::holds(&live, &name) {
-                    let at = named_at(out, &name);
-                    live.push(name);
-                    if at >= 0 {
-                        let mut c: taddr = 0;
-                        while c < out[at].calls.len() {
-                            queue.push(out[at].calls[c].to_string());
-                            c += 1;
-                        }
-                    }
-                }
-            }
-            Option::None => return live,
-        }
-    }
-}
-
-/// Which emitted function is called that, or −1.
-fn named_at(out: &Vec<Emitted>, name: &str) -> taddr {
-    let mut i: taddr = 0;
-    while i < out.len() {
-        if out[i].name.same(name) {
-            return i;
-        }
-        i += 1;
-    }
-    0 - 1
-}
-
-/// Every `call @name` in a function's text.
-///
-/// Read back out of what was written rather than collected while writing:
-/// what a function calls is what its text says it calls, and a second list
-/// would be a second thing to keep right.
-fn callees(text: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut i: taddr = 0;
-    let want = "call @";
-    while i + want.len() < text.len() {
-        let mut hit = true;
-        let mut k: taddr = 0;
-        while k < want.len() {
-            if text[i + k] != want[k] {
-                hit = false;
-            }
-            k += 1;
-        }
-        if hit {
-            let mut name: String = Vec::new();
-            let mut j = i + want.len();
-            while j < text.len() && text[j] != '(' {
-                name.push(text[j]);
-                j += 1;
-            }
-            out.push(name);
-            i = j;
-        } else {
-            i += 1;
-        }
-    }
-    out
 }
 
 /// One module, parsed, with what it defines added to the world.

@@ -85,17 +85,14 @@ Ch. 2 and Ch. 4's checking, and it **lowers to TIR** — every pass compared
 against `trustc` character for character, and the lowering compared
 including the names, since equality is on the text.
 
-What it lowers is the whole of the language it reads except one thing:
-**generic types**. `struct Pair<T>` and the impls written on them are not
-instantiated, and that is what the prelude's `Vec`, `Option` and `String`
-are — so a program that uses the library is still refused, and
-`bootstrap/`'s own source is such a program. Generic *functions* are done
-(§4 step 3), which was the larger half and the one the naming rules were
-in.
+What it lowers is the whole of the language it reads except **enum
+construction**: `Opt::Just(7)` builds nothing, generic or plain, and the
+prelude's `Option` is made of exactly that. Generics — functions, methods
+and types alike — are done (§4 step 3).
 
 So there is still no `stage1`: it needs a compiler that can compile
 `bootstrap/`, and `bootstrap/` is written in the part of Trust that is
-left. The remaining order is generic types, then the library, then the
+left. The remaining order is enum construction, then the library, then the
 backend TIR already has.
 
 ### 3.3 The comparison has something to compare — **not started**
@@ -325,23 +322,39 @@ Each step is checkable on its own, and none of them is only for DDC.
      and Ch. 4 §2.3 is what refuses it; `trustc` refuses it in the checker,
      and this refuses it where it would otherwise have picked the first and
      emitted a call whose second argument is the wrong width;
-   - generic *types*: `struct Pair<T>`, and **every** method of an
-     `impl<T> Pair<T>` — including one whose own signature has no parameter
-     in it, because `trustc` names it `@Pair.size.t27` all the same: the
-     *impl's* parameter becomes the method's key, which is the next thing
-     this has to learn. That is what the prelude's `Vec` is, which is why
-     the prelude still does not lower and why the library is not yet what
-     this compiles. The refusal reaches back into Ch. 2: neither
-     implementation lays out what is written for a generic type, which
-     `bootstrap/layouts/05.tr` now holds them to.
+   - a generic type as a key, for the same reason an aggregate is not one.
 
-   Generic **methods** on an ordinary type are done and are the same
-   machinery: a family under `C.with`, whose receiver is an argument the
-   call did not write and which therefore infers nothing. That one is worth
-   naming because it was found the way G9.55 and G9.56 were — by writing
-   the first program that uses it before writing the feature — and it
-   failed the same way: not by refusing, but by emitting `call @C.plus(…)`
-   under a name nothing defines.
+   Generic **methods** are done and are the same machinery: a family under
+   `C.with`, whose receiver is an argument the call did not write and which
+   therefore infers nothing. That one is worth naming because it was found
+   the way G9.55 and G9.56 were — by writing the first program that uses it
+   before writing the feature — and it failed the same way: not by
+   refusing, but by emitting `call @C.plus(…)` under a name nothing
+   defines.
+
+   **Generic types are done too**, and they were cheaper than the functions
+   because an instantiation shows in no name: `fn make(x) -> Pair<t27>` is
+   `@make`, and `Pair.t27` is a size and a set of offsets Ch. 2 already
+   decides — which is why neither implementation lays out what is *written*
+   for a generic type, and `bootstrap/layouts/05.tr` holds them to that. A
+   name is needed in one place only: a method of an `impl<T> Pair<T>` is
+   `@Pair.first.t27`, because the impl's parameter is the first of the
+   method's key and is read off whatever the receiver turned out to be.
+   `Holder.Pair.t27` cannot be read back into a head and its arguments, so
+   what made each mangled name is remembered rather than parsed.
+
+   Three things had to come with them, all older than they were and all
+   found by writing the program before the feature (G9.60): an aggregate
+   temporary was named `%agg.N` where `trustc` names it `%tmp.slot.N`; a
+   field that is itself an aggregate emitted `store ?` instead of a
+   field-by-field copy; and `bootstrap/build.tr` did not cut a file down to
+   what `main` reaches while `bootstrap/program.tr` did. Both drivers call
+   one `lower::module` now, which makes the class of mistake impossible
+   rather than the instance of it.
+
+   What stands between here and the prelude is **enum construction**:
+   `Opt::Just(7)` builds nothing, generic or plain, and `Option` is made of
+   exactly that.
 
    The limit that was stated in advance — that substituting the signature is
    not enough for a body that names its own type parameters — was met by

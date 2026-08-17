@@ -15,3 +15,15 @@ impl Box {
     // path of the type it is written on, and the key goes after that.
     fn take<T>(&self, d: T) -> T { d }
 }
+
+/// A generic *type* across a module: the name of an instantiation is the
+/// path with its arguments after it, and a method of a parameterized impl
+/// takes the impl's parameter as the first of its own key (Ch. 6 §4).
+pub struct Cell<T> { held: T }
+
+impl<T> Cell<T> {
+    fn get(&self) -> T { self.held }
+    fn width(&self) -> t27 { 1 }
+}
+
+pub fn wrap(n: t27) -> Cell<t27> { Cell { held: n } }
