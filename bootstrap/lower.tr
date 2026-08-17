@@ -217,9 +217,16 @@ pub fn function(
     header.push_str("fn @");
     header.push_str(&f.name);
     header.push_str("(");
+    // A function whose answer is an aggregate is given the storage for it,
+    // because a value that big is not carried in a register (TIR §3).
+    let answer = head_of(&f.ret);
+    let sret = def_at(&e.defs, &answer) >= 0;
+    if sret {
+        header.push_str("%sret: ptr");
+    }
     let mut i: taddr = 0;
     while i < f.params.len() {
-        if i > 0 {
+        if i > 0 || sret {
             header.push_str(", ");
         }
         let ty = tir_ty(&f.params[i].ty);
@@ -262,7 +269,7 @@ pub fn function(
     let ret = tir_ty(&f.ret);
     let unit = match &f.ret {
         ast::Ty::Unit => true,
-        _ => false,
+        _ => sret,
     };
     if !unit {
         if ret.same("?") {
@@ -277,7 +284,11 @@ pub fn function(
         Option::Some(b) => b,
         Option::None => return false,
     };
-    block(&mut e, body, &ret, unit);
+    if sret {
+        aggregate_body(&mut e, body, &answer);
+    } else {
+        block(&mut e, body, &ret, unit);
+    }
     if e.stuck {
         return false;
     }
@@ -422,6 +433,106 @@ fn one_name(name: &str) -> Vec<String> {
     out
 }
 
+/// A body whose answer is an aggregate: it is written into the storage the
+/// caller gave, and the function answers nothing.
+fn aggregate_body(e: &mut Emit, b: &ast::Block, owner: &str) {
+    let mut i: taddr = 0;
+    while i < b.stmts.len() {
+        stmt(e, &b.stmts[i], "");
+        i += 1;
+    }
+    match &b.tail {
+        Option::Some(x) => {
+            match x {
+                // Built where it is wanted, rather than built and copied.
+                ast::Expr::Aggregate(path, fields) => {
+                    fill(e, "%sret", path, fields);
+                }
+                _ => {
+                    let v = value(e, x, "");
+                    if e.stuck {
+                        return;
+                    }
+                    copy_between(e, &v.text, "%sret", owner);
+                }
+            }
+            e.insts.push("    ret".to_string());
+        }
+        Option::None => {
+            e.stuck = true;
+        }
+    }
+}
+
+/// Write an aggregate's fields into storage that is already there.
+fn fill(e: &mut Emit, dest: &str, path: &str, fields: &Vec<ast::Field>) {
+    let which = def_at(&e.defs, path);
+    if which < 0 {
+        e.stuck = true;
+        return;
+    }
+    let self_ty = ast::Ty::Name(one_name(path));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return;
+        }
+    };
+    let mut i: taddr = 0;
+    while i < fields.len() {
+        let index = field_at(e, which, &fields[i].name);
+        if index < 0 {
+            e.stuck = true;
+            return;
+        }
+        let ty = tir_ty(&e.defs[which].fields[index]);
+        // The value first, then where it goes: that order is what decides
+        // the numbers, and the numbers are what the comparison is on.
+        let v = value(e, &fields[i].value, &ty);
+        if e.stuck {
+            return;
+        }
+        let at = offset_of(e, dest, l.offsets[index]);
+        store_into(e, &ty, &v.text, &at);
+        i += 1;
+    }
+}
+
+/// Copy one aggregate into another, field by field.
+fn copy_between(e: &mut Emit, from: &str, to: &str, owner: &str) {
+    let which = def_at(&e.defs, owner);
+    if which < 0 {
+        e.stuck = true;
+        return;
+    }
+    let self_ty = ast::Ty::Name(one_name(owner));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return;
+        }
+    };
+    let mut i: taddr = 0;
+    while i < l.offsets.len() {
+        let ty = tir_ty(&e.defs[which].fields[i]);
+        let src = offset_of(e, from, l.offsets[i]);
+        let dst = offset_of(e, to, l.offsets[i]);
+        let v = fresh(e, "v");
+        let mut load: String = Vec::new();
+        load.push_str("    ");
+        load.push_str(&v);
+        load.push_str(" = load ");
+        load.push_str(&ty);
+        load.push_str(" ");
+        load.push_str(&src);
+        e.insts.push(load);
+        store_into(e, &ty, &v, &dst);
+        i += 1;
+    }
+}
+
 /// A block written as a branch's arm: its statements, then its value.
 fn branch_block(e: &mut Emit, b: &ast::Block, want: &str) -> Value {
     let mut i: taddr = 0;
@@ -436,6 +547,68 @@ fn branch_block(e: &mut Emit, b: &ast::Block, want: &str) -> Value {
             unknown_value()
         }
     }
+}
+
+/// Give a name a different one, wherever it was written.
+///
+/// The only name a lowering ever changes its mind about: an aggregate is
+/// built in a temporary and a binding adopts it, so what was `%agg.3`
+/// becomes `%p.slot.8` in the slot that declares it and in every
+/// instruction that touched it.
+fn rename(e: &mut Emit, from: &str, to: &str) {
+    let mut i: taddr = 0;
+    while i < e.slots.len() {
+        let fixed = replaced(&e.slots[i], from, to);
+        e.slots[i] = fixed;
+        i += 1;
+    }
+    let mut k: taddr = 0;
+    while k < e.insts.len() {
+        let fixed = replaced(&e.insts[k], from, to);
+        e.insts[k] = fixed;
+        k += 1;
+    }
+    let mut b: taddr = 0;
+    while b < e.blocks.len() {
+        let mut j: taddr = 0;
+        while j < e.blocks[b].insts.len() {
+            let fixed = replaced(&e.blocks[b].insts[j], from, to);
+            e.blocks[b].insts[j] = fixed;
+            j += 1;
+        }
+        b += 1;
+    }
+}
+
+/// One string with every occurrence of another put differently.
+fn replaced(line: &str, from: &str, to: &str) -> String {
+    let mut out: String = Vec::new();
+    let mut i: taddr = 0;
+    while i < line.len() {
+        if at_here(line, i, from) {
+            out.push_str(to);
+            i += from.len();
+        } else {
+            out.push(line[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Whether `what` is written at this position.
+fn at_here(line: &str, at: taddr, what: &str) -> bool {
+    if at + what.len() > line.len() {
+        return false;
+    }
+    let mut i: taddr = 0;
+    while i < what.len() {
+        if line[at + i] != what[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 /// `store TY value, slot`.
@@ -496,6 +669,23 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
             };
             if ty.same("?") {
                 e.stuck = true;
+                return;
+            }
+            let which = def_at(&e.defs, &val.ty);
+            if which >= 0 {
+                // The temporary *is* the binding's storage: it was made for
+                // this value and nothing else names it, so it is renamed
+                // rather than copied out of.
+                let mut prefix: String = Vec::new();
+                prefix.push_str(name);
+                prefix.push_str(".slot");
+                let slot = fresh(e, &prefix);
+                rename(e, &val.text, &slot);
+                e.locals.push(Slot {
+                    name: name.to_string(),
+                    slot: slot,
+                    ty: val.ty.to_string(),
+                });
                 return;
             }
             let slot = slot_for(e, name, &ty);
@@ -621,6 +811,11 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             }
             let ty = e.locals[at].ty.to_string();
             let slot = e.locals[at].slot.to_string();
+            // An aggregate's value *is* its storage: it is too big to carry
+            // and there is nothing to load it into (TIR §3).
+            if def_at(&e.defs, &ty) >= 0 {
+                return Value { text: slot, ty: ty };
+            }
             let name = fresh(e, "v");
             let mut line: String = Vec::new();
             line.push_str("    ");
@@ -800,6 +995,37 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             load.push_str(&src);
             e.insts.push(load);
             Value { text: v, ty: ty }
+        }
+        // An aggregate with nowhere to go is built in a temporary, which a
+        // `let` then *renames* rather than copying out of — which is what
+        // makes `let p = P { … }` cost nothing (Ch. 3 §1.1).
+        ast::Expr::Aggregate(path, fields) => {
+            let which = def_at(&e.defs, path);
+            if which < 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let self_ty = ast::Ty::Name(one_name(path));
+            let l = match layout::of(&e.defs, &self_ty, 0) {
+                Result::Ok(x) => x,
+                Result::Err(why) => {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+            };
+            let held = fresh(e, "agg");
+            let mut line: String = Vec::new();
+            line.push_str("    ");
+            line.push_str(&held);
+            line.push_str(" = slot tryte[");
+            push_int(&mut line, l.size as t27);
+            line.push_str("]");
+            e.slots.push(line);
+            fill(e, &held, path, fields);
+            if e.stuck {
+                return unknown_value();
+            }
+            Value { text: held, ty: path.to_string() }
         }
         ast::Expr::Assign(op, target, v) => {
             if !op.same("=") {

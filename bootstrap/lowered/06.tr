@@ -1,0 +1,16 @@
+struct P { x: t27, y: t9 }
+struct Wide { a: t9, b: taddr, c: bool }
+
+fn make(a: t27) -> P { P { x: a, y: 1 } }
+fn made(a: t27) -> P { let p = P { x: a + 1, y: 2 }; p }
+fn used(a: t27, b: t9) -> t27 { let p = P { x: a + 1, y: b }; p.x }
+fn wide(a: t9, b: taddr) -> Wide { Wide { a: a, b: b, c: true } }
+fn twice(a: t27) -> t27 {
+    let p = P { x: a, y: 1 };
+    let q = P { x: a + 1, y: 2 };
+    p.x + q.x
+}
+fn branched(a: t27) -> t27 {
+    let p = P { x: a, y: 0 };
+    if p.x > 0 { p.x } else { 0 }
+}

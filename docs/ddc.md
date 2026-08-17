@@ -216,6 +216,11 @@ Each step is checkable on its own, and none of them is only for DDC.
    temporary rather than copying out of it, which is what makes `let p = P {
    … }` cost nothing. A second implementation has to make the same
    temporary, and skip the same number.
+
+   *All four are done.* What is left of this step is `match` — the tag, the
+   three-way branch, and what a pattern binds — and the drops Ch. 3 §1.4 puts
+   at the end of a scope, which is the last thing between here and a compiler
+   that can compile itself.
 4. **Run the double compile.** `scripts/ddc.sh`: build `stage1` with
    `trustc`, build `stage2` with `stage1`, demand `stage2 == stage1`. Report
    the two hashes whether or not they match, because a number that is only
