@@ -4340,6 +4340,22 @@ impl Fn<'_> {
         self.done = false;
     }
 
+    /// Whether any block already emitted branches to this label.
+    ///
+    /// A `match` whose every arm leaves by another door — a `return`, a
+    /// `break` — has a join nothing arrives at, and an unreachable block is
+    /// one the verifier rejects. So the join is started only when something
+    /// jumps to it, which is the test `loop` already makes with `broke`.
+    fn anything_reaches(&self, label: &str) -> bool {
+        self.blocks.iter().any(|b| match &b.term {
+            Terminator::Br(t) => t.label == label,
+            Terminator::Br3 { neg, zero, pos, .. } => {
+                neg.label == label || zero.label == label || pos.label == label
+            }
+            _ => false,
+        })
+    }
+
     fn jump(&mut self, label: &str) {
         self.finish(Terminator::Br(Target {
             label: label.to_string(),
@@ -11040,6 +11056,9 @@ impl Fn<'_> {
             if let Some(m) = merged {
                 self.owned = m;
             }
+            if !self.anything_reaches(&join) {
+                return Ok((unit(), Ty::Never));
+            }
             self.start(join);
             return Ok(self.match_result(result));
         }
@@ -11255,6 +11274,9 @@ impl Fn<'_> {
             if let Some(m) = merged {
                 self.owned = m;
             }
+            if !self.anything_reaches(&join) {
+                return Ok((unit(), Ty::Never));
+            }
             self.start(join);
             return Ok(self.match_result(result));
         }
@@ -11353,6 +11375,9 @@ impl Fn<'_> {
         }
         if let Some(m) = merged {
             self.owned = m;
+        }
+        if !self.anything_reaches(&join) {
+            return Ok((unit(), Ty::Never));
         }
         self.start(join);
         Ok(self.match_result(result))

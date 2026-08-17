@@ -4618,3 +4618,22 @@ fn a_reference_to_a_reference_is_a_type() {
          fn main() -> t27 { let x = 1; let p = &x; let q = &p; f(q) }\n",
     );
 }
+
+#[test]
+fn a_match_whose_every_arm_leaves_has_no_join() {
+    // Every arm returns, so nothing arrives after the `match` — and a block
+    // nothing reaches is one the TIR verifier rejects. `loop` had this test
+    // from the start (`broke`); `match` started its join whatever happened,
+    // and the block only became unreachable when the `match` was nested
+    // inside something that went on afterwards (G9.48).
+    let src = "enum E { A, B }\n\
+               struct Held { v: Vec<t27> }\n\
+               impl Drop for Held { fn drop(self) { } }\n\
+               fn pick(e: E, h: Held) -> taddr {\n\
+               \x20   match e {\n\
+               \x20       E::A => { match e { E::A => return h.v.len(), E::B => return 0, } }\n\
+               \x20       E::B => 1,\n\
+               \x20   }\n}\n\
+               fn main() -> t27 { 0 }\n";
+    assert!(lang::compile(src).is_ok(), "{:?}", lang::compile(src).err());
+}

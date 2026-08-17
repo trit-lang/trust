@@ -148,9 +148,9 @@ done
 # Pass two: what every `use` reaches, and by which rule it was refused when
 # it reached nothing. `bootstrap/programs/refused` is every way it can fail.
 u=0
-for root in examples/trust/modules/main.tr bootstrap/programs/refused/main.tr bootstrap/resolve.tr; do
+for root in examples/trust/modules/main.tr bootstrap/programs/refused/main.tr bootstrap/uses.tr; do
     rust=$("$trust" uses "$root")
-    mine=$("$trust" bundle "$root" | "$trust" run bootstrap/resolve.tr)
+    mine=$("$trust" bundle "$root" | "$trust" run bootstrap/uses.tr)
     if [ "$rust" != "$mine" ]; then
         echo "bootstrap: the two disagree about what the \`use\`s of $root reach" >&2
         diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10 >&2
@@ -159,5 +159,20 @@ for root in examples/trust/modules/main.tr bootstrap/programs/refused/main.tr bo
     u=$((u + $(printf '%s\n' "$rust" | wc -l)))
 done
 
-printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d modules of whole programs, %d names defined, %d names resolved — all agreed\n' \
-    "$n" "$r" "$e" "$i" "$w" "$b" "$m" "$y" "$u"
+# Pass three: the whole program as one list of items, every name resolved.
+# It is what the rest of the compiler has always been handed, and the last
+# question about Ch. 6 that can be asked without asking about types.
+z=0
+for root in examples/trust/modules/main.tr bootstrap/symbols.tr bootstrap/flat.tr; do
+    rust=$("$trust" flat "$root")
+    mine=$("$trust" bundle "$root" | "$trust" run bootstrap/flat.tr)
+    if [ "$rust" != "$mine" ]; then
+        echo "bootstrap: the two disagree about the resolved items of $root" >&2
+        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -4 | cut -c1-200 >&2
+        exit 1
+    fi
+    z=$((z + $(printf '%s\n' "$rust" | wc -l)))
+done
+
+printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d modules of whole programs, %d names defined, %d names resolved, %d items rewritten — all agreed\n' \
+    "$n" "$r" "$e" "$i" "$w" "$b" "$m" "$y" "$u" "$z"

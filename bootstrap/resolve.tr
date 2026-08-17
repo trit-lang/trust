@@ -1,22 +1,20 @@
-// Pass two of Ch. 6 §4, in Trust: what every `use` reaches.
+// Ch. 6 §4, in Trust: what a program's names mean.
 //
-//     trust bundle <root.tr> | trust run bootstrap/resolve.tr
+// Three passes, and each is a fact the one after it needs:
 //
-// One line per `use` — `<module> <as written> -> <full name>`, or `!` and
-// the one word for the rule that refused it. A refusal is reported by rule
-// and not by wording, because two implementations should agree about the
-// language and need not agree about a sentence.
+//   1. what every module defines, and what each name would be called
+//   2. what every module can see — what it defines, what it declares, and
+//      what its `use`s bring in
+//   3. every name written in the program, rewritten to what it names
 //
 // A `use` is absolute (§3.1): it starts at the root wherever it is written.
 // Where it *is* written still decides visibility, and holding those two
-// apart is the whole of this pass — draft 0.1 had them as one thing and two
-// sibling modules could not see each other at all (G9.37).
+// apart is the whole of the second pass — draft 0.1 had them as one thing
+// and two sibling modules could not see each other at all (G9.37).
 
-mod ast;
-mod bundle;
-mod input;
-mod lex;
-mod parse;
+use ast;
+use ast::Ty;
+use ast::What;
 
 /// One name a module defines, and what it is called from the root.
 pub struct Defined {
@@ -24,102 +22,57 @@ pub struct Defined {
     pub name: String,
     pub full: String,
     pub public: bool,
+    /// `fn`, `const`, or `type` for everything else — which is what tells
+    /// `m::f(x)` from `m::V(x)` once the names are known (§4).
+    pub kind: String,
+}
+
+/// One name a module can write, and what it means.
+pub struct Binding {
+    pub name: String,
+    pub full: String,
+}
+
+/// What one module can name.
+pub struct Scope {
+    pub names: Vec<Binding>,
+    pub mods: Vec<Binding>,
 }
 
 /// Everything resolution knows about the program, gathered once.
 ///
-/// Both lists are searched from the front rather than hashed. A program is a
-/// few hundred names and the machine has no clock to lose; a hash of a
+/// The lists are searched from the front rather than hashed. A program is a
+/// few hundred names and this is not where the time goes; a hash of a
 /// `String` would be a second thing to keep the same as the Rust side, and
-/// this pass is about agreeing on answers rather than on how they are found.
+/// these two implementations are held to the same *answers* and not to the
+/// same way of finding them.
 pub struct World {
     pub modules: Vec<String>,
     pub defined: Vec<Defined>,
     pub sources: Vec<String>,
 }
 
-fn main() -> t27 {
-    let src = input::read_all();
-    let mods = bundle::split(&src);
-    let mut w = World { modules: Vec::new(), defined: Vec::new(), sources: Vec::new() };
-    let mut files: Vec<Vec<ast::Item>> = Vec::new();
-
-    // Pass one, again — a `use` cannot be resolved before it is known what
-    // the program defines, and that is a fact about every module at once.
-    let mut i: taddr = 0;
-    while i < mods.len() {
-        let here = plain(&mods[i].path);
-        w.sources.push(here.to_string());
-        let mut p = parse::Parser { src: mods[i].text.to_string(), at: 0, no_struct: false };
-        match parse::file(&mut p) {
-            Result::Ok(items) => {
-                let mut k: taddr = 0;
-                while k < items.len() {
-                    gather(&mut w, &here, &items[k]);
-                    k += 1;
-                }
-                files.push(items);
-            }
-            Result::Err(err) => {
-                print("error ");
-                print(&mods[i].path);
-                print(" ");
-                print_int(err.at as t27);
-                println("");
-                let empty: Vec<ast::Item> = Vec::new();
-                files.push(empty);
-            }
-        }
-        i += 1;
-    }
-
-    // Pass two: every `use`, in the order the modules were read.
-    let mut f: taddr = 0;
-    while f < files.len() {
-        let here = plain(&mods[f].path);
-        let mut k: taddr = 0;
-        while k < files[f].len() {
-            match &files[f][k].what {
-                ast::What::Use(segments) => report(&w, &mods[f].path, &here, &segments),
-                _ => {}
-            }
-            k += 1;
-        }
-        f += 1;
-    }
-    0
+/// A resolved path: what it named, and how many segments that took.
+pub struct Found {
+    pub full: String,
+    pub taken: taddr,
+    pub kind: String,
 }
 
-/// One `use`, and what it reached.
-fn report(w: &World, shown: &str, here: &str, segments: &Vec<String>) {
-    let written = written_path(segments);
-    print(shown);
-    print(" ");
-    print(&written);
-    let found = lookup(w, here, segments);
-    match found {
-        Result::Ok(full) => {
-            print(" -> ");
-            println(&full);
-        }
-        Result::Err(why) => {
-            print(" ! ");
-            println(&why);
-        }
-    }
-}
+// --- pass one -------------------------------------------------------------
 
 /// Add what one item defines to the world (§4).
-fn gather(w: &mut World, here: &str, item: &ast::Item) {
+pub fn gather(w: &mut World, here: &str, item: &ast::Item) {
     match &item.what {
-        ast::What::Mod(name) => {
+        What::Mod(name) => {
             let full = joined(here, &name);
             w.modules.push(full);
         }
         _ => {
             match ast::defines(&item.what) {
                 Option::Some(name) => {
-                    // A declaration keeps its written name (§4, G9.44).
+                    // A declaration keeps its written name: it names
+                    // something outside, which knows no modules (G9.44).
                     let full = if ast::declared(&item.what) {
                         name.to_string()
                     } else {
@@ -130,6 +83,7 @@ fn gather(w: &mut World, here: &str, item: &ast::Item) {
                         name: name,
                         full: full,
                         public: item.public,
+                        kind: shape(&item.what),
                     });
                 }
                 Option::None => {}
@@ -138,11 +92,79 @@ fn gather(w: &mut World, here: &str, item: &ast::Item) {
     }
 }
 
-/// Resolve a `use`'s path from the root, checking what `here` may see.
-fn lookup(w: &World, here: &str, segments: &Vec<String>) -> Result<String, String> {
+/// What a resolved name turns out to be, for §4's shape corrections.
+fn shape(what: &What) -> String {
+    let word = ast::kind(what);
+    if word.same("fn") || word.same("const") {
+        word
+    } else {
+        "type".to_string()
+    }
+}
+
+// --- pass two -------------------------------------------------------------
+
+/// What one module can name: what it defines, the modules it declares, and
+/// what its `use`s bring in (§3.2).
+pub fn scope_of(w: &World, here: &str, items: &Vec<ast::Item>) -> Scope {
+    let mut sc = Scope { names: Vec::new(), mods: Vec::new() };
+    let mut i: taddr = 0;
+    while i < w.defined.len() {
+        if w.defined[i].module.same(here) {
+            sc.names.push(Binding {
+                name: w.defined[i].name.to_string(),
+                full: w.defined[i].full.to_string(),
+            });
+        }
+        i += 1;
+    }
+    let mut k: taddr = 0;
+    while k < items.len() {
+        match &items[k].what {
+            What::Mod(name) => {
+                let full = joined(here, &name);
+                sc.mods.push(Binding { name: name.to_string(), full: full });
+            }
+            What::Use(segments) => {
+                match lookup(w, here, "", &segments) {
+                    Result::Ok(found) => {
+                        // Taken apart before the branch: a field moved on one
+                        // path and not the other is refused, and this is a
+                        // `use` that resolved either way (Ch. 3 §1.2).
+                        let taken = found.taken;
+                        let full = found.full;
+                        if taken == segments.len() {
+                            let last = segments[segments.len() - 1].to_string();
+                            // A `use` of a *module* binds a module name,
+                            // which is what a path's first segment may be.
+                            if holds(&w.modules, &full) {
+                                sc.mods.push(Binding {
+                                    name: last.to_string(),
+                                    full: full.to_string(),
+                                });
+                            }
+                            sc.names.push(Binding { name: last, full: full });
+                        }
+                    }
+                    Result::Err(why) => {}
+                }
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    sc
+}
+
+/// Resolve a written path, starting at `from` and seen from `here`.
+///
+/// `here` decides **visibility** and `from` decides **resolution**. They are
+/// the same for a path in an expression and differ for a `use`, which starts
+/// at the root wherever it is written (§3.1).
+pub fn lookup(w: &World, here: &str, from: &str, segments: &Vec<String>) -> Result<Found, String> {
     // Walk as far as the segments keep naming modules. What stops the walk
     // is an item, and whatever follows *it* is not this pass's business.
-    let mut at: String = Vec::new();
+    let mut at = from.to_string();
     let mut taken: taddr = 0;
     while taken < segments.len() {
         let next = joined(&at, &segments[taken]);
@@ -154,7 +176,7 @@ fn lookup(w: &World, here: &str, segments: &Vec<String>) -> Result<String, Strin
     }
     if taken == segments.len() {
         // The path ended at a module — `use lang::lex;` names one.
-        return Result::Ok(at);
+        return Result::Ok(Found { full: at, taken: taken, kind: "mod".to_string() });
     }
     if !holds(&w.sources, &at) {
         return Result::Err("missing".to_string());
@@ -168,20 +190,459 @@ fn lookup(w: &World, here: &str, segments: &Vec<String>) -> Result<String, Strin
             if !w.defined[i].public && !inside(here, &at) {
                 return Result::Err("private".to_string());
             }
-            if taken + 1 != segments.len() {
-                // `use a::E::V;` reaches the enum and stops: a `use` names
-                // an item or a module, not something inside one (§3.2).
-                return Result::Err("deep".to_string());
-            }
-            return Result::Ok(w.defined[i].full.to_string());
+            return Result::Ok(Found {
+                full: w.defined[i].full.to_string(),
+                taken: taken + 1,
+                kind: w.defined[i].kind.to_string(),
+            });
         }
         i += 1;
     }
     Result::Err("missing".to_string())
 }
 
+// --- pass three -----------------------------------------------------------
+
+/// Where a rewrite is: what the module can see, where it is, and what is
+/// bound nearer than the module — locals and parameters, innermost last.
+pub struct At {
+    pub here: String,
+    pub scope: Scope,
+    pub locals: Vec<String>,
+}
+
+/// One item, with its own name given its module and every name in it
+/// resolved. A `mod` and a `use` name nothing below the frontend and are
+/// dropped by the caller.
+pub fn rewrite(w: &World, a: &mut At, item: ast::Item) -> ast::Item {
+    let public = item.public;
+    let declared = ast::declared(&item.what);
+    let module = a.here.to_string();
+    let what = match item.what {
+        What::Function(f) => What::Function(rw_fn(w, a, f, &module, declared)),
+        What::Struct(name, fields) => {
+            let full = joined(&module, &name);
+            What::Struct(full, rw_params(w, a, fields))
+        }
+        What::Enum(name, variants) => {
+            let full = joined(&module, &name);
+            let mut out: Vec<ast::Variant> = Vec::new();
+            for v in variants {
+                // A variant keeps the name it was written with: it is named
+                // through its enum, and the enum's name carries the module.
+                let fields = rw_tys(w, a, v.fields);
+                out.push(ast::Variant { name: v.name, fields: fields });
+            }
+            What::Enum(full, out)
+        }
+        What::Alias(name, ty) => {
+            let full = joined(&module, &name);
+            What::Alias(full, rw_ty(w, a, ty))
+        }
+        What::Const(name, ty, value) => {
+            let full = joined(&module, &name);
+            let t = rw_ty(w, a, ty);
+            What::Const(full, t, rw_expr(w, a, value))
+        }
+        What::Impl(tr, ty, fns) => {
+            let t: Option<Ty> = match tr {
+                Option::Some(x) => Option::Some(rw_ty(w, a, x)),
+                Option::None => Option::None,
+            };
+            let s = rw_ty(w, a, ty);
+            let mut out: Vec<ast::Fn> = Vec::new();
+            for f in fns {
+                // A method's name is the type's business and not a module's:
+                // it is reached through the type, which carries the path.
+                out.push(rw_fn(w, a, f, "", true));
+            }
+            What::Impl(t, s, out)
+        }
+        other => other,
+    };
+    ast::Item { public: public, what: what }
+}
+
+/// A function, with its parameters bound as locals for its body.
+fn rw_fn(w: &World, a: &mut At, f: ast::Fn, module: &str, keep: bool) -> ast::Fn {
+    let mark = a.locals.len();
+    let written = f.name;
+    let name = if keep { written } else { joined(module, &written) };
+    let params = rw_params_binding(w, a, f.params);
+    let ret = rw_ty(w, a, f.ret);
+    let body: Option<ast::Block> = match f.body {
+        Option::Some(b) => Option::Some(rw_block(w, a, b)),
+        Option::None => Option::None,
+    };
+    unbind(a, mark);
+    ast::Fn { name: name, params: params, ret: ret, body: body }
+}
+
+/// The fields of a struct: types rewritten, names left alone.
+fn rw_params(w: &World, a: &mut At, params: Vec<ast::Param>) -> Vec<ast::Param> {
+    let mut out: Vec<ast::Param> = Vec::new();
+    for p in params {
+        let t = rw_ty(w, a, p.ty);
+        out.push(ast::Param { name: p.name, ty: t });
+    }
+    out
+}
+
+/// The parameters of a function, which are also names for its body.
+fn rw_params_binding(w: &World, a: &mut At, params: Vec<ast::Param>) -> Vec<ast::Param> {
+    let mut out: Vec<ast::Param> = Vec::new();
+    for p in params {
+        let t = rw_ty(w, a, p.ty);
+        a.locals.push(p.name.to_string());
+        out.push(ast::Param { name: p.name, ty: t });
+    }
+    out
+}
+
+fn rw_tys(w: &World, a: &mut At, tys: Vec<Ty>) -> Vec<Ty> {
+    let mut out: Vec<Ty> = Vec::new();
+    for t in tys {
+        out.push(rw_ty(w, a, t));
+    }
+    out
+}
+
+/// A written type. A name in one is a path like any other (§3.1).
+fn rw_ty(w: &World, a: &mut At, t: Ty) -> Ty {
+    match t {
+        Ty::Name(segments) => {
+            let p = rw_path(w, a, segments);
+            Ty::Name(p.segments)
+        }
+        Ty::App(segments, args) => {
+            let p = rw_path(w, a, segments);
+            Ty::App(p.segments, rw_tys(w, a, args))
+        }
+        Ty::Ref(inner, mutable) => Ty::Ref(Box::new(rw_ty(w, a, *inner)), mutable),
+        Ty::Slice(inner) => Ty::Slice(Box::new(rw_ty(w, a, *inner))),
+        other => other,
+    }
+}
+
+/// A path and what its head turned out to be.
+pub struct Path {
+    pub segments: Vec<String>,
+    pub kind: String,
+}
+
+/// A written path, resolved.
+///
+/// A path whose head names a module resolves *inside* that module: the head
+/// may be a submodule declared here or a name a `use` brought in, and both
+/// answer with the module's full path — so the rest is looked up from there
+/// and not from where it was written.
+fn rw_path(w: &World, a: &mut At, segments: Vec<String>) -> Path {
+    if segments.len() >= 2 {
+        match binding(&a.scope.mods, &segments[0]) {
+            Option::Some(base) => {
+                let mut rest: Vec<String> = Vec::new();
+                let mut i: taddr = 1;
+                while i < segments.len() {
+                    rest.push(segments[i].to_string());
+                    i += 1;
+                }
+                let here = a.here.to_string();
+                match lookup(w, &here, &base, &rest) {
+                    Result::Ok(found) => {
+                        let mut out: Vec<String> = Vec::new();
+                        out.push(found.full);
+                        let mut k = found.taken;
+                        while k < rest.len() {
+                            out.push(rest[k].to_string());
+                            k += 1;
+                        }
+                        return Path { segments: out, kind: found.kind };
+                    }
+                    Result::Err(why) => {
+                        return Path { segments: segments, kind: "".to_string() };
+                    }
+                }
+            }
+            Option::None => {}
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    out.push(local_or_name(a, &segments[0]));
+    let mut i: taddr = 1;
+    while i < segments.len() {
+        out.push(segments[i].to_string());
+        i += 1;
+    }
+    Path { segments: out, kind: "".to_string() }
+}
+
+fn rw_block(w: &World, a: &mut At, b: ast::Block) -> ast::Block {
+    let mark = a.locals.len();
+    let mut stmts: Vec<ast::Stmt> = Vec::new();
+    for s in b.stmts {
+        match s {
+            ast::Stmt::Let(mutable, name, value) => {
+                // A `let`'s value is written before its name is bound, so
+                // `let x = x;` names the outer one — the rule everywhere
+                // else, and why this order matters.
+                let v = rw_expr(w, a, value);
+                a.locals.push(name.to_string());
+                stmts.push(ast::Stmt::Let(mutable, name, v));
+            }
+            ast::Stmt::Do(e) => stmts.push(ast::Stmt::Do(rw_expr(w, a, e))),
+        }
+    }
+    let tail: Option<Box<ast::Expr>> = match b.tail {
+        Option::Some(e) => Option::Some(Box::new(rw_expr(w, a, *e))),
+        Option::None => Option::None,
+    };
+    unbind(a, mark);
+    ast::Block { stmts: stmts, tail: tail }
+}
+
+fn rw_exprs(w: &World, a: &mut At, es: Vec<ast::Expr>) -> Vec<ast::Expr> {
+    let mut out: Vec<ast::Expr> = Vec::new();
+    for e in es {
+        out.push(rw_expr(w, a, e));
+    }
+    out
+}
+
+fn rw_expr(w: &World, a: &mut At, e: ast::Expr) -> ast::Expr {
+    match e {
+        ast::Expr::Name(n) => ast::Expr::Name(local_or_name(a, &n)),
+        ast::Expr::Call(n, args) => {
+            // A call by name is a function, a tuple struct or a variant, and
+            // never a local: calling one of those is a different node.
+            let full = name_of(a, &n);
+            ast::Expr::Call(full, rw_exprs(w, a, args))
+        }
+        ast::Expr::Aggregate(path, fields) => rw_aggregate(w, a, path, fields),
+        ast::Expr::Method(recv, name, args) => {
+            let r = rw_expr(w, a, *recv);
+            ast::Expr::Method(Box::new(r), name, rw_exprs(w, a, args))
+        }
+        ast::Expr::Cast(v, t) => {
+            let inner = rw_expr(w, a, *v);
+            ast::Expr::Cast(Box::new(inner), rw_ty(w, a, t))
+        }
+        ast::Expr::Binary(op, x, y) => {
+            let l = rw_expr(w, a, *x);
+            let r = rw_expr(w, a, *y);
+            ast::Expr::Binary(op, Box::new(l), Box::new(r))
+        }
+        ast::Expr::Assign(op, x, y) => {
+            let l = rw_expr(w, a, *x);
+            let r = rw_expr(w, a, *y);
+            ast::Expr::Assign(op, Box::new(l), Box::new(r))
+        }
+        ast::Expr::Index(x, y) => {
+            let l = rw_expr(w, a, *x);
+            let r = rw_expr(w, a, *y);
+            ast::Expr::Index(Box::new(l), Box::new(r))
+        }
+        ast::Expr::Unary(op, x) => ast::Expr::Unary(op, Box::new(rw_expr(w, a, *x))),
+        ast::Expr::Borrow(x, mutable) => {
+            ast::Expr::Borrow(Box::new(rw_expr(w, a, *x)), mutable)
+        }
+        ast::Expr::Deref(x) => ast::Expr::Deref(Box::new(rw_expr(w, a, *x))),
+        ast::Expr::Try(x) => ast::Expr::Try(Box::new(rw_expr(w, a, *x))),
+        ast::Expr::Group(x) => ast::Expr::Group(Box::new(rw_expr(w, a, *x))),
+        ast::Expr::Field(x, name) => ast::Expr::Field(Box::new(rw_expr(w, a, *x)), name),
+        ast::Expr::Tuple(items) => ast::Expr::Tuple(rw_exprs(w, a, items)),
+        ast::Expr::Nested(b) => ast::Expr::Nested(Box::new(rw_block(w, a, *b))),
+        ast::Expr::If(c, t, o) => {
+            let cond = rw_expr(w, a, *c);
+            let then = rw_block(w, a, *t);
+            let other: Option<Box<ast::Expr>> = match o {
+                Option::Some(x) => Option::Some(Box::new(rw_expr(w, a, *x))),
+                Option::None => Option::None,
+            };
+            ast::Expr::If(Box::new(cond), Box::new(then), other)
+        }
+        ast::Expr::While(c, b) => {
+            let cond = rw_expr(w, a, *c);
+            ast::Expr::While(Box::new(cond), Box::new(rw_block(w, a, *b)))
+        }
+        ast::Expr::Loop(b) => ast::Expr::Loop(Box::new(rw_block(w, a, *b))),
+        // The binding is in scope for the body and hides an item of the same
+        // name, as a `let` does (Ch. 4 §5.7).
+        ast::Expr::For(name, iter, b) => {
+            let over = rw_expr(w, a, *iter);
+            let mark = a.locals.len();
+            a.locals.push(name.to_string());
+            let body = rw_block(w, a, *b);
+            unbind(a, mark);
+            ast::Expr::For(name, Box::new(over), Box::new(body))
+        }
+        ast::Expr::Return(v) => ast::Expr::Return(rw_optional(w, a, v)),
+        ast::Expr::Break(v) => ast::Expr::Break(rw_optional(w, a, v)),
+        ast::Expr::Match(s, arms) => {
+            let scrutinee = rw_expr(w, a, *s);
+            let mut out: Vec<ast::Arm> = Vec::new();
+            for arm in arms {
+                let mark = a.locals.len();
+                let mut patterns: Vec<ast::Pattern> = Vec::new();
+                for p in arm.patterns {
+                    patterns.push(rw_pattern(w, a, p));
+                }
+                let guard: Option<ast::Expr> = match arm.guard {
+                    Option::Some(g) => Option::Some(rw_expr(w, a, g)),
+                    Option::None => Option::None,
+                };
+                let body = rw_expr(w, a, arm.body);
+                unbind(a, mark);
+                out.push(ast::Arm { patterns: patterns, guard: guard, body: body });
+            }
+            ast::Expr::Match(Box::new(scrutinee), out)
+        }
+        other => other,
+    }
+}
+
+fn rw_optional(w: &World, a: &mut At, v: Option<Box<ast::Expr>>) -> Option<Box<ast::Expr>> {
+    let out: Option<Box<ast::Expr>> = match v {
+        Option::Some(e) => Option::Some(Box::new(rw_expr(w, a, *e))),
+        Option::None => Option::None,
+    };
+    out
+}
+
+/// `m::f(x)` and `m::N` are read as aggregates, because a path of two
+/// segments followed by `(` is a tuple literal and one followed by nothing
+/// is a unit literal — which is what they are when the head is a type. When
+/// the head is a **function** or a **constant** they are a call and a value,
+/// and the node has to become one (§4).
+fn rw_aggregate(w: &World, a: &mut At, path: String, fields: Vec<ast::Field>) -> ast::Expr {
+    let written = split(&path);
+    let resolved = rw_path(w, a, written);
+    let mut out: Vec<ast::Field> = Vec::new();
+    for f in fields {
+        let v = rw_expr(w, a, f.value);
+        out.push(ast::Field { name: f.name, value: v });
+    }
+    let one = resolved.segments.len() == 1;
+    if one && resolved.kind.same("fn") {
+        let mut args: Vec<ast::Expr> = Vec::new();
+        for f in out {
+            args.push(f.value);
+        }
+        return ast::Expr::Call(resolved.segments[0].to_string(), args);
+    }
+    if one && resolved.kind.same("const") && out.len() == 0 {
+        return ast::Expr::Name(resolved.segments[0].to_string());
+    }
+    let name = rejoin(&resolved.segments);
+    ast::Expr::Aggregate(name, out)
+}
+
+fn rw_pattern(w: &World, a: &mut At, p: ast::Pattern) -> ast::Pattern {
+    match p {
+        ast::Pattern::Bind(n) => {
+            a.locals.push(n.to_string());
+            ast::Pattern::Bind(n)
+        }
+        ast::Pattern::Aggregate(path, fields) => {
+            let written = split(&path);
+            let resolved = rw_path(w, a, written);
+            let mut out: Vec<ast::PatField> = Vec::new();
+            for f in fields {
+                let sub = rw_pattern(w, a, f.pat);
+                out.push(ast::PatField { name: f.name, pat: sub });
+            }
+            let name = rejoin(&resolved.segments);
+            ast::Pattern::Aggregate(name, out)
+        }
+        ast::Pattern::Tuple(items) => {
+            let mut out: Vec<ast::Pattern> = Vec::new();
+            for i in items {
+                out.push(rw_pattern(w, a, i));
+            }
+            ast::Pattern::Tuple(out)
+        }
+        other => other,
+    }
+}
+
+/// A written name, unless something nearer is called that.
+///
+/// A local or a parameter hides an item of the same name, exactly as it does
+/// when the whole program is one file.
+fn local_or_name(a: &At, n: &str) -> String {
+    let mut i: taddr = 0;
+    while i < a.locals.len() {
+        if a.locals[i].same(n) {
+            return n.to_string();
+        }
+        i += 1;
+    }
+    name_of(a, n)
+}
+
+/// What a single written name means here, or itself if nothing does.
+fn name_of(a: &At, n: &str) -> String {
+    match binding(&a.scope.names, n) {
+        Option::Some(full) => full,
+        Option::None => n.to_string(),
+    }
+}
+
+/// What a name is bound to in a list, if it is bound.
+fn binding(list: &Vec<Binding>, name: &str) -> Option<String> {
+    let mut i: taddr = 0;
+    while i < list.len() {
+        if list[i].name.same(name) {
+            return Option::Some(list[i].full.to_string());
+        }
+        i += 1;
+    }
+    Option::None
+}
+
+/// Forget every local bound since the mark.
+fn unbind(a: &mut At, mark: taddr) {
+    while a.locals.len() > mark {
+        a.locals.pop();
+    }
+}
+
+// --- names ----------------------------------------------------------------
+
+/// A path written `a::b::c`, as its segments.
+pub fn split(path: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur: String = Vec::new();
+    let mut i: taddr = 0;
+    while i < path.len() {
+        if path[i] == ':' && i + 1 < path.len() && path[i + 1] == ':' {
+            out.push(cur);
+            cur = Vec::new();
+            i += 2;
+        } else {
+            cur.push(path[i]);
+            i += 1;
+        }
+    }
+    out.push(cur);
+    out
+}
+
+/// The segments of a path, with `::` between them.
+pub fn rejoin(segments: &Vec<String>) -> String {
+    let mut out: String = Vec::new();
+    let mut i: taddr = 0;
+    while i < segments.len() {
+        if i > 0 {
+            out.push_str("::");
+        }
+        out.push_str(&segments[i]);
+        i += 1;
+    }
+    out
+}
+
 /// Whether module `here` is `at` or inside it (§2.1).
-fn inside(here: &str, at: &str) -> bool {
+pub fn inside(here: &str, at: &str) -> bool {
     if at.len() == 0 {
         return true;
     }
@@ -199,7 +660,7 @@ fn inside(here: &str, at: &str) -> bool {
 }
 
 /// Whether a list holds this exact name.
-fn holds(names: &Vec<String>, name: &str) -> bool {
+pub fn holds(names: &Vec<String>, name: &str) -> bool {
     let mut i: taddr = 0;
     while i < names.len() {
         if names[i].same(name) {
@@ -210,23 +671,9 @@ fn holds(names: &Vec<String>, name: &str) -> bool {
     false
 }
 
-/// A path as it was written, with `::` between the segments.
-fn written_path(segments: &Vec<String>) -> String {
-    let mut out: String = Vec::new();
-    let mut i: taddr = 0;
-    while i < segments.len() {
-        if i > 0 {
-            out.push_str("::");
-        }
-        out.push_str(&segments[i]);
-        i += 1;
-    }
-    out
-}
-
 /// A name through the module holding it, with `.` for `::` (§4). The root
 /// has no name of its own, so a name in it is that name and nothing before.
-fn joined(path: &str, name: &str) -> String {
+pub fn joined(path: &str, name: &str) -> String {
     let mut out: String = Vec::new();
     if path.len() > 0 {
         out.push_str(path);
@@ -237,7 +684,7 @@ fn joined(path: &str, name: &str) -> String {
 }
 
 /// The bundle writes the root's path as `-`, since it has none (§1.1).
-fn plain(path: &str) -> String {
+pub fn plain(path: &str) -> String {
     if path.same("-") {
         let empty: String = Vec::new();
         return empty;

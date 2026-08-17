@@ -2592,6 +2592,20 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.48 — a join nothing arrives at.** A `match` started its join block
+however its arms ended. When every arm left by another door — a `return`, a
+`break` — nothing jumped there, and the block was unreachable, which the TIR
+verifier rejects. It only showed when such a `match` sat inside something
+that went on afterwards, so the join was not the last block and the drops
+after it landed in it.
+
+`loop` had this test from the beginning: it returns `!` and starts no exit
+block when nothing `break`s. `match` now asks the same question of the
+blocks it has already emitted — does anything branch to this label — and
+answers `!` when nothing does. Found by the resolver of Ch. 6 written in
+Trust, whose `rw_path` is `match … { Ok => return …, Err => return … }`
+inside an outer `match`, which is the shape a resolver is.
+
 **G9.47 — a construct no tree showed.** `for x in e { … }` was turned into
 Ch. 4 §5.7's `loop` and `match` **in the parser**, so no AST ever held a
 `for`. Three things followed. An editor could not point at one — `trust-lsp`

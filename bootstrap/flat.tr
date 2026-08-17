@@ -1,0 +1,78 @@
+// Pass three of Ch. 6 §4, run: the whole program as one list of items with
+// every name in it resolved.
+//
+//     trust bundle <root.tr> | trust run bootstrap/flat.tr
+//
+// One item a line, in the order the modules were read. A `mod` and a `use`
+// name nothing below the frontend and are not here: a module is a naming
+// construct and has no run-time anything (§4).
+
+mod ast;
+mod bundle;
+mod input;
+mod lex;
+mod parse;
+mod resolve;
+
+fn main() -> t27 {
+    let src = input::read_all();
+    let mods = bundle::split(&src);
+    let mut w = resolve::World { modules: Vec::new(), defined: Vec::new(), sources: Vec::new() };
+    let mut files: Vec<Vec<ast::Item>> = Vec::new();
+
+    // Pass one: nothing can be resolved before it is known what the program
+    // defines, and that is a fact about every module at once.
+    let mut i: taddr = 0;
+    while i < mods.len() {
+        let here = resolve::plain(&mods[i].path);
+        w.sources.push(here.to_string());
+        files.push(read(&mods[i], &mut w, &here));
+        i += 1;
+    }
+
+    // Passes two and three, a module at a time: the scope is what the module
+    // can see, and the rewrite is what it means.
+    let mut f: taddr = 0;
+    for items in files {
+        let here = resolve::plain(&mods[f].path);
+        let scope = resolve::scope_of(&w, &here, &items);
+        let mut at = resolve::At { here: here, scope: scope, locals: Vec::new() };
+        for item in items {
+            // Asked without taking the item apart: reading `item.what` here
+            // would move it, and what follows wants the whole item.
+            let word = ast::kind(&item.what);
+            if !word.same("mod") && !word.same("use") {
+                let done = resolve::rewrite(&w, &mut at, item);
+                let mut out: String = Vec::new();
+                ast::show_item(&done, &mut out);
+                println(&out);
+            }
+        }
+        f += 1;
+    }
+    0
+}
+
+/// One module, parsed, with what it defines added to the world.
+fn read(m: &bundle::Module, w: &mut resolve::World, here: &str) -> Vec<ast::Item> {
+    let mut p = parse::Parser { src: m.text.to_string(), at: 0, no_struct: false };
+    match parse::file(&mut p) {
+        Result::Ok(items) => {
+            let mut k: taddr = 0;
+            while k < items.len() {
+                resolve::gather(w, here, &items[k]);
+                k += 1;
+            }
+            items
+        }
+        Result::Err(err) => {
+            print("error ");
+            print(&m.path);
+            print(" ");
+            print_int(err.at as t27);
+            println("");
+            let empty: Vec<ast::Item> = Vec::new();
+            empty
+        }
+    }
+}
