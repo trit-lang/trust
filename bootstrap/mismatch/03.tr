@@ -1,0 +1,18 @@
+// An argument is a claim about a parameter, and a tail about the return.
+struct Span { lo: taddr, hi: taddr }
+
+fn takes(n: t27, f: bool) -> t27 { n }
+fn takes_ref(s: &Span) -> taddr { s.lo }
+
+fn call_right() -> t27 { takes(1, true) }
+fn call_wrong_second() -> t27 { takes(1, 2) }
+fn call_wrong_first(s: Span) -> t27 { takes(s, true) }
+fn call_wrong_count() -> t27 { takes(1) }
+
+fn ref_right(s: &Span) -> taddr { takes_ref(s) }
+fn ref_wrong(s: Span) -> taddr { takes_ref(s) }
+
+fn tail_right() -> t27 { 1 }
+fn tail_wrong() -> t27 { true }
+fn tail_wrong_shape(s: &Span) -> t27 { s.lo }
+fn tail_unit() -> t27 { }

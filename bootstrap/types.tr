@@ -73,6 +73,13 @@ pub struct World {
     /// Whether the function being walked has already been refused: one
     /// answer per function, as the Rust side gives (it stops at the first).
     pub refused: bool,
+    /// Whether it was refused by a rule that is not a type that does not
+    /// match — a wrong number of arguments is one, and the Rust side calls
+    /// it something else, so this must too.
+    pub other: bool,
+    /// What the function being walked answers with, for its tail and its
+    /// `return`s to be claims about (Ch. 4 §2.2).
+    pub returns: ast::Ty,
     /// `type Name = T;` — only a name (Ch. 0 §3.6), so a name is what it
     /// is taken off before anything else asks what a type is.
     pub aliases: Vec<Binding>,
@@ -94,6 +101,8 @@ fn main() -> t27 {
             let mut w = World {
                 agreeing: agreeing,
                 refused: false,
+                other: false,
+                returns: ast::Ty::Unit,
                 aliases: Vec::new(),
                 fields: Vec::new(),
                 sigs: Vec::new(),
@@ -239,10 +248,17 @@ fn walk_item(w: &mut World, item: &ast::Item) {
             match &f.body {
                 Option::Some(b) => {
                     w.refused = false;
+                    w.other = false;
                     walk_fn(w, f, b);
                     if w.agreeing {
                         print(&f.name);
-                        if w.refused {
+                        // A refusal is reported by its rule, and the rule
+                        // that fires first is the one the Rust side stops
+                        // at — which is the count, since it is asked before
+                        // any argument is looked at.
+                        if w.other {
+                            println(" other");
+                        } else if w.refused {
                             println(" mismatch");
                         } else {
                             println(" ok");
@@ -258,6 +274,7 @@ fn walk_item(w: &mut World, item: &ast::Item) {
 
 fn walk_fn(w: &mut World, f: &ast::Fn, body: &ast::Block) {
     let mark = w.locals.len();
+    w.returns = expand(w, &f.ret);
     let mut i: taddr = 0;
     while i < f.params.len() {
         let t = expand(w, &f.params[i].ty);
@@ -265,6 +282,7 @@ fn walk_fn(w: &mut World, f: &ast::Fn, body: &ast::Block) {
         i += 1;
     }
     walk_block(w, &f.name, body);
+    check_body(w, body);
     unbind(w, mark);
 }
 
@@ -320,6 +338,40 @@ fn walk_block(w: &mut World, what: &str, b: &ast::Block) {
         Option::None => {}
     }
     unbind(w, mark);
+}
+
+/// Whether a block leaves by another door than its end.
+fn ends_by_leaving(b: &ast::Block) -> bool {
+    if b.stmts.len() == 0 {
+        return false;
+    }
+    match &b.stmts[b.stmts.len() - 1] {
+        ast::Stmt::Do(e) => diverges(e),
+        _ => false,
+    }
+}
+
+/// Whether an expression never gives a value back to what follows it.
+fn diverges(e: &ast::Expr) -> bool {
+    match e {
+        ast::Expr::Return(v) => true,
+        ast::Expr::Break(v) => true,
+        ast::Expr::Continue => true,
+        // A `loop` with no `break` in it never ends; one with a `break`
+        // gives `()` and this does not need to tell them apart, because
+        // `()` is what a block with no tail is either way.
+        ast::Expr::Loop(b) => true,
+        _ => false,
+    }
+}
+
+/// A function's body is a claim about what it answers with (Ch. 4 §2.2).
+fn check_body(w: &mut World, body: &ast::Block) {
+    let want = copy_ty(&w.returns);
+    let got = block_type(w, body);
+    if !agrees(&want, &got) {
+        w.refused = true;
+    }
 }
 
 /// The blocks an expression holds, in source order.
@@ -396,6 +448,7 @@ fn walk_expr(w: &mut World, what: &str, e: &ast::Expr) {
                 walk_expr(w, what, &args[i]);
                 i += 1;
             }
+            check_call(w, name, args);
         }
         ast::Expr::Return(v) => walk_optional(w, what, v),
         ast::Expr::Break(v) => walk_optional(w, what, v),
@@ -408,6 +461,45 @@ fn walk_optional(w: &mut World, what: &str, v: &Option<Box<ast::Expr>>) {
         Option::Some(e) => walk_expr(w, what, e),
         Option::None => {}
     }
+}
+
+/// An argument is a claim about a parameter (Ch. 4 §2.2).
+///
+/// A call of something this checker has no signature for says nothing: it
+/// is not in the file, and what it wants is not this file's to know.
+fn check_call(w: &mut World, name: &str, args: &Vec<ast::Expr>) {
+    let at = sig_at(w, name);
+    if at < 0 {
+        return;
+    }
+    if w.sigs[at].params.len() != args.len() {
+        // A different *count* is a different refusal, and is reported as
+        // one: nothing about the arguments is a type that does not match
+        // when there are the wrong number of them.
+        w.other = true;
+        return;
+    }
+    let mut i: taddr = 0;
+    while i < args.len() {
+        let want = copy_ty(&w.sigs[at].params[i]);
+        let got = type_of(w, &args[i]);
+        if !agrees(&want, &got) {
+            w.refused = true;
+        }
+        i += 1;
+    }
+}
+
+/// Which signature is called that, or −1.
+fn sig_at(w: &World, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < w.sigs.len() {
+        if w.sigs[i].name.same(name) {
+            return i;
+        }
+        i += 1;
+    }
+    0 - 1
 }
 
 /// What an expression is.
@@ -481,11 +573,11 @@ pub fn type_of(w: &mut World, e: &ast::Expr) -> ast::Ty {
         ast::Expr::If(c, t, o) => block_type(w, t),
         ast::Expr::Match(s, arms) => {
             if arms.len() == 0 {
-                return ast::Ty::Unit;
+                return unknown();
             }
             type_of(w, &arms[0].body)
         }
-        _ => ast::Ty::Unit,
+        _ => unknown(),
     }
 }
 
@@ -500,11 +592,8 @@ pub fn agrees(want: &ast::Ty, got: &ast::Ty) -> bool {
     // and a thing it does not know is not a thing it may refuse. It says so
     // at every level, because an argument it could not work out does not
     // make the type around it wrong.
-    match got {
-        ast::Ty::Unit => {
-            return true;
-        }
-        _ => {}
+    if is_unknown(got) {
+        return true;
     }
     match got {
         ast::Ty::Name(segments) => {
@@ -518,7 +607,16 @@ pub fn agrees(want: &ast::Ty, got: &ast::Ty) -> bool {
     match want {
         ast::Ty::Ref(a, m) => {
             match got {
-                ast::Ty::Ref(b, n) => agrees(a, b),
+                ast::Ty::Ref(b, n) => {
+                    // A `&Vec<T>` is accepted where a `&[T]` is wanted, and
+                    // a `&Vec<char>` where a `&str` is: what a vector owns
+                    // is a run of elements, and a slice is a run of them
+                    // (Ch. 5 §2). The permission goes down, never up.
+                    if slice_of(a, b) {
+                        return true;
+                    }
+                    agrees(a, b)
+                }
                 _ => false,
             }
         }
@@ -552,6 +650,28 @@ pub fn agrees(want: &ast::Ty, got: &ast::Ty) -> bool {
     }
 }
 
+/// Whether `want` is the slice a `Vec` of `got` lends.
+fn slice_of(want: &ast::Ty, got: &ast::Ty) -> bool {
+    let element = match got {
+        ast::Ty::App(segments, args) => {
+            if !joined(segments).same("Vec") || args.len() != 1 {
+                return false;
+            }
+            copy_ty(&args[0])
+        }
+        _ => return false,
+    };
+    match want {
+        ast::Ty::Slice(inner) => agrees(inner, &element),
+        // A `str` is a slice of characters (Ch. 5 §1.1).
+        ast::Ty::Name(segments) => {
+            let ch = named("char");
+            joined(segments).same("str") && agrees(&ch, &element)
+        }
+        _ => false,
+    }
+}
+
 /// Whether a type is one an integer literal may become (Ch. 1 §2).
 fn is_integer(t: &ast::Ty) -> bool {
     match t {
@@ -572,6 +692,24 @@ fn same_ty(a: &ast::Ty, b: &ast::Ty) -> bool {
     x.same(&y)
 }
 
+/// What this checker answers where it does not know.
+///
+/// Told apart from `()`, which is a type a program can write and therefore
+/// a type it can get wrong: `fn f() -> t27 { }` answers `()` and is refused,
+/// and it would not be if not knowing and answering nothing were the same
+/// thing. It prints as `()` because nothing that reaches a report is one.
+fn unknown() -> ast::Ty {
+    named("#unknown")
+}
+
+/// Whether a type is this checker's admission that it does not know.
+fn is_unknown(t: &ast::Ty) -> bool {
+    match t {
+        ast::Ty::Name(segments) => joined(segments).same("#unknown"),
+        _ => false,
+    }
+}
+
 /// A type, as the name it has once it is one type and not a family.
 ///
 /// A generic type is *monomorphized* (Ch. 4 §2.5): `Option<taddr>` becomes
@@ -583,10 +721,14 @@ fn same_ty(a: &ast::Ty, b: &ast::Ty) -> bool {
 /// instantiate: it is one type the language writes, and it keeps its name.
 pub fn show_type(t: &ast::Ty, out: &mut String) {
     match t {
-        // A literal that nothing decided is a word (§5.2).
+        // A literal that nothing decided is a word (§5.2), and what this
+        // checker does not know prints as nothing, which is what it is.
         ast::Ty::Name(segments) => {
-            if joined(segments).same("#int") {
+            let n = joined(segments);
+            if n.same("#int") {
                 out.push_str("t27");
+            } else if n.same("#unknown") {
+                out.push_str("()");
             } else {
                 ast::show_ty(t, out);
             }
@@ -645,13 +787,27 @@ fn block_type(w: &mut World, b: &ast::Block) -> ast::Ty {
     }
     let out = match &b.tail {
         Option::Some(e) => type_of(w, e),
-        Option::None => ast::Ty::Unit,
+        // A block with no tail is `()` — unless it never reaches its end,
+        // in which case it claims nothing about anything (§5.1). A function
+        // whose body is a `loop` that only leaves by `return` is the case
+        // this is here for.
+        Option::None => {
+            if ends_by_leaving(b) {
+                unknown()
+            } else {
+                ast::Ty::Unit
+            }
+        }
     };
     unbind(w, mark);
     out
 }
 
-/// What a name in scope is, or `()` when nothing here is called that.
+/// What a name in scope is, or nothing when this checker does not know.
+///
+/// A pattern's bindings are not in scope here — they are the pattern's, and
+/// nothing records them yet — so a name it has not seen is an admission and
+/// not a claim that the name is `()`.
 fn look_up(w: &mut World, name: &str) -> ast::Ty {
     let mut i = w.locals.len();
     while i > 0 {
@@ -660,7 +816,7 @@ fn look_up(w: &mut World, name: &str) -> ast::Ty {
             return copy_ty(&w.locals[i].ty);
         }
     }
-    ast::Ty::Unit
+    unknown()
 }
 
 /// The type of a field of a named struct.
@@ -672,7 +828,7 @@ fn field_type(w: &mut World, owner: &str, name: &str) -> ast::Ty {
         }
         i += 1;
     }
-    ast::Ty::Unit
+    unknown()
 }
 
 /// What a function of this name answers with.
@@ -684,7 +840,7 @@ fn return_of(w: &mut World, name: &str) -> ast::Ty {
         }
         i += 1;
     }
-    ast::Ty::Unit
+    unknown()
 }
 
 /// `Kind::Rect(2, 3)` is a value of `Kind`; `Point { x: 1 }` is one of
@@ -700,9 +856,8 @@ fn aggregate_type(w: &mut World, path: &str, fields: &Vec<ast::Field>) -> ast::T
     if at < 0 {
         // Not a variant of anything known: `Vec::new()` is a call of an
         // associated function, and answering `Vec` would be a guess. This
-        // checker says what it knows and `()` is how it says it knows
-        // nothing.
-        return ast::Ty::Unit;
+        // checker says what it knows, and says so.
+        return unknown();
     }
     if w.variants[at].params.len() == 0 {
         return named(&owner);
@@ -794,7 +949,7 @@ fn bound_or_unit(bound: &Vec<Binding>, name: &str) -> ast::Ty {
         }
         i += 1;
     }
-    ast::Ty::Unit
+    unknown()
 }
 
 /// A path written `a::b`, as its segments.
@@ -884,7 +1039,7 @@ fn method_type(w: &mut World, on: &ast::Ty, name: &str) -> ast::Ty {
     if name.same("same") || name.same("starts_with") || name.same("contains") {
         return named("bool");
     }
-    ast::Ty::Unit
+    unknown()
 }
 
 /// The first type argument of `Option<T>` or `Result<T, E>`.
@@ -895,9 +1050,9 @@ fn first_argument(t: &ast::Ty) -> ast::Ty {
             if (head.same("Option") || head.same("Result")) && args.len() > 0 {
                 return copy_ty(&args[0]);
             }
-            ast::Ty::Unit
+            unknown()
         }
-        _ => ast::Ty::Unit,
+        _ => unknown(),
     }
 }
 
@@ -908,7 +1063,7 @@ fn element_of(t: &ast::Ty) -> ast::Ty {
             if args.len() == 1 {
                 return copy_ty(&args[0]);
             }
-            ast::Ty::Unit
+            unknown()
         }
         ast::Ty::Slice(inner) => copy_ty(inner),
         ast::Ty::Name(segments) => {
@@ -916,10 +1071,10 @@ fn element_of(t: &ast::Ty) -> ast::Ty {
             if joined(segments).same("str") {
                 named("char")
             } else {
-                ast::Ty::Unit
+                unknown()
             }
         }
-        _ => ast::Ty::Unit,
+        _ => unknown(),
     }
 }
 
@@ -927,7 +1082,7 @@ fn element_of(t: &ast::Ty) -> ast::Ty {
 fn target_of(t: &ast::Ty) -> ast::Ty {
     match t {
         ast::Ty::Ref(inner, m) => copy_ty(inner),
-        _ => ast::Ty::Unit,
+        _ => unknown(),
     }
 }
 
