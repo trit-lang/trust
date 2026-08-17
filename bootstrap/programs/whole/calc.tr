@@ -1,0 +1,9 @@
+pub struct Pair { a: t27, b: t27 }
+
+pub fn twice(n: t27) -> t27 { n + n }
+
+pub fn first(p: Pair) -> t27 { p.a }
+
+fn helper(n: t27) -> t27 { n - 1 }
+
+pub fn both(n: t27) -> t27 { twice(n) + helper(n) }

@@ -28,6 +28,7 @@ usage:
                                        print its tree
     trust bundle <file.tr>             the whole module tree as one text,
                                        for a compiler that cannot open files
+    trust build <file.tr>              the whole program as TIR
     trust modules <file.tr>            each module of it, and its token count
     trust file <file.tr>               every item in it, as a tree
     trust symbols <file.tr>            every name the program defines
@@ -278,6 +279,22 @@ fn main() -> ExitCode {
                 for e in &errs {
                     eprintln!("trust: {}", e.message);
                 }
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    // The whole program as TIR: `trustc build` reads one file, and a
+    // program is a tree of them (Ch. 6 §1).
+    if cmd == "build" {
+        let build = lang::build(std::path::Path::new(path));
+        match &build.module {
+            Some(m) if build.errors.is_empty() => {
+                print!("{}", trustc::tir::print_module(m));
+                return ExitCode::SUCCESS;
+            }
+            _ => {
+                report(&build);
                 return ExitCode::FAILURE;
             }
         }
