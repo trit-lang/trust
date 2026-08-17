@@ -625,6 +625,15 @@ pub enum Expr {
     Loop(Block, Span),
     /// `while cond { … }`.
     While(Box<Expr>, Block, Span),
+    /// `for name in iter { … }` (Ch. 4 §5.7).
+    ///
+    /// It is §5.7's desugaring written as itself, and becomes the `loop` and
+    /// `match` there at *lowering*. Draft 0.1 desugared it in the parser,
+    /// which put a construct in the language that no tree ever showed: an
+    /// editor could not point at it, and a second parser could not agree
+    /// about it without also agreeing about the names the desugaring
+    /// invents.
+    For(String, Span, Box<Expr>, Block, Span),
     /// `break` with an optional value.
     Break(Option<Box<Expr>>, Span),
     /// `continue`.
@@ -676,6 +685,7 @@ impl Expr {
             | Match(_, _, l)
             | Loop(_, l)
             | While(_, _, l)
+            | For(_, _, _, _, l)
             | Break(_, l)
             | Continue(l)
             | Return(_, l)
@@ -723,6 +733,7 @@ impl Expr {
             | Match(_, _, l)
             | Loop(_, l)
             | While(_, _, l)
+            | For(_, _, _, _, l)
             | Break(_, l)
             | Continue(l)
             | Return(_, l)
@@ -959,6 +970,10 @@ fn expr_tys(e: &mut Expr, f: &mut impl FnMut(&mut Ty)) {
             expr_tys(c, f);
             block_tys(b, f);
         }
+        Expr::For(_, _, it, b, _) => {
+            expr_tys(it, f);
+            block_tys(b, f);
+        }
         Expr::Loop(b, _) => block_tys(b, f),
         Expr::Method(r, _, _, args, _) => {
             expr_tys(r, f);
@@ -1091,6 +1106,10 @@ pub fn for_each_child_mut(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
         }
         Expr::While(c, b, _) => {
             f(c);
+            block_children(b, f);
+        }
+        Expr::For(_, _, it, b, _) => {
+            f(it);
             block_children(b, f);
         }
         Expr::Loop(b, _) => block_children(b, f),

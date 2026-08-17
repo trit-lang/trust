@@ -1742,90 +1742,6 @@ impl Parser {
     ///
     /// The iterator's name contains a dot, which no Trust identifier may, so
     /// it cannot shadow or be shadowed by anything a program wrote.
-    fn desugar_for(
-        &mut self,
-        name: String,
-        name_span: Span,
-        iter: Expr,
-        body: Block,
-        span: Span,
-    ) -> Expr {
-        self.counter += 1;
-        let it = format!("it.{}", self.counter);
-        let path = |segs: &[&str]| Path {
-            segments: segs.iter().map(|s| s.to_string()).collect(),
-            targs: Vec::new(),
-            span,
-        };
-        let next = Expr::Method(
-            Box::new(Expr::Path(it.clone(), span)),
-            "next".to_string(),
-            span,
-            Vec::new(),
-            span,
-        );
-        // The arm reaches to the end of the body, because that is how far
-        // the loop's binding is in scope — a desugaring that collapsed it to
-        // the `for` keyword would put the name nowhere.
-        let arm_span = span.to(body.span);
-        let arms = vec![
-            Arm {
-                patterns: vec![Pattern::Aggregate(
-                    path(&["Option", "Some"]),
-                    // The name is the file's, not the desugaring's, so it
-                    // keeps the place it was written.
-                    vec![("0".to_string(), Pattern::Bind(name, name_span))],
-                    span,
-                )],
-                guard: None,
-                body: Expr::Block(body),
-                span: arm_span,
-            },
-            Arm {
-                patterns: vec![Pattern::Aggregate(
-                    path(&["Option", "None"]),
-                    Vec::new(),
-                    span,
-                )],
-                guard: None,
-                body: Expr::Break(None, span),
-                span: arm_span,
-            },
-        ];
-        Expr::Block(Block {
-            stmts: vec![
-                Stmt::Let {
-                    mutable: true,
-                    name: it,
-                    name_span: span,
-                    ty: None,
-                    pattern: None,
-                    // Ch. 4 §5.7: the loop's expression is turned into an
-                    // iterator first, which is what lets `for c in s` walk a
-                    // string and not only something that is already one.
-                    value: Expr::Method(
-                        Box::new(iter),
-                        "into_iter".to_string(),
-                        span,
-                        Vec::new(),
-                        span,
-                    ),
-                    span,
-                },
-                Stmt::Expr(Expr::Loop(
-                    Block {
-                        stmts: Vec::new(),
-                        tail: Some(Box::new(Expr::Match(Box::new(next), arms, span))),
-                        span,
-                    },
-                    span,
-                )),
-            ],
-            tail: None,
-            span,
-        })
-    }
-
     fn closure(&mut self, span: Span) -> R<Expr> {
         let mut params = Vec::new();
         if self.eat_op("||") {
@@ -2073,7 +1989,7 @@ impl Parser {
                 let iter = self.expr()?;
                 self.no_struct = saved;
                 let body = self.block()?;
-                Ok(self.desugar_for(name, name_span, iter, body, span))
+                Ok(Expr::For(name, name_span, Box::new(iter), body, span))
             }
             Tok::Kw("true") => {
                 self.bump();
@@ -2420,6 +2336,7 @@ fn block_like(e: &Expr) -> bool {
             | Expr::Match(..)
             | Expr::Loop(..)
             | Expr::While(..)
+            | Expr::For(..)
             // `$( … )*` ends at its `*` and holds statements of its own, so
             // it stands as one without a terminator (Ch. 7 §3).
             | Expr::MacroRepeat(..)

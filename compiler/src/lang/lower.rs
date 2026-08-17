@@ -1297,6 +1297,13 @@ fn free_names(e: &ast::Expr, bound: &mut Vec<String>, out: &mut Vec<String>) {
             free_names(c, bound, out);
             free_names_block(b, bound, out);
         }
+        For(name, _, it, b, _) => {
+            free_names(it, bound, out);
+            let depth = bound.len();
+            bound.push(name.clone());
+            free_names_block(b, bound, out);
+            bound.truncate(depth);
+        }
         Match(sc, arms, _) => {
             free_names(sc, bound, out);
             for a in arms {
@@ -1435,6 +1442,10 @@ fn for_each_child(e: &ast::Expr, f: &mut impl FnMut(&ast::Expr)) {
             f(c);
             for_each_child_block(b, f);
         }
+        For(_, _, it, b, _) => {
+            f(it);
+            for_each_child_block(b, f);
+        }
         Match(sc, arms, _) => {
             f(sc);
             for a in arms {
@@ -1523,6 +1534,10 @@ fn for_each_child_mut(e: &mut ast::Expr, f: &mut impl FnMut(&mut ast::Expr)) {
         }
         While(c, b, _) => {
             f(c);
+            for_each_child_block_mut(b, f);
+        }
+        For(_, _, it, b, _) => {
+            f(it);
             for_each_child_block_mut(b, f);
         }
         Match(sc, arms, _) => {
@@ -2050,6 +2065,11 @@ fn subst_expr(e: &mut ast::Expr, self_ty: &SelfTy) {
         }
         While(c, b, _) => {
             subst_expr(c, self_ty);
+            subst_block(b, self_ty);
+            return;
+        }
+        For(_, _, it, b, _) => {
+            subst_expr(it, self_ty);
             subst_block(b, self_ty);
             return;
         }
@@ -5485,6 +5505,12 @@ impl Fn<'_> {
                 self.match_expr(scrutinee, arms, expected, *span)
             }
             E::While(cond, body, span) => self.while_expr(cond, body, *span),
+            // Ch. 4 §5.7's desugaring, done here rather than in the parser
+            // so that the tree a reader sees is the one they wrote.
+            E::For(name, name_span, iter, body, span) => {
+                let e = self.desugar_for(name, *name_span, iter, body, *span);
+                self.expr(&e, expected)
+            }
             E::Loop(body, span) => self.loop_expr(body, expected, *span),
 
             E::Break(value, span) => {
@@ -10592,6 +10618,102 @@ impl Fn<'_> {
         }
     }
 
+    /// Ch. 4 §5.7's desugaring, written out:
+    ///
+    /// ```text
+    /// { let mut it = e.into_iter();
+    ///   loop { match it.next() { Some(x) => { body } None => break, } } }
+    /// ```
+    ///
+    /// The iterator's name contains a dot, which no Trust identifier may, so
+    /// it cannot shadow or be shadowed by anything a program wrote.
+    fn desugar_for(
+        &mut self,
+        name: &str,
+        name_span: Span,
+        iter: &ast::Expr,
+        body: &ast::Block,
+        span: Span,
+    ) -> ast::Expr {
+        self.counter += 1;
+        let it = format!("it.{}", self.counter);
+        let path = |segs: &[&str]| ast::Path {
+            segments: segs.iter().map(|s| s.to_string()).collect(),
+            targs: Vec::new(),
+            span,
+        };
+        let next = ast::Expr::Method(
+            Box::new(ast::Expr::Path(it.clone(), span)),
+            "next".to_string(),
+            span,
+            Vec::new(),
+            span,
+        );
+        // The arm reaches to the end of the body, because that is how far
+        // the loop's binding is in scope — a desugaring that collapsed it to
+        // the `for` keyword would put the name nowhere.
+        let arm_span = span.to(body.span);
+        let arms = vec![
+            ast::Arm {
+                patterns: vec![ast::Pattern::Aggregate(
+                    path(&["Option", "Some"]),
+                    // The name is the file's, not the desugaring's, so it
+                    // keeps the place it was written.
+                    vec![(
+                        "0".to_string(),
+                        ast::Pattern::Bind(name.to_string(), name_span),
+                    )],
+                    span,
+                )],
+                guard: None,
+                body: ast::Expr::Block(body.clone()),
+                span: arm_span,
+            },
+            ast::Arm {
+                patterns: vec![ast::Pattern::Aggregate(
+                    path(&["Option", "None"]),
+                    Vec::new(),
+                    span,
+                )],
+                guard: None,
+                body: ast::Expr::Break(None, span),
+                span: arm_span,
+            },
+        ];
+        ast::Expr::Block(ast::Block {
+            stmts: vec![
+                ast::Stmt::Let {
+                    mutable: true,
+                    name: it,
+                    name_span: span,
+                    ty: None,
+                    pattern: None,
+                    // Ch. 4 §5.7: the loop's expression is turned into an
+                    // iterator first, which is what lets `for c in s` walk a
+                    // string and not only something that is already one.
+                    value: ast::Expr::Method(
+                        Box::new(iter.clone()),
+                        "into_iter".to_string(),
+                        span,
+                        Vec::new(),
+                        span,
+                    ),
+                    span,
+                },
+                ast::Stmt::Expr(ast::Expr::Loop(
+                    ast::Block {
+                        stmts: Vec::new(),
+                        tail: Some(Box::new(ast::Expr::Match(Box::new(next), arms, span))),
+                        span,
+                    },
+                    span,
+                )),
+            ],
+            tail: None,
+            span,
+        })
+    }
+
     fn while_expr(&mut self, cond: &ast::Expr, body: &ast::Block, span: Span) -> R<(Operand, Ty)> {
         let (head, body_l, exit) = (self.fresh("while"), self.fresh("body"), self.fresh("done"));
         // The **body first**, and the test after it.
@@ -11596,6 +11718,10 @@ fn walk_expr(e: &ast::Expr, index: &mut u32, out: &mut HashMap<String, u32>) {
         E::Loop(b, _) => walk_block(b, index, out),
         E::While(c, b, _) => {
             go(c, index, out);
+            walk_block(b, index, out);
+        }
+        E::For(_, _, it, b, _) => {
+            go(it, index, out);
             walk_block(b, index, out);
         }
         E::Break(v, _) | E::Return(v, _) => {

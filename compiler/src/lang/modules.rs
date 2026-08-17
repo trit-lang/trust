@@ -856,6 +856,13 @@ impl Rewriter<'_> {
                 self.expr(c);
                 self.block(body);
             }
+            Expr::For(name, _, iter, body, _) => {
+                self.expr(iter);
+                let mark = self.locals.len();
+                self.locals.push(name.clone());
+                self.block(body);
+                self.locals.truncate(mark);
+            }
             Expr::Loop(body, _) => self.block(body),
             Expr::Field(v, _, _)
             | Expr::Unary(_, v, _)

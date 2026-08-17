@@ -53,6 +53,10 @@ pub enum Expr {
     /// `if c { … } else { … }` (§5.3). The alternative is an expression so
     /// that `else if` is an `if` and not a third shape.
     If(Box<Expr>, Box<Block>, Option<Box<Expr>>),
+    /// `for x in e { … }` (Ch. 4 §5.7). It is written as itself and turned
+    /// into a `loop` and a `match` at lowering, so a reader and an editor
+    /// see the loop they wrote.
+    For(String, Box<Expr>, Box<Block>),
     /// `while c { … }` (§5.5).
     While(Box<Expr>, Box<Block>),
     /// `loop { … }` (§5.5).
@@ -241,6 +245,15 @@ pub fn show(e: &Expr, out: &mut String) {
                 }
                 Option::None => {}
             }
+            out.push_str(")");
+        }
+        Expr::For(name, iter, b) => {
+            out.push_str("(for ");
+            out.push_str(&name);
+            out.push_str(" ");
+            show(&*iter, out);
+            out.push_str(" ");
+            show_block(&*b, out);
             out.push_str(")");
         }
         Expr::While(c, b) => {

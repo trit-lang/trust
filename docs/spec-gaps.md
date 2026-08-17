@@ -2592,6 +2592,20 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.47 — a construct no tree showed.** `for x in e { … }` was turned into
+Ch. 4 §5.7's `loop` and `match` **in the parser**, so no AST ever held a
+`for`. Three things followed. An editor could not point at one — `trust-lsp`
+saw a binding named `it.3` and a `match` nobody wrote. A second parser could
+not agree about one without also agreeing about the names the desugaring
+invents and the order it invents them in, which is not a fact about the
+language. And the desugaring ran before the `for` was known to be
+well-formed, so its errors were reported against code the file does not
+contain.
+
+`Expr::For` is a node now, and §5.7's desugaring happens at lowering. The
+tree a reader sees is the tree they wrote, `bootstrap`'s parser reads a `for`
+as a `for`, and the two print the same one.
+
 **G9.46 — a struct could not be taken apart.** Ch. 0 §4 lists
 `Point { x, y }` among the patterns and says patterns appear in `match` arms
 and in `let`. The implementation read one in neither: `match` on a struct

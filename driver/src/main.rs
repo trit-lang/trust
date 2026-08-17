@@ -594,6 +594,13 @@ fn show_expr(e: &lang::ast::Expr, out: &mut String) {
             }
             out.push(')');
         }
+        Expr::For(name, _, iter, b, _) => {
+            out.push_str(&format!("(for {name} "));
+            show_expr(iter, out);
+            out.push(' ');
+            show_block(b, out);
+            out.push(')');
+        }
         Expr::While(c, b, _) => {
             out.push_str("(while ");
             show_expr(c, out);

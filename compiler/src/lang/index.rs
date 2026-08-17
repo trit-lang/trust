@@ -990,6 +990,15 @@ impl Builder {
                 self.expr(c);
                 self.block(body);
             }
+            // The binding is the file's and is in scope for the body, which
+            // is what an editor asked about it needs to know (Ch. 4 §5.7).
+            Expr::For(name, at, iter, body, _) => {
+                self.expr(iter);
+                self.scope(body.span, |s| {
+                    s.bind_and_mark(name, *at, SymbolKind::Local, name.clone());
+                    s.block(body);
+                });
+            }
             Expr::Loop(body, _) => self.block(body),
             Expr::Field(v, _, _) => self.expr(v),
             Expr::Unary(_, v, _)
