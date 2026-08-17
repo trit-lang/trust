@@ -180,6 +180,11 @@ pub fn of(defs: &Vec<Def>, t: &Ty, depth: taddr) -> Result<Layout, String> {
         Ty::Ref(inner, mutable) => Result::Ok(ranged(3, 1, MANY as t27)),
         Ty::Unit => Result::Ok(scalar(0, 0)),
         Ty::SelfTy => Result::Err("`Self` outside an impl".to_string()),
+        Ty::ImplFn(kind, args, ret) => {
+            Result::Err("a closure type is not laid out here".to_string())
+        }
+        Ty::Tuple(args) => Result::Err("a tuple is not laid out here".to_string()),
+        Ty::Array(held, len) => Result::Err("an array is not laid out here".to_string()),
         Ty::Slice(inner) => Result::Err("a slice has no size of its own".to_string()),
         Ty::App(segments, args) => {
             let head = segments[segments.len() - 1].to_string();

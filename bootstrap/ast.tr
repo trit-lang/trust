@@ -20,6 +20,15 @@ pub enum Expr {
     Unary(String, Box<Expr>),
     /// `f(a, b)`.
     Call(String, Vec<Expr>),
+    /// `(m.f)(x)` — a call whose callee is not a name, which is what
+    /// calling a captured closure is (Ch. 4 §4.2). Kept apart from `Call`
+    /// because a call *by name* is the only one a linker can resolve, and
+    /// everything downstream of here asks for the name.
+    CallExpr(Box<Expr>, Vec<Expr>),
+    /// `[a, b]` — an array written out (Ch. 2 §4).
+    Array(Vec<Expr>),
+    /// `[v; n]` — the same array written once.
+    Repeat(Box<Expr>, Box<Expr>),
     /// `Point { x: 1 }`, `Kind::Rect(2, 3)`, `Kind::Dot` — one shape, because
     /// a tuple form's fields are its positions written out, and a bare path
     /// to a variant is that shape with no fields at all.
@@ -91,6 +100,19 @@ pub enum Ty {
     Unit,
     /// `Self`, inside an `impl` (Ch. 4 §1.2).
     SelfTy,
+    /// `impl Fn(A) -> R` — a parameter that takes anything callable that
+    /// way, which is what a closure is passed as (Ch. 4 §4.1). The name is
+    /// `Fn`, `FnMut` or `FnOnce`, and the answer is nothing where none was
+    /// written.
+    ImplFn(String, Vec<Ty>, Option<Box<Ty>>),
+    /// `(A, B)` — an anonymous product, whose fields are its positions
+    /// (Ch. 2 §3). `()` is not one of these: it is `Unit`, because a
+    /// product of nothing is a value and not a shape.
+    Tuple(Vec<Ty>),
+    /// `[T; N]` — an array. The length is kept as it was **written**,
+    /// because a `const` parameter may be what says it and a number would
+    /// not be able to say `N` (Ch. 2 §4).
+    Array(Box<Ty>, String),
 }
 
 /// A statement (§5.2).
@@ -367,6 +389,34 @@ pub fn show(e: &Expr, out: &mut String) {
             }
             out.push_str(")");
         }
+        Expr::Array(items) => {
+            out.push_str("(array");
+            let mut i: taddr = 0;
+            while i < items.len() {
+                out.push_str(" ");
+                show(&items[i], out);
+                i += 1;
+            }
+            out.push_str(")");
+        }
+        Expr::Repeat(value, count) => {
+            out.push_str("(repeat ");
+            show(&*value, out);
+            out.push_str(" ");
+            show(&*count, out);
+            out.push_str(")");
+        }
+        Expr::CallExpr(callee, args) => {
+            out.push_str("(call! ");
+            show(&*callee, out);
+            let mut i: taddr = 0;
+            while i < args.len() {
+                out.push_str(" ");
+                show(&args[i], out);
+                i += 1;
+            }
+            out.push_str(")");
+        }
         Expr::Str(text) => {
             out.push_str("(str ");
             out.push_str(text);
@@ -568,6 +618,46 @@ pub fn show_ty(t: &Ty, out: &mut String) {
         }
         Ty::Unit => out.push_str("()"),
         Ty::SelfTy => out.push_str("Self"),
+        Ty::Array(held, len) => {
+            out.push_str("[");
+            show_ty(&*held, out);
+            out.push_str("; ");
+            out.push_str(len);
+            out.push_str("]");
+        }
+        Ty::Tuple(args) => {
+            out.push_str("(");
+            let mut i: taddr = 0;
+            while i < args.len() {
+                if i > 0 {
+                    out.push_str(",");
+                }
+                show_ty(&args[i], out);
+                i += 1;
+            }
+            out.push_str(")");
+        }
+        Ty::ImplFn(kind, args, ret) => {
+            out.push_str("impl ");
+            out.push_str(kind);
+            out.push_str("(");
+            let mut i: taddr = 0;
+            while i < args.len() {
+                if i > 0 {
+                    out.push_str(",");
+                }
+                show_ty(&args[i], out);
+                i += 1;
+            }
+            out.push_str(")");
+            match ret {
+                Option::Some(r) => {
+                    out.push_str(" -> ");
+                    show_ty(&*r, out);
+                }
+                Option::None => {}
+            }
+        }
     }
 }
 

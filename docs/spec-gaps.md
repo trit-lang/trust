@@ -2592,6 +2592,41 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.62 — the tree printer fell through to `{:?}` four times, and the
+comparison could not see it.** The Trust side is held to `trustc` by
+printing the same tree for the same source, character for character. Four
+things had no case in `driver`'s printer and reached its `other =>`
+fallback, which prints the Rust debug form — `ImplFn(Fn, [Name("t27", Span
+{ file: 0, line: 1, lo: 16, hi: 19 })], …)`.
+
+That is not a formatting complaint. A debug form carries **spans**, and
+`bootstrap/`'s tree deliberately carries none; so for `impl Fn(A) -> R`,
+`(m.f)(x)`, `(A, B)` and `[T; N]`, the comparison was not one a second
+implementation could ever pass. The fallback made four holes in the
+language look like four holes in the bootstrap. All four print canonically
+now, and all four parse on both sides.
+
+A fifth was a printer bug outright: `impl IntoIterator for &str` printed as
+`impl IntoIterator for str`, because the printer read the type's name and
+not the `&` beside it. Two different impls printed the same way — and the
+Trust side, which had the `&`, looked wrong.
+
+The lesson is the one about exercise again, one level up: a *comparison* is
+only as good as the programs put through it, and every one of these was
+invisible until the library was.
+
+**G9.63 — `*self as taddr` cast the reference.** `as` was parsed as a
+postfix operator, so it bound tighter than the prefix `*` and
+`*self as taddr` read as `*(self as taddr)` — a cast of a *reference* to a
+word, then a load through it. Both readings are grammatical and only one is
+Ch. 1 §6's, and no corpus program had written the two together.
+
+And in the same round, the ambiguity every language with block expressions
+has: `if c { … }` followed by `(a, b)` on the next line is two statements
+and not a call. Adding a call postfix for `(m.f)(x)` made every block-shaped
+expression callable, and `char::to_utf8` — an `if` chain followed by a
+tuple — was the first program to say so.
+
 **G9.61 — an enum copied as no fields at all.** Building an enum (§3.3)
 was the last hole in the lowering and was ordinary: the payload where the
 layout puts that variant's fields, then the tag. What it uncovered was not.

@@ -58,7 +58,7 @@ pub fn expr(p: &mut Parser) -> Result<Expr, lex::Error> {
 
 /// The left-associative levels, loosest first.
 pub fn binary(p: &mut Parser, min: taddr) -> Result<Expr, lex::Error> {
-    let mut left = unary(p)?;
+    let mut left = cast(p)?;
     loop {
         let t = peek(p)?;
         // Ownership is tracked per local and not per place, so taking the
@@ -103,17 +103,39 @@ pub fn postfix(p: &mut Parser) -> Result<Expr, lex::Error> {
             e = Expr::Try(Box::new(e));
             continue;
         }
-        if op.same("as") {
+        // `(m.f)(x)` — calling what an expression answered with rather than
+        // a name (Ch. 4 §4.2). A call *by name* is read in `primary`,
+        // because that is the one a linker can resolve.
+        if op.same("(") {
+            // ...but not after an `if` or a `match`: one written as a
+            // statement has ended, and what follows is the next statement
+            // (§5.1). `if c { … } (a, b)` is two things and not a call.
+            if block_shaped(&e) {
+                return Result::Ok(e);
+            }
             p.at = next;
-            let ty = type_name(p)?;
-            e = Expr::Cast(Box::new(e), ty);
+            let args = arguments(p)?;
+            e = Expr::CallExpr(Box::new(e), args);
             continue;
         }
         if !op.same(".") {
             return Result::Ok(e);
         }
         p.at = next;
-        let name = ident(p)?;
+        // A tuple's fields are its positions, so `p.0` names one with a
+        // number where a struct names one with a word (Ch. 2 §3).
+        let t1 = peek(p)?;
+        let at1 = t1.at;
+        let mut name: String = Vec::new();
+        match t1.tok {
+            Tok::Int(v) => {
+                p.at = at1;
+                ast::push_int(&mut name, v);
+            }
+            _ => {
+                name = ident(p)?;
+            }
+        }
         let t2 = peek(p)?;
         let at2 = t2.at;
         let is_call = match t2.tok {
@@ -127,6 +149,27 @@ pub fn postfix(p: &mut Parser) -> Result<Expr, lex::Error> {
         } else {
             e = Expr::Field(Box::new(e), name);
         }
+    }
+}
+
+/// `e as T` — looser than a prefix operator, so `*self as taddr` is the
+/// *referent* cast and not a cast of the reference (§2.6). That is the one
+/// place the two readings differ and both are grammatical.
+pub fn cast(p: &mut Parser) -> Result<Expr, lex::Error> {
+    let mut e = unary(p)?;
+    loop {
+        let t = peek(p)?;
+        let next = t.at;
+        let casts = match t.tok {
+            Tok::Kw(k) => k.same("as"),
+            _ => false,
+        };
+        if !casts {
+            return Result::Ok(e);
+        }
+        p.at = next;
+        let ty = type_name(p)?;
+        e = Expr::Cast(Box::new(e), ty);
     }
 }
 
@@ -277,6 +320,50 @@ pub fn primary(p: &mut Parser) -> Result<Expr, lex::Error> {
                 let e = parenthesized(p);
                 p.no_struct = outer;
                 return e;
+            }
+            // `[a, b]` and `[v; n]` — an array written out, and the same
+            // one written once (Ch. 2 §4).
+            if o.same("[") {
+                let outer = p.no_struct;
+                p.no_struct = false;
+                let mut items: Vec<Expr> = Vec::new();
+                loop {
+                    let t2 = peek(p)?;
+                    let at2 = t2.at;
+                    let done = match t2.tok {
+                        Tok::Op(o2) => o2.same("]"),
+                        _ => false,
+                    };
+                    if done {
+                        p.at = at2;
+                        p.no_struct = outer;
+                        return Result::Ok(Expr::Array(items));
+                    }
+                    let held = expr(p)?;
+                    let t3 = peek(p)?;
+                    let at3 = t3.at;
+                    let repeated = match t3.tok {
+                        Tok::Op(o3) => o3.same(";") && items.len() == 0,
+                        _ => false,
+                    };
+                    if repeated {
+                        p.at = at3;
+                        let count = expr(p)?;
+                        expect_op(p, "]")?;
+                        p.no_struct = outer;
+                        return Result::Ok(Expr::Repeat(Box::new(held), Box::new(count)));
+                    }
+                    items.push(held);
+                    let t4 = peek(p)?;
+                    let at4 = t4.at;
+                    let more = match t4.tok {
+                        Tok::Op(o4) => o4.same(","),
+                        _ => false,
+                    };
+                    if more {
+                        p.at = at4;
+                    }
+                }
             }
             Result::Err(lex::Error { at: p.at, message: "expected an expression".to_string() })
         }
@@ -934,7 +1021,86 @@ fn type_name(p: &mut Parser) -> Result<ast::Ty, lex::Error> {
             // `Self` is a type and is a keyword (Ch. 4 §1.2).
             if k.same("Self") {
                 p.at = next;
-                return Result::Ok(ast::Ty::SelfTy);
+                // `Self::Item` is an associated type and is a *path*
+                // through `Self` (Ch. 4 §1.7), so what follows a `::` is
+                // read the same way it is read after any other head.
+                let q = peek(p)?;
+                let at_q = q.at;
+                let qualified = match q.tok {
+                    Tok::Op(o) => o.same("::"),
+                    _ => false,
+                };
+                if !qualified {
+                    return Result::Ok(ast::Ty::SelfTy);
+                }
+                let mut segments: Vec<String> = Vec::new();
+                segments.push("Self".to_string());
+                loop {
+                    let q = peek(p)?;
+                    let at_q = q.at;
+                    let more = match q.tok {
+                        Tok::Op(o) => o.same("::"),
+                        _ => false,
+                    };
+                    if !more {
+                        break;
+                    }
+                    p.at = at_q;
+                    segments.push(ident(p)?);
+                }
+                return Result::Ok(ast::Ty::Name(segments));
+            }
+            // `impl Fn(A) -> R` — a parameter that takes anything callable
+            // that way (Ch. 4 §4.1). Only the three callable traits are
+            // read: an `impl Trait` of any other kind is a type this does
+            // not know how to be given, and saying so is better than
+            // reading it as one of these.
+            if k.same("impl") {
+                p.at = next;
+                let kind = ident(p)?;
+                if !kind.same("Fn") && !kind.same("FnMut") && !kind.same("FnOnce") {
+                    return Result::Err(lex::Error {
+                        at: p.at,
+                        message: "expected a callable trait".to_string(),
+                    });
+                }
+                expect_op(p, "(")?;
+                let mut args: Vec<ast::Ty> = Vec::new();
+                loop {
+                    let t2 = peek(p)?;
+                    let at2 = t2.at;
+                    let done = match t2.tok {
+                        Tok::Op(o) => o.same(")"),
+                        _ => false,
+                    };
+                    if done {
+                        p.at = at2;
+                        break;
+                    }
+                    args.push(type_name(p)?);
+                    let t3 = peek(p)?;
+                    let at3 = t3.at;
+                    let comma = match t3.tok {
+                        Tok::Op(o) => o.same(","),
+                        _ => false,
+                    };
+                    if comma {
+                        p.at = at3;
+                    }
+                }
+                let t4 = peek(p)?;
+                let at4 = t4.at;
+                let answers = match t4.tok {
+                    Tok::Op(o) => o.same("->"),
+                    _ => false,
+                };
+                let mut ret: Option<Box<ast::Ty>> = Option::None;
+                if answers {
+                    p.at = at4;
+                    let held = type_name(p)?;
+                    ret = Option::Some(Box::new(held));
+                }
+                return Result::Ok(ast::Ty::ImplFn(kind, args, ret));
             }
             Result::Err(lex::Error { at: p.at, message: "expected a type".to_string() })
         }
@@ -987,13 +1153,77 @@ fn type_name(p: &mut Parser) -> Result<ast::Ty, lex::Error> {
             if o.same("[") {
                 p.at = next;
                 let inner = type_name(p)?;
+                // `[T]` is a slice and `[T; N]` is an array: one is a run
+                // of them whose length is not in the type, and the other is
+                // a run whose length is (Ch. 2 §4).
+                let t2 = peek(p)?;
+                let at2 = t2.at;
+                let sized = match t2.tok {
+                    Tok::Op(o2) => o2.same(";"),
+                    _ => false,
+                };
+                if sized {
+                    p.at = at2;
+                    // The length as it was written: a number, or the name
+                    // of a `const` parameter. Anything else is an
+                    // expression this does not keep, and refusing it is
+                    // better than keeping a shape of it.
+                    let t3 = peek(p)?;
+                    let at3 = t3.at;
+                    let mut len: String = Vec::new();
+                    match t3.tok {
+                        Tok::Int(v) => {
+                            p.at = at3;
+                            ast::push_int(&mut len, v);
+                        }
+                        Tok::Ident(n) => {
+                            p.at = at3;
+                            len.push_str(&n);
+                        }
+                        _ => {
+                            return Result::Err(lex::Error {
+                                at: p.at,
+                                message: "expected a length".to_string(),
+                            });
+                        }
+                    }
+                    expect_op(p, "]")?;
+                    return Result::Ok(ast::Ty::Array(Box::new(inner), len));
+                }
                 expect_op(p, "]")?;
                 return Result::Ok(ast::Ty::Slice(Box::new(inner)));
             }
             if o.same("(") {
                 p.at = next;
+                // `()` is the unit and `(A, B)` is a tuple: a product of
+                // nothing is a value, and a product of some is a shape
+                // (Ch. 2 §3).
+                let t2 = peek(p)?;
+                let at2 = t2.at;
+                let empty = match t2.tok {
+                    Tok::Op(o2) => o2.same(")"),
+                    _ => false,
+                };
+                if empty {
+                    p.at = at2;
+                    return Result::Ok(ast::Ty::Unit);
+                }
+                let mut args: Vec<ast::Ty> = Vec::new();
+                loop {
+                    args.push(type_name(p)?);
+                    let t3 = peek(p)?;
+                    let at3 = t3.at;
+                    let more = match t3.tok {
+                        Tok::Op(o3) => o3.same(","),
+                        _ => false,
+                    };
+                    if !more {
+                        break;
+                    }
+                    p.at = at3;
+                }
                 expect_op(p, ")")?;
-                return Result::Ok(ast::Ty::Unit);
+                return Result::Ok(ast::Ty::Tuple(args));
             }
             Result::Err(lex::Error { at: p.at, message: "expected a type".to_string() })
         }
@@ -1386,6 +1616,40 @@ fn impl_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
                 at: p.at,
                 message: "`pub` on a method of an impl".to_string(),
             });
+        }
+        // `type Item = t27;` — what this impl chooses for the trait's
+        // associated type (Ch. 4 §1.7). It is read and set aside: what it
+        // chooses is a fact about the *type*, and the tree an impl prints
+        // is its methods.
+        let t4 = peek(p)?;
+        let at4 = t4.at;
+        let alias = match t4.tok {
+            Tok::Kw(k) => k.same("type"),
+            _ => false,
+        };
+        if alias {
+            p.at = at4;
+            let name = ident(p)?;
+            expect_op(p, "=")?;
+            let held = type_name(p)?;
+            expect_op(p, ";")?;
+            continue;
+        }
+        let held = peek(p)?;
+        let at5 = held.at;
+        let is_const = match held.tok {
+            Tok::Kw(k) => k.same("const"),
+            _ => false,
+        };
+        if is_const {
+            p.at = at5;
+            let name = ident(p)?;
+            expect_op(p, ":")?;
+            let ty = type_name(p)?;
+            expect_op(p, "=")?;
+            let value = expr(p)?;
+            expect_op(p, ";")?;
+            continue;
         }
         fns.push(function(p)?);
     }
@@ -1878,6 +2142,50 @@ fn one_bound(p: &mut Parser) -> Result<ast::Bound, lex::Error> {
     let mut assoc: Vec<ast::Named> = Vec::new();
     let t = peek(p)?;
     let next = t.at;
+    // `Fn(A) -> R` is `Fn<A, Output = R>` written the way a call is written
+    // (Ch. 4 §4.1): the arguments are the trait's, and what it answers with
+    // is the binding every other trait writes as one.
+    let sugar = match &t.tok {
+        Tok::Op(o) => o.same("("),
+        _ => false,
+    };
+    if sugar {
+        p.at = next;
+        loop {
+            let t2 = peek(p)?;
+            let at2 = t2.at;
+            let done = match t2.tok {
+                Tok::Op(o) => o.same(")"),
+                _ => false,
+            };
+            if done {
+                p.at = at2;
+                break;
+            }
+            args.push(type_name(p)?);
+            let t3 = peek(p)?;
+            let at3 = t3.at;
+            let comma = match t3.tok {
+                Tok::Op(o) => o.same(","),
+                _ => false,
+            };
+            if comma {
+                p.at = at3;
+            }
+        }
+        let t4 = peek(p)?;
+        let at4 = t4.at;
+        let answers = match t4.tok {
+            Tok::Op(o) => o.same("->"),
+            _ => false,
+        };
+        if answers {
+            p.at = at4;
+            let held = type_name(p)?;
+            assoc.push(ast::Named { name: "Output".to_string(), ty: held });
+        }
+        return Result::Ok(ast::Bound { name: name, args: args, assoc: assoc });
+    }
     let opens = match t.tok {
         Tok::Op(o) => o.same("<"),
         _ => false,

@@ -2791,6 +2791,11 @@ fn subst_ty(
         ast::Ty::Slice(held) => ast::Ty::Slice(Box::new(subst_ty(e, tyvars, key, held))),
         ast::Ty::Unit => ast::Ty::Unit,
         ast::Ty::SelfTy => ast::Ty::SelfTy,
+        ast::Ty::ImplFn(kind, args, ret) => copy_impl_fn(kind, args, ret),
+        ast::Ty::Tuple(args) => ast::Ty::Tuple(copy_tys(args)),
+        ast::Ty::Array(held, len) => {
+            ast::Ty::Array(Box::new(copy_ty(&*held)), len.to_string())
+        }
     }
 }
 
@@ -2811,6 +2816,11 @@ fn copy_ty(t: &ast::Ty) -> ast::Ty {
         ast::Ty::Slice(inner) => ast::Ty::Slice(Box::new(copy_ty(inner))),
         ast::Ty::Unit => ast::Ty::Unit,
         ast::Ty::SelfTy => ast::Ty::SelfTy,
+        ast::Ty::ImplFn(kind, args, ret) => copy_impl_fn(kind, args, ret),
+        ast::Ty::Tuple(args) => ast::Ty::Tuple(copy_tys(args)),
+        ast::Ty::Array(held, len) => {
+            ast::Ty::Array(Box::new(copy_ty(&*held)), len.to_string())
+        }
     }
 }
 
@@ -3813,4 +3823,36 @@ fn push_int(out: &mut String, v: t27) {
         i -= 1;
         out.push(digits[i]);
     }
+}
+
+/// An `impl Fn(A) -> R`, copied. There is no `Clone` here and a type is a
+/// tree (Ch. 4 §4.1).
+fn copy_impl_fn(
+    kind: &str,
+    args: &Vec<ast::Ty>,
+    ret: &Option<Box<ast::Ty>>,
+) -> ast::Ty {
+    let mut out: Vec<ast::Ty> = Vec::new();
+    let mut i: taddr = 0;
+    while i < args.len() {
+        out.push(copy_ty(&args[i]));
+        i += 1;
+    }
+    let mut answer: Option<Box<ast::Ty>> = Option::None;
+    match ret {
+        Option::Some(r) => answer = Option::Some(Box::new(copy_ty(&*r))),
+        Option::None => {}
+    }
+    ast::Ty::ImplFn(kind.to_string(), out, answer)
+}
+
+/// A list of types, copied.
+fn copy_tys(from: &Vec<ast::Ty>) -> Vec<ast::Ty> {
+    let mut out: Vec<ast::Ty> = Vec::new();
+    let mut i: taddr = 0;
+    while i < from.len() {
+        out.push(copy_ty(&from[i]));
+        i += 1;
+    }
+    out
 }

@@ -85,17 +85,25 @@ Ch. 2 and Ch. 4's checking, and it **lowers to TIR** — every pass compared
 against `trustc` character for character, and the lowering compared
 including the names, since equality is on the text.
 
-What it lowers is now the whole of the language it *reads*: generics —
+What it lowers is the whole of the language it *reads*: generics —
 functions, methods and types alike — aggregates, enums and their variants,
 `self` by value, and the drops Ch. 3 §1.4 puts at the end of a scope
-(§4 step 3). What it does not read is the next thing in the way:
-`Option<Self::Item>` stops the parser at the third declaration of the
-prelude, so the library it is handed is a library it cannot parse.
+(§4 step 3).
 
-So there is still no `stage1`: it needs a compiler that can compile
-`bootstrap/`, and `bootstrap/` is written in the part of Trust that is
-left. The remaining order is associated types, then the library, then the
-backend TIR already has.
+**It reads the library now.** All 28 173 characters of the prelude, 57
+items, parsed into the same tree by both implementations — associated
+types, `Fn(A) -> R` bounds, `impl Fn` parameters, tuple and array types,
+array literals, and a call whose callee is not a name. Getting there fixed
+five things on the *`trustc`* side, not the Trust one (G9.62, G9.63): four
+tree forms that printed as Rust debug output with spans in them, which no
+second implementation could have reproduced, and an `impl … for &str` that
+printed without its `&`.
+
+Reading it is not compiling it. What the library needs beyond what is here
+is Ch. 4's third and fourth blocks — traits with dispatch, `dyn`, closures
+and their captures — and Ch. 5's `Vec` and `String`, which are the
+compiler's rather than the library's. That is the remaining order, and it
+is the bulk of what is left before `stage1` exists.
 
 ### 3.3 The comparison has something to compare — **not started**
 

@@ -735,6 +735,14 @@ fn print_items(file: &lang::ast::File) {
                     }
                     out.push_str(" for ");
                 }
+                // `impl Trait for &Type` — the `&` is part of what is
+                // implemented for, and a printer that drops it prints two
+                // different impls the same way (Ch. 4 §2.1).
+                if i.self_mut {
+                    out.push_str("&mut ");
+                } else if i.self_ref {
+                    out.push('&');
+                }
                 out.push_str(&i.self_ty);
                 if !i.self_args.is_empty() {
                     let args: Vec<String> = i.self_args.iter().map(written_ty).collect();
@@ -873,6 +881,29 @@ fn written_ty(t: &lang::ast::Ty) -> String {
         Ty::App(n, args, _) => {
             let args: Vec<String> = args.iter().map(written_ty).collect();
             format!("{n}<{}>", args.join(","))
+        }
+        // `[T; N]` — an array, whose length is an expression (Ch. 2 §4).
+        Ty::Array(elem, len, _) => {
+            let mut out = String::new();
+            show_expr(len, &mut out);
+            format!("[{}; {out}]", written_ty(elem))
+        }
+        // `(A, B)` — written as it was written. Without this it fell
+        // through to the debug form, which carries spans (Ch. 2 §3).
+        Ty::Tuple(args, _) => {
+            let args: Vec<String> = args.iter().map(written_ty).collect();
+            format!("({})", args.join(","))
+        }
+        // `impl Fn(A) -> R` — written as it was written. Without this it
+        // fell through to the debug form, which carries spans and which no
+        // second implementation could reproduce (Ch. 4 §4.1).
+        Ty::ImplFn(kind, args, ret, _) => {
+            let args: Vec<String> = args.iter().map(written_ty).collect();
+            let ret = match ret {
+                Some(r) => format!(" -> {}", written_ty(r)),
+                None => String::new(),
+            };
+            format!("impl {}({}){ret}", kind.name(), args.join(","))
         }
         other => format!("{other:?}"),
     }
@@ -1121,6 +1152,35 @@ fn show_expr(e: &lang::ast::Expr, out: &mut String) {
                 out.push_str(&format!(" ({name} "));
                 show_expr(value, out);
                 out.push(')');
+            }
+            out.push(')');
+        }
+        // `[a, b]` and `[v; n]` — the two ways an array is written
+        // (Ch. 2 §4). Without these they fell through to the debug form.
+        Expr::Array(items, _) => {
+            out.push_str("(array");
+            for i in items {
+                out.push(' ');
+                show_expr(i, out);
+            }
+            out.push(')');
+        }
+        Expr::Repeat(value, count, _) => {
+            out.push_str("(repeat ");
+            show_expr(value, out);
+            out.push(' ');
+            show_expr(count, out);
+            out.push(')');
+        }
+        // `(m.f)(x)` — a call whose callee is not a name. Without this it
+        // fell through to the debug form, which carries spans and which no
+        // second implementation could reproduce (Ch. 4 §4.2).
+        Expr::CallExpr(callee, args, _) => {
+            out.push_str("(call! ");
+            show_expr(callee, out);
+            for a in args {
+                out.push(' ');
+                show_expr(a, out);
             }
             out.push(')');
         }

@@ -116,6 +116,28 @@ for f in bootstrap/*.tr; do
     b=$((b + $(printf '%s\n' "$rust" | wc -l)))
 done
 
+# The **library**, which is the largest Trust program neither implementation
+# wrote and the one they both have to agree about before either can compile a
+# program that uses it. It is not a file in this repository — it is carried
+# inside the compiler and handed over by `--prelude` (Ch. 6 §3.3) — so it is
+# taken out of a bundle and given to both.
+prelude=$(mktemp)
+trap 'rm -f "$prelude"' EXIT
+bundle=$(mktemp)
+trap 'rm -f "$prelude" "$bundle"' EXIT
+"$trust" bundle bootstrap/programs/whole/main.tr --prelude > "$bundle"
+# Up to the next section header. Not the character count the header gives:
+# that is in *characters* and the library is not all ASCII (Ch. 5 §1.4).
+tail -n +2 "$bundle" | awk '/^mod [^ ]+ [0-9]+$/ { exit } { print }' > "$prelude"
+rust=$("$trust" file "$prelude")
+mine=$("$trust" run bootstrap/file.tr < "$prelude")
+if [ "$rust" != "$mine" ]; then
+    echo "bootstrap: the two parsers disagree on the library" >&2
+    diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10 >&2
+    exit 1
+fi
+v=$(printf '%s\n' "$rust" | wc -l)
+
 # A whole *program*, not a file. The machine has a character port and no
 # filesystem (ISA §2.2), so the driver walks the module tree and hands the
 # program over on stdin — which is where finding files belongs anyway, since
@@ -261,5 +283,5 @@ for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
     q=$((q + $(printf '%s\n' "$rust" | wc -l)))
 done
 
-printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d modules of whole programs, %d names defined, %d names resolved, %d items rewritten, %d types laid out, %d bindings typed, %d functions checked, %d lines of TIR, %d of whole programs — all agreed\n' \
-    "$n" "$r" "$e" "$i" "$w" "$b" "$m" "$y" "$u" "$z" "$l" "$t" "$c" "$g" "$q"
+printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d items of the library, %d modules of whole programs, %d names defined, %d names resolved, %d items rewritten, %d types laid out, %d bindings typed, %d functions checked, %d lines of TIR, %d of whole programs — all agreed\n' \
+    "$n" "$r" "$e" "$i" "$w" "$b" "$v" "$m" "$y" "$u" "$z" "$l" "$t" "$c" "$g" "$q"
