@@ -129,6 +129,7 @@ fn show_tag(t: &layout::Tag) {
 
 /// A resolved item, as a definition the layout engine can read.
 fn collect(defs: &mut Vec<layout::Def>, item: ast::Item) {
+    let linear = item.linear;
     match item.what {
         ast::What::Struct(name, gs, fields) => {
             let mut tys: Vec<ast::Ty> = Vec::new();
@@ -140,7 +141,7 @@ fn collect(defs: &mut Vec<layout::Def>, item: ast::Item) {
             defs.push(layout::Def {
                 name: name,
                 is_enum: false,
-                linear: false,
+                linear: linear,
                 fields: tys,
                 counts: counts,
                 discriminants: discs,
@@ -167,7 +168,7 @@ fn collect(defs: &mut Vec<layout::Def>, item: ast::Item) {
             defs.push(layout::Def {
                 name: name,
                 is_enum: true,
-                linear: false,
+                linear: linear,
                 fields: tys,
                 counts: counts,
                 discriminants: discs,

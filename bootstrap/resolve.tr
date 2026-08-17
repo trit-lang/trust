@@ -215,7 +215,11 @@ pub struct At {
 /// resolved. A `mod` and a `use` name nothing below the frontend and are
 /// dropped by the caller.
 pub fn rewrite(w: &World, a: &mut At, item: ast::Item) -> ast::Item {
+    // Taken apart before the shape is: reading `item.what` moves it, and
+    // the attributes are wanted after (Ch. 3 §1.2).
     let public = item.public;
+    let linear = item.linear;
+    let derives = item.derives;
     let declared = ast::declared(&item.what);
     let module = a.here.to_string();
     let what = match item.what {
@@ -260,7 +264,7 @@ pub fn rewrite(w: &World, a: &mut At, item: ast::Item) -> ast::Item {
         }
         other => other,
     };
-    ast::Item { public: public, what: what }
+    ast::Item { public: public, linear: linear, derives: derives, what: what }
 }
 
 /// A function, with its parameters bound as locals for its body.

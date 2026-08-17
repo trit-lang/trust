@@ -1,0 +1,15 @@
+#[repr(linear)]
+struct Wire { a: t9, b: t27, c: trit }
+
+#[derive(Eq, Ord)]
+pub struct Key { n: t27 }
+
+#[repr(lang)]
+#[derive(Clone)]
+enum Tagged { A, B(t9) }
+
+#[derive(Eq)]
+#[repr(linear)]
+pub enum Code { X, Y }
+
+fn main() -> t27 { 0 }

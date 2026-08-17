@@ -1047,6 +1047,57 @@ pub fn file(p: &mut Parser) -> Result<Vec<ast::Item>, lex::Error> {
 /// One item. `pub` is read and dropped: it decides visibility (Ch. 6 §2) and
 /// nothing here asks about visibility.
 pub fn item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
+    // An attribute attaches to the item that follows (§3.4), and comes
+    // before a `pub`: the word is about the item and the attribute is too.
+    let mut linear = false;
+    let mut derives: Vec<String> = Vec::new();
+    loop {
+        let a = peek(p)?;
+        let at_a = a.at;
+        let more = match &a.tok {
+            Tok::Op(o) => o.same("#"),
+            _ => false,
+        };
+        if !more {
+            break;
+        }
+        p.at = at_a;
+        expect_op(p, "[")?;
+        let name = ident(p)?;
+        expect_op(p, "(")?;
+        if name.same("repr") {
+            let how = ident(p)?;
+            if how.same("linear") {
+                linear = true;
+            } else if !how.same("lang") {
+                return Result::Err(lex::Error {
+                    at: p.at,
+                    message: "not a layout regime; use `lang` or `linear`".to_string(),
+                });
+            }
+        } else if name.same("derive") {
+            loop {
+                derives.push(ident(p)?);
+                let c = peek(p)?;
+                let at_c = c.at;
+                let comma = match &c.tok {
+                    Tok::Op(o) => o.same(","),
+                    _ => false,
+                };
+                if !comma {
+                    break;
+                }
+                p.at = at_c;
+            }
+        } else {
+            return Result::Err(lex::Error {
+                at: p.at,
+                message: "the language defines `repr` and `derive`".to_string(),
+            });
+        }
+        expect_op(p, ")")?;
+        expect_op(p, "]")?;
+    }
     let t = peek(p)?;
     let at = t.at;
     let public = match t.tok {
@@ -1057,7 +1108,12 @@ pub fn item(p: &mut Parser) -> Result<ast::Item, lex::Error> {
         p.at = at;
     }
     let what = what(p)?;
-    Result::Ok(ast::Item { public: public, what: what })
+    Result::Ok(ast::Item {
+        public: public,
+        linear: linear,
+        derives: derives,
+        what: what,
+    })
 }
 
 /// The item itself, after any `pub`.

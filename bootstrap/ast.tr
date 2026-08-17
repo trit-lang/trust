@@ -147,6 +147,11 @@ pub struct Variant {
 /// in one place and means one thing whatever follows it.
 pub struct Item {
     pub public: bool,
+    /// `#[repr(linear)]` — fields in declaration order (Ch. 2 §1). The
+    /// language defines two attributes and this is one of them (§3.4).
+    pub linear: bool,
+    /// `#[derive(Eq, Ord, Clone)]`, in the order written (Ch. 4 §6).
+    pub derives: Vec<String>,
     pub what: What,
 }
 
@@ -673,6 +678,18 @@ pub fn show_stmt(s: &Stmt, out: &mut String) {
 
 /// One item, written out.
 pub fn show_item(i: &Item, out: &mut String) {
+    // An attribute is written before the item and is printed before it, so
+    // that what a reader wrote and what the tree holds are the same shape.
+    if i.linear {
+        out.push_str("(repr linear) ");
+    }
+    let mut d: taddr = 0;
+    while d < i.derives.len() {
+        out.push_str("(derive ");
+        out.push_str(&i.derives[d]);
+        out.push_str(") ");
+        d += 1;
+    }
     match &i.what {
         What::Function(f) => show_fn(&f, out),
         What::Struct(name, gs, fields) => {

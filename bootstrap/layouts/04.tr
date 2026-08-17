@@ -1,0 +1,13 @@
+// `repr(linear)` keeps declaration order, whatever it costs (§1).
+#[repr(linear)]
+struct Wire { a: t9, b: taddr, c: trit, d: char }
+struct Same { a: t9, b: taddr, c: trit, d: char }
+#[repr(linear)]
+struct Tight { a: taddr, b: t9 }
+#[repr(linear)]
+enum Framed { A, B(t9, taddr) }
+enum Free { A, B(t9, taddr) }
+#[repr(linear)]
+enum Never { A(&t27), B }
+enum Niched { A(&t27), B }
+fn main() -> t27 { 0 }

@@ -539,6 +539,13 @@ fn print_items(file: &lang::ast::File) {
     use lang::ast::Item;
     for item in &file.items {
         let mut out = String::new();
+        // An attribute is written before the item and is printed before it.
+        if repr_linear(item) {
+            out.push_str("(repr linear) ");
+        }
+        for d in derives_of(item) {
+            out.push_str(&format!("(derive {d}) "));
+        }
         match item {
             Item::Fn(f) => show_fn(f, &mut out),
             Item::Struct(s) => {
@@ -608,8 +615,7 @@ fn print_items(file: &lang::ast::File) {
                 if let Some(t) = &i.trait_name {
                     out.push_str(t);
                     if !i.trait_args.is_empty() {
-                        let args: Vec<String> =
-                            i.trait_args.iter().map(written_ty).collect();
+                        let args: Vec<String> = i.trait_args.iter().map(written_ty).collect();
                         out.push_str(&format!("<{}>", args.join(",")));
                     }
                     out.push_str(" for ");
@@ -649,6 +655,26 @@ fn tag_word(t: &trustc::layout::Tag) -> String {
             used,
             ..
         } => format!("niche:{untagged}:{offset}:{used}"),
+    }
+}
+
+/// Whether an item was written `#[repr(linear)]` (Ch. 2 §1).
+fn repr_linear(i: &lang::ast::Item) -> bool {
+    use lang::ast::{Item, Repr};
+    match i {
+        Item::Struct(s) => s.repr == Repr::Linear,
+        Item::Enum(e) => e.repr == Repr::Linear,
+        _ => false,
+    }
+}
+
+/// What an item derives, in the order written (Ch. 4 §6).
+fn derives_of(i: &lang::ast::Item) -> &[String] {
+    use lang::ast::Item;
+    match i {
+        Item::Struct(s) => &s.derives,
+        Item::Enum(e) => &e.derives,
+        _ => &[],
     }
 }
 
