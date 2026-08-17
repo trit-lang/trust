@@ -31,7 +31,7 @@ fn main() -> t27 {
                         let defs = lower::definitions(&items);
                         let drops = lower::destructors(&items);
                         let mut out: String = Vec::new();
-                        if lower::function(f, sigs, params, defs, drops, &mut out) {
+                        if lower::function(f, sigs, params, defs, drops, "".to_string(), &mut out) {
                             println("");
                             print(&out);
                         }
@@ -44,30 +44,34 @@ fn main() -> t27 {
             while d < items.len() {
                 match &items[d].what {
                     ast::What::Impl(gs, tr, ty, fns) => {
-                        match tr {
-                            Option::Some(t) => {
-                                let named = lower::written_head(t);
-                                let owner = lower::written_head(ty);
-                                let mut k: taddr = 0;
-                                while k < fns.len() {
-                                    let sigs = lower::signatures(&items);
-                                    let params = lower::parameters(&items);
-                                    let defs = lower::definitions(&items);
-                                    let drops = lower::destructors(&items);
-                                    let mut out: String = Vec::new();
-                                    if named.same("Drop")
-                                        && lower::destructor(
-                                            &fns[k], &owner, sigs, params, defs, drops,
-                                            &mut out,
-                                        )
-                                    {
-                                        println("");
-                                        print(&out);
-                                    }
-                                    k += 1;
-                                }
+                        let owner = lower::written_head(ty);
+                        let named = match tr {
+                            Option::Some(t) => lower::written_head(t),
+                            Option::None => "".to_string(),
+                        };
+                        let mut k: taddr = 0;
+                        while k < fns.len() {
+                            let sigs = lower::signatures(&items);
+                            let params = lower::parameters(&items);
+                            let defs = lower::definitions(&items);
+                            let drops = lower::destructors(&items);
+                            let mut out: String = Vec::new();
+                            // `Drop` is the one impl whose method becomes a
+                            // function named after the *type* and not after
+                            // the method (Ch. 3 §1.4).
+                            let made = if named.same("Drop") {
+                                lower::destructor(
+                                    &fns[k], &owner, sigs, params, defs, drops, &mut out)
+                            } else {
+                                lower::function(
+                                    &fns[k], sigs, params, defs, drops,
+                                    owner.to_string(), &mut out)
+                            };
+                            if made {
+                                println("");
+                                print(&out);
                             }
-                            Option::None => {}
+                            k += 1;
                         }
                     }
                     _ => {}

@@ -1,0 +1,17 @@
+struct C { n: t27, k: t9 }
+
+impl C {
+    fn get(&self) -> t27 { self.n }
+    fn plus(&self, d: t27) -> t27 { self.n + d }
+    fn small(&self) -> t9 { self.k }
+    fn unused(&self) -> t27 { 0 }
+}
+
+struct Held { v: t27 }
+impl Drop for Held { fn drop(self) { } }
+
+fn main() -> t27 {
+    let c = C { n: 1, k: 2 };
+    let h = Held { v: 3 };
+    c.get() + c.plus(2) + (c.small() as t27) + h.v
+}

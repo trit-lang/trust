@@ -74,6 +74,8 @@ pub struct Emit {
     pub drops: Vec<String>,
     /// The locals this scope is responsible for dropping, innermost last.
     pub owned: Vec<Slot>,
+    /// The type an `impl`'s `self` points at, for a field read through it.
+    pub self_ty: String,
 }
 
 /// A value in TIR: either a name or a constant, as it is written.
@@ -99,6 +101,14 @@ pub fn tir_ty(t: &ast::Ty) -> String {
             }
         }
         _ => "?".to_string(),
+    }
+}
+
+/// Whether a written type is a reference (Ch. 3 §2.1).
+pub fn is_reference(t: &ast::Ty) -> bool {
+    match t {
+        ast::Ty::Ref(inner, m) => true,
+        _ => false,
     }
 }
 
@@ -200,6 +210,7 @@ pub fn function(
     params: Vec<Sig>,
     defs: Vec<layout::Def>,
     drops: Vec<String>,
+    owner: String,
     out: &mut String,
 ) -> bool {
     let mut e = Emit {
@@ -216,12 +227,17 @@ pub fn function(
         defs: defs,
         drops: drops,
         owned: Vec::new(),
+        self_ty: owner.to_string(),
     };
 
     // A parameter arrives as a value and is given storage at once, so that
     // everything below reads it the same way a local is read.
     let mut header: String = Vec::new();
     header.push_str("fn @");
+    if owner.len() > 0 {
+        header.push_str(&owner);
+        header.push_str(".");
+    }
     header.push_str(&f.name);
     header.push_str("(");
     // A function whose answer is an aggregate is given the storage for it,
@@ -238,6 +254,22 @@ pub fn function(
         }
         let ty = tir_ty(&f.params[i].ty);
         let name = f.params[i].name.to_string();
+        // `&self` is a reference and stays one: what a method is given is an
+        // address, and reading through it is a load and then the field's own
+        // (Ch. 3 §2.2). An aggregate *value* is copied in; an address is not.
+        if name.same("self") && is_reference(&f.params[i].ty) {
+            if i > 0 || sret {
+                header.push_str(", ");
+            }
+            header.push_str("%self: ptr");
+            let slot = slot_for(&mut e, "self", "ptr");
+            let mut store: String = Vec::new();
+            store.push_str("    store ptr %self, ");
+            store.push_str(&slot);
+            e.insts.push(store);
+            i += 1;
+            continue;
+        }
         if ty.same("?") {
             // An aggregate arrives as a pointer and is copied into storage
             // of its own on entry, field by field: what a function is given
@@ -816,6 +848,7 @@ pub fn destructor(
         defs: defs,
         drops: drops,
         owned: Vec::new(),
+        self_ty: owner.to_string(),
     };
     let at = def_at(&e.defs, owner);
     if at < 0 {
@@ -1364,8 +1397,21 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 e.stuck = true;
                 return unknown_value();
             }
-            let owner = e.locals[at].ty.to_string();
-            let slot = e.locals[at].slot.to_string();
+            let mut owner = e.locals[at].ty.to_string();
+            let mut slot = e.locals[at].slot.to_string();
+            // A local holding an *address* is read through: the address
+            // first, and then what it points at.
+            if owner.same("ptr") {
+                owner = e.self_ty.to_string();
+                let p = fresh(e, "p");
+                let mut line: String = Vec::new();
+                line.push_str("    ");
+                line.push_str(&p);
+                line.push_str(" = load ptr ");
+                line.push_str(&slot);
+                e.insts.push(line);
+                slot = p;
+            }
             let which = def_at(&e.defs, &owner);
             if which < 0 {
                 e.stuck = true;
@@ -1587,6 +1633,61 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             store_into(e, &ty, &val.text, &slot);
             Value { text: "".to_string(), ty: "".to_string() }
         }
+        // `x.m(a)` — the receiver is the first argument, as an address,
+        // and the function is named after the type it is written on.
+        ast::Expr::Method(recv, name, args) => {
+            let missing: taddr = 0 - 1;
+            let at = match recv {
+                ast::Expr::Name(n) => local_at(e, n),
+                _ => missing,
+            };
+            if at < 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let mut owner = e.locals[at].ty.to_string();
+            let slot = e.locals[at].slot.to_string();
+            if owner.same("ptr") {
+                owner = e.self_ty.to_string();
+            }
+            let mut full: String = Vec::new();
+            full.push_str(&owner);
+            full.push_str(".");
+            full.push_str(name);
+            let mut texts: Vec<String> = Vec::new();
+            let mut i: taddr = 0;
+            while i < args.len() {
+                let each = param_type(e, &full, i + 1);
+                let v = value(e, &args[i], &each);
+                if e.stuck {
+                    return unknown_value();
+                }
+                texts.push(v.text);
+                i += 1;
+            }
+            let ty = call_type(e, &full);
+            if e.stuck {
+                return unknown_value();
+            }
+            let out = fresh(e, "r");
+            let mut line: String = Vec::new();
+            line.push_str("    ");
+            line.push_str(&out);
+            line.push_str(" = call @");
+            line.push_str(&full);
+            line.push_str("(");
+            line.push_str(&slot);
+            let mut k: taddr = 0;
+            while k < texts.len() {
+                line.push_str(", ");
+                line.push_str(&texts[k]);
+                k += 1;
+            }
+            line.push_str(") -> ");
+            line.push_str(&ty);
+            e.insts.push(line);
+            Value { text: out, ty: ty }
+        }
         ast::Expr::Call(callee, args) => {
             let mut texts: Vec<String> = Vec::new();
             let mut i: taddr = 0;
@@ -1765,6 +1866,32 @@ pub fn parameters(items: &Vec<ast::Item>) -> Vec<Sig> {
                 }
                 out.push(Sig { name: f.name.to_string(), ret: all });
             }
+            ast::What::Impl(gs, tr, ty, fns) => {
+                let owner = written_head(ty);
+                let mut k: taddr = 0;
+                while k < fns.len() {
+                    let mut all: String = Vec::new();
+                    let mut j: taddr = 0;
+                    while j < fns[k].params.len() {
+                        if j > 0 {
+                            all.push(',');
+                        }
+                        let each = if fns[k].params[j].name.same("self") {
+                            "ptr".to_string()
+                        } else {
+                            tir_ty(&fns[k].params[j].ty)
+                        };
+                        all.push_str(&each);
+                        j += 1;
+                    }
+                    let mut full: String = Vec::new();
+                    full.push_str(&owner);
+                    full.push_str(".");
+                    full.push_str(&fns[k].name);
+                    out.push(Sig { name: full, ret: all });
+                    k += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -1782,6 +1909,20 @@ pub fn signatures(items: &Vec<ast::Item>) -> Vec<Sig> {
                     name: f.name.to_string(),
                     ret: tir_ty(&f.ret),
                 });
+            }
+            // A method is reached through its receiver, so the receiver's
+            // name is half of its own (Ch. 4 §1.2).
+            ast::What::Impl(gs, tr, ty, fns) => {
+                let owner = written_head(ty);
+                let mut k: taddr = 0;
+                while k < fns.len() {
+                    let mut full: String = Vec::new();
+                    full.push_str(&owner);
+                    full.push_str(".");
+                    full.push_str(&fns[k].name);
+                    out.push(Sig { name: full, ret: tir_ty(&fns[k].ret) });
+                    k += 1;
+                }
             }
             _ => {}
         }

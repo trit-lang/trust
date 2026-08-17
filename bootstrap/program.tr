@@ -136,7 +136,7 @@ fn main() -> t27 {
                 let defs = lower::definitions(&items);
                 let drops = lower::destructors(&items);
                 let mut text: String = Vec::new();
-                if lower::function(fun, sigs, params, defs, drops, &mut text) {
+                if lower::function(fun, sigs, params, defs, drops, "".to_string(), &mut text) {
                     let calls = callees(&text);
                     out.push(Emitted { name: fun.name.to_string(), text: text, calls: calls });
                 }
@@ -149,31 +149,42 @@ fn main() -> t27 {
     while d < items.len() {
         match &items[d].what {
             ast::What::Impl(gs, tr, ty, fns) => {
-                match tr {
-                    Option::Some(t) => {
-                        let named = lower::written_head(t);
-                        let owner = lower::written_head(ty);
-                        let mut m: taddr = 0;
-                        while m < fns.len() {
-                            let sigs = lower::signatures(&items);
-                            let params = lower::parameters(&items);
-                            let defs = lower::definitions(&items);
-                            let drops = lower::destructors(&items);
-                            let mut text: String = Vec::new();
-                            if named.same("Drop")
-                                && lower::destructor(
-                                    &fns[m], &owner, sigs, params, defs, drops, &mut text)
-                            {
-                                let mut full: String = Vec::new();
-                                full.push_str("drop.");
-                                full.push_str(&owner);
-                                let calls = callees(&text);
-                                out.push(Emitted { name: full, text: text, calls: calls });
-                            }
-                            m += 1;
+                let owner = lower::written_head(ty);
+                let named = match tr {
+                    Option::Some(t) => lower::written_head(t),
+                    Option::None => "".to_string(),
+                };
+                let mut m: taddr = 0;
+                while m < fns.len() {
+                    let sigs = lower::signatures(&items);
+                    let params = lower::parameters(&items);
+                    let defs = lower::definitions(&items);
+                    let drops = lower::destructors(&items);
+                    let mut text: String = Vec::new();
+                    // `Drop` is the one impl whose method becomes a function
+                    // named after the *type* and not after the method.
+                    let made = if named.same("Drop") {
+                        lower::destructor(
+                            &fns[m], &owner, sigs, params, defs, drops, &mut text)
+                    } else {
+                        lower::function(
+                            &fns[m], sigs, params, defs, drops,
+                            owner.to_string(), &mut text)
+                    };
+                    if made {
+                        let mut full: String = Vec::new();
+                        if named.same("Drop") {
+                            full.push_str("drop.");
+                            full.push_str(&owner);
+                        } else {
+                            full.push_str(&owner);
+                            full.push_str(".");
+                            full.push_str(&fns[m].name);
                         }
+                        let calls = callees(&text);
+                        out.push(Emitted { name: full, text: text, calls: calls });
                     }
-                    Option::None => {}
+                    m += 1;
                 }
             }
             _ => {}

@@ -237,11 +237,15 @@ Each step is checkable on its own, and none of them is only for DDC.
    is that this compiler is handed the library it compiles against for the
    same reason it is handed the files.
 
+   The operators are all there now, and so are `impl` methods: a method is
+   a function named after the type it is written on, its `&self` is an
+   address rather than a copy, and a call passes the receiver's storage as
+   the first argument. `Drop` is the one impl whose method is named after
+   the *type* instead.
+
    What stands between here and `stage1` is **generics** — §2.5's
-   monomorphization, and with it the `impl` methods and the `/` and `%` the
-   prelude's own bodies use. The plumbing for the prelude is done and the
-   thing it plumbs is not yet compilable: `floor_div` divides, and division
-   is one of the operators the lowering has not reached.
+   monomorphization. The prelude's plumbing is done and its bodies are
+   generic, so the two arrive together.
 4. **Run the double compile.** `scripts/ddc.sh`: build `stage1` with
    `trustc`, build `stage2` with `stage1`, demand `stage2 == stage1`. Report
    the two hashes whether or not they match, because a number that is only

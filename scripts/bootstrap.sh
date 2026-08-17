@@ -248,7 +248,8 @@ done
 # down to what `main` reaches — a function nothing calls is a function the
 # program does not contain, and the two have to agree about which.
 q=0
-for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr; do
+for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
+            bootstrap/programs/methods/main.tr; do
     rust=$("$trust" build "$root")
     mine=$("$trust" bundle "$root" | "$trust" run bootstrap/program.tr)
     if [ "$rust" != "$mine" ]; then
