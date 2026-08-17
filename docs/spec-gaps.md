@@ -2592,6 +2592,31 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.61 — an enum copied as no fields at all.** Building an enum (§3.3)
+was the last hole in the lowering and was ordinary: the payload where the
+layout puts that variant's fields, then the tag. What it uncovered was not.
+
+`fn nothing() -> Maybe<t27> { let out: Maybe<t27> = Maybe::Nothing; out }`
+emitted a function that wrote its local and then **returned without copying
+it into `%sret`** — a function that answers with whatever was in the
+caller's storage already. The copy is field by field, and an enum has no
+`offsets` at all, because which fields it has depends on which variant it
+holds. So the loop ran zero times and reported that it had copied
+everything.
+
+The same code had an enum branch in one place — where an aggregate
+parameter is copied in on entry — and not in the other. The two were the
+same loop until this round merged them, and merging them is what made the
+missing case visible: the branch that existed in one copy did not exist in
+the other, and no program had asked the other for an enum.
+
+That is the ninth since G9.55, and the *second* fixed by making two copies
+of a thing into one. It is worth stating as a rule, because it is the only
+rule in this list that prevents rather than detects: where the same question
+is answered in two places, the answers diverge on the case neither was
+written for, and a comparison catches it only if some program asks. One
+copy has no such case.
+
 **G9.60 — three more of the same, found by writing a generic type.**
 Generic *types* (Ch. 4 §2.5) turned out to be cheaper than the functions
 were: an instantiation shows in no name at all — `fn make(x) -> Pair<t27>`

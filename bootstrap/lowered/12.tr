@@ -1,0 +1,71 @@
+// Building an enum (§3.3): the payload where the layout puts *that
+// variant's* fields, and then the tag that says which variant it is. The
+// trytes a variant does not use are not written, because they are trytes
+// nothing reads.
+//
+// The interesting half is the generic case. A variant with a payload says
+// what its arguments are the way a call does — from the values written —
+// and a variant with **no** payload says nothing at all: `Opt::None` is one
+// type per instantiation and none of them is written down. What says is
+// where the value is going, which is Ch. 4 §2.3 inferring from the binding
+// and the one direction this can follow.
+//
+// `self` by value is here too, because that is what an `unwrap` is: an
+// aggregate parameter whose written type is `Self`, and inside an
+// instantiation `Self` is the instantiation.
+//
+// What is **not** here is `Opt<trit>`. A trit fits in a tryte with eight
+// trits to spare, so its `Option` is niche-encoded (§6) and says which
+// variant it is by writing a value the payload could not have had. Working
+// out which value that is is not something this does yet — and the side
+// that *reads* a tag refuses a niche too, so the two refuse together.
+
+enum Plain { A, B(t27) }
+
+enum Two { P(t9, t27), Q }
+
+enum Opt<T> { None, Some(T) }
+
+struct P { a: t27, b: t27 }
+
+enum Held { Empty, Full(P) }
+
+impl<T> Opt<T> {
+    fn unwrap_or(self, d: T) -> T {
+        match self {
+            Opt::Some(v) => v,
+            Opt::None => d,
+        }
+    }
+    fn is_some(&self) -> bool {
+        match self {
+            Opt::Some(v) => true,
+            Opt::None => false,
+        }
+    }
+}
+
+fn take(o: Opt<t27>) -> t27 {
+    match o {
+        Opt::None => 0,
+        Opt::Some(v) => v,
+    }
+}
+
+fn main() -> t27 {
+    let a = Plain::B(7);
+    let e = Plain::A;
+    let c = Two::P(1, 2);
+    let d = Two::Q;
+
+    // Told by the value on the left, and by the binding on the right.
+    let some: Opt<t27> = Opt::Some(3);
+    let none: Opt<t27> = Opt::None;
+    let wide: Opt<t9> = Opt::Some(1);
+
+    // A payload that is itself an aggregate is built where it can be and
+    // copied into the variant's storage.
+    let full = Held::Full(P { a: 1, b: 2 });
+
+    some.unwrap_or(0) + none.unwrap_or(4) + (wide.unwrap_or(1) as t27)
+}

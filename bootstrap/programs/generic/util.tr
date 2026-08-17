@@ -27,3 +27,23 @@ impl<T> Cell<T> {
 }
 
 pub fn wrap(n: t27) -> Cell<t27> { Cell { held: n } }
+
+/// A generic enum across a module, and `self` by value — which is what an
+/// `unwrap` is (Ch. 4 §1.2).
+pub enum Maybe<T> { Nothing, Just(T) }
+
+impl<T> Maybe<T> {
+    fn or(self, d: T) -> T {
+        match self {
+            Maybe::Just(v) => v,
+            Maybe::Nothing => d,
+        }
+    }
+}
+
+pub fn just(n: t27) -> Maybe<t27> { Maybe::Just(n) }
+
+pub fn nothing() -> Maybe<t27> {
+    let out: Maybe<t27> = Maybe::Nothing;
+    out
+}

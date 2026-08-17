@@ -705,37 +705,6 @@ fn copy_in(e: &mut Emit, name: &str, at: taddr) -> bool {
     let mut from: String = Vec::new();
     from.push_str("%");
     from.push_str(name);
-    if e.defs[at].is_enum {
-        // An enum has no one set of fields, so what is copied is its
-        // storage: a word at a time, and a tryte for what is left.
-        let mut at_off: taddr = 0;
-        while at_off < l.size {
-            let ty = if l.size - at_off >= 3 {
-                "t27".to_string()
-            } else {
-                "t9".to_string()
-            };
-            // Read before the destination is named: an enum is copied as
-            // storage and a struct field by field, and the two orders are
-            // what they are.
-            let src = offset_of(e, &from, at_off);
-            let v = fresh(e, "v");
-            let mut load: String = Vec::new();
-            load.push_str("    ");
-            load.push_str(&v);
-            load.push_str(" = load ");
-            let shown = tir_of(&ty);
-            load.push_str(&shown);
-            load.push_str(" ");
-            load.push_str(&src);
-            e.insts.push(load);
-            let dst = offset_of(e, &slot, at_off);
-            store_into(e, &ty, &v, &dst);
-            let wide = tir_of(&ty);
-            at_off = at_off + (trytes(&wide) as taddr);
-        }
-        return true;
-    }
     let owner = e.defs[at].name.to_string();
     copy_fields(e, &from, &slot, &owner)
 }
@@ -759,12 +728,13 @@ fn aggregate_body(e: &mut Emit, b: &ast::Block, owner: &str) {
             match x {
                 // Built where it is wanted, rather than built and copied.
                 ast::Expr::Aggregate(path, fields) => {
-                    let made = aggregate_type(e, path, fields);
+                    let made = aggregate_type(e, path, owner, fields);
                     if made.len() == 0 {
                         e.stuck = true;
                         return;
                     }
-                    fill(e, "%sret", &made, fields);
+                    let variant = variant_of(path);
+                    fill(e, "%sret", &made, &variant, fields);
                 }
                 _ => {
                     let v = value(e, x, "");
@@ -783,10 +753,20 @@ fn aggregate_body(e: &mut Emit, b: &ast::Block, owner: &str) {
 }
 
 /// Write an aggregate's fields into storage that is already there.
-fn fill(e: &mut Emit, dest: &str, path: &str, fields: &Vec<ast::Field>) {
+fn fill(
+    e: &mut Emit,
+    dest: &str,
+    path: &str,
+    variant: &str,
+    fields: &Vec<ast::Field>,
+) {
     let which = def_at(&e.defs, path);
     if which < 0 {
         e.stuck = true;
+        return;
+    }
+    if variant.len() > 0 {
+        fill_variant(e, dest, which, variant, fields);
         return;
     }
     let self_ty = ast::Ty::Name(one_name(path));
@@ -833,6 +813,96 @@ fn fill(e: &mut Emit, dest: &str, path: &str, fields: &Vec<ast::Field>) {
     }
 }
 
+/// One variant of an enum, written into storage that is already there
+/// (§3.3): its payload where the layout puts *that variant's* fields, and
+/// then the tag that says which variant it is.
+///
+/// The payload first and the tag after it, which is what decides the
+/// numbers — and nothing else is written, because the trytes a variant
+/// does not use are trytes nothing reads.
+fn fill_variant(
+    e: &mut Emit,
+    dest: &str,
+    which: taddr,
+    variant: &str,
+    fields: &Vec<ast::Field>,
+) {
+    let owner = e.defs[which].name.to_string();
+    let self_ty = ast::Ty::Name(one_name(&owner));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return;
+        }
+    };
+    let index = named_variant(&e.defs[which], variant);
+    if index < 0 || fields.len() != e.defs[which].counts[index] {
+        e.stuck = true;
+        return;
+    }
+    let start = variant_start(&e.defs[which], index);
+    let mut i: taddr = 0;
+    while i < fields.len() {
+        let held = name_head(&e.defs[which].fields[start + i]);
+        let inner = def_at(&e.defs, &held);
+        if inner >= 0 {
+            let v = value(e, &fields[i].value, &held);
+            if e.stuck {
+                return;
+            }
+            let at = offset_of(e, dest, l.variant_offsets[index][i]);
+            if !copy_fields(e, &v.text, &at, &held) {
+                e.stuck = true;
+                return;
+            }
+            i += 1;
+            continue;
+        }
+        let ty = tir_ty(&e.defs[which].fields[start + i]);
+        if ty.same("?") {
+            e.stuck = true;
+            return;
+        }
+        let v = value(e, &fields[i].value, &ty);
+        if e.stuck {
+            return;
+        }
+        let at = offset_of(e, dest, l.variant_offsets[index][i]);
+        store_into(e, &ty, &v.text, &at);
+        i += 1;
+    }
+    // Which variant it is. A niche-encoded enum says so by writing a value
+    // the payload could not have had (§6), and working out which value that
+    // is is not something this does yet — so it is refused, on the side
+    // that builds one as it already is on the side that reads one.
+    match &l.tag {
+        layout::Tag::Direct(width, at) => {
+            let ty = if width == 1 {
+                "t9".to_string()
+            } else {
+                "t27".to_string()
+            };
+            let spot = offset_of(e, dest, at);
+            let mut held: String = Vec::new();
+            held.push_str("const ");
+            held.push_str(&ty);
+            held.push_str(" ");
+            push_int(&mut held, l.discriminants[index]);
+            store_into(e, &ty, &held, &spot);
+        }
+        layout::Tag::TritShaped => {
+            let mut held: String = Vec::new();
+            held.push_str("const t1 ");
+            push_int(&mut held, l.discriminants[index]);
+            store_into(e, "t1", &held, dest);
+        }
+        _ => {
+            e.stuck = true;
+        }
+    }
+}
+
 /// Copy one aggregate into another, field by field.
 fn copy_between(e: &mut Emit, from: &str, to: &str, owner: &str) {
     if !copy_fields(e, from, to, owner) {
@@ -858,6 +928,40 @@ fn copy_fields(e: &mut Emit, from: &str, to: &str, owner: &str) -> bool {
         Result::Ok(x) => x,
         Result::Err(why) => return false,
     };
+    if e.defs[which].is_enum {
+        // An enum has no one set of fields — which set it has depends on
+        // which variant it holds — so what is copied is its *storage*: a
+        // word at a time, and a tryte for what is left. An enum has no
+        // `offsets` at all, so a copy that read them would copy nothing and
+        // say it had.
+        let mut at_off: taddr = 0;
+        while at_off < l.size {
+            let ty = if l.size - at_off >= 3 {
+                "t27".to_string()
+            } else {
+                "t9".to_string()
+            };
+            // Read before the destination is named: an enum is copied as
+            // storage and a struct field by field, and the two orders are
+            // what they are.
+            let src = offset_of(e, from, at_off);
+            let v = fresh(e, "v");
+            let mut load: String = Vec::new();
+            load.push_str("    ");
+            load.push_str(&v);
+            load.push_str(" = load ");
+            let shown = tir_of(&ty);
+            load.push_str(&shown);
+            load.push_str(" ");
+            load.push_str(&src);
+            e.insts.push(load);
+            let dst = offset_of(e, to, at_off);
+            store_into(e, &ty, &v, &dst);
+            let wide = tir_of(&ty);
+            at_off = at_off + (trytes(&wide) as taddr);
+        }
+        return true;
+    }
     let mut i: taddr = 0;
     while i < l.offsets.len() {
         let held = name_head(&e.defs[which].fields[i]);
@@ -1280,8 +1384,20 @@ fn block(e: &mut Emit, b: &ast::Block, ret: &str, unit: bool) {
 fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
     match s {
         ast::Stmt::Let(mutable, name, written, v) => {
+            // What the binding was written as, which is what an aggregate
+            // with nothing to infer from is told by (Ch. 4 §2.3).
             let hint = match written {
-                Option::Some(t) => tir_ty_at(&e.tyvars, &e.key, t),
+                Option::Some(t) => {
+                    let tyvars = copy_names(&e.tyvars);
+                    let key = copy_names(&e.key);
+                    let held = subst_ty(e, &tyvars, &key, t);
+                    let named = nominal(e, &held);
+                    if def_at(&e.defs, &named) >= 0 {
+                        named
+                    } else {
+                        tir_ty_at(&e.tyvars, &e.key, t)
+                    }
+                }
                 Option::None => "".to_string(),
             };
             let val = value(e, v, &hint);
@@ -1294,7 +1410,12 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                 Option::Some(t) => tir_ty_at(&e.tyvars, &e.key, t),
                 Option::None => val.ty.to_string(),
             };
-            if ty.same("?") {
+            // A written type that names an aggregate says which one, and a
+            // value that turned out to be another is not this binding's:
+            // `let a: Option<t9> = Option::Some(7)` is a t9 to Ch. 4 §2.3
+            // and a t27 to a lowering that reads the literal alone, so it
+            // is refused rather than bound at the wrong width.
+            if def_at(&e.defs, &hint) >= 0 && !hint.same(&val.ty) {
                 e.stuck = true;
                 return;
             }
@@ -1335,6 +1456,10 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                         ty: val.ty.to_string(),
                     });
                 }
+                return;
+            }
+            if ty.same("?") {
+                e.stuck = true;
                 return;
             }
             let slot = slot_for(e, name, &ty);
@@ -1765,11 +1890,12 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
         // `let` then *renames* rather than copying out of — which is what
         // makes `let p = P { … }` cost nothing (Ch. 3 §1.1).
         ast::Expr::Aggregate(path, fields) => {
-            let made = aggregate_type(e, path, fields);
+            let made = aggregate_type(e, path, want, fields);
             if made.len() == 0 {
                 e.stuck = true;
                 return unknown_value();
             }
+            let variant = variant_of(path);
             let path = &made;
             let which = def_at(&e.defs, path);
             if which < 0 {
@@ -1796,7 +1922,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             push_int(&mut line, l.size as t27);
             line.push_str("]");
             e.slots.push(line);
-            fill(e, &held, path, fields);
+            fill(e, &held, path, &variant, fields);
             if e.stuck {
                 return unknown_value();
             }
@@ -2252,12 +2378,30 @@ fn returned_aggregate(e: &mut Emit, name: &str) -> String {
 ///
 /// A type written with no parameters is a family of one and is its own
 /// answer, which is every aggregate that was written before this.
-fn aggregate_type(e: &mut Emit, path: &str, fields: &Vec<ast::Field>) -> String {
-    if def_at(&e.defs, path) >= 0 {
-        return path.to_string();
+fn aggregate_type(
+    e: &mut Emit,
+    path: &str,
+    want: &str,
+    fields: &Vec<ast::Field>,
+) -> String {
+    let head = type_path(path);
+    if def_at(&e.defs, &head) >= 0 {
+        return head;
     }
-    let at = tyfamily_at(e, path);
+    // A variant with no payload says nothing about the arguments — nothing
+    // is written for them to be read off. What says is where the value is
+    // going: `let a: Opt<t27> = Opt::None` is Ch. 4 §2.3 inferring from the
+    // binding, and that is the one direction this can follow.
+    let told = inst_at(e, want);
+    if told >= 0 && e.instances[told].base.same(&head) {
+        return want.to_string();
+    }
+    let at = tyfamily_at(e, &head);
     if at < 0 {
+        return "".to_string();
+    }
+    let declared = written_fields(e, at, path, fields);
+    if declared.len() != fields.len() {
         return "".to_string();
     }
     let mut key: Vec<String> = Vec::new();
@@ -2268,18 +2412,14 @@ fn aggregate_type(e: &mut Emit, path: &str, fields: &Vec<ast::Field>) -> String 
         let mut clash = false;
         let mut i: taddr = 0;
         while i < fields.len() {
-            let which = tyfield_at(e, at, &fields[i].name);
-            if which >= 0 {
-                let declared = name_head(&e.tyfams[at].def.fields[which]);
-                if declared.same(&each) {
-                    let got = guess_ty(e, &fields[i].value);
-                    if got.len() == 0 {
-                        clash = true;
-                    } else if found.len() == 0 {
-                        found = got;
-                    } else if !found.same(&got) {
-                        clash = true;
-                    }
+            if declared[i].same(&each) {
+                let got = guess_ty(e, &fields[i].value);
+                if got.len() == 0 {
+                    clash = true;
+                } else if found.len() == 0 {
+                    found = got;
+                } else if !found.same(&got) {
+                    clash = true;
                 }
             }
             i += 1;
@@ -2290,19 +2430,114 @@ fn aggregate_type(e: &mut Emit, path: &str, fields: &Vec<ast::Field>) -> String 
         key.push(found);
         t += 1;
     }
-    instantiate(e, path, &key)
+    instantiate(e, &head, &key)
 }
 
-/// Which field of a family is called this, or −1.
-fn tyfield_at(e: &Emit, at: taddr, name: &str) -> taddr {
+/// The declared type of each field a literal writes, in the order it writes
+/// them — a struct's by name, a variant's by position, since a payload has
+/// no names to be written under (§3.3).
+fn written_fields(
+    e: &Emit,
+    at: taddr,
+    path: &str,
+    fields: &Vec<ast::Field>,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let variant = variant_of(path);
+    if variant.len() > 0 {
+        let index = named_variant(&e.tyfams[at].def, &variant);
+        if index < 0 {
+            return out;
+        }
+        let start = variant_start(&e.tyfams[at].def, index);
+        let mut i: taddr = 0;
+        while i < fields.len() && i < e.tyfams[at].def.counts[index] {
+            out.push(name_head(&e.tyfams[at].def.fields[start + i]));
+            i += 1;
+        }
+        return out;
+    }
     let mut i: taddr = 0;
-    while i < e.tyfams[at].def.field_names.len() {
-        if e.tyfams[at].def.field_names[i].same(name) {
+    while i < fields.len() {
+        let mut k: taddr = 0;
+        while k < e.tyfams[at].def.field_names.len() {
+            if e.tyfams[at].def.field_names[k].same(&fields[i].name) {
+                out.push(name_head(&e.tyfams[at].def.fields[k]));
+            }
+            k += 1;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `E::B` names the variant `B`; a name with no `::` names no variant.
+fn variant_of(path: &str) -> String {
+    let mut out: String = Vec::new();
+    let mut i: taddr = 0;
+    let mut at: taddr = 0 - 1;
+    while i + 1 < path.len() {
+        if path[i] == ':' && path[i + 1] == ':' {
+            at = i;
+        }
+        i += 1;
+    }
+    if at < 0 {
+        return out;
+    }
+    let mut k = at + 2;
+    while k < path.len() {
+        out.push(path[k]);
+        k += 1;
+    }
+    out
+}
+
+/// And the type it is a variant of, which is the whole of a name with no
+/// `::` in it. A module is written with `.` by the time this reads one
+/// (Ch. 6 §4), so a `::` here is a variant and nothing else.
+fn type_path(path: &str) -> String {
+    let mut i: taddr = 0;
+    let mut at: taddr = 0 - 1;
+    while i + 1 < path.len() {
+        if path[i] == ':' && path[i + 1] == ':' {
+            at = i;
+        }
+        i += 1;
+    }
+    if at < 0 {
+        return path.to_string();
+    }
+    let mut out: String = Vec::new();
+    let mut k: taddr = 0;
+    while k < at {
+        out.push(path[k]);
+        k += 1;
+    }
+    out
+}
+
+/// Which variant of a definition is called this, or −1.
+fn named_variant(d: &layout::Def, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < d.field_names.len() {
+        if d.field_names[i].same(name) {
             return i;
         }
         i += 1;
     }
     0 - 1
+}
+
+/// Where a variant's payload types begin in the flat list of them all.
+fn variant_start(d: &layout::Def, index: taddr) -> taddr {
+    let mut out: taddr = 0;
+    let mut i: taddr = 0;
+    while i < index {
+        out = out + d.counts[i];
+        i += 1;
+    }
+    out
 }
 
 /// What type an expression will turn out to be, without lowering it.
@@ -2410,6 +2645,10 @@ fn tyfamily_at(e: &Emit, name: &str) -> taddr {
 fn nominal(e: &mut Emit, t: &ast::Ty) -> String {
     match t {
         ast::Ty::Name(segments) => joined(segments),
+        // `Self` is the type the impl is written on, and inside an
+        // instantiation that is the instantiation (Ch. 4 §1.2) — which is
+        // what a `fn unwrap_or(self, …)` is given.
+        ast::Ty::SelfTy => e.self_ty.to_string(),
         ast::Ty::App(segments, args) => {
             let head = joined(segments);
             let mut key: Vec<String> = Vec::new();

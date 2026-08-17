@@ -85,14 +85,16 @@ Ch. 2 and Ch. 4's checking, and it **lowers to TIR** — every pass compared
 against `trustc` character for character, and the lowering compared
 including the names, since equality is on the text.
 
-What it lowers is the whole of the language it reads except **enum
-construction**: `Opt::Just(7)` builds nothing, generic or plain, and the
-prelude's `Option` is made of exactly that. Generics — functions, methods
-and types alike — are done (§4 step 3).
+What it lowers is now the whole of the language it *reads*: generics —
+functions, methods and types alike — aggregates, enums and their variants,
+`self` by value, and the drops Ch. 3 §1.4 puts at the end of a scope
+(§4 step 3). What it does not read is the next thing in the way:
+`Option<Self::Item>` stops the parser at the third declaration of the
+prelude, so the library it is handed is a library it cannot parse.
 
 So there is still no `stage1`: it needs a compiler that can compile
 `bootstrap/`, and `bootstrap/` is written in the part of Trust that is
-left. The remaining order is enum construction, then the library, then the
+left. The remaining order is associated types, then the library, then the
 backend TIR already has.
 
 ### 3.3 The comparison has something to compare — **not started**
@@ -352,9 +354,26 @@ Each step is checkable on its own, and none of them is only for DDC.
    one `lower::module` now, which makes the class of mistake impossible
    rather than the instance of it.
 
-   What stands between here and the prelude is **enum construction**:
-   `Opt::Just(7)` builds nothing, generic or plain, and `Option` is made of
-   exactly that.
+   **Enum construction** is done as well — the payload where the layout puts
+   that variant's fields, then the tag — and with it `self` by value, which
+   is what an `unwrap` is: an aggregate parameter whose written type is
+   `Self`, and inside an instantiation `Self` *is* the instantiation. A
+   variant with no payload says nothing about its arguments, so `Opt::None`
+   is told which member it is by the binding it is going into, which is the
+   one direction of Ch. 4 §2.3 this follows.
+
+   A **niche-encoded** enum is refused: it says which variant it is by
+   writing a value the payload could not have had (§6), and working out
+   which value that is is not done here. The side that reads a tag refuses
+   a niche too, so the two refuse together — which is why
+   `bootstrap/lowered/12.tr` has an `Opt<t27>` and an `Opt<t9>` and not an
+   `Opt<trit>`.
+
+   What stands between here and the prelude is now the **parser**:
+   `Option<Self::Item>` in `trait Iterator` stops it at the third
+   declaration in the file. An associated type is a Ch. 4 §1.7 feature the
+   Trust side has not read yet, and until it can, the library it is handed
+   is a library it cannot parse.
 
    The limit that was stated in advance — that substituting the signature is
    not enough for a body that names its own type parameters — was met by
