@@ -260,6 +260,30 @@ Each step is checkable on its own, and none of them is only for DDC.
    fn @id.t27(%x: t27) -> t27 { … }    ← and in the order they were queued
    ```
 
+   The emitter carries the written type now, which is what the key needs.
+   What is left is five coordinated pieces, and none of them needs a
+   decision:
+
+   - a `Family` per generic function — its type parameters, its parameters'
+     written types, and its own — so a call can work out which instantiation
+     it means;
+   - a `Job` queue on the emitter: the function's name and the written types
+     its parameters turned out to be, deduplicated;
+   - inference at the call: match each declared parameter type against the
+     argument's written type, which is the same matching the checker already
+     does for a variant's payload;
+   - `function()` taking a **key** — the type arguments in declaration order
+     — which it substitutes for the type parameters as it reads the
+     signature, and appends to the name;
+   - the driver draining the queue after the ordinary functions and the
+     impls, which is where the instantiations go.
+
+   The limit to state when it lands: substituting the *signature* is enough
+   for a body that mentions its type parameters nowhere else, and a body
+   that does — a cast to `T`, an aggregate of `T` — needs the substitution
+   to reach the body too. Until it does, such a body must be left out rather
+   than lowered wrongly, which is the rule G9.55 and G9.56 were both about.
+
    Four things: an instantiation is named `id.trit` by Ch. 6 §4's rule, and
    the argument is the *written* type (`trit`, not `t1`); the key is the
    argument types and a body is emitted once per distinct key; the queue is
