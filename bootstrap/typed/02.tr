@@ -1,0 +1,35 @@
+struct Point { x: t27, y: taddr }
+enum Shape { Dot, Line(t27), Rect(t27, t27) }
+
+fn make() -> Point { Point { x: 1, y: 2 } }
+fn width(s: Shape) -> t27 { 0 }
+
+fn calls() -> t27 {
+    let a = make();
+    let b = a.x;
+    let c = width(Shape::Dot);
+    let d = Shape::Line(1);
+    let e = Shape::Dot;
+    let f = Point { x: 1, y: 2 };
+    0
+}
+
+fn strings(s: &str, v: Vec<char>) -> t27 {
+    let a = s.len();
+    let b = s[0];
+    let c = v.len();
+    let d = v[1];
+    let e = s.to_string();
+    let f = s.same("x");
+    0
+}
+
+fn nested(p: &Point) -> t27 {
+    let a = &p.x;
+    let b = **&a;
+    let c = (1 + 2) * 3;
+    let d = 1 <=> 2;
+    let e = !true;
+    let f = 0 - 1;
+    0
+}

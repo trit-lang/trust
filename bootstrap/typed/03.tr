@@ -1,0 +1,27 @@
+struct Counter { n: t27 }
+
+impl Counter {
+    fn get(&self) -> t27 { self.n }
+    fn twice(&self) -> t27 { self.n * 2 }
+}
+
+fn methods(c: &Counter) -> t27 {
+    let a = c.get();
+    let b = c.twice();
+    0
+}
+
+fn control(n: t27, v: &Vec<t27>) -> t27 {
+    let a = match n { 0 => 1, _ => 2 };
+    let b = if n > 0 { n } else { 0 - n };
+    let c = match v.len() { 0 => 0 - 1, _ => v[0] };
+    0
+}
+
+fn widths(n: t27, m: t9) -> t27 {
+    let a = n as t9;
+    let b = m as taddr;
+    let c = n as t9 as taddr;
+    let d = true as t27;
+    0
+}

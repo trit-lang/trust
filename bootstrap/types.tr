@@ -39,10 +39,19 @@ pub struct Sig {
     pub ret: ast::Ty,
 }
 
+/// One method, and the type it is written on. A method is reached through
+/// its receiver, so the receiver's head is half of its name (Ch. 4 §1.2).
+pub struct Method {
+    pub owner: String,
+    pub name: String,
+    pub ret: ast::Ty,
+}
+
 /// What the file defines, and what is in scope where the walk has reached.
 pub struct World {
     pub fields: Vec<Field>,
     pub sigs: Vec<Sig>,
+    pub methods: Vec<Method>,
     /// Every variant of every enum, as `Enum::Variant`, and its enum.
     pub variants: Vec<Binding>,
     pub locals: Vec<Binding>,
@@ -56,6 +65,7 @@ fn main() -> t27 {
             let mut w = World {
                 fields: Vec::new(),
                 sigs: Vec::new(),
+                methods: Vec::new(),
                 variants: Vec::new(),
                 locals: Vec::new(),
             };
@@ -102,6 +112,23 @@ fn gather(w: &mut World, item: &ast::Item) {
                 full.push_str("::");
                 full.push_str(&variants[i].name);
                 w.variants.push(Binding { name: full, ty: named(name) });
+                i += 1;
+            }
+        }
+        ast::What::Impl(gs, tr, ty, fns) => {
+            // A method of a generic impl is typed once per instantiation,
+            // so there is no one answer and it is left out (§2.5).
+            if gs.len() > 0 {
+                return;
+            }
+            let owner = head_of(ty);
+            let mut i: taddr = 0;
+            while i < fns.len() {
+                w.methods.push(Method {
+                    owner: owner.to_string(),
+                    name: fns[i].name.to_string(),
+                    ret: copy_ty(&fns[i].ret),
+                });
                 i += 1;
             }
         }
@@ -424,6 +451,16 @@ fn aggregate_type(w: &mut World, path: &str) -> ast::Ty {
 
 /// The methods the language writes, by receiver (Ch. 5 §2).
 fn method_type(w: &mut World, on: &ast::Ty, name: &str) -> ast::Ty {
+    // What the program wrote comes first: a method the language also names
+    // is the program's on a type the language writes nothing on (§2.5).
+    let owner = head_of(on);
+    let mut i: taddr = 0;
+    while i < w.methods.len() {
+        if w.methods[i].owner.same(&owner) && w.methods[i].name.same(name) {
+            return copy_ty(&w.methods[i].ret);
+        }
+        i += 1;
+    }
     if name.same("len") {
         return named("taddr");
     }
