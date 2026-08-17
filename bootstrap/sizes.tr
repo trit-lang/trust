@@ -1,0 +1,209 @@
+// Ch. 2, run: what every type a program defines is laid out as.
+//
+//     trust bundle <root.tr> | trust run bootstrap/sizes.tr
+//
+// One type a line, in the order the modules were read, and in the same form
+// `trust layout` prints. Sizes and offsets are facts about types, so the two
+// implementations can be asked the same question with nothing else agreed
+// between them.
+
+mod ast;
+mod bundle;
+mod input;
+mod layout;
+mod lex;
+mod parse;
+mod resolve;
+
+fn main() -> t27 {
+    let src = input::read_all();
+    let mods = bundle::split(&src);
+    let mut w = resolve::World { modules: Vec::new(), defined: Vec::new(), sources: Vec::new() };
+    let mut files: Vec<Vec<ast::Item>> = Vec::new();
+
+    let mut i: taddr = 0;
+    while i < mods.len() {
+        let here = resolve::plain(&mods[i].path);
+        w.sources.push(here.to_string());
+        files.push(read(&mods[i], &mut w, &here));
+        i += 1;
+    }
+
+    // The names have to be resolved before a type can be looked up: a field
+    // written `lex::Taken` and a type named `lex.Taken` are the same type,
+    // and only pass three knows that (Ch. 6 §4).
+    let mut defs: Vec<layout::Def> = Vec::new();
+    let mut f: taddr = 0;
+    for items in files {
+        let here = resolve::plain(&mods[f].path);
+        let scope = resolve::scope_of(&w, &here, &items);
+        let mut at = resolve::At { here: here, scope: scope, locals: Vec::new() };
+        for item in items {
+            let word = ast::kind(&item.what);
+            if word.same("struct") || word.same("enum") {
+                let done = resolve::rewrite(&w, &mut at, item);
+                collect(&mut defs, done);
+            }
+        }
+        f += 1;
+    }
+
+    let mut k: taddr = 0;
+    while k < defs.len() {
+        show(&defs, k);
+        k += 1;
+    }
+    0
+}
+
+/// One type, laid out and written in `trust layout`'s form.
+fn show(defs: &Vec<layout::Def>, at: taddr) {
+    print(&defs[at].name);
+    let self_ty = ast::Ty::Name(one(&defs[at].name));
+    match layout::of(defs, &self_ty, 0) {
+        Result::Ok(l) => {
+            print(" size=");
+            print_int(l.size as t27);
+            print(" align=");
+            print_int(l.align as t27);
+            let mut i: taddr = 0;
+            while i < l.offsets.len() {
+                print(" +");
+                print_int(l.offsets[i] as t27);
+                i += 1;
+            }
+            if defs[at].is_enum {
+                print(" tag=");
+                show_tag(&l.tag);
+                let mut d: taddr = 0;
+                while d < l.discriminants.len() {
+                    print(" =");
+                    print_int(l.discriminants[d]);
+                    d += 1;
+                }
+                let mut v: taddr = 0;
+                while v < l.variant_offsets.len() {
+                    print(" [");
+                    let mut k: taddr = 0;
+                    while k < l.variant_offsets[v].len() {
+                        if k > 0 {
+                            print(" ");
+                        }
+                        print("+");
+                        print_int(l.variant_offsets[v][k] as t27);
+                        k += 1;
+                    }
+                    print("]");
+                    v += 1;
+                }
+            }
+            println("");
+        }
+        Result::Err(why) => {
+            print(" ! ");
+            println(&why);
+        }
+    }
+}
+
+fn show_tag(t: &layout::Tag) {
+    match t {
+        layout::Tag::None => print("none"),
+        layout::Tag::TritShaped => print("trit"),
+        layout::Tag::Direct(width, offset) => {
+            print("direct:");
+            print_int(width as t27);
+            print(":");
+            print_int(offset as t27);
+        }
+        layout::Tag::Niche(untagged, offset, used) => {
+            print("niche:");
+            print_int(untagged as t27);
+            print(":");
+            print_int(offset as t27);
+            print(":");
+            print_int(used as t27);
+        }
+    }
+}
+
+/// A resolved item, as a definition the layout engine can read.
+fn collect(defs: &mut Vec<layout::Def>, item: ast::Item) {
+    match item.what {
+        ast::What::Struct(name, fields) => {
+            let mut tys: Vec<ast::Ty> = Vec::new();
+            for f in fields {
+                tys.push(f.ty);
+            }
+            let counts: Vec<taddr> = Vec::new();
+            let discs: Vec<t27> = Vec::new();
+            defs.push(layout::Def {
+                name: name,
+                is_enum: false,
+                linear: false,
+                fields: tys,
+                counts: counts,
+                discriminants: discs,
+            });
+        }
+        ast::What::Enum(name, variants) => {
+            let mut tys: Vec<ast::Ty> = Vec::new();
+            let mut counts: Vec<taddr> = Vec::new();
+            let mut discs: Vec<t27> = Vec::new();
+            let mut next: t27 = 0;
+            for v in variants {
+                let mut n: taddr = 0;
+                for t in v.fields {
+                    tys.push(t);
+                    n += 1;
+                }
+                counts.push(n);
+                // An unwritten discriminant continues from the one before,
+                // which is what makes `enum { A = -1, B, C }` trit-shaped
+                // (§5.1).
+                discs.push(next);
+                next = next + 1;
+            }
+            defs.push(layout::Def {
+                name: name,
+                is_enum: true,
+                linear: false,
+                fields: tys,
+                counts: counts,
+                discriminants: discs,
+            });
+        }
+        _ => {}
+    }
+}
+
+/// A name, as the one-segment path a resolved type is.
+fn one(name: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    out.push(name.to_string());
+    out
+}
+
+/// One module, parsed, with what it defines added to the world.
+fn read(m: &bundle::Module, w: &mut resolve::World, here: &str) -> Vec<ast::Item> {
+    let mut p = parse::Parser { src: m.text.to_string(), at: 0, no_struct: false };
+    match parse::file(&mut p) {
+        Result::Ok(items) => {
+            let mut k: taddr = 0;
+            while k < items.len() {
+                resolve::gather(w, here, &items[k]);
+                k += 1;
+            }
+            items
+        }
+        Result::Err(err) => {
+            print("error ");
+            print(&m.path);
+            print(" ");
+            print_int(err.at as t27);
+            println("");
+            let empty: Vec<ast::Item> = Vec::new();
+            empty
+        }
+    }
+}

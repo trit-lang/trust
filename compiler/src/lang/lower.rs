@@ -852,6 +852,29 @@ impl Noted {
     }
 }
 
+/// Every nominal type the program defines, with the layout Ch. 2 gives it.
+///
+/// It is the same `Types` the lowering builds and asks, not a second reading
+/// of the same chapter — a layout reported here and a layout used to emit an
+/// offset are one computation, or the report is worth nothing.
+pub fn layouts(file: &ast::File) -> Result<Vec<(String, layout::Layout)>, Vec<Error>> {
+    let types = build_types(file).map_err(|e| vec![e])?;
+    let mut out = Vec::new();
+    for item in &file.items {
+        let (name, ty) = match item {
+            ast::Item::Struct(st) if st.generics.is_empty() => {
+                (st.name.clone(), Ty::Struct(st.name.clone()))
+            }
+            ast::Item::Enum(en) if en.generics.is_empty() => {
+                (en.name.clone(), Ty::Enum(en.name.clone()))
+            }
+            _ => continue,
+        };
+        out.push((name, types.layout(&ty)));
+    }
+    Ok(out)
+}
+
 /// Lower a whole file to TIR, recording nothing on the way.
 pub fn lower(file: &ast::File) -> Result<Module, Vec<Error>> {
     lower_noting(file, &HashSet::new(), None)

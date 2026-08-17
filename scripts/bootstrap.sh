@@ -174,5 +174,20 @@ for root in examples/trust/modules/main.tr bootstrap/symbols.tr bootstrap/flat.t
     z=$((z + $(printf '%s\n' "$rust" | wc -l)))
 done
 
-printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d modules of whole programs, %d names defined, %d names resolved, %d items rewritten — all agreed\n' \
-    "$n" "$r" "$e" "$i" "$w" "$b" "$m" "$y" "$u" "$z"
+# Ch. 2: what every type the program defines is laid out as. Sizes and
+# offsets are facts about types and need no inference, which is what makes
+# this the first part of the middle two implementations can both answer.
+l=0
+for f in bootstrap/layouts/*.tr; do
+    rust=$("$trust" layout "$f")
+    mine=$("$trust" bundle "$f" | "$trust" run bootstrap/sizes.tr)
+    if [ "$rust" != "$mine" ]; then
+        echo "bootstrap: the two disagree about the layouts in $f" >&2
+        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -6 >&2
+        exit 1
+    fi
+    l=$((l + $(printf '%s\n' "$rust" | wc -l)))
+done
+
+printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d modules of whole programs, %d names defined, %d names resolved, %d items rewritten, %d types laid out — all agreed\n' \
+    "$n" "$r" "$e" "$i" "$w" "$b" "$m" "$y" "$u" "$z" "$l"

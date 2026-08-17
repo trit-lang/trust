@@ -1,0 +1,587 @@
+// Ch. 2, in Trust: what a type is laid out as.
+//
+// Sizes, alignments and offsets are facts about *types* and need no
+// inference, which is what makes this the first part of the middle a second
+// implementation can be held to. It is asked the same question as the Rust
+// engine and must give the same answer: the same sizes, the same offsets,
+// the same discriminants, and the same decision about where each enum's
+// discriminant lives.
+//
+// What it does **not** answer is how many niches a type has. That number is
+// 3^n for n up to 27 trits, which does not fit in a word, and the Rust side
+// computes it in 128-bit arithmetic this language does not have. Every
+// *decision* that number is used for compares it against the number of
+// variants, which is small — so a count is carried here saturating at MANY,
+// and the count itself is not printed (G9.49).
+
+use ast;
+use ast::Ty;
+
+/// Trits in a tryte (§1).
+pub const TRITS: taddr = 9;
+
+/// More than any decision needs. A count reaching this is one that overflows
+/// a word, and every comparison made against it is against a variant count.
+pub const MANY: taddr = 3812798742493;
+
+/// Where an enclosing enum may hide a discriminant, and in what values (§6).
+pub struct Spot {
+    pub offset: taddr,
+    pub trits: taddr,
+    pub lo: t27,
+    pub hi: t27,
+}
+
+/// How a discriminant is stored (§5).
+pub enum Tag {
+    /// One variant, or none: nothing to distinguish.
+    None,
+    /// Representation-identical to `trit`: one `br3` (§5.2).
+    TritShaped,
+    /// A tag of its own, this many trytes wide, at this offset.
+    Direct(taddr, taddr),
+    /// In invalid representations of the payload (§6): no space at all.
+    /// The variant that carries the payload, the offset of the scalar, and
+    /// how many of its invalid values this enum takes.
+    Niche(taddr, taddr, taddr),
+}
+
+/// What Ch. 2 says about a type.
+pub struct Layout {
+    pub size: taddr,
+    pub align: taddr,
+    /// Field offsets in **declaration order**, whatever order they were
+    /// placed in (§4).
+    pub offsets: Vec<taddr>,
+    /// How much of this type's storage is not a valid value, saturating.
+    pub niches: taddr,
+    /// Where those invalid values are, when something wants to use them.
+    pub spot: Option<Spot>,
+    /// For an enum: how the discriminant is stored, what each variant's is,
+    /// and where each variant's fields are.
+    pub tag: Tag,
+    pub discriminants: Vec<t27>,
+    pub variant_offsets: Vec<Vec<taddr>>,
+}
+
+/// One nominal type the program defines.
+pub struct Def {
+    pub name: String,
+    /// True for an `enum`, false for a `struct`.
+    pub is_enum: bool,
+    /// `repr(linear)` keeps declaration order (§1).
+    pub linear: bool,
+    /// A struct's fields, or an enum's variants' fields.
+    pub fields: Vec<Ty>,
+    /// For an enum: how many fields each variant has, in order.
+    pub counts: Vec<taddr>,
+    /// For an enum: each variant's discriminant.
+    pub discriminants: Vec<t27>,
+}
+
+/// 3^trits, saturating — a count that overflows a word is MANY (§6).
+pub fn capacity(trits: taddr) -> taddr {
+    if trits >= 27 {
+        return MANY;
+    }
+    let mut n: taddr = 1;
+    let mut i: taddr = 0;
+    while i < trits {
+        n = n * 3;
+        i += 1;
+    }
+    n
+}
+
+/// How many invalid values a spot has.
+pub fn spot_count(s: &Spot) -> taddr {
+    let cap = capacity(s.trits);
+    // Asked before the valid range is counted, and that order is the point:
+    // a spot 27 trits wide can have a range that overflows a word by one —
+    // `1..=MAX` is every address — and the answer is MANY either way.
+    if cap == MANY {
+        return MANY;
+    }
+    let valid = (s.hi - s.lo + 1) as taddr;
+    cap - valid
+}
+
+/// The spot left after an enum has taken `used` of its invalid values.
+///
+/// Taken from above the valid range first and then from below it, which is
+/// what makes nesting inside a niche free up to the budget: what this enum
+/// did not use is still there for whatever encloses it (§6, guarantee 3).
+pub fn consume(s: &Spot, used: taddr) -> Spot {
+    let max = (capacity(s.trits) - 1) / 2;
+    let above = max - (s.hi as taddr);
+    let none: taddr = 0;
+    let room = if above < 0 { none } else { above };
+    let take_above = if used < room { used } else { room };
+    let take_below = used - take_above;
+    Spot {
+        offset: s.offset,
+        trits: s.trits,
+        lo: s.lo - (take_below as t27),
+        hi: s.hi + (take_above as t27),
+    }
+}
+
+/// Round up to the next multiple of `align`.
+fn align_to(offset: taddr, align: taddr) -> taddr {
+    let over = offset % align;
+    // `%` is symmetric (Ch. 1 §4), so its answer can be negative and is
+    // corrected here — the sixth kind of place in this repository where the
+    // radix's division has to be said out loud.
+    let rest = if over < 0 { over + align } else { over };
+    if rest == 0 {
+        offset
+    } else {
+        offset + (align - rest)
+    }
+}
+
+/// A scalar: size, alignment and how many of its patterns are valid.
+fn scalar(size: taddr, niches: taddr) -> Layout {
+    Layout {
+        size: size,
+        align: size,
+        offsets: Vec::new(),
+        niches: niches,
+        spot: Option::None,
+        tag: Tag::None,
+        discriminants: Vec::new(),
+        variant_offsets: Vec::new(),
+    }
+}
+
+/// A scalar whose valid values are `lo..=hi`, which is what gives it a spot.
+fn ranged(size: taddr, lo: t27, hi: t27) -> Layout {
+    let s = Spot { offset: 0, trits: size * TRITS, lo: lo, hi: hi };
+    let n = spot_count(&s);
+    let mut l = scalar(size, n);
+    l.align = size;
+    l.spot = Option::Some(s);
+    l
+}
+
+/// The layout of a written type.
+pub fn of(defs: &Vec<Def>, t: &Ty, depth: taddr) -> Result<Layout, String> {
+    if depth > 16 {
+        return Result::Err("a type reaches itself without an indirection".to_string());
+    }
+    match t {
+        // A reference is a word and is never null, so it always has a spot
+        // (§6). What it points at is not laid out: a pointer is one whatever
+        // it points at, and computing it here would not end for exactly the
+        // recursive types §8 calls well-formed.
+        Ty::Ref(inner, mutable) => Result::Ok(ranged(3, 1, MANY as t27)),
+        Ty::Unit => Result::Ok(scalar(0, 0)),
+        Ty::SelfTy => Result::Err("`Self` outside an impl".to_string()),
+        Ty::Slice(inner) => Result::Err("a slice has no size of its own".to_string()),
+        Ty::App(segments, args) => {
+            let head = segments[segments.len() - 1].to_string();
+            if head.same("Box") {
+                return Result::Ok(ranged(3, 1, MANY as t27));
+            }
+            Result::Err("a generic type is not laid out here".to_string())
+        }
+        Ty::Name(segments) => {
+            let name = joined(&segments);
+            named(defs, &name, depth)
+        }
+    }
+}
+
+/// A type written as one name: a scalar the language defines, or a type the
+/// program does.
+fn named(defs: &Vec<Def>, name: &str, depth: taddr) -> Result<Layout, String> {
+    if name.same("trit") {
+        return Result::Ok(ranged(1, 0 - 1, 1));
+    }
+    if name.same("bool") {
+        return Result::Ok(ranged(1, 0, 1));
+    }
+    if name.same("t9") {
+        return Result::Ok(scalar(1, 0));
+    }
+    if name.same("t27") || name.same("taddr") {
+        return Result::Ok(scalar(3, 0));
+    }
+    if name.same("char") {
+        // The valid range is `0..=0x10FFFF` rather than that minus the
+        // surrogates: a spot wants one contiguous range, and counting the
+        // surrogates as valid only *under*-counts what is spare (Ch. 5 §1.2).
+        return Result::Ok(ranged(3, 0, 1114111));
+    }
+    let mut i: taddr = 0;
+    while i < defs.len() {
+        if defs[i].name.same(name) {
+            if defs[i].is_enum {
+                return of_enum(defs, i, depth);
+            }
+            return of_struct(defs, i, depth);
+        }
+        i += 1;
+    }
+    Result::Err("no such type".to_string())
+}
+
+/// Lay out a product (§4).
+///
+/// Under `repr(linear)` fields go in declaration order. Under `repr(lang)`
+/// the compiler may permute them — and with nine trits to a tryte and only
+/// two alignments, padding arises exactly when a 3-aligned field follows a
+/// prefix whose size is not a multiple of 3, so the most-aligned first is
+/// enough.
+fn product(parts: &Vec<Layout>, linear: bool) -> Layout {
+    let mut align: taddr = 1;
+    let mut i: taddr = 0;
+    while i < parts.len() {
+        if parts[i].align > align {
+            align = parts[i].align;
+        }
+        i += 1;
+    }
+
+    let mut offsets: Vec<taddr> = Vec::new();
+    let mut k: taddr = 0;
+    while k < parts.len() {
+        offsets.push(0);
+        k += 1;
+    }
+    let mut cursor: taddr = 0;
+    let mut placed: taddr = 0;
+    let mut want = align;
+    // The most-aligned first, then the rest in declaration order, which is
+    // one pass per alignment and there are two of them.
+    loop {
+        let mut j: taddr = 0;
+        while j < parts.len() {
+            let take = if linear { true } else { parts[j].align == want };
+            if take {
+                cursor = align_to(cursor, parts[j].align);
+                offsets[j] = cursor;
+                cursor = cursor + parts[j].size;
+                placed += 1;
+            }
+            j += 1;
+        }
+        if linear || placed >= parts.len() {
+            break;
+        }
+        want = want / 3;
+        if want < 1 {
+            break;
+        }
+    }
+    let size = align_to(cursor, align);
+
+    // Padding has unspecified contents, so every padding pattern is valid
+    // and contributes nothing; a product's spare capacity is its fields'.
+    let mut niches: taddr = 0;
+    let mut spot: Option<Spot> = Option::None;
+    let mut best: taddr = 0;
+    let mut f: taddr = 0;
+    while f < parts.len() {
+        if parts[f].niches > 0 {
+            niches = MANY;
+        }
+        match &parts[f].spot {
+            Option::Some(s) => {
+                let here = spot_count(&s);
+                if here > best {
+                    best = here;
+                    spot = Option::Some(Spot {
+                        offset: offsets[f] + s.offset,
+                        trits: s.trits,
+                        lo: s.lo,
+                        hi: s.hi,
+                    });
+                }
+            }
+            Option::None => {}
+        }
+        f += 1;
+    }
+    let mut used: taddr = 0;
+    let mut g: taddr = 0;
+    while g < parts.len() {
+        used = used + parts[g].size;
+        g += 1;
+    }
+    if size > used {
+        niches = MANY;
+    }
+
+    Layout {
+        size: size,
+        align: align,
+        offsets: offsets,
+        niches: niches,
+        spot: spot,
+        tag: Tag::None,
+        discriminants: Vec::new(),
+        variant_offsets: Vec::new(),
+    }
+}
+
+/// A `struct`, which is a product and nothing else.
+fn of_struct(defs: &Vec<Def>, at: taddr, depth: taddr) -> Result<Layout, String> {
+    let mut parts: Vec<Layout> = Vec::new();
+    let mut i: taddr = 0;
+    while i < defs[at].fields.len() {
+        parts.push(of(defs, &defs[at].fields[i], depth + 1)?);
+        i += 1;
+    }
+    Result::Ok(product(&parts, defs[at].linear))
+}
+
+/// An `enum` (§5): each variant's payload as a product, then a decision
+/// about where the discriminant goes.
+fn of_enum(defs: &Vec<Def>, at: taddr, depth: taddr) -> Result<Layout, String> {
+    let discs = copy_discs(&defs[at].discriminants);
+    let linear = defs[at].linear;
+
+    let mut payloads: Vec<Layout> = Vec::new();
+    let mut from: taddr = 0;
+    let mut v: taddr = 0;
+    while v < defs[at].counts.len() {
+        let mut parts: Vec<Layout> = Vec::new();
+        let mut k: taddr = 0;
+        while k < defs[at].counts[v] {
+            parts.push(of(defs, &defs[at].fields[from + k], depth + 1)?);
+            k += 1;
+        }
+        from = from + defs[at].counts[v];
+        payloads.push(product(&parts, linear));
+        v += 1;
+    }
+
+    let variants = defs[at].counts.len();
+    let mut fieldless = true;
+    let mut carriers: taddr = 0;
+    let mut carrier: taddr = 0;
+    let mut c: taddr = 0;
+    while c < variants {
+        if defs[at].counts[c] > 0 {
+            fieldless = false;
+            carriers += 1;
+            carrier = c;
+        }
+        c += 1;
+    }
+
+    // Three fieldless variants at −1, 0, +1 are representation-identical to
+    // `trit`, and `match` over one is a single `br3` (§5.2).
+    if !linear && fieldless && variants == 3 && holds3(&discs) {
+        let mut offs: Vec<Vec<taddr>> = Vec::new();
+        let mut e: taddr = 0;
+        while e < variants {
+            let none: Vec<taddr> = Vec::new();
+            offs.push(none);
+            e += 1;
+        }
+        return Result::Ok(Layout {
+            size: 1,
+            align: 1,
+            offsets: Vec::new(),
+            niches: 19680,
+            spot: Option::Some(Spot { offset: 0, trits: TRITS, lo: 0 - 1, hi: 1 }),
+            tag: Tag::TritShaped,
+            discriminants: discs,
+            variant_offsets: offs,
+        });
+    }
+
+    // One variant has nothing to tell apart, so it is its payload. Asked
+    // before the niche rule, which would otherwise encode a discriminant
+    // that does not exist.
+    if variants == 1 {
+        let mut offs: Vec<Vec<taddr>> = Vec::new();
+        offs.push(copy_offsets(&payloads[0].offsets));
+        let p = &payloads[0];
+        return Result::Ok(Layout {
+            size: p.size,
+            align: p.align,
+            offsets: Vec::new(),
+            niches: p.niches,
+            spot: copy_spot(&p.spot),
+            tag: Tag::None,
+            discriminants: discs,
+            variant_offsets: offs,
+        });
+    }
+
+    // Exactly one variant carries a payload, the rest are fieldless, and the
+    // payload has invalid representations to spare: the discriminant costs
+    // no space at all (§6).
+    let needed = (variants - 1) as taddr;
+    if !linear && carriers == 1 && payloads[carrier].niches >= needed
+        && payloads[carrier].size > 0
+    {
+        match &payloads[carrier].spot {
+            Option::Some(s) => {
+                if spot_count(&s) >= needed {
+                    let mut offs: Vec<Vec<taddr>> = Vec::new();
+                    let mut e: taddr = 0;
+                    while e < variants {
+                        if e == carrier {
+                            offs.push(copy_offsets(&payloads[carrier].offsets));
+                        } else {
+                            let none: Vec<taddr> = Vec::new();
+                            offs.push(none);
+                        }
+                        e += 1;
+                    }
+                    let at_off = s.offset;
+                    // What this enum did not use is still there for whatever
+                    // encloses it, which is why nesting inside a niche costs
+                    // no size (§6, guarantee 3).
+                    let left = consume(&s, needed);
+                    return Result::Ok(Layout {
+                        size: payloads[carrier].size,
+                        align: payloads[carrier].align,
+                        offsets: Vec::new(),
+                        niches: payloads[carrier].niches - needed,
+                        spot: Option::Some(left),
+                        tag: Tag::Niche(carrier, at_off, needed),
+                        discriminants: discs,
+                        variant_offsets: offs,
+                    });
+                }
+            }
+            Option::None => {}
+        }
+    }
+
+    // Otherwise a tag of its own, as narrow as the discriminants allow, and
+    // the payloads after it.
+    let width = tag_width(&discs);
+    let mut align: taddr = width;
+    let mut size: taddr = width;
+    let mut offs: Vec<Vec<taddr>> = Vec::new();
+    let mut e: taddr = 0;
+    while e < variants {
+        if payloads[e].align > align {
+            align = payloads[e].align;
+        }
+        e += 1;
+    }
+    let body = align_to(width, align);
+    let mut n: taddr = 0;
+    while n < variants {
+        let mut here: Vec<taddr> = Vec::new();
+        let mut k: taddr = 0;
+        while k < payloads[n].offsets.len() {
+            here.push(body + payloads[n].offsets[k]);
+            k += 1;
+        }
+        offs.push(here);
+        let total = body + payloads[n].size;
+        if total > size {
+            size = total;
+        }
+        n += 1;
+    }
+    size = align_to(size, align);
+    // The tag's unused values are niches of their own: a one-tryte tag with
+    // three variants leaves 19 680 patterns invalid.
+    let spare = capacity(width * TRITS) - (variants as taddr);
+    let lo: t27 = 0;
+    let hi = (variants - 1) as t27;
+    Result::Ok(Layout {
+        size: size,
+        align: align,
+        offsets: Vec::new(),
+        niches: spare,
+        spot: Option::Some(Spot { offset: 0, trits: width * TRITS, lo: lo, hi: hi }),
+        tag: Tag::Direct(width, 0),
+        discriminants: discs,
+        variant_offsets: offs,
+    })
+}
+
+/// Whether the discriminants are exactly −1, 0 and +1 in some order.
+fn holds3(discs: &Vec<t27>) -> bool {
+    let mut neg = false;
+    let mut zero = false;
+    let mut pos = false;
+    let mut i: taddr = 0;
+    while i < discs.len() {
+        if discs[i] == 0 - 1 {
+            neg = true;
+        } else if discs[i] == 0 {
+            zero = true;
+        } else if discs[i] == 1 {
+            pos = true;
+        }
+        i += 1;
+    }
+    neg && zero && pos
+}
+
+/// The narrowest integer that holds every discriminant, in trytes (§5.1).
+fn tag_width(discs: &Vec<t27>) -> taddr {
+    let mut wide: t27 = 0;
+    let mut i: taddr = 0;
+    while i < discs.len() {
+        let d = discs[i];
+        let m = if d < 0 { 0 - d } else { d };
+        if m > wide {
+            wide = m;
+        }
+        i += 1;
+    }
+    // A `t9` holds ±(3^9−1)/2 = ±9841.
+    if wide <= 9841 {
+        1
+    } else {
+        3
+    }
+}
+
+/// A list of discriminants, copied — there is no `Clone` here, and the
+/// original belongs to the definition.
+fn copy_discs(from: &Vec<t27>) -> Vec<t27> {
+    let mut out: Vec<t27> = Vec::new();
+    let mut i: taddr = 0;
+    while i < from.len() {
+        out.push(from[i]);
+        i += 1;
+    }
+    out
+}
+
+fn copy_offsets(from: &Vec<taddr>) -> Vec<taddr> {
+    let mut out: Vec<taddr> = Vec::new();
+    let mut i: taddr = 0;
+    while i < from.len() {
+        out.push(from[i]);
+        i += 1;
+    }
+    out
+}
+
+fn copy_spot(s: &Option<Spot>) -> Option<Spot> {
+    match s {
+        Option::Some(x) => {
+            Option::Some(Spot { offset: x.offset, trits: x.trits, lo: x.lo, hi: x.hi })
+        }
+        Option::None => Option::None,
+    }
+}
+
+/// The segments of a path, with `::` between them — a resolved name has one
+/// segment and a written one may have more.
+fn joined(segments: &Vec<String>) -> String {
+    let mut out: String = Vec::new();
+    let mut i: taddr = 0;
+    while i < segments.len() {
+        if i > 0 {
+            out.push_str("::");
+        }
+        out.push_str(&segments[i]);
+        i += 1;
+    }
+    out
+}

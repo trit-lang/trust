@@ -1,0 +1,11 @@
+// The chapter's own appendix, and the three §6 guarantees.
+struct Span { lo: taddr, hi: taddr }
+struct Mixed { a: t9, b: taddr, c: bool, d: char, e: trit }
+struct Ref3 { a: &t9, b: &Span, c: &char }
+enum Tree { Leaf, Node(Box<Tree>, t27) }
+enum Chain { A(&t27), B, C, D, E }
+enum Pair { X(t9, char), Y(bool) }
+enum Solo { Only }
+struct Holds { t: Tree, s: Span }
+enum Nested { P, Q(Holds) }
+fn main() -> t27 { 0 }

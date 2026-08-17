@@ -2592,6 +2592,31 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.49 — a count that could not be represented turned §6 off.** Ch. 2 §6
+niche-encodes an enum when its one payload has invalid representations to
+spare. The engine asked two questions: does the payload have `needed`
+niches, and does its niche *spot* have `needed`. The first is 3^n over the
+payload's whole width — a twelve-tryte payload has 3^108 patterns — so it
+saturated at `u128::MAX`, and `capacity(size) - valid` then came out **zero**
+because both sides had saturated to the same number. Every payload over
+eight trytes reported no niches and got a tag of its own.
+
+Nothing was wrong, only larger: a tag where none was needed. It was found by
+writing Ch. 2 in Trust, where there is no u128 at all — the second
+implementation said `size=12` where the first said `size=15`, and the first
+was the one with the accident in it.
+
+The fix is to ask only the question that can be answered: does the *spot* —
+one scalar, with a contiguous valid range — have `needed` invalid values.
+The payload's total count is an approximation kept for reporting, and a
+count that cannot be represented is not a reason to lay a type out
+differently.
+
+The Trust side carries the same count saturating at a word and does not
+print it, which is why `trust layout` prints sizes, alignments, offsets,
+discriminants and the tag decision, and no niche counts: those are what both
+implementations can be held to.
+
 **G9.48 — a join nothing arrives at.** A `match` started its join block
 however its arms ended. When every arm left by another door — a `return`, a
 `break` — nothing jumped there, and the block was unreachable, which the TIR

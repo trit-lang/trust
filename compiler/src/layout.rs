@@ -751,8 +751,14 @@ fn enum_layout(
         let untagged = carriers[0];
         let (payload, fields) = &payloads[untagged];
         let needed = (def.variants.len() - 1) as u128;
-        if payload.niches >= needed
-            && payload.size > 0
+        // The question is whether the *spot* has invalid values to spare,
+        // and not what `payload.niches` says. That count is 3^n for n up to
+        // the payload's whole width, so it saturates at `u128::MAX` for
+        // anything over eight trytes and then reads as **zero** once the
+        // subtraction is done — which quietly turned §6 off for every large
+        // payload. A count that cannot be represented is not a reason to
+        // lay a type out differently (G9.49).
+        if payload.size > 0
             && let Some(spot) = payload.niche.clone()
             && spot.count() >= needed
         {
@@ -776,7 +782,7 @@ fn enum_layout(
                 // The niches this enum did not consume remain available to
                 // whatever encloses it — which is why nesting up to the
                 // budget adds no size (§6, guarantee 3).
-                niches: payload.niches - needed,
+                niches: payload.niches.saturating_sub(needed),
                 niche: Some(spot.consume(needed)),
             });
         }

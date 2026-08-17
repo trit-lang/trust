@@ -1,0 +1,11 @@
+// The niche rule (§6), and what nesting inside it costs.
+struct Ptr { r: &t27 }
+enum MaybePtr { Nothing, Held(&t27) }
+enum MaybeBool { Nothing, Held(bool) }
+enum MaybeTrit { Nothing, Held(trit) }
+enum Deep { Nothing, Held(MaybeTrit) }
+enum Wide { A, B, C, D(t27) }
+enum One { Only(t27, bool) }
+struct Nest { p: Ptr, t: trit, c: char }
+enum Big { A(t9, t9), B(char), C }
+fn main() -> t27 { 0 }

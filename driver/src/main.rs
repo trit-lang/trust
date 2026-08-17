@@ -144,6 +144,69 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // Ch. 2, reported: what every nominal type the program defines is laid
+    // out as. Sizes and offsets are facts about types and need no inference,
+    // which makes this the first part of the middle a second implementation
+    // can be held to.
+    if cmd == "layout" {
+        let program = lang::modules::load(std::path::Path::new(path));
+        if !program.errors.is_empty() {
+            for e in &program.errors {
+                eprintln!("trust: {}", e.message);
+            }
+            return ExitCode::FAILURE;
+        }
+        let (user, errors) = lang::modules::resolve(&program);
+        if !errors.is_empty() {
+            for e in &errors {
+                eprintln!("trust: {}", e.message);
+            }
+            return ExitCode::FAILURE;
+        }
+        // The prelude is part of the program (Ch. 5), and its types are laid
+        // out by the same rules — but a report of *this* program's types is
+        // what a second implementation can answer, so the merge is skipped
+        // and what is printed is what the file defines.
+        match lang::lower::layouts(&user) {
+            Ok(ls) => {
+                for (name, l) in ls {
+                    // The niche *count* is not printed. It is 3^n for n up
+                    // to 27 trits, computed here in 128-bit arithmetic that
+                    // Trust does not have; what both implementations can be
+                    // held to is every decision made from it (G9.49).
+                    print!("{name} size={} align={}", l.size, l.align);
+                    for off in &l.offsets {
+                        print!(" +{off}");
+                    }
+                    if let Some(e) = &l.enum_layout {
+                        print!(" tag={}", tag_word(&e.tag));
+                        for d in &e.discriminants {
+                            print!(" ={d}");
+                        }
+                        for v in &e.variant_offsets {
+                            print!(" [");
+                            for (i, off) in v.iter().enumerate() {
+                                if i > 0 {
+                                    print!(" ");
+                                }
+                                print!("+{off}");
+                            }
+                            print!("]");
+                        }
+                    }
+                    println!();
+                }
+                return ExitCode::SUCCESS;
+            }
+            Err(errs) => {
+                for e in &errs {
+                    eprintln!("trust: {}", e.message);
+                }
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
     // Pass three of Ch. 6 §4: the whole program as one flat list of items,
     // every name in it resolved. It is what the rest of the compiler has
     // always been given, and it is the last question about this chapter that
@@ -469,6 +532,26 @@ fn print_items(file: &lang::ast::File) {
 }
 
 /// A type as its text, which is all either parser keeps of one here.
+/// How a discriminant is stored, in one word (Ch. 2 §5).
+fn tag_word(t: &trustc::layout::Tag) -> String {
+    use trustc::layout::Tag;
+    match t {
+        Tag::None => "none".to_string(),
+        Tag::TritShaped => "trit".to_string(),
+        // In trytes, which is what a second implementation can say: the
+        // name of the integer type is this compiler's spelling.
+        Tag::Direct { ty, offset } => {
+            format!("direct:{}:{offset}", ty.trits().div_ceil(9))
+        }
+        Tag::Niche {
+            untagged,
+            offset,
+            used,
+            ..
+        } => format!("niche:{untagged}:{offset}:{used}"),
+    }
+}
+
 fn written_ty(t: &lang::ast::Ty) -> String {
     use lang::ast::Ty;
     match t {

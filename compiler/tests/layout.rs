@@ -459,3 +459,40 @@ fn arrays_have_defined_layout_even_under_repr_lang() {
         (0..4).map(|i| i * elem.size).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn a_niche_is_used_however_wide_the_payload_is() {
+    // §6's rule is about the payload having invalid representations to
+    // spare, and a payload wider than eight trytes has as many as a narrow
+    // one. Draft 0.1 asked `payload.niches >= needed` first, and that count
+    // is 3^n over the payload's whole width — it saturated at `u128::MAX`
+    // and then read as zero once the subtraction was done, so §6 was
+    // quietly off for every large payload (G9.49).
+    let mut db = TypeDb::new();
+    db.struct_(
+        "Wide",
+        Repr::Lang,
+        vec![
+            ("r", Ty::reference(Ty::Int(IntTy::T27))),
+            ("a", Ty::Int(IntTy::TAddr)),
+        ],
+    );
+    db.enum_(
+        "Maybe",
+        Repr::Lang,
+        vec![
+            Variant::unit("None"),
+            Variant::payload("Some", Ty::named("Wide")),
+        ],
+    );
+    let wide = layout_of(&db, &Ty::named("Wide")).expect("a layout");
+    let maybe = layout_of(&db, &Ty::named("Maybe")).expect("a layout");
+    assert_eq!(
+        maybe.size, wide.size,
+        "the discriminant goes in the reference's niche and costs nothing"
+    );
+    assert!(matches!(
+        maybe.enum_layout.expect("an enum").tag,
+        Tag::Niche { .. }
+    ));
+}

@@ -1,0 +1,7 @@
+struct Empty;
+struct One { a: t9 }
+struct Mixed { a: t9, b: t27, c: trit }
+struct Wide { a: taddr, b: char, c: bool }
+enum Sign { Neg, Zero, Pos }
+enum Shape { Dot, Line(t27), Rect(t27, t27) }
+fn main() -> t27 { 0 }
