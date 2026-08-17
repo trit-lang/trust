@@ -61,7 +61,18 @@ pub struct Method {
 }
 
 /// What the file defines, and what is in scope where the walk has reached.
+/// What the walk is being asked for.
+///
+/// Both questions are one walk, because the second is the first with an
+/// answer compared: a checker that reported types it had not checked would
+/// be reporting what it guessed.
 pub struct World {
+    /// Set to report which functions are refused, rather than what every
+    /// binding is.
+    pub agreeing: bool,
+    /// Whether the function being walked has already been refused: one
+    /// answer per function, as the Rust side gives (it stops at the first).
+    pub refused: bool,
     /// `type Name = T;` — only a name (Ch. 0 §3.6), so a name is what it
     /// is taken off before anything else asks what a type is.
     pub aliases: Vec<Binding>,
@@ -74,10 +85,15 @@ pub struct World {
 
 fn main() -> t27 {
     let src = input::read_all();
+    // `agree` on the first line asks the second question; anything else
+    // asks the first. The driver has no arguments to give.
+    let agreeing = starts_with_agree(&src);
     let mut p = parse::Parser { src: src, at: 0, no_struct: false };
     match parse::file(&mut p) {
         Result::Ok(items) => {
             let mut w = World {
+                agreeing: agreeing,
+                refused: false,
                 aliases: Vec::new(),
                 fields: Vec::new(),
                 sigs: Vec::new(),
@@ -112,6 +128,19 @@ fn main() -> t27 {
             0
         }
     }
+}
+
+/// Whether the file opens with the line that asks for the other question.
+fn starts_with_agree(src: &str) -> bool {
+    let mut i: taddr = 0;
+    let want = "// agree";
+    while i < want.len() {
+        if i >= src.len() || src[i] != want[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 /// The aliases, which are read before anything else (Ch. 0 §3.6).
@@ -208,7 +237,18 @@ fn walk_item(w: &mut World, item: &ast::Item) {
                 return;
             }
             match &f.body {
-                Option::Some(b) => walk_fn(w, f, b),
+                Option::Some(b) => {
+                    w.refused = false;
+                    walk_fn(w, f, b);
+                    if w.agreeing {
+                        print(&f.name);
+                        if w.refused {
+                            println(" mismatch");
+                        } else {
+                            println(" ok");
+                        }
+                    }
+                }
                 Option::None => {}
             }
         }
@@ -240,13 +280,26 @@ fn walk_block(w: &mut World, what: &str, b: &ast::Block) {
                     Option::Some(x) => expand(w, x),
                     Option::None => type_of(w, value),
                 };
-                print(what);
-                print(" ");
-                print(name);
-                print(" ");
-                let mut out: String = Vec::new();
-                show_type(&t, &mut out);
-                println(&out);
+                // A written type is the answer *and* a claim about the
+                // value, which is the first place this has to say no.
+                match written {
+                    Option::Some(x) => {
+                        let got = type_of(w, value);
+                        if !agrees(&t, &got) {
+                            w.refused = true;
+                        }
+                    }
+                    Option::None => {}
+                }
+                if !w.agreeing {
+                    print(what);
+                    print(" ");
+                    print(name);
+                    print(" ");
+                    let mut out: String = Vec::new();
+                    show_type(&t, &mut out);
+                    println(&out);
+                }
                 // The value's own blocks come after, because a `let` is
                 // reported where it is written and what is inside it is
                 // written after it.
@@ -360,8 +413,11 @@ fn walk_optional(w: &mut World, what: &str, v: &Option<Box<ast::Expr>>) {
 /// What an expression is.
 pub fn type_of(w: &mut World, e: &ast::Expr) -> ast::Ty {
     match e {
-        // An integer with nothing to say otherwise is a word (§5.2).
-        ast::Expr::Int(v) => named("t27"),
+        // An integer literal takes its width from what is around it, and
+        // is a word where nothing says (§5.2). It is carried as a type of
+        // its own until something decides: printed as `t27`, and agreeing
+        // with any width, which is what "takes its width" means.
+        ast::Expr::Int(v) => named("#int"),
         ast::Expr::Char(v) => named("char"),
         ast::Expr::Trit(v) => named("trit"),
         ast::Expr::Bool(b) => named("bool"),
@@ -433,6 +489,89 @@ pub fn type_of(w: &mut World, e: &ast::Expr) -> ast::Ty {
     }
 }
 
+/// Whether a value of the second type is one of the first.
+///
+/// There are no implicit conversions (Ch. 0 §5.2), so this is equality —
+/// with one exception, and it is the one the language states: `()` is what
+/// this checker answers where it does not know, and a thing it does not
+/// know is not a thing it may refuse.
+pub fn agrees(want: &ast::Ty, got: &ast::Ty) -> bool {
+    // `()` on the answering side is this checker saying it does not know,
+    // and a thing it does not know is not a thing it may refuse. It says so
+    // at every level, because an argument it could not work out does not
+    // make the type around it wrong.
+    match got {
+        ast::Ty::Unit => {
+            return true;
+        }
+        _ => {}
+    }
+    match got {
+        ast::Ty::Name(segments) => {
+            // A literal takes its width from what is around it (§5.2).
+            if joined(segments).same("#int") {
+                return is_integer(want);
+            }
+        }
+        _ => {}
+    }
+    match want {
+        ast::Ty::Ref(a, m) => {
+            match got {
+                ast::Ty::Ref(b, n) => agrees(a, b),
+                _ => false,
+            }
+        }
+        ast::Ty::Slice(a) => {
+            match got {
+                ast::Ty::Slice(b) => agrees(a, b),
+                _ => false,
+            }
+        }
+        ast::Ty::App(head, args) => {
+            match got {
+                ast::Ty::App(other, given) => {
+                    let a = joined(head);
+                    let b = joined(other);
+                    if !a.same(&b) || args.len() != given.len() {
+                        return false;
+                    }
+                    let mut i: taddr = 0;
+                    while i < args.len() {
+                        if !agrees(&args[i], &given[i]) {
+                            return false;
+                        }
+                        i += 1;
+                    }
+                    true
+                }
+                _ => false,
+            }
+        }
+        _ => same_ty(want, got),
+    }
+}
+
+/// Whether a type is one an integer literal may become (Ch. 1 §2).
+fn is_integer(t: &ast::Ty) -> bool {
+    match t {
+        ast::Ty::Name(segments) => {
+            let n = joined(segments);
+            n.same("t9") || n.same("t27") || n.same("taddr") || n.same("#int")
+        }
+        _ => false,
+    }
+}
+
+/// Whether two types are the same type.
+fn same_ty(a: &ast::Ty, b: &ast::Ty) -> bool {
+    let mut x: String = Vec::new();
+    let mut y: String = Vec::new();
+    show_type(a, &mut x);
+    show_type(b, &mut y);
+    x.same(&y)
+}
+
 /// A type, as the name it has once it is one type and not a family.
 ///
 /// A generic type is *monomorphized* (Ch. 4 §2.5): `Option<taddr>` becomes
@@ -444,6 +583,14 @@ pub fn type_of(w: &mut World, e: &ast::Expr) -> ast::Ty {
 /// instantiate: it is one type the language writes, and it keeps its name.
 pub fn show_type(t: &ast::Ty, out: &mut String) {
     match t {
+        // A literal that nothing decided is a word (§5.2).
+        ast::Ty::Name(segments) => {
+            if joined(segments).same("#int") {
+                out.push_str("t27");
+            } else {
+                ast::show_ty(t, out);
+            }
+        }
         ast::Ty::App(segments, args) => {
             let head = joined(segments);
             if head.same("Vec") {
@@ -551,7 +698,11 @@ fn aggregate_type(w: &mut World, path: &str, fields: &Vec<ast::Field>) -> ast::T
     let variant = segments[1].to_string();
     let at = variant_at(w, &owner, &variant);
     if at < 0 {
-        return named(&owner);
+        // Not a variant of anything known: `Vec::new()` is a call of an
+        // associated function, and answering `Vec` would be a guess. This
+        // checker says what it knows and `()` is how it says it knows
+        // nothing.
+        return ast::Ty::Unit;
     }
     if w.variants[at].params.len() == 0 {
         return named(&owner);

@@ -208,5 +208,24 @@ for f in bootstrap/typed/*.tr bootstrap/ast.tr bootstrap/input.tr \
     t=$((t + $(printf '%s\n' "$rust" | wc -l)))
 done
 
-printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d modules of whole programs, %d names defined, %d names resolved, %d items rewritten, %d types laid out, %d bindings typed — all agreed\n' \
-    "$n" "$r" "$e" "$i" "$w" "$b" "$m" "$y" "$u" "$z" "$l" "$t"
+# Ch. 4, the other question: which functions are *refused*, and by which
+# rule. Reported per function rather than by position — two implementations
+# should agree about the language, and the second one's tree carries no
+# spans to point with. `bootstrap/mismatch` is one wrong thing per function
+# and `bootstrap/typed` is the same programs the two agreed about above, so
+# a checker that refused what compiles would be caught here.
+c=0
+for f in bootstrap/mismatch/*.tr bootstrap/typed/*.tr bootstrap/ast.tr \
+         bootstrap/lex.tr bootstrap/bundle.tr bootstrap/input.tr; do
+    rust=$("$trust" agree "$f")
+    mine=$({ printf '// agree\n'; cat "$f"; } | "$trust" run bootstrap/types.tr)
+    if [ "$rust" != "$mine" ]; then
+        echo "bootstrap: the two disagree about which functions type-check in $f" >&2
+        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -6 >&2
+        exit 1
+    fi
+    c=$((c + $(printf '%s\n' "$rust" | wc -l)))
+done
+
+printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d modules of whole programs, %d names defined, %d names resolved, %d items rewritten, %d types laid out, %d bindings typed, %d functions checked — all agreed\n' \
+    "$n" "$r" "$e" "$i" "$w" "$b" "$m" "$y" "$u" "$z" "$l" "$t" "$c"

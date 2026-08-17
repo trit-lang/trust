@@ -1,0 +1,56 @@
+// Where the two answers must be the same, and where a checker that guessed
+// would be caught: every one of these is a written type and a value.
+struct Span { lo: taddr, hi: taddr }
+enum Kind { A, B(t27) }
+
+fn field_right(s: &Span) -> t27 {
+    let a: taddr = s.lo;
+    0
+}
+
+fn field_wrong(s: &Span) -> t27 {
+    let a: t27 = s.lo;
+    0
+}
+
+fn call_right() -> t27 {
+    let a: t27 = maker();
+    0
+}
+
+fn call_wrong() -> t27 {
+    let a: bool = maker();
+    0
+}
+
+fn maker() -> t27 { 1 }
+
+fn variant_right() -> t27 {
+    let a: Kind = Kind::B(1);
+    0
+}
+
+fn variant_wrong() -> t27 {
+    let a: Span = Kind::A;
+    0
+}
+
+fn index_right(v: &Vec<char>) -> t27 {
+    let a: char = v[0];
+    0
+}
+
+fn index_wrong(v: &Vec<char>) -> t27 {
+    let a: t27 = v[0];
+    0
+}
+
+fn cast_right(n: t27) -> t27 {
+    let a: t9 = n as t9;
+    0
+}
+
+fn cast_wrong(n: t27) -> t27 {
+    let a: taddr = n as t9;
+    0
+}

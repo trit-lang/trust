@@ -1,0 +1,23 @@
+// A written type the value is not (Ch. 0 §5.2).
+struct Point { x: t27, y: taddr }
+
+fn right() -> t27 {
+    let a: t27 = 1;
+    let b: bool = true;
+    0
+}
+
+fn wrong_width() -> t27 {
+    let a: t9 = true;
+    0
+}
+
+fn wrong_shape() -> t27 {
+    let p: Point = 1;
+    0
+}
+
+fn wrong_reference(n: t27) -> t27 {
+    let r: &t27 = n;
+    0
+}

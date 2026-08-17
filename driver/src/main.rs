@@ -176,6 +176,50 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // Ch. 4, refused: which functions do not type-check, and by which rule.
+    //
+    // Reported per *function* and by rule rather than by wording or by
+    // position: two implementations should agree about the language, and a
+    // second one has no spans to point with (`bootstrap/`'s tree carries
+    // none). What both can say is "this function is refused, and it is a
+    // type that does not match".
+    if cmd == "agree" {
+        let Ok(src) = std::fs::read_to_string(path) else {
+            eprintln!("trust: cannot read {path}");
+            return ExitCode::FAILURE;
+        };
+        let analysis = lang::analyze(&src);
+        let file = match lang::parse::parse(&src) {
+            Ok(f) => f,
+            Err(e) => {
+                println!("error {}", e.span.lo);
+                return ExitCode::SUCCESS;
+            }
+        };
+        for item in &file.items {
+            let lang::ast::Item::Fn(f) = item else {
+                continue;
+            };
+            if !f.generics.is_empty() || f.body.is_none() {
+                continue;
+            }
+            let span = f.span;
+            let why = analysis
+                .errors
+                .iter()
+                .find(|e| e.span.lo >= span.lo && e.span.hi <= span.hi)
+                .map(|e| match e.message.contains("expected") {
+                    true => "mismatch",
+                    false => "other",
+                });
+            match why {
+                Some(class) => println!("{} {class}", f.name),
+                None => println!("{} ok", f.name),
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+
     // Ch. 2, reported: what every nominal type the program defines is laid
     // out as. Sizes and offsets are facts about types and need no inference,
     // which makes this the first part of the middle a second implementation

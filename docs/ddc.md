@@ -136,6 +136,9 @@ Each step is checkable on its own, and none of them is only for DDC.
    *Done, and now guarded.*
 2. **Finish the checker** (Ch. 4 in `bootstrap/`): the types of expressions,
    then whether they agree — the first place the Trust side must say *no*.
+   *Begun: `trust types` and `trust agree` are both compared, the second by
+   rule rather than by wording or position, since `bootstrap/`'s tree
+   carries no spans.*
 3. **Lower to TIR** in Trust, compared against `trustc build` the way every
    other pass is compared: same input, same module, character for character.
    This is the step that makes `stage1` exist.
