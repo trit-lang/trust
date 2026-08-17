@@ -99,11 +99,22 @@ tree forms that printed as Rust debug output with spans in them, which no
 second implementation could have reproduced, and an `impl … for &str` that
 printed without its `&`.
 
-Reading it is not compiling it. What the library needs beyond what is here
-is Ch. 4's third and fourth blocks — traits with dispatch, `dyn`, closures
-and their captures — and Ch. 5's `Vec` and `String`, which are the
-compiler's rather than the library's. That is the remaining order, and it
-is the bulk of what is left before `stage1` exists.
+And it **compiles part of it**: `bootstrap/programs/library/main.tr` uses
+the handed-over `Option`, its variants and its generic methods, and its TIR
+is the same characters as `trustc`'s. Every other pass agrees about the
+whole library too — the names it defines, what each `use` reaches, the
+layout of every type in it, and which of its functions type-check.
+
+Compiling *all* of it is what is left, and it is the bulk of the remaining
+work: Ch. 4's third and fourth blocks — traits with dispatch, `dyn`,
+closures and their captures — Ch. 5's `Vec` and `String`, which are the
+compiler's rather than the library's, and one thing smaller than either: an
+`if` or `match` whose value is an aggregate has to build each arm into the
+storage the caller gave rather than into a temporary it then copies.
+
+Until then, what a program may use of the library is what the Trust side
+lowers, and what it may not is refused rather than lowered wrongly — which
+is the same rule the rest of this file is about.
 
 ### 3.3 The comparison has something to compare — **not started**
 

@@ -129,14 +129,31 @@ trap 'rm -f "$prelude" "$bundle"' EXIT
 # Up to the next section header. Not the character count the header gives:
 # that is in *characters* and the library is not all ASCII (Ch. 5 §1.4).
 tail -n +2 "$bundle" | awk '/^mod [^ ]+ [0-9]+$/ { exit } { print }' > "$prelude"
-rust=$("$trust" file "$prelude")
-mine=$("$trust" run bootstrap/file.tr < "$prelude")
-if [ "$rust" != "$mine" ]; then
-    echo "bootstrap: the two parsers disagree on the library" >&2
-    diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10 >&2
-    exit 1
-fi
-v=$(printf '%s\n' "$rust" | wc -l)
+v=0
+ask() {
+    rust=$1
+    mine=$2
+    if [ "$rust" != "$mine" ]; then
+        echo "bootstrap: the two disagree about $3 in the library" >&2
+        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10 >&2
+        exit 1
+    fi
+    v=$((v + $(printf '%s\n' "$rust" | wc -l)))
+}
+ask "$("$trust" file "$prelude")" \
+    "$("$trust" run bootstrap/file.tr < "$prelude")" "the items"
+ask "$("$trust" symbols "$prelude")" \
+    "$("$trust" bundle "$prelude" | "$trust" run bootstrap/symbols.tr)" \
+    "the names defined"
+ask "$("$trust" uses "$prelude")" \
+    "$("$trust" bundle "$prelude" | "$trust" run bootstrap/uses.tr)" \
+    "what every use reaches"
+ask "$("$trust" layout "$prelude")" \
+    "$("$trust" bundle "$prelude" | "$trust" run bootstrap/sizes.tr)" \
+    "the layouts"
+ask "$("$trust" agree "$prelude")" \
+    "$({ printf '// agree\n'; cat "$prelude"; } | "$trust" run bootstrap/types.tr)" \
+    "which functions type-check"
 
 # A whole *program*, not a file. The machine has a character port and no
 # filesystem (ISA §2.2), so the driver walks the module tree and hands the
@@ -272,9 +289,13 @@ done
 q=0
 for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
             bootstrap/programs/methods/main.tr \
-            bootstrap/programs/generic/main.tr; do
+            bootstrap/programs/generic/main.tr \
+            bootstrap/programs/library/main.tr; do
+    # The one that uses the library is handed the library, which is what
+    # `--prelude` is for (Ch. 6 §3.3) — and asking for it where there is
+    # none costs nothing, since a prelude nothing names is pruned away.
     rust=$("$trust" build "$root")
-    mine=$("$trust" bundle "$root" | "$trust" run bootstrap/program.tr)
+    mine=$("$trust" bundle "$root" --prelude | "$trust" run bootstrap/program.tr)
     if [ "$rust" != "$mine" ]; then
         echo "bootstrap: the two lower the program at $root differently" >&2
         diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10 >&2
@@ -283,5 +304,5 @@ for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
     q=$((q + $(printf '%s\n' "$rust" | wc -l)))
 done
 
-printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d items of the library, %d modules of whole programs, %d names defined, %d names resolved, %d items rewritten, %d types laid out, %d bindings typed, %d functions checked, %d lines of TIR, %d of whole programs — all agreed\n' \
+printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d lines about the library, %d modules of whole programs, %d names defined, %d names resolved, %d items rewritten, %d types laid out, %d bindings typed, %d functions checked, %d lines of TIR, %d of whole programs — all agreed\n' \
     "$n" "$r" "$e" "$i" "$w" "$b" "$v" "$m" "$y" "$u" "$z" "$l" "$t" "$c" "$g" "$q"

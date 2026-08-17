@@ -103,9 +103,13 @@ fn main() -> t27 {
             items.push(resolve::rewrite(&w, &mut here_at, item));
         }
     }
+    // `w.sources` and not `mods`: the prelude is a section of the bundle
+    // and not a module of the program, so it was skipped when the modules
+    // were read and the two lists no longer line up. They did before the
+    // prelude was handed over, which is why nothing said so.
     let mut f: taddr = 0;
     for each in files {
-        let here = resolve::plain(&mods[f].path);
+        let here = w.sources[f].to_string();
         let scope = resolve::scope_of(&w, &here, &each);
         let mut at = resolve::At { here: here, scope: scope, locals: Vec::new() };
         for item in each {

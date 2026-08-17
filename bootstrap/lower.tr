@@ -801,6 +801,13 @@ fn fill(
             continue;
         }
         let ty = tir_ty(&e.defs[which].fields[index]);
+        // A type TIR has no spelling for is not one this writes down: a
+        // reference to something unsized is two words and not one, and
+        // `store ?` is not TIR (TIR §1).
+        if ty.same("?") {
+            e.stuck = true;
+            return;
+        }
         // The value first, then where it goes: that order is what decides
         // the numbers, and the numbers are what the comparison is on.
         let v = value(e, &fields[i].value, &ty);
@@ -1198,10 +1205,23 @@ fn at_here(line: &str, at: taddr, what: &str) -> bool {
 }
 
 /// `store TY value, slot`.
+///
+/// TIR stores a *value*, and an aggregate is not one — it **is** its
+/// storage (TIR §3). So a store whose type is not one TIR spells is a store
+/// this cannot write, and saying so here catches every place that would
+/// otherwise write it down: the join of an `if` whose arms are aggregates,
+/// a field whose type is a reference to something unsized, and whatever
+/// else has not been reached yet.
 fn store_into(e: &mut Emit, ty: &str, what: &str, where_: &str) {
+    let shown = tir_of(ty);
+    if !shown.same("t1") && !shown.same("t9") && !shown.same("t27")
+        && !shown.same("ptr")
+    {
+        e.stuck = true;
+        return;
+    }
     let mut line: String = Vec::new();
     line.push_str("    store ");
-    let shown = tir_of(ty);
     line.push_str(&shown);
     line.push_str(" ");
     line.push_str(what);

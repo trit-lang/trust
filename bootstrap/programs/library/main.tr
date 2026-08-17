@@ -1,0 +1,31 @@
+// A program that uses the **library**, which is handed over rather than
+// written here (Ch. 6 §3.3): `Option` is the prelude's, its `unwrap_or` is
+// the prelude's generic method, and what reaches the module is one
+// instantiation of it per type asked for.
+//
+// The rest of the prelude is not in the program, because nothing calls it —
+// which the two implementations have to agree about as much as they agree
+// about what is.
+
+// What is *not* here: `fn pick(n) -> Option<t27> { if n > 0 { … } else { … } }`.
+// An `if` whose value is an aggregate has to build each arm into the
+// storage the caller gave, and this builds it in a temporary and copies —
+// which is a `store` of an aggregate, and TIR has none (TIR §3). It is
+// refused rather than written, which is what leaving it out of here means.
+
+fn some(n: t27) -> Option<t27> { Option::Some(n) }
+
+fn none() -> Option<t27> {
+    let out: Option<t27> = Option::None;
+    out
+}
+
+fn main() -> t27 {
+    let a: Option<t27> = Option::Some(7);
+    let b: Option<t27> = Option::None;
+    let c = some(3);
+    let d = none();
+    let e: Option<t9> = Option::Some(1);
+    a.unwrap_or(0) + b.unwrap_or(1) + c.unwrap_or(2) + d.unwrap_or(4)
+        + (e.unwrap_or(1) as t27)
+}

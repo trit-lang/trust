@@ -2592,6 +2592,42 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.64 — the library compiles, as far as `Option` goes, and three things
+had to stop lying first.**
+
+`bootstrap/programs/library/main.tr` is a program that uses the *handed-over*
+prelude, and its TIR is the same characters as `trustc`'s — `Option`, its
+variants, and one `Option.unwrap_or` per type asked for. What it took:
+
+*The prelude is a section of a bundle and not a module of the program.* The
+second resolution pass walked `files` and read the module path out of
+`mods[f]` — two lists that lined up until the prelude was put at the front
+of one of them and not the other. Every item of the program came out under
+the path `#prelude`, so `main` was `@#prelude.main`, so nothing was
+reachable from `main`, so nothing was pruned. One off-by-one, three visible
+symptoms, and none of them looked like an off-by-one.
+
+*A reference to something unsized is two words.* `&str` and `&[T]` carry
+the length beside the address (Ch. 2 §4), so `struct Chars { s: &str, at:
+taddr }` is nine trytes and not six. The Trust layout engine gave every
+reference three, and the library is the first program either implementation
+had that puts one in a struct.
+
+*And `store` had no idea what it could store.* An `if` whose value is an
+aggregate emitted `store Option.t27 %tmp.slot.8, %tmp.slot.11` — TIR has no
+such instruction, because an aggregate has no value: it **is** its storage
+(TIR §3). `store_into` now refuses any type TIR does not spell, which is one
+guard in one place that catches every route to writing one down. That is
+the third fix of this kind — a check where the mistake would be *made*
+rather than where it was found — and the three of them have retired the
+whole `store ?` family.
+
+What is refused, and is the next thing the library needs: an `if` or a
+`match` whose value is an aggregate has to build each arm into the storage
+the caller gave, rather than into a temporary that is then copied. Both
+implementations agree about `Option` because nothing in the corpus asks for
+the other shape yet.
+
 **G9.62 — the tree printer fell through to `{:?}` four times, and the
 comparison could not see it.** The Trust side is held to `trustc` by
 printing the same tree for the same source, character for character. Four

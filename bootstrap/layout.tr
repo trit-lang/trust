@@ -167,6 +167,16 @@ fn ranged(size: taddr, lo: t27, hi: t27) -> Layout {
     l
 }
 
+/// Whether a type's size is not in the type: a slice and a `str` are runs
+/// whose length is not written, so a reference to one carries it (Ch. 2 §4).
+fn unsized_(t: &Ty) -> bool {
+    match t {
+        Ty::Slice(inner) => true,
+        Ty::Name(segments) => segments[segments.len() - 1].same("str"),
+        _ => false,
+    }
+}
+
 /// The layout of a written type.
 pub fn of(defs: &Vec<Def>, t: &Ty, depth: taddr) -> Result<Layout, String> {
     if depth > 16 {
@@ -177,7 +187,20 @@ pub fn of(defs: &Vec<Def>, t: &Ty, depth: taddr) -> Result<Layout, String> {
         // (§6). What it points at is not laid out: a pointer is one whatever
         // it points at, and computing it here would not end for exactly the
         // recursive types §8 calls well-formed.
-        Ty::Ref(inner, mutable) => Result::Ok(ranged(3, 1, MANY as t27)),
+        //
+        // Except that a reference to something whose size is not in its
+        // type carries the size beside the address — `&str` and `&[T]` are
+        // two words, not one (Ch. 2 §4, Ch. 3 §2.1). The spot is still the
+        // address's, because the address is still never zero.
+        Ty::Ref(inner, mutable) => {
+            if unsized_(&*inner) {
+                let mut l = ranged(3, 1, MANY as t27);
+                l.size = 6;
+                l.align = 3;
+                return Result::Ok(l);
+            }
+            Result::Ok(ranged(3, 1, MANY as t27))
+        }
         Ty::Unit => Result::Ok(scalar(0, 0)),
         Ty::SelfTy => Result::Err("`Self` outside an impl".to_string()),
         Ty::ImplFn(kind, args, ret) => {
