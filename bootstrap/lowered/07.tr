@@ -1,0 +1,21 @@
+enum K { A, B, C }
+enum P { N, S(t27) }
+enum Two { L(t9, t27), R }
+
+fn kind(k: K) -> t27 { match k { K::A => 1, K::B => 2, K::C => 3 } }
+fn payload(p: P) -> t27 { match p { P::N => 0, P::S(n) => n } }
+fn used(p: P) -> t27 { match p { P::N => 0, P::S(n) => n + 1 } }
+fn pair(t: Two) -> t27 { match t { Two::L(a, b) => b, Two::R => 0 } }
+fn nested(k: K, p: P) -> t27 {
+    match k {
+        K::A => match p { P::N => 0, P::S(n) => n },
+        K::B => 1,
+        K::C => 2,
+    }
+}
+fn branchy(p: P) -> t27 {
+    match p {
+        P::N => 0,
+        P::S(n) => if n > 0 { n } else { 0 - n },
+    }
+}

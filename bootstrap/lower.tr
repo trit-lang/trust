@@ -401,15 +401,44 @@ fn copy_in(e: &mut Emit, name: &str, at: taddr) -> bool {
         ty: e.defs[at].name.to_string(),
     });
 
+    let mut from: String = Vec::new();
+    from.push_str("%");
+    from.push_str(name);
+    if e.defs[at].is_enum {
+        // An enum has no one set of fields, so what is copied is its
+        // storage: a word at a time, and a tryte for what is left.
+        let mut at_off: taddr = 0;
+        while at_off < l.size {
+            let ty = if l.size - at_off >= 3 {
+                "t27".to_string()
+            } else {
+                "t9".to_string()
+            };
+            // Read before the destination is named: an enum is copied as
+            // storage and a struct field by field, and the two orders are
+            // what they are.
+            let src = offset_of(e, &from, at_off);
+            let v = fresh(e, "v");
+            let mut load: String = Vec::new();
+            load.push_str("    ");
+            load.push_str(&v);
+            load.push_str(" = load ");
+            load.push_str(&ty);
+            load.push_str(" ");
+            load.push_str(&src);
+            e.insts.push(load);
+            let dst = offset_of(e, &slot, at_off);
+            store_into(e, &ty, &v, &dst);
+            at_off = at_off + (trytes(&ty) as taddr);
+        }
+        return true;
+    }
     let mut i: taddr = 0;
     while i < l.offsets.len() {
         let ty = tir_ty(&e.defs[at].fields[i]);
         if ty.same("?") {
             return false;
         }
-        let mut from: String = Vec::new();
-        from.push_str("%");
-        from.push_str(name);
         let src = offset_of(e, &from, l.offsets[i]);
         let dst = offset_of(e, &slot, l.offsets[i]);
         let v = fresh(e, "v");
@@ -546,6 +575,102 @@ fn branch_block(e: &mut Emit, b: &ast::Block, want: &str) -> Value {
             e.stuck = true;
             unknown_value()
         }
+    }
+}
+
+/// Which variant an arm names, or −1.
+fn arm_variant(e: &Emit, which: taddr, arm: &ast::Arm) -> taddr {
+    if arm.patterns.len() != 1 {
+        return 0 - 1;
+    }
+    let name = match &arm.patterns[0] {
+        ast::Pattern::Aggregate(path, fields) => last_segment(path),
+        _ => return 0 - 1,
+    };
+    let mut i: taddr = 0;
+    while i < e.defs[which].field_names.len() {
+        if e.defs[which].field_names[i].same(&name) {
+            return i;
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
+/// The last segment of a written path: `K::A` names `A`.
+fn last_segment(path: &str) -> String {
+    let mut out: String = Vec::new();
+    let mut i: taddr = 0;
+    while i < path.len() {
+        if path[i] == ':' && i + 1 < path.len() && path[i + 1] == ':' {
+            out = Vec::new();
+            i += 2;
+        } else {
+            out.push(path[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// What an arm's pattern binds: a copy of each payload field, in storage of
+/// its own, which is what an arm's binding is when the scrutinee is a place
+/// it does not own (Ch. 3 §1.3).
+fn bind_payload(
+    e: &mut Emit,
+    which: taddr,
+    index: taddr,
+    base: &str,
+    l: &layout::Layout,
+    arm: &ast::Arm,
+) {
+    let fields = match &arm.patterns[0] {
+        ast::Pattern::Aggregate(path, fs) => fs,
+        _ => return,
+    };
+    // Where this variant's payload begins, and which of the definition's
+    // flat field list it is.
+    let mut first: taddr = 0;
+    let mut v: taddr = 0;
+    while v < index {
+        first = first + e.defs[which].counts[v];
+        v += 1;
+    }
+    let mut i: taddr = 0;
+    while i < fields.len() {
+        let name = match &fields[i].pat {
+            ast::Pattern::Bind(n) => n.to_string(),
+            _ => {
+                e.stuck = true;
+                return;
+            }
+        };
+        let ty = tir_ty(&e.defs[which].fields[first + i]);
+        if ty.same("?") {
+            e.stuck = true;
+            return;
+        }
+        let at = l.variant_offsets[index][i];
+        let src = offset_of(e, base, at);
+        let got = fresh(e, "v");
+        let mut load: String = Vec::new();
+        load.push_str("    ");
+        load.push_str(&got);
+        load.push_str(" = load ");
+        load.push_str(&ty);
+        load.push_str(" ");
+        load.push_str(&src);
+        e.insts.push(load);
+        let slot = slot_for(e, &name, &ty);
+        store_into(e, &ty, &got, &slot);
+        i += 1;
+    }
+}
+
+/// Forget the locals bound since a mark: an arm is a scope (Ch. 3 §1.4).
+fn forget(e: &mut Emit, mark: taddr) {
+    while e.locals.len() > mark {
+        e.locals.pop();
     }
 }
 
@@ -1027,6 +1152,139 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             }
             Value { text: held, ty: path.to_string() }
         }
+        // `match e { … }` — the discriminant once, then a three-way test per
+        // arm, and a slot the arms agree to leave the answer in (§5.4).
+        ast::Expr::Match(scrutinee, arms) => {
+            let base = match scrutinee {
+                ast::Expr::Name(n) => {
+                    let at = local_at(e, n);
+                    if at < 0 {
+                        e.stuck = true;
+                        return unknown_value();
+                    }
+                    e.locals[at].slot.to_string()
+                }
+                _ => {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+            };
+            let owner = match scrutinee {
+                ast::Expr::Name(n) => {
+                    let at = local_at(e, n);
+                    e.locals[at].ty.to_string()
+                }
+                _ => "".to_string(),
+            };
+            let which = def_at(&e.defs, &owner);
+            if which < 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let self_ty = ast::Ty::Name(one_name(&owner));
+            let l = match layout::of(&e.defs, &self_ty, 0) {
+                Result::Ok(x) => x,
+                Result::Err(why) => {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+            };
+            let tag = match &l.tag {
+                layout::Tag::Direct(width, at) => {
+                    if width == 1 {
+                        "t9".to_string()
+                    } else {
+                        "t27".to_string()
+                    }
+                }
+                _ => {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+            };
+            let d = fresh(e, "d");
+            let mut read: String = Vec::new();
+            read.push_str("    ");
+            read.push_str(&d);
+            read.push_str(" = load ");
+            read.push_str(&tag);
+            read.push_str(" ");
+            read.push_str(&base);
+            e.insts.push(read);
+            let join = label(e, "match.join");
+
+            let mut held: String = Vec::new();
+            let mut ty: String = Vec::new();
+            let mut a: taddr = 0;
+            while a < arms.len() {
+                let arm_at = label(e, "arm");
+                let next_at = label(e, "arm.next");
+                let index = arm_variant(e, which, &arms[a]);
+                if index < 0 {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+                let c = fresh(e, "c");
+                let mut test: String = Vec::new();
+                test.push_str("    ");
+                test.push_str(&c);
+                test.push_str(" = cmp ");
+                test.push_str(&tag);
+                test.push_str(" ");
+                test.push_str(&d);
+                test.push_str(", const ");
+                test.push_str(&tag);
+                test.push_str(" ");
+                push_int(&mut test, l.discriminants[index]);
+                e.insts.push(test);
+                let mut br: String = Vec::new();
+                br.push_str("    br3 ");
+                br.push_str(&c);
+                br.push_str(", ");
+                br.push_str(&next_at);
+                br.push_str(", ");
+                br.push_str(&arm_at);
+                br.push_str(", ");
+                br.push_str(&next_at);
+                e.insts.push(br);
+
+                start(e, &arm_at);
+                let mark = e.locals.len();
+                bind_payload(e, which, index, &base, &l, &arms[a]);
+                if e.stuck {
+                    return unknown_value();
+                }
+                let v = value(e, &arms[a].body, want);
+                if e.stuck {
+                    return unknown_value();
+                }
+                if held.len() == 0 {
+                    ty = v.ty.to_string();
+                    held = slot_for(e, "tmp", &ty);
+                }
+                store_into(e, &ty, &v.text, &held);
+                jump(e, &join);
+                forget(e, mark);
+                start(e, &next_at);
+                a += 1;
+            }
+            // Exhaustiveness was checked, so control cannot arrive here in a
+            // well-typed program — but TIR wants a terminator.
+            e.insts.push("    trap F_TRAP".to_string());
+            e.done = true;
+
+            start(e, &join);
+            let name = fresh(e, "v");
+            let mut line: String = Vec::new();
+            line.push_str("    ");
+            line.push_str(&name);
+            line.push_str(" = load ");
+            line.push_str(&ty);
+            line.push_str(" ");
+            line.push_str(&held);
+            e.insts.push(line);
+            Value { text: name, ty: ty }
+        }
         ast::Expr::Assign(op, target, v) => {
             if !op.same("=") {
                 e.stuck = true;
@@ -1116,6 +1374,37 @@ pub fn definitions(items: &Vec<ast::Item>) -> Vec<layout::Def> {
                     field_names: names,
                     counts: Vec::new(),
                     discriminants: Vec::new(),
+                });
+            }
+            ast::What::Enum(name, gs, variants) => {
+                let mut tys: Vec<ast::Ty> = Vec::new();
+                let mut counts: Vec<taddr> = Vec::new();
+                let mut discs: Vec<t27> = Vec::new();
+                let mut names: Vec<String> = Vec::new();
+                let mut next: t27 = 0;
+                let mut v: taddr = 0;
+                while v < variants.len() {
+                    let mut n: taddr = 0;
+                    let mut k: taddr = 0;
+                    while k < variants[v].fields.len() {
+                        tys.push(copy_ty(&variants[v].fields[k]));
+                        n += 1;
+                        k += 1;
+                    }
+                    names.push(variants[v].name.to_string());
+                    counts.push(n);
+                    discs.push(next);
+                    next = next + 1;
+                    v += 1;
+                }
+                out.push(layout::Def {
+                    name: name.to_string(),
+                    is_enum: true,
+                    linear: items[i].linear,
+                    fields: tys,
+                    field_names: names,
+                    counts: counts,
+                    discriminants: discs,
                 });
             }
             _ => {}
