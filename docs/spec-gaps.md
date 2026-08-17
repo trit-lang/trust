@@ -2638,11 +2638,27 @@ tuple destructuring had never worked for a part that owns anything. It does
 now. `let (mut a, b) = …` still takes the old path: what a pattern binds is
 what would be `mut`, and there is nowhere in a pattern to write that yet.
 
-**Still open**: **per-place ownership**. Moving `p.a` should leave `p.b`
-alive. It needs ownership tracked per field path, drop glue that can skip a
-moved field, and per-field flags where a branch left it undecided. The
-patterns above make the common case writable without it, which is why they
-came first; they do not make it unnecessary.
+**Per-place ownership** followed, and Ch. 3 §1.3's sentence — "moving out of
+a place leaves *that place* uninitialized, not the whole variable" — is now
+what the compiler does. An `Owned` entry carries the direct fields moved out
+of it; a move of `p.x` records `x` rather than marking `p`; the drop at the
+end of the scope drops what is left, one field at a time, because the type's
+own glue would drop all of them; and `p.x = …` puts the field back and makes
+the value whole again.
+
+Three things are still refused, and each for a reason worth stating:
+
+- A field moved on one path of a branch and not the other. The drop flag
+  decides for a whole local and not for a part of it, so this would need a
+  flag per part. Refused rather than leaked — the other path still owns the
+  field, and nothing would drop it.
+- A field moved inside a loop, which is the same argument G9.9 makes about a
+  whole local one projection along.
+- Reading the *whole* of a value a field has gone from. It is not a value
+  any more; its parts are.
+
+A move through an index or through a reference still moves the whole
+conservatively, because what is left of `v[i]` is not a set of names.
 
 **G9.45 — the same double free, one projection along.** G9.27 refused
 `take(*r)`: reading a non-`Copy` value through a reference moves it, and

@@ -1838,16 +1838,13 @@ fn the_field_move_family_is_rejected() {
 }
 
 #[test]
-fn per_local_ownership_rejects_two_programs_that_are_legal() {
-    // The evidence for calling the approximation *conservative*, which is a
-    // claim about which direction it errs in and needs a wrongly-rejected
-    // program to support. Ownership is tracked per local, not per place, so
-    // a move out of one field takes the whole local with it.
-    //
-    // Both of these are legal by Ch. 3 §1.3 — "moving out of a place leaves
-    // *that place* uninitialized, not the whole variable" — and both are
-    // accepted by Rust. If per-place ownership ever arrives, these two
-    // assertions are what must flip.
+fn ownership_is_per_place_and_these_two_programs_are_legal() {
+    // Ch. 3 §1.3: "moving out of a place leaves *that place* uninitialized,
+    // not the whole variable". Draft 0.1 tracked ownership per local, so a
+    // move out of one field took the whole local with it, and these two were
+    // refused — the evidence that the approximation was conservative. They
+    // are the assertions that flipped when per-place ownership arrived
+    // (G9.46).
     for (what, body) in [
         (
             "moving out of disjoint fields",
@@ -1858,8 +1855,10 @@ fn per_local_ownership_rejects_two_programs_that_are_legal() {
             "let mut o = O { a: B{id:1}, b: B{id:2} }; take(o.a); o.a = B{id:3}; takeo(o); 0",
         ),
     ] {
-        let e = error(&format!("{MOVE_FAMILY} fn main() -> t27 {{ {body} }}"));
-        assert!(e.contains("moved out of"), "{what}: {e}");
+        let src = format!("{MOVE_FAMILY} fn main() -> t27 {{ {body} }}");
+        if let Err(errs) = lang::compile(&src) {
+            panic!("{what}: {}", errs[0].message);
+        }
     }
 }
 
@@ -2064,6 +2063,23 @@ fn every_owner_drops_exactly_once() {
     ledger(
         "a struct field",
         "let s = Pair { a: P{id:65}, b: P{id:66} }; 0",
+        "AB",
+    );
+    // Per-place ownership (G9.46): what is left of a partly-moved struct is
+    // what its scope drops, and the part that went is dropped where it went.
+    ledger(
+        "a field moved out, and the rest",
+        "let s = Pair { a: P{id:65}, b: P{id:66} }; { let a = s.a; } 0",
+        "AB",
+    );
+    ledger(
+        "a field moved out and put back",
+        "let mut s = Pair { a: P{id:65}, b: P{id:66} }; eat(s.a); s.a = P{id:67}; 0",
+        "ACB",
+    );
+    ledger(
+        "both fields moved out",
+        "let s = Pair { a: P{id:65}, b: P{id:66} }; eat(s.a); eat(s.b); 0",
         "AB",
     );
     ledger(

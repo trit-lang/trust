@@ -307,3 +307,65 @@ fn a_tuple_of_values_that_own_can_be_taken_apart() {
                fn main() -> t27 { let (a, b) = two(); (a.len() + b.len()) as t27 }\n";
     assert_eq!(refusal(src), None);
 }
+
+#[test]
+fn a_field_moved_on_one_path_only_is_refused() {
+    // The drop flag decides for a whole local and not for a part of it, so
+    // two paths that disagree about which parts are left would need a flag
+    // per part. Until there is one this is refused rather than leaked: the
+    // `else` path still owns `p.a`, and nothing would drop it (G9.46).
+    let src = "struct Note { n: t27 }\n\
+               impl Drop for Note { fn drop(self) { } }\n\
+               struct Pair { a: Note, b: Note }\n\
+               fn take(x: Note) { }\n\
+               fn f(p: Pair, go: bool) { if go { take(p.a); } }\n\
+               fn main() -> t27 { 0 }\n";
+    assert!(
+        refusal(src)
+            .expect("a refusal")
+            .contains("on one path here and not on the other"),
+    );
+}
+
+#[test]
+fn a_field_moved_inside_a_loop_is_refused() {
+    let src = "struct Note { n: t27 }\n\
+               impl Drop for Note { fn drop(self) { } }\n\
+               struct Pair { a: Note, b: Note }\n\
+               fn take(x: Note) { }\n\
+               fn f(p: Pair) { let mut i = 0; while i < 2 { take(p.a); i += 1; } }\n\
+               fn main() -> t27 { 0 }\n";
+    assert!(
+        refusal(src)
+            .expect("a refusal")
+            .contains("the loop may reach this again"),
+    );
+}
+
+#[test]
+fn a_struct_missing_a_field_is_not_a_whole_value() {
+    let src = "struct Note { n: t27 }\n\
+               impl Drop for Note { fn drop(self) { } }\n\
+               struct Pair { a: Note, b: Note }\n\
+               fn take(x: Note) { }\n\
+               fn whole(p: Pair) { }\n\
+               fn f(p: Pair) { take(p.a); whole(p); }\n\
+               fn main() -> t27 { 0 }\n";
+    assert!(
+        refusal(src)
+            .expect("a refusal")
+            .contains("is not a whole value any more"),
+    );
+}
+
+#[test]
+fn a_field_put_back_makes_the_value_whole_again() {
+    let src = "struct Note { n: t27 }\n\
+               impl Drop for Note { fn drop(self) { } }\n\
+               struct Pair { a: Note, b: Note }\n\
+               fn take(x: Note) { }\n\
+               fn whole(p: Pair) { }\n\
+               fn f(p: Pair) { let mut q = p; take(q.a); q.a = Note { n: 9 }; whole(q); }\n\
+               fn main() -> t27 { 0 }\n";
+    assert_eq!(refusal(src), None);
+}

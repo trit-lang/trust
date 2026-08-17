@@ -4053,6 +4053,11 @@ struct Fn<'a> {
     done: bool,
 }
 
+/// Whether two sets of field names hold the same names.
+fn same_set(a: &[String], b: &[String]) -> bool {
+    a.len() == b.len() && a.iter().all(|x| b.contains(x))
+}
+
 /// One value a scope is responsible for dropping.
 #[derive(Clone)]
 struct Owned {
@@ -4067,6 +4072,14 @@ struct Owned {
     drop_flag: Option<String>,
     /// Whether it is still owned here.
     owns: Owns,
+    /// The fields moved out of it, by name (Ch. 3 §1.2).
+    ///
+    /// Ownership is per *place*, and this is where a place that is not a
+    /// whole local is recorded: `let a = p.x;` takes `x` and leaves the rest
+    /// of `p` alive, so what is dropped at the end of the scope is what is
+    /// left. Only direct fields; a move through an index or through a
+    /// reference still moves the whole, conservatively (G9.46).
+    moved: Vec<String>,
     /// The scope it belongs to.
     depth: usize,
 }
@@ -4455,6 +4468,7 @@ impl Fn<'_> {
                 ty: local.ty.clone(),
                 drop_flag: local.drop_flag.clone(),
                 owns: Owns::Yes,
+                moved: Vec::new(),
                 depth: self.scopes.len() - 1,
             });
         }
@@ -4502,6 +4516,35 @@ impl Fn<'_> {
         }
     }
 
+    /// Record that one field of a local was moved out of (Ch. 3 §1.2).
+    ///
+    /// The local still owns the rest, so its flag is left alone and what is
+    /// dropped at the end of the scope is the fields not named here.
+    fn mark_field_moved(&mut self, name: &str, field: &str) {
+        if let Some(entry) = self.owned.iter_mut().rev().find(|o| o.name == name)
+            && !entry.moved.iter().any(|f| f == field)
+        {
+            entry.moved.push(field.to_string());
+        }
+    }
+
+    /// Record that one field of a local was given a value again.
+    fn mark_field_given(&mut self, name: &str, field: &str) {
+        if let Some(entry) = self.owned.iter_mut().rev().find(|o| o.name == name) {
+            entry.moved.retain(|f| f != field);
+        }
+    }
+
+    /// What has been taken out of a local so far.
+    fn moved_fields(&self, name: &str) -> Vec<String> {
+        self.owned
+            .iter()
+            .rev()
+            .find(|o| o.name == name)
+            .map(|o| o.moved.clone())
+            .unwrap_or_default()
+    }
+
     /// Record that a whole local was given a value again (Ch. 3 §1.2).
     ///
     /// `s = f(s)` moves `s` out and then puts something back, and after it
@@ -4511,6 +4554,7 @@ impl Fn<'_> {
     fn mark_initialized(&mut self, name: &str) {
         if let Some(entry) = self.owned.iter_mut().rev().find(|o| o.name == name) {
             entry.owns = Owns::Yes;
+            entry.moved.clear();
         }
         if let Some(local) = self.lookup(name)
             && let Some(flag) = local.drop_flag
@@ -4528,19 +4572,42 @@ impl Fn<'_> {
     /// Join two paths' ownership: a value moved on either is not certainly
     /// owned afterwards, and its drop is decided by its flag. Matched by
     /// storage, since two entries may share a name.
-    fn owned_join(&mut self, a: Vec<Owned>, b: Vec<Owned>) {
-        self.owned = a
-            .into_iter()
-            .map(|mut e| {
-                let other = b
+    fn owned_join(&mut self, a: Vec<Owned>, b: Vec<Owned>, span: Span) -> R<()> {
+        let mut out = Vec::with_capacity(a.len());
+        for mut e in a {
+            let other = b.iter().find(|o| o.slot == e.slot);
+            // A field taken on one path and not on the other cannot be
+            // answered by the drop flag, which decides for the whole local
+            // and not for a part of it. Two paths that disagree about which
+            // parts are left would need a flag per part; until there is one,
+            // this is refused rather than leaked (G9.46).
+            if let Some(o) = other
+                && !same_set(&e.moved, &o.moved)
+            {
+                let (mut here, mut there) = (e.moved.clone(), o.moved.clone());
+                here.sort();
+                there.sort();
+                let differ: Vec<String> = here
                     .iter()
-                    .find(|o| o.slot == e.slot)
-                    .map(|o| o.owns)
-                    .unwrap_or(e.owns);
-                e.owns = e.owns.join(other);
-                e
-            })
-            .collect();
+                    .chain(there.iter())
+                    .filter(|f| !(here.contains(f) && there.contains(f)))
+                    .cloned()
+                    .collect();
+                return err(
+                    span,
+                    format!(
+                        "`{}` is moved out of `{}` on one path here and not on the other, \
+                         and what is left has to be the same on both (Ch. 3 §1.2)",
+                        differ.join("`, `"),
+                        e.name
+                    ),
+                );
+            }
+            e.owns = e.owns.join(other.map(|o| o.owns).unwrap_or(e.owns));
+            out.push(e);
+        }
+        self.owned = out;
+        Ok(())
     }
 
     /// Whether a local is known to still own its value.
@@ -4628,7 +4695,16 @@ impl Fn<'_> {
             match (e.owns, e.drop_flag.clone()) {
                 (Owns::Yes, _) if fields_only => {
                     let addr = Operand::Value(e.slot.clone());
-                    self.drop_fields(addr, &e.ty, span, 0)?;
+                    let kept = e.moved.clone();
+                    self.drop_fields_except(addr, &e.ty, &kept, span)?;
+                }
+                // Some of it went somewhere else, so what is dropped is what
+                // is left — one field at a time, since the type's own glue
+                // would drop all of them.
+                (Owns::Yes, _) if !e.moved.is_empty() => {
+                    let addr = Operand::Value(e.slot.clone());
+                    let kept = e.moved.clone();
+                    self.drop_fields_except(addr, &e.ty, &kept, span)?;
                 }
                 (Owns::Yes, _) => self.emit_drop(&e.slot, &e.ty, span)?,
                 // Ownership depends on the path taken, so the flag decides.
@@ -4639,7 +4715,8 @@ impl Fn<'_> {
                     self.start(yes);
                     if fields_only {
                         let addr = Operand::Value(e.slot.clone());
-                        self.drop_fields(addr, &e.ty, span, 0)?;
+                        let kept = e.moved.clone();
+                        self.drop_fields_except(addr, &e.ty, &kept, span)?;
                     } else {
                         self.emit_drop(&e.slot, &e.ty, span)?;
                     }
@@ -4699,6 +4776,30 @@ impl Fn<'_> {
             && !path.projections.is_empty()
         {
             return err(span, format!("`{root}` {what} (Ch. 3 §4.1)"));
+        }
+        // A local one of whose fields has gone is not a value any more: it
+        // can be read a field at a time, and not as a whole.
+        let gone = self.moved_fields(root);
+        if !gone.is_empty() {
+            let touches_whole = match path.projections.as_slice() {
+                [] => true,
+                [Proj::Field(f)] => gone.iter().any(|m| m == f),
+                _ => true,
+            };
+            // Writing to a field that went is how it is put back, so a
+            // write is what this is not about (Ch. 3 §1.2).
+            let putting_back =
+                access == Access::Write && matches!(path.projections.as_slice(), [Proj::Field(_)]);
+            if touches_whole && access != Access::Read && !putting_back {
+                return err(
+                    span,
+                    format!(
+                        "`{root}` is missing `{}`, which was moved out of it, so it is not a \
+                         whole value any more (Ch. 3 §4.1)",
+                        gone.join("`, `")
+                    ),
+                );
+            }
         }
 
         self.retire_loans();
@@ -4821,6 +4922,20 @@ impl Fn<'_> {
                 return err(
                     span,
                     format!("`{name}` is moved out of here, and the loop may reach this again"),
+                );
+            }
+            // A *field* taken inside the loop would be taken again on the
+            // next turn, which is the same argument one projection along.
+            let gone = self.moved_fields(name);
+            if gone.len() > e.moved.len() {
+                let fresh: Vec<String> =
+                    gone.into_iter().filter(|f| !e.moved.contains(f)).collect();
+                return err(
+                    span,
+                    format!(
+                        "`{}` is moved out of `{name}` here, and the loop may reach this again",
+                        fresh.join("`, `")
+                    ),
                 );
             }
         }
@@ -4997,6 +5112,25 @@ impl Fn<'_> {
 
     /// The second half of dropping a value: its fields, without its own
     /// destructor. This is what a destructor's `self` gets.
+    /// Drop the fields of a struct except the ones already moved out.
+    fn drop_fields_except(&mut self, addr: Operand, ty: &Ty, gone: &[String], span: Span) -> R<()> {
+        // Nothing was taken, so the ordinary glue applies — and it knows
+        // things this does not, such as how to drop an enum's payload.
+        if gone.is_empty() {
+            return self.drop_fields(addr, ty, span, 0);
+        }
+        for (name, ft, off) in self.types.fields(ty) {
+            if gone.contains(&name) {
+                continue;
+            }
+            if self.types.needs_drop(&ft) {
+                let at = self.offset(addr.clone(), off);
+                self.drop_at(at, &ft, span, 1)?;
+            }
+        }
+        Ok(())
+    }
+
     fn drop_fields(&mut self, addr: Operand, ty: &Ty, span: Span, depth: u32) -> R<()> {
         if depth > 8 {
             return err(span, "drop glue nested too deeply");
@@ -5758,7 +5892,26 @@ impl Fn<'_> {
                         self.check_access(p, Access::Move, span)?;
                         let root = p.root.clone();
                         if self.lookup(&root).is_some() {
-                            self.mark_moved(&root);
+                            // `p.x` takes the field and leaves the rest of
+                            // `p` alive. Anything deeper — an index, a field
+                            // of a field — still moves the whole, because
+                            // what is left is not a set of names.
+                            match p.projections.as_slice() {
+                                [Proj::Field(f)] => {
+                                    if self.moved_fields(&root).iter().any(|m| m == f) {
+                                        return err(
+                                            span,
+                                            format!(
+                                                "`{root}.{f}` was moved out of and cannot be \
+                                                 used again (Ch. 3 §4.1)"
+                                            ),
+                                        );
+                                    }
+                                    let f = f.clone();
+                                    self.mark_field_moved(&root, &f);
+                                }
+                                _ => self.mark_moved(&root),
+                            }
                         }
                     }
                     (None, _) => {}
@@ -6039,7 +6192,16 @@ impl Fn<'_> {
             if self.types.needs_drop(&ty) {
                 let live = self
                     .path_of(target)
-                    .map(|p| self.ownership(&p.root) != Some(Owns::No))
+                    .map(|p| {
+                        if self.ownership(&p.root) == Some(Owns::No) {
+                            return false;
+                        }
+                        // What was moved out is not there to be dropped.
+                        match p.projections.as_slice() {
+                            [Proj::Field(f)] => !self.moved_fields(&p.root).contains(f),
+                            _ => true,
+                        }
+                    })
                     .unwrap_or(true);
                 if live {
                     self.drop_at(addr.clone(), &ty, span, 0)?;
@@ -6071,9 +6233,18 @@ impl Fn<'_> {
         // been put back in it.
         if op == "="
             && let Some(path) = self.path_of(target)
-            && path.projections.is_empty()
         {
-            self.mark_initialized(&path.root);
+            match path.projections.as_slice() {
+                [] => self.mark_initialized(&path.root),
+                // A field that was taken is owned again once something has
+                // been put in it, and the local is whole again once every
+                // field that went has come back.
+                [Proj::Field(f)] => {
+                    let f = f.clone();
+                    self.mark_field_given(&path.root, &f);
+                }
+                _ => {}
+            }
         }
         Ok((unit(), Ty::Unit))
     }
@@ -10590,7 +10761,7 @@ impl Fn<'_> {
         self.jump(&join_l);
         let after_else = self.owned_snapshot();
         match (then_reaches, else_reaches) {
-            (true, true) => self.owned_join(after_then, after_else),
+            (true, true) => self.owned_join(after_then, after_else, span)?,
             (true, false) => self.owned = after_then,
             (false, true) => self.owned = after_else,
             // Neither reaches the join, so nothing after it runs and what is
@@ -10864,7 +11035,7 @@ impl Fn<'_> {
                 self.owned = before.clone();
                 self.start(label.clone());
                 self.arm_body(arm, expected, &mut result, &join, span, None, &dest)?;
-                merged = self.join_arm(merged);
+                merged = self.join_arm(merged, span)?;
             }
             if let Some(m) = merged {
                 self.owned = m;
@@ -10884,7 +11055,7 @@ impl Fn<'_> {
             let unconditional = self.arm_test(arm, &v, &ty, &body, &next, span)?;
             self.start(body);
             self.arm_body(arm, expected, &mut result, &join, span, None, &dest)?;
-            merged = self.join_arm(merged);
+            merged = self.join_arm(merged, span)?;
             if unconditional {
                 // A wildcard or binding matches everything, so no later arm
                 // and no fallthrough block is reachable — and an unreachable
@@ -11079,7 +11250,7 @@ impl Fn<'_> {
                     &dest,
                     None,
                 )?;
-                merged = self.join_arm(merged);
+                merged = self.join_arm(merged, span)?;
             }
             if let Some(m) = merged {
                 self.owned = m;
@@ -11146,7 +11317,7 @@ impl Fn<'_> {
                 &dest,
                 fail.as_deref(),
             )?;
-            merged = self.join_arm(merged);
+            merged = self.join_arm(merged, span)?;
             self.owned = before.clone();
             self.start(next);
         }
@@ -11172,7 +11343,7 @@ impl Fn<'_> {
                     &dest,
                     fail.as_deref(),
                 )?;
-                merged = self.join_arm(merged);
+                merged = self.join_arm(merged, span)?;
                 if let Some(f) = fail {
                     self.start(f);
                     self.finish(Terminator::Trap(FaultCode::Trap));
@@ -11477,17 +11648,17 @@ impl Fn<'_> {
     /// `None` means no arm has contributed yet — which is not the same as
     /// "the first arm's state", and confusing the two put a diverging
     /// *first* arm's state in as if it were everyone's (G9.41).
-    fn join_arm(&mut self, merged: Option<Vec<Owned>>) -> Option<Vec<Owned>> {
+    fn join_arm(&mut self, merged: Option<Vec<Owned>>, span: Span) -> R<Option<Vec<Owned>>> {
         // An arm that left by another door contributes nothing.
         if !self.arm_reaches {
-            return merged;
+            return Ok(merged);
         }
         let here = self.owned_snapshot();
         match merged {
-            None => Some(here),
+            None => Ok(Some(here)),
             Some(prev) => {
-                self.owned_join(prev, here);
-                Some(self.owned_snapshot())
+                self.owned_join(prev, here, span)?;
+                Ok(Some(self.owned_snapshot()))
             }
         }
     }
