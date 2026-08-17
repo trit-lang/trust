@@ -1280,6 +1280,14 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             let arms = choice(op);
             if arms.len() > 0 || op.same("<=>") {
                 let ty = left.ty.to_string();
+                // `cmp` compares *scalars*. On a type the program defines,
+                // `==` is a call to what `derive(Eq)` wrote (Ch. 4 §6), and
+                // a `cmp` on two addresses would be comparing the addresses
+                // — which is Ch. 3 §2.3's refusal, silently taken.
+                if def_at(&e.defs, &ty) >= 0 {
+                    e.stuck = true;
+                    return unknown_value();
+                }
                 let c = fresh(e, "c");
                 let mut line: String = Vec::new();
                 line.push_str("    ");

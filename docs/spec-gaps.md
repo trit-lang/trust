@@ -2592,6 +2592,22 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.56 — two addresses compared instead of two values.** `a == b` on a
+type the program defines is a call to what `derive(Eq)` wrote (Ch. 4 §6).
+The Trust lowering emitted `cmp K %a.slot, %b.slot` — a scalar comparison
+of two *addresses*, which is exactly what Ch. 3 §2.3 refuses when a program
+writes it, taken silently because the lowering never asked what it was
+comparing.
+
+Found the same way as G9.55, and it is the same shape: not something the
+lowering *could not* do, so it did something instead. A comparison whose
+operands are a nominal type is left out now.
+
+Twice in one round is a pattern worth naming: "leave out what you have not
+reached" only works where the code *asks* whether it has reached it. Every
+place that dispatches on a type rather than on a case is a place that can
+answer wrongly instead of not answering.
+
 **G9.55 — a generic emitted as though it were one function.** The Trust
 lowering left out what it could not lower, which is what keeps its
 comparison honest — but a generic function is not something it *could not*
