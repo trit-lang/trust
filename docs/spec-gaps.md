@@ -2592,6 +2592,25 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.55 — a generic emitted as though it were one function.** The Trust
+lowering left out what it could not lower, which is what keeps its
+comparison honest — but a generic function is not something it *could not*
+lower, it is something that is not one function at all (Ch. 4 §2.5). So
+`fn id<T>(x: T) -> T` was emitted under the name written, with `T` reaching
+`tir_ty` as a type it does not know, and a call to it came out as
+
+```
+%r.1 = call @id(const t27 1) -> ?
+```
+
+— TIR that is not TIR, which the comparison would have accepted only
+because no corpus had a generic in it.
+
+A generic is left out now and a call to one makes its caller stuck, which
+is the same rule as everything else the lowering has not reached. Found by
+writing the *first* generic program to try, before writing any of the
+monomorphization it needs.
+
 **G9.54 — an editor could not be told what a pattern binds.** A `let`'s
 name is recorded with its type, which is what hover answers with; a
 *pattern's* bindings were not. So `let P { a, b } = p;` and `for x in …` —

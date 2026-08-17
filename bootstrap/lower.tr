@@ -213,6 +213,12 @@ pub fn function(
     owner: String,
     out: &mut String,
 ) -> bool {
+    // A generic function is one function per instantiation and none of them
+    // is this one (Ch. 4 §2.5). Emitting it as written would be emitting a
+    // function no program calls under a name no call uses.
+    if f.generics.len() > 0 {
+        return false;
+    }
     let mut e = Emit {
         slots: Vec::new(),
         insts: Vec::new(),
@@ -1905,10 +1911,16 @@ pub fn signatures(items: &Vec<ast::Item>) -> Vec<Sig> {
     while i < items.len() {
         match &items[i].what {
             ast::What::Function(f) => {
-                out.push(Sig {
-                    name: f.name.to_string(),
-                    ret: tir_ty(&f.ret),
-                });
+                // A generic function is not one function: it is one per
+                // instantiation (Ch. 4 §2.5), and none of them is named by
+                // the name written here. Until this lowers them, a call to
+                // one has no answer and says so.
+                let ret = if f.generics.len() > 0 {
+                    "?".to_string()
+                } else {
+                    tir_ty(&f.ret)
+                };
+                out.push(Sig { name: f.name.to_string(), ret: ret });
             }
             // A method is reached through its receiver, so the receiver's
             // name is half of its own (Ch. 4 §1.2).
@@ -1972,7 +1984,11 @@ fn call_type(e: &mut Emit, name: &str) -> String {
     let mut i: taddr = 0;
     while i < e.sigs.len() {
         if e.sigs[i].name.same(name) {
-            return e.sigs[i].ret.to_string();
+            let ret = e.sigs[i].ret.to_string();
+            if ret.same("?") {
+                e.stuck = true;
+            }
+            return ret;
         }
         i += 1;
     }
