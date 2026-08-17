@@ -233,7 +233,8 @@ vm/          crate tritium: the reference machine and its assembler
 driver/      crate trust: compile a program and run it, in one command
 lsp/         crate trust-lsp: diagnostics for an editor, over stdio
 editors/     a tree-sitter grammar, and the Zed extension that loads it
-bootstrap/   the compiler, in Trust — a lexer and a parser that read their own source
+bootstrap/   the compiler, in Trust — it reads its own source, and is the
+             `sA` of Diverse Double-Compiling (docs/ddc.md)
 targets/     target descriptions (TIR §7)
 examples/    TIR modules and Trust programs that run
 docs/        notes about the spec, including every derived decision

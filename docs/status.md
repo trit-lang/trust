@@ -384,6 +384,19 @@ contradicts is the next thing to catch.
 
 ---
 
+## 9a. Diverse Double-Compiling
+
+`bootstrap/` has a second purpose, written down in [`ddc.md`](ddc.md): it is
+the `sA` of Wheeler's Diverse Double-Compiling, the only practical answer to
+Thompson's *Reflections on Trusting Trust*. `trustc` is the diverse parent,
+the differential invariant is what makes the two agree about the language,
+and `scripts/reproducible.sh` guards the property the whole technique rests
+on — that compiling the same source twice gives the same bytes.
+
+What it needs next is in `ddc.md` §4. The short version: `bootstrap/` has to
+*compile* Trust and not only read it, and the TIR module's canonical form
+becomes the thing equality is defined on.
+
 ## 10. Where to go next
 
 > **Ordering constraint.** Before anything else, re-read §11 and hunt for
