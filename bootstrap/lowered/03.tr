@@ -1,0 +1,9 @@
+fn lt(a: t27, b: t27) -> bool { a < b }
+fn gt(a: t27, b: t27) -> bool { a > b }
+fn eq(a: t27, b: t27) -> bool { a == b }
+fn ne(a: t27, b: t27) -> bool { a != b }
+fn le(a: t27, b: t27) -> bool { a <= b }
+fn ge(a: t27, b: t27) -> bool { a >= b }
+fn sp(a: t27, b: t27) -> trit { a <=> b }
+fn narrow(a: t9, b: t9) -> bool { a == b }
+fn mixed(a: t27) -> bool { let f = a < 3; f }

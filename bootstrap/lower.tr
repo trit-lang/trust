@@ -29,14 +29,27 @@ pub struct Slot {
     pub ty: String,
 }
 
+/// One basic block: its label, and what runs in it (TIR §2).
+pub struct Chunk {
+    pub label: String,
+    pub insts: Vec<String>,
+}
+
 /// A function being emitted.
 ///
 /// Slots are kept apart from instructions because TIR prints them first,
 /// whatever order they were made in — a slot is storage and storage has no
 /// place in the order of what runs.
+///
+/// Finished blocks are kept in the order they were *finished*, which is not
+/// the order they run in: a `while`'s body is lowered before its head, so
+/// the body is printed first and jumped over. Both implementations have to
+/// agree about that order, since equality is on the text.
 pub struct Emit {
     pub slots: Vec<String>,
     pub insts: Vec<String>,
+    pub label: String,
+    pub blocks: Vec<Chunk>,
     pub locals: Vec<Slot>,
     /// One counter for slots and values both, which is what makes two
     /// implementations that agree about the order agree about the names.
@@ -88,6 +101,43 @@ pub fn trytes(ty: &str) -> t27 {
     } else {
         3
     }
+}
+
+/// A fresh label, `^<prefix>.<n>`, and the counter moves on.
+fn label(e: &mut Emit, prefix: &str) -> String {
+    let mut out: String = Vec::new();
+    out.push_str("^");
+    out.push_str(prefix);
+    out.push_str(".");
+    push_int(&mut out, e.next);
+    e.next = e.next + 1;
+    out
+}
+
+/// End the block being emitted and start another.
+fn start(e: &mut Emit, name: &str) {
+    let mut held: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < e.insts.len() {
+        held.push(e.insts[i].to_string());
+        i += 1;
+    }
+    e.blocks.push(Chunk { label: e.label.to_string(), insts: held });
+    e.insts = Vec::new();
+    let mut open: String = Vec::new();
+    open.push_str(name);
+    open.push_str(":");
+    e.label = open;
+    e.done = false;
+}
+
+/// `br ^somewhere`.
+fn jump(e: &mut Emit, to: &str) {
+    let mut line: String = Vec::new();
+    line.push_str("    br ");
+    line.push_str(to);
+    e.insts.push(line);
+    e.done = true;
 }
 
 /// A fresh name, `%<prefix>.<n>`, and the counter moves on.
@@ -146,6 +196,8 @@ pub fn function(f: &ast::Fn, sigs: Vec<Sig>, params: Vec<Sig>, out: &mut String)
         sigs: sigs,
         done: false,
         params: params,
+        label: "^entry:".to_string(),
+        blocks: Vec::new(),
     };
 
     // A parameter arrives as a value and is given storage at once, so that
@@ -202,22 +254,61 @@ pub fn function(f: &ast::Fn, sigs: Vec<Sig>, params: Vec<Sig>, out: &mut String)
         return false;
     }
 
+    start(&mut e, "^");
     out.push_str(&header);
-    out.push_str("\n^entry:\n");
-    let mut k: taddr = 0;
-    while k < e.slots.len() {
-        out.push_str(&e.slots[k]);
+    out.push_str("\n");
+    let mut n: taddr = 0;
+    while n < e.blocks.len() {
+        out.push_str(&e.blocks[n].label);
         out.push_str("\n");
-        k += 1;
-    }
-    let mut j: taddr = 0;
-    while j < e.insts.len() {
-        out.push_str(&e.insts[j]);
-        out.push_str("\n");
-        j += 1;
+        // Every slot of the function belongs to its entry block: storage is
+        // named where it is declared and used wherever it is (TIR §2).
+        if n == 0 {
+            let mut k: taddr = 0;
+            while k < e.slots.len() {
+                out.push_str(&e.slots[k]);
+                out.push_str("\n");
+                k += 1;
+            }
+        }
+        let mut j: taddr = 0;
+        while j < e.blocks[n].insts.len() {
+            out.push_str(&e.blocks[n].insts[j]);
+            out.push_str("\n");
+            j += 1;
+        }
+        n += 1;
     }
     out.push_str("}\n");
     true
+}
+
+/// A block written as a branch's arm: its statements, then its value.
+fn branch_block(e: &mut Emit, b: &ast::Block, want: &str) -> Value {
+    let mut i: taddr = 0;
+    while i < b.stmts.len() {
+        stmt(e, &b.stmts[i], want);
+        i += 1;
+    }
+    match &b.tail {
+        Option::Some(x) => value(e, x, want),
+        Option::None => {
+            e.stuck = true;
+            unknown_value()
+        }
+    }
+}
+
+/// `store TY value, slot`.
+fn store_into(e: &mut Emit, ty: &str, what: &str, where_: &str) {
+    let mut line: String = Vec::new();
+    line.push_str("    store ");
+    line.push_str(ty);
+    line.push_str(" ");
+    line.push_str(what);
+    line.push_str(", ");
+    line.push_str(where_);
+    e.insts.push(line);
 }
 
 /// A function's body: its statements, then what it answers with.
@@ -280,6 +371,36 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
         }
         ast::Stmt::Do(x) => {
             match x {
+                // `while c { … }` — the body is lowered first and the head
+                // after it, so the head is the block jumped *back* to and
+                // the body is printed before it (§5.3).
+                ast::Expr::While(c, b) => {
+                    let head = label(e, "while");
+                    let body = label(e, "body");
+                    let done = label(e, "done");
+                    jump(e, &head);
+                    start(e, &body);
+                    let mut i: taddr = 0;
+                    while i < b.stmts.len() {
+                        stmt(e, &b.stmts[i], ret);
+                        i += 1;
+                    }
+                    jump(e, &head);
+                    start(e, &head);
+                    let cond = value(e, c, "t1");
+                    if e.stuck {
+                        return;
+                    }
+                    let mut br: String = Vec::new();
+                    br.push_str("    br2 ");
+                    br.push_str(&cond.text);
+                    br.push_str(", ");
+                    br.push_str(&body);
+                    br.push_str(", ");
+                    br.push_str(&done);
+                    e.insts.push(br);
+                    start(e, &done);
+                }
                 // `return e;` as a statement is the whole of what follows.
                 ast::Expr::Return(v) => {
                     match v {
@@ -378,6 +499,42 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             if e.stuck {
                 return unknown_value();
             }
+            // A comparison is one `cmp`, which answers a trit, and then a
+            // choice of what that trit means (Ch. 1 §4). `<=>` *is* the
+            // trit and needs no choosing, which is the whole point of
+            // having a three-way comparison at all.
+            let arms = choice(op);
+            if arms.len() > 0 || op.same("<=>") {
+                let ty = left.ty.to_string();
+                let c = fresh(e, "c");
+                let mut line: String = Vec::new();
+                line.push_str("    ");
+                line.push_str(&c);
+                line.push_str(" = cmp ");
+                line.push_str(&ty);
+                line.push_str(" ");
+                line.push_str(&left.text);
+                line.push_str(", ");
+                line.push_str(&right.text);
+                e.insts.push(line);
+                if op.same("<=>") {
+                    return Value { text: c, ty: "t1".to_string() };
+                }
+                let b = fresh(e, "b");
+                let mut pick: String = Vec::new();
+                pick.push_str("    ");
+                pick.push_str(&b);
+                pick.push_str(" = select3 ");
+                pick.push_str(&c);
+                pick.push_str(", t1 const t1 ");
+                pick.push(arms[0]);
+                pick.push_str(", const t1 ");
+                pick.push(arms[1]);
+                pick.push_str(", const t1 ");
+                pick.push(arms[2]);
+                e.insts.push(pick);
+                return Value { text: b, ty: "t1".to_string() };
+            }
             let word = arith(op);
             if word.same("?") {
                 e.stuck = true;
@@ -398,6 +555,91 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             line.push_str(&right.text);
             e.insts.push(line);
             Value { text: name, ty: ty }
+        }
+        // `if c { … } else { … }` — the condition, a two-way branch, and a
+        // slot the two arms agree to leave the answer in (§5.3).
+        // A block written as an expression is its statements and then its
+        // value (§5.1) — which is what an `else` arm is.
+        ast::Expr::Nested(b) => branch_block(e, b, want),
+        ast::Expr::If(c, t, o) => {
+            let cond = value(e, c, "t1");
+            if e.stuck {
+                return unknown_value();
+            }
+            let then_at = label(e, "then");
+            let else_at = label(e, "else");
+            let join_at = label(e, "join");
+            let mut br: String = Vec::new();
+            br.push_str("    br2 ");
+            br.push_str(&cond.text);
+            br.push_str(", ");
+            br.push_str(&then_at);
+            br.push_str(", ");
+            br.push_str(&else_at);
+            e.insts.push(br);
+
+            start(e, &then_at);
+            let a = branch_block(e, t, want);
+            if e.stuck {
+                return unknown_value();
+            }
+            let ty = a.ty.to_string();
+            // The slot is made where the first arm has its answer ready,
+            // which is what decides the number it gets.
+            let held = slot_for(e, "tmp", &ty);
+            store_into(e, &ty, &a.text, &held);
+            jump(e, &join_at);
+
+            start(e, &else_at);
+            match o {
+                Option::Some(x) => {
+                    let b = value(e, x, &ty);
+                    if e.stuck {
+                        return unknown_value();
+                    }
+                    store_into(e, &ty, &b.text, &held);
+                }
+                Option::None => {}
+            }
+            jump(e, &join_at);
+
+            start(e, &join_at);
+            let name = fresh(e, "v");
+            let mut line: String = Vec::new();
+            line.push_str("    ");
+            line.push_str(&name);
+            line.push_str(" = load ");
+            line.push_str(&ty);
+            line.push_str(" ");
+            line.push_str(&held);
+            e.insts.push(line);
+            Value { text: name, ty: ty }
+        }
+        ast::Expr::Assign(op, target, v) => {
+            if !op.same("=") {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let name = match target {
+                ast::Expr::Name(n) => n.to_string(),
+                _ => {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+            };
+            let at = local_at(e, &name);
+            if at < 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let ty = e.locals[at].ty.to_string();
+            let slot = e.locals[at].slot.to_string();
+            let val = value(e, v, &ty);
+            if e.stuck {
+                return unknown_value();
+            }
+            store_into(e, &ty, &val.text, &slot);
+            Value { text: "".to_string(), ty: "".to_string() }
         }
         ast::Expr::Call(callee, args) => {
             let mut texts: Vec<String> = Vec::new();
@@ -540,6 +782,39 @@ fn unknown_value() -> Value {
 ///
 /// Ch. 1 §5: the trapping flavour is what a written `+` means, since an
 /// overflow that wraps silently is the thing the chapter refuses.
+/// What a comparison's trit means, as the three values `select3` picks
+/// between: less, equal, greater (Ch. 1 §4). Empty for an operator that is
+/// not a comparison.
+fn choice(op: &str) -> Vec<char> {
+    let mut out: Vec<char> = Vec::new();
+    if op.same("<") {
+        out.push('1');
+        out.push('0');
+        out.push('0');
+    } else if op.same(">") {
+        out.push('0');
+        out.push('0');
+        out.push('1');
+    } else if op.same("==") {
+        out.push('0');
+        out.push('1');
+        out.push('0');
+    } else if op.same("!=") {
+        out.push('1');
+        out.push('0');
+        out.push('1');
+    } else if op.same("<=") {
+        out.push('1');
+        out.push('1');
+        out.push('0');
+    } else if op.same(">=") {
+        out.push('0');
+        out.push('1');
+        out.push('1');
+    }
+    out
+}
+
 fn arith(op: &str) -> String {
     if op.same("+") {
         "add.trap".to_string()

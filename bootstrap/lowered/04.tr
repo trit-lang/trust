@@ -1,0 +1,23 @@
+fn pick(a: t27) -> t27 { if a > 0 { 1 } else { 2 } }
+fn nested(a: t27, b: t27) -> t27 {
+    if a > b { if a > 0 { a } else { b } } else { 0 }
+}
+fn chain(a: t27) -> t27 {
+    if a > 2 { 3 } else if a > 1 { 2 } else { 1 }
+}
+fn counted(a: t27) -> t27 {
+    let mut n = a;
+    let mut total = 0;
+    while n > 0 {
+        total = total + n;
+        n = n - 1;
+    }
+    total
+}
+fn both(a: t27) -> t27 {
+    let mut n = a;
+    while n > 0 {
+        n = if n > 10 { n - 10 } else { n - 1 };
+    }
+    n
+}
