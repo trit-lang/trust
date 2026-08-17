@@ -1102,7 +1102,7 @@ fn finish(program: modules::Program) -> Build {
                 };
             }
             let mut module = module;
-            keep_reachable(&mut module, &prelude_functions());
+            keep_reachable(&mut module, &prelude_functions_beyond(&user));
             Build {
                 program,
                 module: Some(module),
@@ -1154,7 +1154,7 @@ pub fn compile(src: &str) -> Result<crate::tir::Module, Vec<SyntaxError>> {
     }
 
     let mut module = module;
-    keep_reachable(&mut module, &prelude_functions());
+    keep_reachable(&mut module, &prelude_functions_beyond(&user));
     Ok(module)
 }
 
@@ -1240,6 +1240,20 @@ fn item_name(i: &ast::Item) -> Option<&str> {
 }
 
 /// The functions the prelude defines, by the names they lower to.
+/// The prelude's function names, less the ones this program defines.
+///
+/// A program's item shadows a prelude item of the same name, everywhere
+/// (Ch. 6 §3.3) — so a program that defines `sum` defines *the* `sum`, and
+/// treating that name as the prelude's dropped it from the module as unused
+/// library code (G9.53).
+fn prelude_functions_beyond(user: &ast::File) -> std::collections::HashSet<String> {
+    let defined: std::collections::HashSet<&str> =
+        user.items.iter().filter_map(item_name).collect();
+    let mut names = prelude_functions();
+    names.retain(|n| !defined.contains(n.as_str()));
+    names
+}
+
 fn prelude_functions() -> std::collections::HashSet<String> {
     let file = parse::parse(PRELUDE).expect("the prelude parses");
     let mut names = std::collections::HashSet::new();

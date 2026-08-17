@@ -4660,3 +4660,23 @@ fn a_cycle_without_an_indirection_is_still_refused() {
     let e = error(src);
     assert!(e.contains("contains itself without indirection"), "{e}");
 }
+
+#[test]
+fn a_program_may_name_a_function_the_prelude_names() {
+    // Ch. 6 §3.3: a program's item shadows a prelude item of the same name,
+    // everywhere in the program. The prune that removes unused library code
+    // was told which names are the prelude's by reading the prelude alone,
+    // so a program that defined `sum` had it dropped as library code
+    // nothing called — silently, since dropping is what that pass is for
+    // (G9.53).
+    // No `main`: a file with one is a whole program, and there every
+    // function must be reached from it. Without one, every function the
+    // *program* wrote is a root — which is the rule that read the name
+    // wrongly.
+    let src = "struct P { x: t27 }\nfn sum(p: P) -> t27 { p.x }\n";
+    let m = lang::compile(src).expect("a module");
+    assert!(
+        m.funcs.iter().any(|f| f.sig.name == "sum"),
+        "the program's `sum` is the program's"
+    );
+}

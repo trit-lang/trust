@@ -2592,6 +2592,24 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.53 — a program could not name a function the prelude names.** Ch. 6
+§3.3: a program's item shadows a prelude item of the same name, everywhere
+in the program. `merged` does that, and drops the prelude's. What did not
+know it was the pass that removes unused library code: it was told which
+names are the prelude's by reading the *prelude alone*, so a program that
+defined `sum` had its own `sum` treated as library code nothing called and
+dropped from the module — silently, since dropping is what that pass is
+for.
+
+Only in a file with no `main`. With one, the program is whole and every
+function must be reached from `main`, so an uncalled `sum` goes either way
+and the bug is invisible. Found lowering a corpus of library files in Trust,
+where the second implementation emitted a function the first did not.
+
+The prune is now told the prelude's names *less the ones this program
+defines*, which is Ch. 6 §3.3 written where it is used rather than only
+where the file is merged.
+
 **G9.52 — two type arguments, one name.** A monomorphization is named by
 its head and its arguments with `.` between them, which is how Ch. 6 §4
 writes a path and for the same reason: TIR §1 admits a `.` in an identifier

@@ -1,0 +1,13 @@
+struct P { x: t27, y: t9 }
+struct Wide { a: t9, b: taddr, c: bool }
+#[repr(linear)]
+struct Wire { a: t9, b: taddr, c: trit }
+
+fn read(p: P) -> t27 { p.x }
+fn other(p: P) -> t9 { p.y }
+fn sum(p: P) -> t27 { p.x + 1 }
+fn reordered(w: Wide) -> taddr { w.b }
+fn flag(w: Wide) -> bool { w.c }
+fn declared(w: Wire) -> taddr { w.b }
+fn two(p: P, q: P) -> t27 { p.x + q.x }
+fn branch(p: P) -> t27 { if p.x > 0 { p.x } else { 0 } }

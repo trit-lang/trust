@@ -73,6 +73,9 @@ pub struct Def {
     pub linear: bool,
     /// A struct's fields, or an enum's variants' fields.
     pub fields: Vec<Ty>,
+    /// A struct's field *names*, in declaration order. Layout does not need
+    /// them and the lowering does: an offset is found by name (§4).
+    pub field_names: Vec<String>,
     /// For an enum: how many fields each variant has, in order.
     pub counts: Vec<taddr>,
     /// For an enum: each variant's discriminant.

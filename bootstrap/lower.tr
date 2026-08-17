@@ -14,6 +14,7 @@
 
 use ast;
 use ast::Ty;
+use layout;
 
 /// The signatures of the file, so a call knows what it answers with. Set
 /// before any function is lowered, since a call may name one written later.
@@ -66,6 +67,9 @@ pub struct Emit {
     /// What the parameters of each function are, so an argument knows what
     /// width a literal written for it should be.
     pub params: Vec<Sig>,
+    /// The nominal types the file defines, for the offsets Ch. 2 gives
+    /// them. It is the same engine `bootstrap/sizes.tr` is held to.
+    pub defs: Vec<layout::Def>,
 }
 
 /// A value in TIR: either a name or a constant, as it is written.
@@ -186,7 +190,13 @@ fn local_at(e: &Emit, name: &str) -> taddr {
 
 /// One function, as the text TIR prints it, or nothing when something in it
 /// is not lowered yet.
-pub fn function(f: &ast::Fn, sigs: Vec<Sig>, params: Vec<Sig>, out: &mut String) -> bool {
+pub fn function(
+    f: &ast::Fn,
+    sigs: Vec<Sig>,
+    params: Vec<Sig>,
+    defs: Vec<layout::Def>,
+    out: &mut String,
+) -> bool {
     let mut e = Emit {
         slots: Vec::new(),
         insts: Vec::new(),
@@ -198,6 +208,7 @@ pub fn function(f: &ast::Fn, sigs: Vec<Sig>, params: Vec<Sig>, out: &mut String)
         params: params,
         label: "^entry:".to_string(),
         blocks: Vec::new(),
+        defs: defs,
     };
 
     // A parameter arrives as a value and is given storage at once, so that
@@ -212,19 +223,36 @@ pub fn function(f: &ast::Fn, sigs: Vec<Sig>, params: Vec<Sig>, out: &mut String)
             header.push_str(", ");
         }
         let ty = tir_ty(&f.params[i].ty);
+        let name = f.params[i].name.to_string();
         if ty.same("?") {
-            return false;
+            // An aggregate arrives as a pointer and is copied into storage
+            // of its own on entry, field by field: what a function is given
+            // is the caller's and what it holds is its own (Ch. 3 §1.1).
+            let owner = head_of(&f.params[i].ty);
+            let at = def_at(&e.defs, &owner);
+            if at < 0 {
+                return false;
+            }
+            header.push_str("%");
+            header.push_str(&name);
+            header.push_str(": ptr");
+            let copied = copy_in(&mut e, &name, at);
+            if !copied {
+                return false;
+            }
+            i += 1;
+            continue;
         }
         header.push_str("%");
-        header.push_str(&f.params[i].name);
+        header.push_str(&name);
         header.push_str(": ");
         header.push_str(&ty);
-        let slot = slot_for(&mut e, &f.params[i].name, &ty);
+        let slot = slot_for(&mut e, &name, &ty);
         let mut store: String = Vec::new();
         store.push_str("    store ");
         store.push_str(&ty);
         store.push_str(" %");
-        store.push_str(&f.params[i].name);
+        store.push_str(&name);
         store.push_str(", ");
         store.push_str(&slot);
         e.insts.push(store);
@@ -281,6 +309,117 @@ pub fn function(f: &ast::Fn, sigs: Vec<Sig>, params: Vec<Sig>, out: &mut String)
     }
     out.push_str("}\n");
     true
+}
+
+/// Which field of that definition is called this, or −1. A struct's fields
+/// are in declaration order and its `counts` are empty, which is what tells
+/// one from an enum here.
+fn field_at(e: &Emit, which: taddr, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < e.defs[which].field_names.len() {
+        if e.defs[which].field_names[i].same(name) {
+            return i;
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
+/// Which definition is called this, or −1.
+fn def_at(defs: &Vec<layout::Def>, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < defs.len() {
+        if defs[i].name.same(name) {
+            return i;
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
+/// The head of a written type, or nothing for one that has no name.
+fn head_of(t: &ast::Ty) -> String {
+    match t {
+        ast::Ty::Name(segments) => joined(segments),
+        ast::Ty::App(segments, args) => joined(segments),
+        _ => "".to_string(),
+    }
+}
+
+/// `%p.N = offset %base, const t27 <at>` — or the base itself at zero,
+/// since an offset of nothing is the thing itself.
+fn offset_of(e: &mut Emit, base: &str, at: taddr) -> String {
+    if at == 0 {
+        return base.to_string();
+    }
+    let name = fresh(e, "p");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&name);
+    line.push_str(" = offset ");
+    line.push_str(base);
+    line.push_str(", const t27 ");
+    push_int(&mut line, at as t27);
+    e.insts.push(line);
+    name
+}
+
+/// Copy an aggregate parameter into storage of its own, field by field.
+fn copy_in(e: &mut Emit, name: &str, at: taddr) -> bool {
+    let self_ty = ast::Ty::Name(one_name(&e.defs[at].name));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => return false,
+    };
+    let mut slot: String = Vec::new();
+    slot.push_str("%");
+    slot.push_str(name);
+    slot.push_str(".slot.");
+    push_int(&mut slot, e.next);
+    e.next = e.next + 1;
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&slot);
+    line.push_str(" = slot tryte[");
+    push_int(&mut line, l.size as t27);
+    line.push_str("]");
+    e.slots.push(line);
+    e.locals.push(Slot {
+        name: name.to_string(),
+        slot: slot.to_string(),
+        ty: e.defs[at].name.to_string(),
+    });
+
+    let mut i: taddr = 0;
+    while i < l.offsets.len() {
+        let ty = tir_ty(&e.defs[at].fields[i]);
+        if ty.same("?") {
+            return false;
+        }
+        let mut from: String = Vec::new();
+        from.push_str("%");
+        from.push_str(name);
+        let src = offset_of(e, &from, l.offsets[i]);
+        let dst = offset_of(e, &slot, l.offsets[i]);
+        let v = fresh(e, "v");
+        let mut load: String = Vec::new();
+        load.push_str("    ");
+        load.push_str(&v);
+        load.push_str(" = load ");
+        load.push_str(&ty);
+        load.push_str(" ");
+        load.push_str(&src);
+        e.insts.push(load);
+        store_into(e, &ty, &v, &dst);
+        i += 1;
+    }
+    true
+}
+
+fn one_name(name: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    out.push(name.to_string());
+    out
 }
 
 /// A block written as a branch's arm: its statements, then its value.
@@ -615,6 +754,53 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             e.insts.push(line);
             Value { text: name, ty: ty }
         }
+        // `p.x` — the field's offset from Ch. 2, and a load (§4).
+        ast::Expr::Field(base, field) => {
+            let name = match base {
+                ast::Expr::Name(n) => n.to_string(),
+                _ => {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+            };
+            let at = local_at(e, &name);
+            if at < 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let owner = e.locals[at].ty.to_string();
+            let slot = e.locals[at].slot.to_string();
+            let which = def_at(&e.defs, &owner);
+            if which < 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let index = field_at(e, which, field);
+            if index < 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let self_ty = ast::Ty::Name(one_name(&owner));
+            let l = match layout::of(&e.defs, &self_ty, 0) {
+                Result::Ok(x) => x,
+                Result::Err(why) => {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+            };
+            let ty = tir_ty(&e.defs[which].fields[index]);
+            let src = offset_of(e, &slot, l.offsets[index]);
+            let v = fresh(e, "v");
+            let mut load: String = Vec::new();
+            load.push_str("    ");
+            load.push_str(&v);
+            load.push_str(" = load ");
+            load.push_str(&ty);
+            load.push_str(" ");
+            load.push_str(&src);
+            e.insts.push(load);
+            Value { text: v, ty: ty }
+        }
         ast::Expr::Assign(op, target, v) => {
             if !op.same("=") {
                 e.stuck = true;
@@ -679,6 +865,68 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             unknown_value()
         }
     }
+}
+
+/// The nominal types the file defines, as the layout engine reads them.
+pub fn definitions(items: &Vec<ast::Item>) -> Vec<layout::Def> {
+    let mut out: Vec<layout::Def> = Vec::new();
+    let mut i: taddr = 0;
+    while i < items.len() {
+        match &items[i].what {
+            ast::What::Struct(name, gs, fields) => {
+                let mut tys: Vec<ast::Ty> = Vec::new();
+                let mut names: Vec<String> = Vec::new();
+                let mut k: taddr = 0;
+                while k < fields.len() {
+                    names.push(fields[k].name.to_string());
+                    tys.push(copy_ty(&fields[k].ty));
+                    k += 1;
+                }
+                out.push(layout::Def {
+                    name: name.to_string(),
+                    is_enum: false,
+                    linear: items[i].linear,
+                    fields: tys,
+                    field_names: names,
+                    counts: Vec::new(),
+                    discriminants: Vec::new(),
+                });
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// A type, copied. There is no `Clone` here and a type is a tree.
+fn copy_ty(t: &ast::Ty) -> ast::Ty {
+    match t {
+        ast::Ty::Name(segments) => ast::Ty::Name(copy_names(segments)),
+        ast::Ty::App(segments, args) => {
+            let mut out: Vec<ast::Ty> = Vec::new();
+            let mut i: taddr = 0;
+            while i < args.len() {
+                out.push(copy_ty(&args[i]));
+                i += 1;
+            }
+            ast::Ty::App(copy_names(segments), out)
+        }
+        ast::Ty::Ref(inner, m) => ast::Ty::Ref(Box::new(copy_ty(inner)), m),
+        ast::Ty::Slice(inner) => ast::Ty::Slice(Box::new(copy_ty(inner))),
+        ast::Ty::Unit => ast::Ty::Unit,
+        ast::Ty::SelfTy => ast::Ty::SelfTy,
+    }
+}
+
+fn copy_names(from: &Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < from.len() {
+        out.push(from[i].to_string());
+        i += 1;
+    }
+    out
 }
 
 /// The parameter types of every function, as one comma-joined string each.

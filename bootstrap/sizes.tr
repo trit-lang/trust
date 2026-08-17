@@ -133,7 +133,9 @@ fn collect(defs: &mut Vec<layout::Def>, item: ast::Item) {
     match item.what {
         ast::What::Struct(name, gs, fields) => {
             let mut tys: Vec<ast::Ty> = Vec::new();
+            let mut names: Vec<String> = Vec::new();
             for f in fields {
+                names.push(f.name);
                 tys.push(f.ty);
             }
             let counts: Vec<taddr> = Vec::new();
@@ -143,6 +145,7 @@ fn collect(defs: &mut Vec<layout::Def>, item: ast::Item) {
                 is_enum: false,
                 linear: linear,
                 fields: tys,
+                field_names: names,
                 counts: counts,
                 discriminants: discs,
             });
@@ -170,6 +173,7 @@ fn collect(defs: &mut Vec<layout::Def>, item: ast::Item) {
                 is_enum: true,
                 linear: linear,
                 fields: tys,
+                field_names: Vec::new(),
                 counts: counts,
                 discriminants: discs,
             });

@@ -9,6 +9,7 @@
 
 mod ast;
 mod input;
+mod layout;
 mod lex;
 mod lower;
 mod parse;
@@ -25,8 +26,9 @@ fn main() -> t27 {
                     ast::What::Function(f) => {
                         let sigs = lower::signatures(&items);
                         let params = lower::parameters(&items);
+                        let defs = lower::definitions(&items);
                         let mut out: String = Vec::new();
-                        if lower::function(f, sigs, params, &mut out) {
+                        if lower::function(f, sigs, params, defs, &mut out) {
                             println("");
                             print(&out);
                         }
