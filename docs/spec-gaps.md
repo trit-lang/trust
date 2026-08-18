@@ -2592,6 +2592,36 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.66 — a method called on a reference receiver was given the slot and
+not what it held.** `self.area()` inside a trait's default body — the first
+program either implementation had where a method is called on a receiver
+that is *itself* a reference. `&self` arrives as an address and is stored in
+a slot, so the slot holds the address; passing the slot passes the address
+*of the address*. `trustc` loads it first, and reading a field through
+`&self` in the Trust lowering had always loaded it too — the method path
+simply never asked.
+
+It is the tenth of these and the shape has not changed since G9.55: a place
+that answers by *position* rather than by case answers wrongly when it
+reaches a case nobody wrote it for. What is new is only how it was found —
+by writing the smallest program in which a trait gives a type a body, which
+is the smallest program in which a method calls a method.
+
+*What traits turned out to be.* Static dispatch on a bound —
+`fn sum<T: Area>(x: T) { x.area() }` — needed **nothing**: by the time the
+body is read the type is known, because §2.5's monomorphization already
+made it known, and `x.area()` is that type's `area` by the same lookup any
+method call uses. The bound is the *checker's* business, and the lowering
+never sees the refusal. What did need building is the other half of what a
+trait is: a method with a body is one function per implementing type, named
+after the type, so `Re.twice` and `Sq.twice` are two functions from one
+source and an impl that writes its own gets its own. That is
+monomorphization again, over a different thing.
+
+The one thing type arguments had to learn was to be aggregates: `sum(a)`
+where `a` is a `Sq` instantiates `@sum.Sq`, and an aggregate arrives as a
+pointer whether or not a type parameter is what named it (TIR §3).
+
 **G9.65 — an aggregate has no value, so an `if` has nothing to join.**
 `fn pick(n) -> Option<t27> { if n > 0 { Option::Some(n) } else { Option::None } }`
 is the shape half the library is written in, and it was the last thing

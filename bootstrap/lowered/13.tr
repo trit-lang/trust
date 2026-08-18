@@ -1,0 +1,46 @@
+// Traits, and the two things a trait is (Ch. 4 §1.7).
+//
+// The first is a **name for a shape**: `fn sum<T: Area>(x: T)` is one
+// function per type it is called at, and inside it `x.area()` is that
+// type's `area`. Nothing about that is dispatch — the type is known by the
+// time the body is read, which is what §2.5's monomorphization is for. What
+// the bound adds is that the checker refuses a `T` that has no `area`, and
+// the lowering never sees the refusal.
+//
+// The second is a **body a type may not have written**: a trait method with
+// a body is one function per implementing type, named after the type, and
+// `Re.twice` and `Sq.twice` are two functions from one source. That is
+// monomorphization again, over a different thing.
+//
+// A `self.area()` inside one of those was the first program either
+// implementation had where a method is called on a receiver that is itself
+// a reference. What a method is given is the address the slot *holds*, not
+// the slot.
+
+trait Area {
+    fn area(&self) -> t27;
+    fn twice(&self) -> t27 { self.area() + self.area() }
+    fn plus(&self, d: t27) -> t27 { self.area() + d }
+}
+
+struct Sq { s: t27 }
+
+struct Re { w: t27, h: t27 }
+
+impl Area for Sq {
+    fn area(&self) -> t27 { self.s * self.s }
+    // Written here, so the trait's is not the one this type gets.
+    fn twice(&self) -> t27 { 0 }
+}
+
+impl Area for Re {
+    fn area(&self) -> t27 { self.w * self.h }
+}
+
+fn sum<T: Area>(x: T) -> t27 { x.area() }
+
+fn main() -> t27 {
+    let a = Sq { s: 3 };
+    let b = Re { w: 2, h: 5 };
+    sum(a) + sum(b) + a.twice() + b.twice() + b.plus(1)
+}

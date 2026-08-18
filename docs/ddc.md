@@ -110,10 +110,17 @@ storage the caller gave now (G9.65) — where a value is going is known
 before it is computed, so there is nothing to join. That is the shape half
 the library is written in.
 
-Compiling *all* of it is what is left, and it is the bulk of the remaining
-work: Ch. 4's third and fourth blocks — traits with dispatch, `dyn`,
-closures and their captures — and Ch. 5's `Vec` and `String`, which are the
-compiler's rather than the library's.
+**Traits are done as far as static dispatch goes.** A bound needed nothing
+at all: `fn sum<T: Area>(x: T) { x.area() }` knows the type by the time the
+body is read, because monomorphization made it known, so `x.area()` is that
+type's `area` by the same lookup any method call uses — the bound is the
+checker's business. What needed building is a trait method *with a body*,
+which is one function per implementing type named after the type
+(`Re.twice`), and type arguments that are aggregates (`@sum.Sq`).
+
+Compiling *all* of the library is what is left: `dyn Trait` and its
+vtables, closures and their captures (Ch. 4 §§3–4), and Ch. 5's `Vec` and
+`String`, which are the compiler's rather than the library's.
 
 Until then, what a program may use of the library is what the Trust side
 lowers, and what it may not is refused rather than lowered wrongly — which

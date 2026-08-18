@@ -2221,9 +2221,21 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 return unknown_value();
             }
             let mut owner = e.locals[at].ty.to_string();
-            let slot = e.locals[at].slot.to_string();
+            let mut slot = e.locals[at].slot.to_string();
+            // A receiver that is itself a reference holds the *address* of
+            // the object, so what a method is given is what the slot holds
+            // and not the slot: `self.area()` inside a `&self` method reads
+            // through `self` exactly as `self.field` does (Ch. 3 §2.2).
             if owner.same("ptr") {
                 owner = e.self_ty.to_string();
+                let held = fresh(e, "v");
+                let mut line: String = Vec::new();
+                line.push_str("    ");
+                line.push_str(&held);
+                line.push_str(" = load ptr ");
+                line.push_str(&slot);
+                e.insts.push(line);
+                slot = held;
             }
             let mut full: String = Vec::new();
             full.push_str(&owner);
@@ -2441,6 +2453,96 @@ pub fn type_families(items: &Vec<ast::Item>) -> Vec<TyFamily> {
     out
 }
 
+/// One method a type gets from a trait rather than from its own `impl`:
+/// the trait wrote a body and the impl did not override it (Ch. 4 §1.7).
+///
+/// It is a function of the type, named after the type, and there is one per
+/// implementing type — `Re.twice` and `Sq.twice` are two functions from one
+/// body, which is monomorphization by another name.
+pub struct Given {
+    pub owner: String,
+    pub trait_name: String,
+    pub name: String,
+}
+
+/// Every method every type in the file is given by a trait.
+pub fn givens(items: &Vec<ast::Item>) -> Vec<Given> {
+    let mut out: Vec<Given> = Vec::new();
+    let mut i: taddr = 0;
+    while i < items.len() {
+        match &items[i].what {
+            ast::What::Impl(gs, tr, ty, fns) => {
+                let named = match tr {
+                    Option::Some(t) => written_head(t),
+                    Option::None => "".to_string(),
+                };
+                // An impl with parameters of its own is one impl per
+                // instantiation of the type, and what a *trait* gives it is
+                // not something this reaches yet.
+                if named.len() > 0 && plain_impl(gs) {
+                    let owner = written_head(ty);
+                    let at = trait_at(items, &named);
+                    if at >= 0 {
+                        match &items[at].what {
+                            ast::What::Trait(n, params, supers, assoc, tfns) => {
+                                let mut k: taddr = 0;
+                                while k < tfns.len() {
+                                    let mut has_body = false;
+                                    match &tfns[k].body {
+                                        Option::Some(b) => has_body = true,
+                                        Option::None => {}
+                                    }
+                                    if has_body && named_fn(fns, &tfns[k].name) < 0 {
+                                        out.push(Given {
+                                            owner: owner.to_string(),
+                                            trait_name: named.to_string(),
+                                            name: tfns[k].name.to_string(),
+                                        });
+                                    }
+                                    k += 1;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Which item is the trait of that name, or −1.
+fn trait_at(items: &Vec<ast::Item>, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < items.len() {
+        match &items[i].what {
+            ast::What::Trait(n, params, supers, assoc, fns) => {
+                if n.same(name) {
+                    return i;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
+/// Which of these functions is called this, or −1.
+fn named_fn(fns: &Vec<ast::Fn>, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < fns.len() {
+        if fns[i].name.same(name) {
+            return i;
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
 /// What every function answers with, as it was written.
 pub fn returns(items: &Vec<ast::Item>) -> Vec<RetTy> {
     let mut out: Vec<RetTy> = Vec::new();
@@ -2466,6 +2568,34 @@ pub fn returns(items: &Vec<ast::Item>) -> Vec<RetTy> {
         }
         i += 1;
     }
+    let given = givens(items);
+    let mut g: taddr = 0;
+    while g < given.len() {
+        let at = trait_at(items, &given[g].trait_name);
+        match &items[at].what {
+            ast::What::Trait(n, params, supers, assoc, tfns) => {
+                let k = named_fn(tfns, &given[g].name);
+                if k >= 0 {
+                    out.push(RetTy {
+                        name: given_name(&given[g]),
+                        ty: copy_ty(&tfns[k].ret),
+                    });
+                }
+            }
+            _ => {}
+        }
+        g += 1;
+    }
+    out
+}
+
+/// The name a given method is known by: the type's, not the trait's
+/// (Ch. 4 §1.2).
+pub fn given_name(g: &Given) -> String {
+    let mut out: String = Vec::new();
+    out.push_str(&g.owner);
+    out.push_str(".");
+    out.push_str(&g.name);
     out
 }
 
@@ -3029,7 +3159,45 @@ pub fn parameters(items: &Vec<ast::Item>) -> Vec<Sig> {
         }
         i += 1;
     }
+    let given = givens(items);
+    let mut g: taddr = 0;
+    while g < given.len() {
+        let at = trait_at(items, &given[g].trait_name);
+        match &items[at].what {
+            ast::What::Trait(n, params, supers, assoc, tfns) => {
+                let k = named_fn(tfns, &given[g].name);
+                if k >= 0 {
+                    out.push(Sig {
+                        name: given_name(&given[g]),
+                        ret: written_types(&tfns[k].params),
+                    });
+                }
+            }
+            _ => {}
+        }
+        g += 1;
+    }
     out
+}
+
+/// The TIR name of each parameter's type, `,`-joined, with a receiver as
+/// the address it is.
+fn written_types(params: &Vec<ast::Param>) -> String {
+    let mut all: String = Vec::new();
+    let mut j: taddr = 0;
+    while j < params.len() {
+        if j > 0 {
+            all.push(',');
+        }
+        let each = if params[j].name.same("self") {
+            "ptr".to_string()
+        } else {
+            tir_ty(&params[j].ty)
+        };
+        all.push_str(&each);
+        j += 1;
+    }
+    all
 }
 
 pub fn signatures(items: &Vec<ast::Item>) -> Vec<Sig> {
@@ -3075,6 +3243,27 @@ pub fn signatures(items: &Vec<ast::Item>) -> Vec<Sig> {
             _ => {}
         }
         i += 1;
+    }
+    // And what a trait gave a type, under the type's name.
+    let given = givens(items);
+    let mut g: taddr = 0;
+    while g < given.len() {
+        let at = trait_at(items, &given[g].trait_name);
+        match &items[at].what {
+            ast::What::Trait(n, params, supers, assoc, tfns) => {
+                let k = named_fn(tfns, &given[g].name);
+                if k >= 0 {
+                    let ret = if tfns[k].generics.len() > 0 {
+                        "?".to_string()
+                    } else {
+                        tir_ty(&tfns[k].ret)
+                    };
+                    out.push(Sig { name: given_name(&given[g]), ret: ret });
+                }
+            }
+            _ => {}
+        }
+        g += 1;
     }
     out
 }
@@ -3329,6 +3518,15 @@ pub fn generic_names(gs: &Vec<ast::Generic>) -> Vec<String> {
     out
 }
 
+/// Whether a name is a type this can instantiate at: one TIR spells, or one
+/// the program defines and Ch. 2 has laid out.
+fn known_type(e: &Emit, name: &str) -> bool {
+    if !scalar_named(name).same("?") {
+        return true;
+    }
+    def_at(&e.defs, name) >= 0
+}
+
 /// Which family is called this, or −1.
 fn family_at(e: &Emit, name: &str) -> taddr {
     let mut i: taddr = 0;
@@ -3411,7 +3609,11 @@ fn generic_call(
             }
             k += 1;
         }
-        if clash || scalar_named(&found).same("?") {
+        // A type argument TIR spells, or one the program defines: a
+        // `sum<T: Area>(x: T)` is instantiated at `Sq` as much as at `t27`,
+        // and what tells the two apart at the call is nothing — an
+        // aggregate arrives as a pointer either way (TIR §3).
+        if clash || !known_type(e, &found) {
             e.stuck = true;
             return unknown_value();
         }
@@ -3618,6 +3820,32 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
         }
         d += 1;
     }
+    // What a trait gave a type is a function of the type, emitted after
+    // the impls that are written and before the instantiations that are
+    // asked for (Ch. 4 §1.7).
+    let given = givens(items);
+    let mut g: taddr = 0;
+    while g < given.len() {
+        let at = trait_at(items, &given[g].trait_name);
+        let mut text: String = Vec::new();
+        let mut made = false;
+        match &items[at].what {
+            ast::What::Trait(n, params, supers, assoc, tfns) => {
+                let k = named_fn(tfns, &given[g].name);
+                if k >= 0 {
+                    made = function(
+                        &tfns[k], context(items), given[g].owner.to_string(),
+                        Vec::new(), Vec::new(), &mut queued, &mut text);
+                }
+            }
+            _ => {}
+        }
+        if made {
+            out.push(Made { name: given_name(&given[g]), text: text });
+        }
+        g += 1;
+    }
+
     let extra = instantiations(items, &mut queued);
     let mut z: taddr = 0;
     while z < extra.len() {
