@@ -4106,6 +4106,12 @@ struct Fn<'a> {
     /// names the next one. Not `counter`: a second implementation can count
     /// closures in the source and cannot count this one's SSA values.
     closures_made: u32,
+    /// The same, for the two other things that are *named* rather than
+    /// computed: an argument bound to a name so inference can refer to it,
+    /// and the iterator a `for` desugars to. Neither is an SSA value and
+    /// neither should move when one is added.
+    bindings_made: u32,
+    loops_made: u32,
     /// Whether the scrutinee being matched was reached through a `&mut`,
     /// which decides what a binding through it is a place *of* (G9.50).
     match_mut: bool,
@@ -4281,6 +4287,8 @@ fn function(
         destructor_of,
         counter: 0,
         closures_made: 0,
+        bindings_made: 0,
+        loops_made: 0,
         match_mut: false,
         done: false,
     };
@@ -4446,8 +4454,12 @@ impl Fn<'_> {
     /// expression. The name cannot collide: `#` is not an identifier
     /// character.
     fn bind_existing(&mut self, slot: String, ty: Ty) -> String {
-        self.counter += 1;
-        let name = format!("#a{}", self.counter);
+        // Its own counter: the name never reaches TIR — `#` is not an
+        // identifier character and the local it makes points at a slot that
+        // already exists — but taking a number from the value counter
+        // leaves a *gap* in the TIR that does, and a gap is text (G9.67).
+        self.bindings_made += 1;
+        let name = format!("#a{}", self.bindings_made);
         let local = Local {
             slot,
             ty,
@@ -10900,8 +10912,10 @@ impl Fn<'_> {
         body: &ast::Block,
         span: Span,
     ) -> ast::Expr {
-        self.counter += 1;
-        let it = format!("it.{}", self.counter);
+        // Which `for` of this function it is, not where the value counter
+        // had got to: this name *does* reach TIR, as `%it.2.slot.7` (G9.67).
+        self.loops_made += 1;
+        let it = format!("it.{}", self.loops_made);
         let path = |segs: &[&str]| ast::Path {
             segments: segs.iter().map(|s| s.to_string()).collect(),
             targs: Vec::new(),

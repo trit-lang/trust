@@ -1167,6 +1167,28 @@ fn show_expr(e: &lang::ast::Expr, out: &mut String) {
             }
             out.push(')');
         }
+        // `|x: t27| x + 1` — its parameters, its answer where one was
+        // written, and its body (Ch. 4 §4.1). Without this it fell through
+        // to the debug form, which carries spans (G9.62).
+        Expr::Closure(params, ret, body, _) => {
+            out.push_str("(closure (");
+            for (i, (n, t)) in params.iter().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                out.push_str(n);
+                if let Some(t) = t {
+                    out.push_str(&format!(":{}", written_ty(t)));
+                }
+            }
+            out.push(')');
+            if let Some(r) = ret {
+                out.push_str(&format!(" {}", written_ty(r)));
+            }
+            out.push(' ');
+            show_expr(body, out);
+            out.push(')');
+        }
         // `[a, b]` and `[v; n]` — the two ways an array is written
         // (Ch. 2 §4). Without these they fell through to the debug form.
         Expr::Array(items, _) => {

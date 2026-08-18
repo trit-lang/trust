@@ -321,6 +321,67 @@ pub fn primary(p: &mut Parser) -> Result<Expr, lex::Error> {
                 p.no_struct = outer;
                 return e;
             }
+            // `|x: t27| x + 1` — a function written where a value goes
+            // (Ch. 4 §4.1). `||` is the empty parameter list and lexes as
+            // the logical-or by maximal munch, exactly as `&&` lexes as one
+            // token where two borrows were written.
+            if o.same("|") || o.same("||") {
+                let empty = o.same("||");
+                let mut params: Vec<ast::Named> = Vec::new();
+                if !empty {
+                    loop {
+                        let t2 = peek(p)?;
+                        let at2 = t2.at;
+                        let done = match t2.tok {
+                            Tok::Op(o2) => o2.same("|"),
+                            _ => false,
+                        };
+                        if done {
+                            p.at = at2;
+                            break;
+                        }
+                        let name = ident(p)?;
+                        // A parameter with no written type is one nothing
+                        // here decides: `Unit` is what stands for that, and
+                        // what a checker refuses (Ch. 4 §4.1).
+                        let mut ty = ast::Ty::Unit;
+                        let t3 = peek(p)?;
+                        let at3 = t3.at;
+                        let typed = match t3.tok {
+                            Tok::Op(o3) => o3.same(":"),
+                            _ => false,
+                        };
+                        if typed {
+                            p.at = at3;
+                            ty = type_name(p)?;
+                        }
+                        params.push(ast::Named { name: name, ty: ty });
+                        let t4 = peek(p)?;
+                        let at4 = t4.at;
+                        let more = match t4.tok {
+                            Tok::Op(o4) => o4.same(","),
+                            _ => false,
+                        };
+                        if more {
+                            p.at = at4;
+                        }
+                    }
+                }
+                let t5 = peek(p)?;
+                let at5 = t5.at;
+                let answers = match t5.tok {
+                    Tok::Op(o5) => o5.same("->"),
+                    _ => false,
+                };
+                let mut ret: Option<ast::Ty> = Option::None;
+                if answers {
+                    p.at = at5;
+                    let held = type_name(p)?;
+                    ret = Option::Some(held);
+                }
+                let body = expr(p)?;
+                return Result::Ok(Expr::Closure(params, ret, Box::new(body)));
+            }
             // `[a, b]` and `[v; n]` — an array written out, and the same
             // one written once (Ch. 2 §4).
             if o.same("[") {

@@ -25,6 +25,11 @@ pub enum Expr {
     /// because a call *by name* is the only one a linker can resolve, and
     /// everything downstream of here asks for the name.
     CallExpr(Box<Expr>, Vec<Expr>),
+    /// `|x: t27| x + 1` — a function written where a value goes, which
+    /// carries the places it names from around it (Ch. 4 §4.1). Its
+    /// parameters, what it answers with where that was written, and its
+    /// body.
+    Closure(Vec<Named>, Option<Ty>, Box<Expr>),
     /// `[a, b]` — an array written out (Ch. 2 §4).
     Array(Vec<Expr>),
     /// `[v; n]` — the same array written once.
@@ -387,6 +392,35 @@ pub fn show(e: &Expr, out: &mut String) {
                 show(&args[i], out);
                 i += 1;
             }
+            out.push_str(")");
+        }
+        Expr::Closure(params, ret, body) => {
+            out.push_str("(closure (");
+            let mut i: taddr = 0;
+            while i < params.len() {
+                if i > 0 {
+                    out.push_str(" ");
+                }
+                out.push_str(&params[i].name);
+                match &params[i].ty {
+                    Ty::Unit => {}
+                    _ => {
+                        out.push_str(":");
+                        show_ty(&params[i].ty, out);
+                    }
+                }
+                i += 1;
+            }
+            out.push_str(")");
+            match ret {
+                Option::Some(r) => {
+                    out.push_str(" ");
+                    show_ty(r, out);
+                }
+                Option::None => {}
+            }
+            out.push_str(" ");
+            show(&*body, out);
             out.push_str(")");
         }
         Expr::Array(items) => {

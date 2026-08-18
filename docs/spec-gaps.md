@@ -2621,6 +2621,34 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.69 — and two more names that were not functions of the program.**
+Fixing the closure's name (G9.67) turned up the same mistake twice more, in
+the same file and both invisible until something counted.
+
+`bind_existing` gives an already-lowered argument a name so that inference
+can refer to it — `#a3`, which never reaches TIR because `#` is not an
+identifier character. It took the number from the **value** counter, so the
+name cost nothing and the *gap it left* cost a number: `%tmp.slot.1` was
+followed by `%r.3`. A gap is text.
+
+`desugar_for`'s iterator is worse, because its name does reach TIR:
+`%it.2.slot.7`, where the 2 is again where the value counter had got to. Two
+programs identical except for an expression before the loop get iterators
+with different names.
+
+Both count their own kind now — which binding, which loop — and the closure
+that started it reads
+
+```
+%tmp.slot.1 = slot tryte[1]
+%r.2 = call @apply.main.closure1(%tmp.slot.1, const t27 2) -> t27
+```
+
+with nothing in it that is not a fact about the program. Three of these in
+one round is worth a sentence: a synthesized name is a name, and the rule
+for names is the rule G9.58 stated for order — derive it from the source or
+the comparison compares implementations.
+
 **G9.67 — a closure's type was named after a counter nobody else can
 count.** `format!("{}.closure{}", self.name, self.counter)` — and
 `self.counter` is how many SSA values the *enclosing* function had made by
