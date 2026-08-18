@@ -97,12 +97,42 @@ pub struct Made {
     pub text: String,
 }
 
+/// A closure, as the function and the type it turns into (Ch. 4 §4.1).
+///
+/// It is found while a body is lowered and not before, because what it
+/// captures is which of the names it uses are *locals here* — a question
+/// only the function holding it can answer.
+pub struct Closed {
+    /// `main.closure1` — which closure of which function, and nothing about
+    /// how either was numbered (G9.67).
+    pub name: String,
+    pub params: Vec<ast::Named>,
+    pub ret: Option<ast::Ty>,
+    /// What it captures: the local's name, its storage, and its type. Each
+    /// becomes a field of the closure's type, holding the *address*.
+    pub captures: Vec<Slot>,
+    pub body: ast::Expr,
+}
+
+/// What lowering one function left for the next: the instantiations it
+/// asked for, and the closures it turned out to hold.
+///
+/// One value rather than two out-parameters, because they travel together
+/// and because a function is given at most eight things (Ch. 5).
+pub struct Work {
+    pub jobs: Vec<Job>,
+    pub closed: Vec<Closed>,
+}
+
 /// What a function is lowered against: everything about the file that is not
 /// the function itself.
 ///
 /// One value rather than five parameters, because they always travel
 /// together and because a function is given at most eight things (Ch. 5).
 pub struct Cx {
+    /// The closures found so far, which are types like any other by the
+    /// time whatever uses them is lowered.
+    pub closed: Vec<Closed>,
     pub sigs: Vec<Sig>,
     pub params: Vec<Sig>,
     pub defs: Vec<layout::Def>,
@@ -186,6 +216,13 @@ pub struct Emit {
     /// Every instantiation of a type made so far, with what it was made
     /// from — the reading a mangled name cannot be parsed back into.
     pub instances: Vec<Inst>,
+    /// The closures this function turned out to hold, and how many it has
+    /// made — which is what names the next one (G9.67).
+    pub closed: Vec<Closed>,
+    pub closures_made: t27,
+    /// The name this function is emitted under, which a closure's is made
+    /// from.
+    pub owner_name: String,
     /// The instantiations being made right now, so that a type reaching
     /// itself is refused rather than read for ever. Nothing is taken off
     /// it: by the time one finishes, its name is in `defs`, and that is
@@ -221,6 +258,37 @@ pub fn tir_ty_at(tyvars: &Vec<String>, key: &Vec<String>, t: &ast::Ty) -> String
             scalar_named(&n)
         }
         _ => "?".to_string(),
+    }
+}
+
+/// What TIR calls the type of a *field*.
+///
+/// A field may be a reference, which TIR spells `ptr` — and a reference to
+/// something whose size is not in its type is two words and not one, which
+/// TIR has no name for, so a field of that kind is refused (Ch. 2 §4).
+pub fn field_tir(t: &ast::Ty) -> String {
+    match t {
+        ast::Ty::Ref(held, m) => {
+            if unsized_ref(&*held) {
+                "?".to_string()
+            } else {
+                "ptr".to_string()
+            }
+        }
+        _ => tir_ty(t),
+    }
+}
+
+/// Whether a reference to this carries a length beside the address, which
+/// makes it two words and not one (Ch. 2 §4).
+fn unsized_ref(t: &ast::Ty) -> bool {
+    match t {
+        ast::Ty::Slice(inner) => true,
+        ast::Ty::Name(segments) => {
+            let n = joined(segments);
+            n.same("str")
+        }
+        _ => false,
     }
 }
 
@@ -274,6 +342,14 @@ pub fn tir_of(name: &str) -> String {
         "t27".to_string()
     } else {
         name.to_string()
+    }
+}
+
+/// What a reference points at, or the unit for a type that is not one.
+fn referent(t: &ast::Ty) -> ast::Ty {
+    match t {
+        ast::Ty::Ref(held, m) => ast::copy_ty(&*held),
+        _ => ast::Ty::Unit,
     }
 }
 
@@ -374,7 +450,15 @@ fn sized(e: &Emit, ty: &str) -> t27 {
     }
     let self_ty = ast::Ty::Name(one_name(ty));
     match layout::of(&e.defs, &self_ty, 0) {
-        Result::Ok(l) => l.size as t27,
+        // Storage is never nothing: a type with no fields still has an
+        // address, and an address needs somewhere to point (Ch. 2 §1).
+        Result::Ok(l) => {
+            if l.size < 1 {
+                1
+            } else {
+                l.size as t27
+            }
+        }
         Result::Err(why) => trytes(ty),
     }
 }
@@ -399,7 +483,7 @@ pub fn function(
     owner: String,
     outer: Vec<String>,
     key: Vec<String>,
-    queued: &mut Vec<Job>,
+    work: &mut Work,
     out: &mut String,
 ) -> bool {
     // A generic function is one function per instantiation and none of them
@@ -411,7 +495,7 @@ pub fn function(
     // The receiver's parameters come first: a method of an
     // `impl<T> Pair<T>` is read under `T` and then under its own.
     let mut tyvars = ast::copy_names(&outer);
-    let own = generic_names(&f.generics);
+    let own = all_tyvars(f);
     let mut g: taddr = 0;
     while g < own.len() {
         tyvars.push(own[g].to_string());
@@ -436,14 +520,48 @@ pub fn function(
         owned: Vec::new(),
         self_ty: owner.to_string(),
         families: cx.families,
-        jobs: copy_jobs(queued),
+        jobs: copy_jobs(&work.jobs),
         tyvars: ast::copy_names(&tyvars),
         key: ast::copy_names(&key),
         tyfams: cx.tyfams,
         rets: cx.rets,
         instances: Vec::new(),
         making: Vec::new(),
+        closed: cx.closed,
+        closures_made: 0,
+        owner_name: "".to_string(),
     };
+    // What a closure found before this was lowered is a type like any
+    // other: its storage is a field per capture, holding an address.
+    let mut c: taddr = 0;
+    while c < e.closed.len() {
+        let made = closure_def(&e.closed[c]);
+        if def_at(&e.defs, &made.name) < 0 {
+            e.defs.push(made);
+        }
+        // And its `call` is a function like any other: what it answers
+        // with, and what it takes after the closure itself.
+        let mut full: String = Vec::new();
+        full.push_str(&e.closed[c].name);
+        full.push_str(".call");
+        let mut answers = "?".to_string();
+        match &e.closed[c].ret {
+            Option::Some(r) => answers = tir_ty(r),
+            Option::None => {}
+        }
+        let mut all: String = Vec::new();
+        all.push_str("ptr");
+        let mut j: taddr = 0;
+        while j < e.closed[c].params.len() {
+            all.push(',');
+            let each = tir_ty(&e.closed[c].params[j].ty);
+            all.push_str(&each);
+            j += 1;
+        }
+        e.sigs.push(Sig { name: full.to_string(), ret: answers });
+        e.params.push(Sig { name: full, ret: all });
+        c += 1;
+    }
 
     settle(&mut e);
 
@@ -481,6 +599,22 @@ pub fn function(
         header.push_str(&key[g]);
         g += 1;
     }
+    // What a closure written in here is named after: the function as it is
+    // emitted, instantiation and all, so two instantiations of one generic
+    // do not name the same closure type.
+    let mut mine: String = Vec::new();
+    if owner.len() > 0 {
+        mine.push_str(&owner);
+        mine.push_str(".");
+    }
+    mine.push_str(&f.name);
+    let mut g: taddr = 0;
+    while g < key.len() {
+        mine.push_str(".");
+        mine.push_str(&key[g]);
+        g += 1;
+    }
+    e.owner_name = mine;
     header.push_str("(");
     // A function whose answer is an aggregate is given the storage for it,
     // because a value that big is not carried in a register (TIR §3).
@@ -497,12 +631,20 @@ pub fn function(
         if i > 0 || sret {
             header.push_str(", ");
         }
-        let ty = tir_ty_at(&tyvars, &key, &f.params[i].ty);
+        let written_param = param_written(f, i);
+        let ty = tir_ty_at(&tyvars, &key, &written_param);
         let name = f.params[i].name.to_string();
         // `&self` is a reference and stays one: what a method is given is an
         // address, and reading through it is a load and then the field's own
         // (Ch. 3 §2.2). An aggregate *value* is copied in; an address is not.
         if name.same("self") && is_reference(&f.params[i].ty) {
+            // What `self` points at, where the function was not written on
+            // an `impl` and so has no owner to say: a closure's `call` is
+            // the one of those (Ch. 4 §4.1).
+            if e.self_ty.len() == 0 {
+                let held = referent(&f.params[i].ty);
+                e.self_ty = nominal(&mut e, &held);
+            }
             header.push_str("%self: ptr");
             let slot = slot_for(&mut e, "self", "ptr");
             let mut store: String = Vec::new();
@@ -516,7 +658,7 @@ pub fn function(
             // An aggregate arrives as a pointer and is copied into storage
             // of its own on entry, field by field: what a function is given
             // is the caller's and what it holds is its own (Ch. 3 §1.1).
-            let written = subst_ty(&mut e, &tyvars, &key, &f.params[i].ty);
+            let written = subst_ty(&mut e, &tyvars, &key, &written_param);
             let owner = nominal(&mut e, &written);
             let at = def_at(&e.defs, &owner);
             if at < 0 {
@@ -581,13 +723,18 @@ pub fn function(
     // What this function asked for, handed back to the queue the caller
     // drains. Only from here: a function that was not emitted is not in the
     // program, and what it would have asked for is not either.
-    let mut q = queued.len();
+    let mut q = work.jobs.len();
     while q < e.jobs.len() {
-        queued.push(Job {
+        work.jobs.push(Job {
             name: e.jobs[q].name.to_string(),
             key: ast::copy_names(&e.jobs[q].key),
         });
         q += 1;
+    }
+    let mut c = work.closed.len();
+    while c < e.closed.len() {
+        work.closed.push(one_closed(&e.closed[c]));
+        c += 1;
     }
 
     start(&mut e, "^");
@@ -693,7 +840,14 @@ fn copy_in(e: &mut Emit, name: &str, at: taddr) -> bool {
     line.push_str("    ");
     line.push_str(&slot);
     line.push_str(" = slot tryte[");
-    push_int(&mut line, l.size as t27);
+    // Storage is never nothing: a type with no fields still has an address
+    // (Ch. 2 §1), and a closure that captures nothing is exactly that.
+    let wide = if l.size < 1 {
+        1
+    } else {
+        l.size as t27
+    };
+    push_int(&mut line, wide);
     line.push_str("]");
     e.slots.push(line);
     e.locals.push(Slot {
@@ -1079,7 +1233,7 @@ fn fill(
             i += 1;
             continue;
         }
-        let ty = tir_ty(&e.defs[which].fields[index]);
+        let ty = field_tir(&e.defs[which].fields[index]);
         // A type TIR has no spelling for is not one this writes down: a
         // reference to something unsized is two words and not one, and
         // `store ?` is not TIR (TIR §1).
@@ -1145,7 +1299,7 @@ fn fill_variant(
             i += 1;
             continue;
         }
-        let ty = tir_ty(&e.defs[which].fields[start + i]);
+        let ty = field_tir(&e.defs[which].fields[start + i]);
         if ty.same("?") {
             e.stuck = true;
             return;
@@ -1261,7 +1415,7 @@ fn copy_fields(e: &mut Emit, from: &str, to: &str, owner: &str) -> bool {
             i += 1;
             continue;
         }
-        let ty = tir_ty(&e.defs[which].fields[i]);
+        let ty = field_tir(&e.defs[which].fields[i]);
         if ty.same("?") {
             return false;
         }
@@ -1364,7 +1518,7 @@ fn bind_payload(
                 return;
             }
         };
-        let ty = tir_ty(&e.defs[which].fields[first + i]);
+        let ty = field_tir(&e.defs[which].fields[first + i]);
         if ty.same("?") {
             e.stuck = true;
             return;
@@ -1548,6 +1702,9 @@ pub fn destructor(
         rets: cx.rets,
         instances: Vec::new(),
         making: Vec::new(),
+        closed: Vec::new(),
+        closures_made: 0,
+        owner_name: "".to_string(),
     };
     settle(&mut e);
     let at = def_at(&e.defs, owner);
@@ -1584,7 +1741,7 @@ pub fn destructor(
     });
     let mut i: taddr = 0;
     while i < l.offsets.len() {
-        let ty = tir_ty(&e.defs[at].fields[i]);
+        let ty = field_tir(&e.defs[at].fields[i]);
         if ty.same("?") {
             return false;
         }
@@ -2120,7 +2277,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                     return unknown_value();
                 }
             };
-            let ty = tir_ty(&e.defs[which].fields[index]);
+            let ty = field_tir(&e.defs[which].fields[index]);
             let src = offset_of(e, &slot, l.offsets[index]);
             let v = fresh(e, "v");
             let mut load: String = Vec::new();
@@ -2137,6 +2294,104 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
         // An aggregate with nowhere to go is built in a temporary, which a
         // `let` then *renames* rather than copying out of — which is what
         // makes `let p = P { … }` cost nothing (Ch. 3 §1.1).
+        // `|x: t27| x + 1` — a function written where a value goes. What
+        // it *is* here is a struct of the addresses of the places it names
+        // from around it (Ch. 4 §4.4); the body becomes a function of its
+        // own, which the driver emits after this one.
+        ast::Expr::Closure(params, ret, body) => {
+            let mut bound: Vec<String> = Vec::new();
+            let mut i: taddr = 0;
+            while i < params.len() {
+                bound.push(params[i].name.to_string());
+                i += 1;
+            }
+            let mut free: Vec<String> = Vec::new();
+            free_names(&*body, &mut bound, &mut free);
+            let mut captures: Vec<Slot> = Vec::new();
+            let mut k: taddr = 0;
+            while k < free.len() {
+                let at = local_at(e, &free[k]);
+                if at >= 0 {
+                    captures.push(Slot {
+                        name: e.locals[at].name.to_string(),
+                        slot: e.locals[at].slot.to_string(),
+                        ty: e.locals[at].ty.to_string(),
+                    });
+                }
+                k += 1;
+            }
+            e.closures_made = e.closures_made + 1;
+            let mut name: String = Vec::new();
+            name.push_str(&e.owner_name);
+            name.push_str(".closure");
+            push_int(&mut name, e.closures_made);
+            let mut ps: Vec<ast::Named> = Vec::new();
+            let mut j: taddr = 0;
+            while j < params.len() {
+                ps.push(ast::Named {
+                    name: params[j].name.to_string(),
+                    ty: ast::copy_ty(&params[j].ty),
+                });
+                j += 1;
+            }
+            let mut answer: Option<ast::Ty> = Option::None;
+            match ret {
+                Option::Some(r) => answer = Option::Some(ast::copy_ty(r)),
+                // Nothing wrote what it answers with, so it is read off the
+                // body with the parameters in scope (Ch. 4 §4.1). They are
+                // put there as *names* and no storage: nothing is emitted
+                // for a question.
+                Option::None => {
+                    let mark = e.locals.len();
+                    let mut m: taddr = 0;
+                    while m < params.len() {
+                        e.locals.push(Slot {
+                            name: params[m].name.to_string(),
+                            slot: "".to_string(),
+                            ty: tir_ty(&params[m].ty),
+                        });
+                        m += 1;
+                    }
+                    let guessed = guess_ty(e, &*body);
+                    forget(e, mark);
+                    if guessed.len() == 0 {
+                        e.stuck = true;
+                        return unknown_value();
+                    }
+                    answer = Option::Some(ast::Ty::Name(one_name(&guessed)));
+                }
+            }
+            let made = Closed {
+                name: name.to_string(),
+                params: ps,
+                ret: answer,
+                captures: captures,
+                body: ast::copy_expr(&*body),
+            };
+            let held_def = closure_def(&made);
+            if def_at(&e.defs, &name) < 0 {
+                e.defs.push(held_def);
+            }
+            let which = def_at(&e.defs, &name);
+            let self_ty = ast::Ty::Name(one_name(&name));
+            let l = match layout::of(&e.defs, &self_ty, 0) {
+                Result::Ok(x) => x,
+                Result::Err(why) => {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+            };
+            let slot = slot_for(e, "tmp", &name);
+            let mut c: taddr = 0;
+            while c < made.captures.len() {
+                let at = offset_of(e, &slot, l.offsets[c]);
+                let from = made.captures[c].slot.to_string();
+                store_into(e, "ptr", &from, &at);
+                c += 1;
+            }
+            e.closed.push(made);
+            Value { text: slot, ty: name }
+        }
         ast::Expr::Aggregate(path, fields) => {
             let made = aggregate_type(e, path, want, fields);
             if made.len() == 0 {
@@ -2306,7 +2561,29 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             e.insts.push(line);
             Value { text: out, ty: ty }
         }
+        // `g(x)` where `g` is a closure: what it calls is the `call` of
+        // whatever type the closure turned out to be, and the closure
+        // itself is its first argument (Ch. 4 §4.2).
+        ast::Expr::CallExpr(callee, args) => {
+            let missing: taddr = 0 - 1;
+            let at = match callee {
+                ast::Expr::Name(n) => local_at(e, n),
+                _ => missing,
+            };
+            if at < 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            closure_call(e, at, args)
+        }
         ast::Expr::Call(callee, args) => {
+            // `g(x)` where `g` is a *local* is a closure call written the
+            // way any call is written; only a name that is not a local can
+            // be a function a linker resolves (Ch. 4 §4.2).
+            let held = local_at(e, callee);
+            if held >= 0 {
+                return closure_call(e, held, args);
+            }
             // A call to a generic function names an instantiation and not
             // the family, and which one it names is read off the arguments
             // (Ch. 4 §2.3).
@@ -2804,6 +3081,24 @@ fn guess_ty(e: &mut Emit, x: &ast::Expr) -> String {
         ast::Expr::Trit(v) => "trit".to_string(),
         ast::Expr::Char(v) => "char".to_string(),
         ast::Expr::Group(inner) => guess_ty(e, inner),
+        ast::Expr::Cast(a, t) => tir_ty_at(&e.tyvars, &e.key, t),
+        // Arithmetic answers with what it was given and a comparison with a
+        // `bool`, which is Ch. 1 §5 either way.
+        ast::Expr::Binary(op, a, b) => {
+            if op.same("==") || op.same("!=") || op.same("<") || op.same(">")
+                || op.same("<=") || op.same(">=") || op.same("&&") || op.same("||")
+            {
+                return "bool".to_string();
+            }
+            if op.same("<=>") {
+                return "trit".to_string();
+            }
+            let left = guess_ty(e, &*a);
+            if left.len() > 0 {
+                return left;
+            }
+            guess_ty(e, &*b)
+        }
         ast::Expr::Name(n) => {
             let at = local_at(e, n);
             if at < 0 {
@@ -2870,6 +3165,360 @@ fn copy_def(d: &layout::Def) -> layout::Def {
         field_names: ast::copy_names(&d.field_names),
         counts: counts,
         discriminants: discs,
+    }
+}
+
+/// The names an expression uses that nothing inside it bound.
+///
+/// In the order they are first used, because that is the order a closure's
+/// captures are laid out in and the order is in the text (Ch. 4 §4.4).
+fn free_names(x: &ast::Expr, bound: &mut Vec<String>, out: &mut Vec<String>) {
+    match x {
+        ast::Expr::Name(n) => {
+            if !holds_name(bound, n) && !holds_name(out, n) {
+                out.push(n.to_string());
+            }
+        }
+        ast::Expr::Binary(op, a, b) => {
+            free_names(&*a, bound, out);
+            free_names(&*b, bound, out);
+        }
+        ast::Expr::Unary(op, a) => free_names(&*a, bound, out),
+        ast::Expr::Call(f, args) => free_in_all(args, bound, out),
+        ast::Expr::CallExpr(callee, args) => {
+            free_names(&*callee, bound, out);
+            free_in_all(args, bound, out);
+        }
+        ast::Expr::Closure(params, ret, body) => {
+            let mark = bound.len();
+            let mut i: taddr = 0;
+            while i < params.len() {
+                bound.push(params[i].name.to_string());
+                i += 1;
+            }
+            free_names(&*body, bound, out);
+            forget_names(bound, mark);
+        }
+        ast::Expr::Array(items) => free_in_all(items, bound, out),
+        ast::Expr::Tuple(items) => free_in_all(items, bound, out),
+        ast::Expr::Repeat(v, n) => {
+            free_names(&*v, bound, out);
+            free_names(&*n, bound, out);
+        }
+        ast::Expr::Aggregate(path, fields) => {
+            let mut i: taddr = 0;
+            while i < fields.len() {
+                free_names(&fields[i].value, bound, out);
+                i += 1;
+            }
+        }
+        ast::Expr::Borrow(a, m) => free_names(&*a, bound, out),
+        ast::Expr::Deref(a) => free_names(&*a, bound, out),
+        ast::Expr::Index(a, at) => {
+            free_names(&*a, bound, out);
+            free_names(&*at, bound, out);
+        }
+        ast::Expr::Cast(a, t) => free_names(&*a, bound, out),
+        ast::Expr::Try(a) => free_names(&*a, bound, out),
+        ast::Expr::Group(a) => free_names(&*a, bound, out),
+        ast::Expr::Field(a, name) => free_names(&*a, bound, out),
+        ast::Expr::Method(recv, name, args) => {
+            free_names(&*recv, bound, out);
+            free_in_all(args, bound, out);
+        }
+        ast::Expr::Assign(op, target, v) => {
+            free_names(&*target, bound, out);
+            free_names(&*v, bound, out);
+        }
+        ast::Expr::Nested(b) => free_in_block(&*b, bound, out),
+        ast::Expr::If(c, t, o) => {
+            free_names(&*c, bound, out);
+            free_in_block(&*t, bound, out);
+            match o {
+                Option::Some(held) => free_names(&*held, bound, out),
+                Option::None => {}
+            }
+        }
+        ast::Expr::For(name, over, body) => {
+            free_names(&*over, bound, out);
+            let mark = bound.len();
+            bound.push(name.to_string());
+            free_in_block(&*body, bound, out);
+            forget_names(bound, mark);
+        }
+        ast::Expr::While(c, body) => {
+            free_names(&*c, bound, out);
+            free_in_block(&*body, bound, out);
+        }
+        ast::Expr::Loop(body) => free_in_block(&*body, bound, out),
+        ast::Expr::Match(scrutinee, arms) => {
+            free_names(&*scrutinee, bound, out);
+            let mut i: taddr = 0;
+            while i < arms.len() {
+                let mark = bound.len();
+                let mut k: taddr = 0;
+                while k < arms[i].patterns.len() {
+                    bind_names(&arms[i].patterns[k], bound);
+                    k += 1;
+                }
+                match &arms[i].guard {
+                    Option::Some(g) => free_names(g, bound, out),
+                    Option::None => {}
+                }
+                free_names(&arms[i].body, bound, out);
+                forget_names(bound, mark);
+                i += 1;
+            }
+        }
+        ast::Expr::Return(v) => free_in_option(v, bound, out),
+        ast::Expr::Break(v) => free_in_option(v, bound, out),
+        _ => {}
+    }
+}
+
+fn free_in_all(items: &Vec<ast::Expr>, bound: &mut Vec<String>, out: &mut Vec<String>) {
+    let mut i: taddr = 0;
+    while i < items.len() {
+        free_names(&items[i], bound, out);
+        i += 1;
+    }
+}
+
+fn free_in_option(
+    v: &Option<Box<ast::Expr>>,
+    bound: &mut Vec<String>,
+    out: &mut Vec<String>,
+) {
+    match v {
+        Option::Some(x) => free_names(&*x, bound, out),
+        Option::None => {}
+    }
+}
+
+fn free_in_block(b: &ast::Block, bound: &mut Vec<String>, out: &mut Vec<String>) {
+    let mark = bound.len();
+    let mut i: taddr = 0;
+    while i < b.stmts.len() {
+        match &b.stmts[i] {
+            ast::Stmt::Let(mutable, name, written, v) => {
+                free_names(v, bound, out);
+                bound.push(name.to_string());
+            }
+            ast::Stmt::LetPattern(p, v) => {
+                free_names(v, bound, out);
+                bind_names(p, bound);
+            }
+            ast::Stmt::Do(v) => free_names(v, bound, out),
+        }
+        i += 1;
+    }
+    match &b.tail {
+        Option::Some(x) => free_names(&*x, bound, out),
+        Option::None => {}
+    }
+    forget_names(bound, mark);
+}
+
+/// What a pattern binds, added to what is bound.
+fn bind_names(p: &ast::Pattern, bound: &mut Vec<String>) {
+    match p {
+        ast::Pattern::Bind(n) => bound.push(n.to_string()),
+        ast::Pattern::Tuple(items) => {
+            let mut i: taddr = 0;
+            while i < items.len() {
+                bind_names(&items[i], bound);
+                i += 1;
+            }
+        }
+        ast::Pattern::Aggregate(path, fields) => {
+            let mut i: taddr = 0;
+            while i < fields.len() {
+                bind_names(&fields[i].pat, bound);
+                i += 1;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Forget what a scope bound, which is what leaving one is.
+fn forget_names(bound: &mut Vec<String>, mark: taddr) {
+    while bound.len() > mark {
+        match bound.pop() {
+            Option::Some(n) => {}
+            Option::None => return,
+        }
+    }
+}
+
+/// The closures, copied. A `&mut Work` is not a `Vec<Closed>` and the
+/// emitter holds its own, which it hands back the new part of when it is
+/// done — exactly as it does with the instantiations it asked for.
+fn copy_closed(from: &Vec<Closed>) -> Vec<Closed> {
+    let mut out: Vec<Closed> = Vec::new();
+    let mut i: taddr = 0;
+    while i < from.len() {
+        out.push(one_closed(&from[i]));
+        i += 1;
+    }
+    out
+}
+
+fn one_closed(c: &Closed) -> Closed {
+    let mut params: Vec<ast::Named> = Vec::new();
+    let mut i: taddr = 0;
+    while i < c.params.len() {
+        params.push(ast::Named {
+            name: c.params[i].name.to_string(),
+            ty: ast::copy_ty(&c.params[i].ty),
+        });
+        i += 1;
+    }
+    let mut captures: Vec<Slot> = Vec::new();
+    let mut k: taddr = 0;
+    while k < c.captures.len() {
+        captures.push(Slot {
+            name: c.captures[k].name.to_string(),
+            slot: c.captures[k].slot.to_string(),
+            ty: c.captures[k].ty.to_string(),
+        });
+        k += 1;
+    }
+    let mut ret: Option<ast::Ty> = Option::None;
+    match &c.ret {
+        Option::Some(r) => ret = Option::Some(ast::copy_ty(r)),
+        Option::None => {}
+    }
+    Closed {
+        name: c.name.to_string(),
+        params: params,
+        ret: ret,
+        captures: captures,
+        body: ast::copy_expr(&c.body),
+    }
+}
+
+/// A closure's body, as the function it becomes: `<name>.call`, taking the
+/// closure itself by reference and then what was written (Ch. 4 §4.1).
+///
+/// A captured name is read *through* `self`, which is what `rewrite` does —
+/// so the body below is the body above with `k` become `(*self.k)`, and
+/// every other rule about fields and references applies to it unchanged.
+fn call_of(c: &Closed) -> ast::Fn {
+    let mut params: Vec<ast::Param> = Vec::new();
+    let held = ast::Ty::Name(one_name(&c.name));
+    params.push(ast::Param {
+        name: "self".to_string(),
+        ty: ast::Ty::Ref(Box::new(held), false),
+    });
+    let mut i: taddr = 0;
+    while i < c.params.len() {
+        params.push(ast::Param {
+            name: c.params[i].name.to_string(),
+            ty: ast::copy_ty(&c.params[i].ty),
+        });
+        i += 1;
+    }
+    let mut ret = ast::Ty::Unit;
+    match &c.ret {
+        Option::Some(r) => ret = ast::copy_ty(r),
+        Option::None => {}
+    }
+    let mut names: Vec<String> = Vec::new();
+    let mut k: taddr = 0;
+    while k < c.captures.len() {
+        names.push(c.captures[k].name.to_string());
+        k += 1;
+    }
+    let body = through_self(&c.body, &names);
+    let mut name: String = Vec::new();
+    name.push_str(&c.name);
+    name.push_str(".call");
+    ast::Fn {
+        name: name,
+        generics: Vec::new(),
+        requires: Vec::new(),
+        params: params,
+        ret: ret,
+        body: Option::Some(ast::Block {
+            stmts: Vec::new(),
+            tail: Option::Some(Box::new(body)),
+        }),
+    }
+}
+
+/// The same expression with every captured name read through `self`.
+fn through_self(x: &ast::Expr, captured: &Vec<String>) -> ast::Expr {
+    match x {
+        ast::Expr::Name(n) => {
+            if holds_name(captured, n) {
+                let base = ast::Expr::Name("self".to_string());
+                let field = ast::Expr::Field(Box::new(base), n.to_string());
+                return ast::Expr::Deref(Box::new(field));
+            }
+            ast::Expr::Name(n.to_string())
+        }
+        ast::Expr::Binary(op, a, b) => ast::Expr::Binary(
+            op.to_string(),
+            Box::new(through_self(&*a, captured)),
+            Box::new(through_self(&*b, captured)),
+        ),
+        ast::Expr::Unary(op, a) => {
+            ast::Expr::Unary(op.to_string(), Box::new(through_self(&*a, captured)))
+        }
+        ast::Expr::Call(f, args) => {
+            ast::Expr::Call(f.to_string(), through_all(args, captured))
+        }
+        ast::Expr::Method(recv, name, args) => ast::Expr::Method(
+            Box::new(through_self(&*recv, captured)),
+            name.to_string(),
+            through_all(args, captured),
+        ),
+        ast::Expr::Cast(a, t) => {
+            ast::Expr::Cast(Box::new(through_self(&*a, captured)), ast::copy_ty(t))
+        }
+        ast::Expr::Group(a) => ast::Expr::Group(Box::new(through_self(&*a, captured))),
+        ast::Expr::Field(a, name) => {
+            ast::Expr::Field(Box::new(through_self(&*a, captured)), name.to_string())
+        }
+        // Anything else is copied as it stands. A capture read from inside
+        // an `if` or a `match` is not rewritten yet, so a closure that does
+        // that is refused rather than given the wrong name.
+        _ => ast::copy_expr(x),
+    }
+}
+
+fn through_all(items: &Vec<ast::Expr>, captured: &Vec<String>) -> Vec<ast::Expr> {
+    let mut out: Vec<ast::Expr> = Vec::new();
+    let mut i: taddr = 0;
+    while i < items.len() {
+        out.push(through_self(&items[i], captured));
+        i += 1;
+    }
+    out
+}
+
+/// A closure's *type*: a field per capture, each holding an address
+/// (Ch. 4 §4.4). A closure that captures nothing is a type with no fields,
+/// which is a tryte because storage is never nothing.
+fn closure_def(c: &Closed) -> layout::Def {
+    let mut fields: Vec<ast::Ty> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < c.captures.len() {
+        names.push(c.captures[i].name.to_string());
+        let held = ast::Ty::Name(one_name(&c.captures[i].ty));
+        fields.push(ast::Ty::Ref(Box::new(held), false));
+        i += 1;
+    }
+    layout::Def {
+        name: c.name.to_string(),
+        is_enum: false,
+        linear: false,
+        fields: fields,
+        field_names: names,
+        counts: Vec::new(),
+        discriminants: Vec::new(),
     }
 }
 
@@ -3294,6 +3943,7 @@ fn unknown_value() -> Value {
 /// Everything about a file that a lowering reads, gathered once.
 pub fn context(items: &Vec<ast::Item>) -> Cx {
     Cx {
+        closed: Vec::new(),
         sigs: signatures(items),
         params: parameters(items),
         defs: definitions(items),
@@ -3319,9 +3969,9 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                 if is_family(f, 0) {
                     out.push(Family {
                         name: f.name.to_string(),
-                        tyvars: generic_names(&f.generics),
+                        tyvars: all_tyvars(f),
                         from_self: 0,
-                        params: written_params(&f.params),
+                        params: written_params(f),
                         ret: name_head(&f.ret),
                     });
                 }
@@ -3347,7 +3997,7 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                             full.push_str(".");
                             full.push_str(&fns[k].name);
                             let mut tyvars = ast::copy_names(&outer);
-                            let own = generic_names(&fns[k].generics);
+                            let own = all_tyvars(&fns[k]);
                             let mut g: taddr = 0;
                             while g < own.len() {
                                 tyvars.push(own[g].to_string());
@@ -3357,7 +4007,7 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                                 name: full,
                                 tyvars: tyvars,
                                 from_self: outer.len() as taddr,
-                                params: written_params(&fns[k].params),
+                                params: written_params(&fns[k]),
                                 ret: name_head(&fns[k].ret),
                             });
                         }
@@ -3421,7 +4071,7 @@ fn self_parameters(gs: &Vec<ast::Generic>, ty: &ast::Ty) -> Vec<String> {
 /// types, with a body to read again under a key, and with at least one
 /// parameter to read it under — its own, or the receiver's.
 fn is_family(f: &ast::Fn, outer: taddr) -> bool {
-    if f.generics.len() + outer == 0 {
+    if all_tyvars(f).len() + outer == 0 {
         return false;
     }
     let mut g: taddr = 0;
@@ -3441,17 +4091,18 @@ fn is_family(f: &ast::Fn, outer: taddr) -> bool {
 /// The written head of each parameter's type, `,`-joined — without the
 /// receiver, which is not something a call writes and so is not something
 /// a call can infer from.
-fn written_params(params: &Vec<ast::Param>) -> String {
+fn written_params(f: &ast::Fn) -> String {
     let mut all: String = Vec::new();
     let mut k: taddr = 0;
     let mut first = true;
-    while k < params.len() {
-        if !params[k].name.same("self") {
+    while k < f.params.len() {
+        if !f.params[k].name.same("self") {
             if !first {
                 all.push(',');
             }
             first = false;
-            let each = name_head(&params[k].ty);
+            let held = param_written(f, k);
+            let each = name_head(&held);
             all.push_str(&each);
         }
         k += 1;
@@ -3467,6 +4118,58 @@ fn name_head(t: &ast::Ty) -> String {
         ast::Ty::Name(segments) => joined(segments),
         _ => "".to_string(),
     }
+}
+
+/// The type a parameter has once an anonymous one has a name.
+///
+/// `impl Fn(A) -> R` in argument position is a type parameter that was not
+/// written (Ch. 4 §2.2, §4.1): naming it is the whole of the desugaring,
+/// and it is what lets a closure argument monomorphize like any other.
+fn param_written(f: &ast::Fn, at: taddr) -> ast::Ty {
+    let mut n: taddr = 0;
+    let mut i: taddr = 0;
+    while i < f.params.len() {
+        let anonymous = match &f.params[i].ty {
+            ast::Ty::ImplFn(kind, args, ret) => true,
+            _ => false,
+        };
+        if i == at {
+            if anonymous {
+                let mut name: String = Vec::new();
+                name.push_str("#F");
+                push_int(&mut name, n as t27);
+                return ast::Ty::Name(one_name(&name));
+            }
+            return ast::copy_ty(&f.params[i].ty);
+        }
+        if anonymous {
+            n += 1;
+        }
+        i += 1;
+    }
+    ast::Ty::Unit
+}
+
+/// The names of the parameters a function is read under: the ones it wrote,
+/// and then one per `impl Fn` it takes.
+pub fn all_tyvars(f: &ast::Fn) -> Vec<String> {
+    let mut out = generic_names(&f.generics);
+    let mut n: taddr = 0;
+    let mut i: taddr = 0;
+    while i < f.params.len() {
+        match &f.params[i].ty {
+            ast::Ty::ImplFn(kind, args, ret) => {
+                let mut name: String = Vec::new();
+                name.push_str("#F");
+                push_int(&mut name, n as t27);
+                out.push(name);
+                n += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
 }
 
 /// The names a function's generic parameters were written with, in
@@ -3618,6 +4321,60 @@ fn generic_call(
     Value { text: name, ty: ret }
 }
 
+/// A call to a closure: what it calls is the `call` of whatever type the
+/// closure turned out to be, and the closure itself is its first argument
+/// (Ch. 4 §4.2).
+fn closure_call(e: &mut Emit, at: taddr, args: &Vec<ast::Expr>) -> Value {
+    let owner = e.locals[at].ty.to_string();
+    let slot = e.locals[at].slot.to_string();
+    let mut full: String = Vec::new();
+    full.push_str(&owner);
+    full.push_str(".call");
+    let none: Vec<String> = Vec::new();
+    let fam = family_at(e, &full);
+    if fam >= 0 {
+        return generic_call(e, fam, &full, &slot, &none, args);
+    }
+    let big = returned_aggregate(e, &full);
+    if big.len() > 0 {
+        return aggregate_call(e, &full, &big, &slot, args);
+    }
+    let mut texts: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < args.len() {
+        let each = param_type(e, &full, i + 1);
+        let v = value(e, &args[i], &each);
+        if e.stuck {
+            return unknown_value();
+        }
+        texts.push(v.text);
+        i += 1;
+    }
+    let ty = call_type(e, &full);
+    if e.stuck {
+        return unknown_value();
+    }
+    let name = fresh(e, "r");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&name);
+    line.push_str(" = call @");
+    line.push_str(&full);
+    line.push_str("(");
+    line.push_str(&slot);
+    let mut k: taddr = 0;
+    while k < texts.len() {
+        line.push_str(", ");
+        line.push_str(&texts[k]);
+        k += 1;
+    }
+    line.push_str(") -> ");
+    let shown = tir_of(&ty);
+    line.push_str(&shown);
+    e.insts.push(line);
+    Value { text: name, ty: ty }
+}
+
 /// A call that answers with an aggregate: the caller makes the storage, the
 /// call is given it as its first argument, and the value *is* that storage
 /// (TIR §3).
@@ -3722,7 +4479,7 @@ fn pending_at(jobs: &Vec<Job>, done: &Vec<String>) -> taddr {
 /// pruning while `bootstrap/program.tr` did was exactly that.
 pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
     let mut out: Vec<Made> = Vec::new();
-    let mut queued: Vec<Job> = Vec::new();
+    let mut work = Work { jobs: Vec::new(), closed: Vec::new() };
     // Ordinary functions first, then the impls, then the instantiations of
     // Ch. 4 §2.5 — a call is what asks for one, so they are known last.
     let mut k: taddr = 0;
@@ -3730,9 +4487,11 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
         match &items[k].what {
             ast::What::Function(f) => {
                 let mut text: String = Vec::new();
+                let mut cx = context(items);
+                cx.closed = copy_closed(&work.closed);
                 if function(
-                    f, context(items), "".to_string(), Vec::new(),
-                    Vec::new(), &mut queued, &mut text)
+                    f, cx, "".to_string(), Vec::new(),
+                    Vec::new(), &mut work, &mut text)
                 {
                     out.push(Made { name: f.name.to_string(), text: text });
                 }
@@ -3765,7 +4524,7 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
                     } else {
                         function(
                             &fns[m], context(items), owner.to_string(),
-                            Vec::new(), Vec::new(), &mut queued, &mut text)
+                            Vec::new(), Vec::new(), &mut work, &mut text)
                     };
                     if made {
                         let mut full: String = Vec::new();
@@ -3801,7 +4560,7 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
                 if k >= 0 {
                     made = function(
                         &tfns[k], context(items), given[g].owner.to_string(),
-                        Vec::new(), Vec::new(), &mut queued, &mut text);
+                        Vec::new(), Vec::new(), &mut work, &mut text);
                 }
             }
             _ => {}
@@ -3812,7 +4571,22 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
         g += 1;
     }
 
-    let extra = instantiations(items, &mut queued);
+    // A closure's body is a function of its own, and it is emitted before
+    // the instantiations because it is what one of them is instantiated
+    // *at* (Ch. 4 §4.1).
+    let mut c: taddr = 0;
+    while c < work.closed.len() {
+        let held = call_of(&work.closed[c]);
+        let mut text: String = Vec::new();
+        let mut cx = context(items);
+        cx.closed = copy_closed(&work.closed);
+        if function(&held, cx, "".to_string(), Vec::new(), Vec::new(), &mut work, &mut text) {
+            out.push(Made { name: held.name.to_string(), text: text });
+        }
+        c += 1;
+    }
+
+    let extra = instantiations(items, &mut work);
     let mut z: taddr = 0;
     while z < extra.len() {
         out.push(Made {
@@ -3833,6 +4607,23 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
             });
         }
         n += 1;
+    }
+    // A call to a function this did not emit is a program this did not
+    // compile. Leaving out what has not been reached is only honest while
+    // nothing *kept* needs it — and a closure whose body was refused is
+    // exactly the case where something did (Ch. 4 §4.1).
+    let mut i: taddr = 0;
+    while i < kept.len() {
+        let calls = callees(&kept[i].text);
+        let mut c: taddr = 0;
+        while c < calls.len() {
+            if made_at(&kept, &calls[c]) < 0 {
+                let none: Vec<Made> = Vec::new();
+                return none;
+            }
+            c += 1;
+        }
+        i += 1;
     }
     kept
 }
@@ -3935,16 +4726,16 @@ pub fn callees(text: &str) -> Vec<String> {
 ///
 /// It runs after the ordinary functions and the impls, because that is when
 /// what a program asks for is known — a call is the only thing that asks.
-pub fn instantiations(items: &Vec<ast::Item>, queued: &mut Vec<Job>) -> Vec<Made> {
+pub fn instantiations(items: &Vec<ast::Item>, work: &mut Work) -> Vec<Made> {
     let mut made: Vec<Made> = Vec::new();
     let mut done: Vec<String> = Vec::new();
     loop {
-        let at = pending_at(queued, &done);
+        let at = pending_at(&work.jobs, &done);
         if at < 0 {
             return made;
         }
-        let name = queued[at].name.to_string();
-        let key = ast::copy_names(&queued[at].key);
+        let name = work.jobs[at].name.to_string();
+        let key = ast::copy_names(&work.jobs[at].key);
         let full = mangled(&name, &key);
         done.push(full.to_string());
         let mut text: String = Vec::new();
@@ -3953,10 +4744,12 @@ pub fn instantiations(items: &Vec<ast::Item>, queued: &mut Vec<Job>) -> Vec<Made
         while i < items.len() {
             match &items[i].what {
                 ast::What::Function(f) => {
-                    if !ok && f.name.same(&name) && f.generics.len() > 0 {
+                    if !ok && f.name.same(&name) && is_family(f, 0) {
+                        let mut cx = context(items);
+                        cx.closed = copy_closed(&work.closed);
                         ok = function(
-                            f, context(items), "".to_string(), Vec::new(),
-                            ast::copy_names(&key), queued, &mut text);
+                            f, cx, "".to_string(), Vec::new(),
+                            ast::copy_names(&key), work, &mut text);
                     }
                 }
                 ast::What::Impl(gs, tr, ty, fns) => {
@@ -3973,10 +4766,12 @@ pub fn instantiations(items: &Vec<ast::Item>, queued: &mut Vec<Job>) -> Vec<Made
                         m.push_str(".");
                         m.push_str(&fns[k].name);
                         if !ok && m.same(&name) && is_family(&fns[k], outer.len()) {
+                            let mut cx = context(items);
+                            cx.closed = copy_closed(&work.closed);
                             ok = function(
-                                &fns[k], context(items), owner.to_string(),
+                                &fns[k], cx, owner.to_string(),
                                 ast::copy_names(&outer), ast::copy_names(&key),
-                                queued, &mut text);
+                                work, &mut text);
                         }
                         k += 1;
                     }

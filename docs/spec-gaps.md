@@ -2621,6 +2621,30 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.71 — a closure is three things, and a program with a dangling call is
+not a program.** The Trust lowering emits a closure now, as far as one that
+captures nothing goes, and what it emits is three things from one
+expression: a **type**, whose fields hold the addresses of what it captured;
+a **function**, `<name>.call`, taking that type by reference and then what
+was written; and a **type argument**, because `impl Fn(A) -> R` in argument
+position is a type parameter nobody wrote (Ch. 4 §2.2) — so `apply` is one
+function per closure passed to it, by the monomorphization that was already
+there. Naming the anonymous parameter is the whole of that desugaring.
+
+A closure that *captures* is refused: reading a capture is `*self.k`, a
+dereference of a reference **value**, and that is the one expression this
+lowering has never had. Its `Value` carries a type name and `ptr` is not a
+name that says what it points at.
+
+That refusal found something worse than itself. `main` lowered fine and its
+closure's `.call` did not, so what came out was a `main` calling a name
+nothing defined — the "leave out what you have not reached" rule failing in
+the one way it can, which is when something *kept* needs what was left out.
+A module whose kept functions call a function it did not emit is not a
+module this emits, and that is checked now rather than assumed. It is the
+same shape as G9.55 and the rest, one level up: the rule was about
+functions, and nothing had checked it about the *module*.
+
 **G9.70 — three copies of "copy a type", and what merging them found.**
 `copy_ty` was written out in `lower.tr` and in `types.tr`, and each grew a
 `copy_names`, a `copy_tys` and a `copy_impl_fn` beside it. Closures needed a

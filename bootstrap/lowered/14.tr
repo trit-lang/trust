@@ -1,0 +1,26 @@
+// A closure with no captures (Ch. 4 §4.1).
+//
+// It is three things at once and the shape is worth reading whole: a
+// **type**, whose fields are the addresses of what it captured — none here,
+// so a type with no fields, which is still a tryte because storage always
+// has an address; a **function**, `<name>.call`, taking that type by
+// reference and then what was written; and a **type argument**, because
+// `impl Fn(A) -> R` in argument position is a type parameter nobody wrote
+// (§2.2), so `apply` is one function per closure passed to it.
+//
+// The name is `main.closure1` — which closure of which function, and
+// nothing about how either was numbered (G9.67).
+//
+// A closure that *captures* is not here: reading a capture is a dereference
+// of a reference value, and that is the one expression this lowering has
+// never had. Such a closure is refused, and because a refused `.call` would
+// leave `main` calling a name nothing defines, the whole module is refused
+// with it.
+
+fn apply(g: impl Fn(t27) -> t27, x: t27) -> t27 { g(x) }
+
+fn twice(g: impl Fn(t27) -> t27, x: t27) -> t27 { apply(g, x) }
+
+fn main() -> t27 {
+    apply(|x: t27| x + 1, 2)
+}
