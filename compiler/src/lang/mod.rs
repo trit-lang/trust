@@ -1025,6 +1025,67 @@ fn merged(user: &ast::File, at: lex::File) -> ast::File {
     file
 }
 
+/// Replace the program's `main` with one that runs its tests.
+///
+/// The names are the *resolved* ones, so a test in a module is called by its
+/// path and shown by it — `calc.adds_up` is what the source wrote as
+/// `calc::adds_up`.
+fn enter_at_tests(file: &mut ast::File) {
+    let none = Span::NONE;
+    let named: Vec<String> = file
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            ast::Item::Fn(f) if f.test => Some(f.name.clone()),
+            _ => None,
+        })
+        .collect();
+
+    let text = |s: &str| ast::Expr::Str(s.chars().map(|c| c as i128).collect(), none);
+    let call = |name: &str, args: Vec<ast::Expr>| {
+        ast::Expr::Call(name.to_string(), none, Vec::new(), args, none)
+    };
+
+    let mut stmts: Vec<ast::Stmt> = Vec::new();
+    for n in &named {
+        // The name first, then the test: a test that traps says which one it
+        // was by the line that has no `ok` after it.
+        stmts.push(ast::Stmt::Expr(call(
+            "print",
+            vec![text(&format!("test {n} ... "))],
+        )));
+        stmts.push(ast::Stmt::Expr(call(n, Vec::new())));
+        stmts.push(ast::Stmt::Expr(call("println", vec![text("ok")])));
+    }
+    stmts.push(ast::Stmt::Expr(call(
+        "print_int",
+        vec![ast::Expr::Int(
+            trit_core::Bt::from_i128(named.len() as i128),
+            none,
+        )],
+    )));
+    stmts.push(ast::Stmt::Expr(call("println", vec![text(" passed")])));
+
+    file.items
+        .retain(|i| !matches!(i, ast::Item::Fn(f) if f.name == "main"));
+    file.items.push(ast::Item::Fn(ast::FnItem {
+        name: "main".to_string(),
+        generics: Vec::new(),
+        params: Vec::new(),
+        ret: Some(ast::Ty::Name("t27".to_string(), none)),
+        body: Some(ast::Block {
+            stmts,
+            tail: Some(Box::new(ast::Expr::Int(trit_core::Bt::ZERO, none))),
+            span: none,
+        }),
+        requires: Vec::new(),
+        public: false,
+        test: false,
+        name_span: none,
+        span: none,
+    }));
+}
+
 /// What one build produced, and everything wrong with it.
 ///
 /// A program is a tree of files (Ch. 6 §1), so an error names one: `errors`
@@ -1040,15 +1101,27 @@ pub struct Build {
 
 /// Compile a program from its root file, following its `mod` declarations.
 pub fn build(root: &std::path::Path) -> Build {
-    finish(modules::load(root))
+    finish(modules::load(root), false)
 }
 
 /// Compile a program that is one file with nothing under it.
 pub fn build_text(src: &str) -> Build {
-    finish(modules::one(src))
+    finish(modules::one(src), false)
 }
 
-fn finish(program: modules::Program) -> Build {
+/// The same program, entered at its tests instead of at its `main`.
+///
+/// A test is an ordinary function marked `#[test]` (G9.68), and the
+/// program that runs them is an ordinary program: its `main` calls each in
+/// the order they were written and says so as it goes. There is no unwinding
+/// (Ch. 5 §4), so a test that fails **stops the run** — which is why the
+/// name is printed before the test and not after it. The last line without
+/// an `ok` is the one that failed.
+pub fn build_tests(root: &std::path::Path) -> Build {
+    finish(modules::load(root), true)
+}
+
+fn finish(program: modules::Program, tests: bool) -> Build {
     // A file that does not parse is not resolved: what resolution would say
     // about the part that parsed is mostly about the part that did not.
     if !program.errors.is_empty() {
@@ -1083,6 +1156,9 @@ fn finish(program: modules::Program) -> Build {
             module: None,
             errors,
         };
+    }
+    if tests {
+        enter_at_tests(&mut file);
     }
     match lower::lower(&file) {
         Ok(module) => {

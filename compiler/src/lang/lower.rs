@@ -5168,6 +5168,7 @@ impl Fn<'_> {
             .borrow_mut()
             .insert(key.clone(), (vec![ty.clone()], Ty::Unit));
         self.extra_fns.borrow_mut().push(ast::FnItem {
+            test: false,
             public: true,
             requires: Vec::new(),
             name: key,
@@ -9148,6 +9149,7 @@ impl Fn<'_> {
         call_params.extend(ps.clone());
         let call = format!("{name}.call");
         let item = ast::FnItem {
+            test: false,
             public: true,
             requires: Vec::new(),
             name: call.clone(),

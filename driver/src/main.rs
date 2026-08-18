@@ -29,7 +29,11 @@ usage:
     trust bundle <file.tr> [--prelude] the whole module tree as one text,
                                        for a compiler that cannot open files;
                                        with the prelude when asked
-    trust build <file.tr>              the whole program as TIR
+    trust build <file.tr>              compile it and write the image beside
+                                       the root, under `target/`
+    trust test <file.tr>               run every `#[test]` function in it,
+                                       in the order they were written
+    trust tir <file.tr>                the whole program as TIR
     trust modules <file.tr>            each module of it, and its token count
     trust file <file.tr>               every item in it, as a tree
     trust symbols <file.tr>            every name the program defines
@@ -285,9 +289,9 @@ fn main() -> ExitCode {
         }
     }
 
-    // The whole program as TIR: `trustc build` reads one file, and a
+    // The whole program as TIR: `trustc tir` reads one file, and a
     // program is a tree of them (Ch. 6 §1).
-    if cmd == "build" {
+    if cmd == "tir" {
         let build = lang::build(std::path::Path::new(path));
         match &build.module {
             Some(m) if build.errors.is_empty() => {
@@ -401,7 +405,14 @@ fn main() -> ExitCode {
 
     // A program is a tree of files (Ch. 6 §1), and the one named is its
     // root: what else is compiled is what its `mod` declarations say.
-    let build = lang::build(std::path::Path::new(path));
+    //
+    // `test` compiles the same program entered at its tests instead of at
+    // its `main` (G9.68). Everything after this point is the same, which
+    // is the point: a test run is a program run.
+    let build = match cmd.as_str() {
+        "test" => lang::build_tests(std::path::Path::new(path)),
+        _ => lang::build(std::path::Path::new(path)),
+    };
     if !build.errors.is_empty() {
         report(&build);
         return ExitCode::FAILURE;
@@ -424,7 +435,8 @@ fn main() -> ExitCode {
             print!("{asm}");
             ExitCode::SUCCESS
         }
-        "run" => run(&asm, stats),
+        "build" => write_image(&asm, path),
+        "run" | "test" => run(&asm, stats),
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
             ExitCode::SUCCESS
@@ -1243,6 +1255,43 @@ fn assemble_module(module: tir::Module, timed: bool) -> Result<String, ExitCode>
 }
 
 /// Assemble into host memory and execute.
+/// Assemble and write the image, beside the root under `target/`.
+///
+/// No manifest says where: a program is a root file and the files its `mod`
+/// declarations reach (Ch. 6 §1), and `target/` beside the root is the one
+/// convention this needs. The image is text (`vm/src/image.rs` says why),
+/// so what is written is readable and diffable like everything else here.
+fn write_image(asm: &str, root: &str) -> ExitCode {
+    let image = match tritium::assemble(asm) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("trust: assembly failed: {e:?}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let root = std::path::Path::new(root);
+    let stem = root.file_stem().unwrap_or_default().to_string_lossy();
+    let dir = root
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("target");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("trust: cannot make `{}`: {e}", dir.display());
+        return ExitCode::FAILURE;
+    }
+    let out = dir.join(format!("{stem}.img"));
+    match std::fs::write(&out, tritium::image::render(&image)) {
+        Ok(()) => {
+            println!("{} ({} trytes)", out.display(), image.len());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("trust: cannot write `{}`: {e}", out.display());
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn run(asm: &str, stats: bool) -> ExitCode {
     let image = match tritium::assemble(asm) {
         Ok(i) => i,

@@ -411,6 +411,10 @@ pub struct FnItem {
     pub requires: Vec<Expr>,
     /// Whether it is visible outside the module defining it (Ch. 6 §2).
     pub public: bool,
+    /// Whether `#[test]` was written on it: a function `trust test` calls
+    /// and nothing else does. No chapter defines it — it is a *tool*
+    /// convention, like the image format (docs/spec-gaps.md G9.68).
+    pub test: bool,
     /// Where its name was written, which is where a reader means
     /// when they point at the item.
     pub name_span: Span,

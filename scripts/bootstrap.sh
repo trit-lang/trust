@@ -273,7 +273,7 @@ done
 # arithmetic of Ch. 1, calls, `return` and a tail.
 g=0
 for f in bootstrap/lowered/*.tr; do
-    rust=$("$trustc" build "$f")
+    rust=$("$trustc" tir "$f")
     mine=$("$trust" run bootstrap/build.tr < "$f")
     if [ "$rust" != "$mine" ]; then
         echo "bootstrap: the two lower $f differently" >&2
@@ -294,7 +294,7 @@ for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
     # The one that uses the library is handed the library, which is what
     # `--prelude` is for (Ch. 6 §3.3) — and asking for it where there is
     # none costs nothing, since a prelude nothing names is pruned away.
-    rust=$("$trust" build "$root")
+    rust=$("$trust" tir "$root")
     mine=$("$trust" bundle "$root" --prelude | "$trust" run bootstrap/program.tr)
     if [ "$rust" != "$mine" ]; then
         echo "bootstrap: the two lower the program at $root differently" >&2

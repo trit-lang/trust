@@ -1,4 +1,4 @@
-// The TIR a program lowers to, printed as `trustc build` prints it.
+// The TIR a program lowers to, printed as `trustc tir` prints it.
 //
 //     trust run bootstrap/build.tr < file.tr
 //

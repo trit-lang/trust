@@ -60,7 +60,7 @@ the ternary one has no use for.
 ## Building
 
 ```
-cargo test          # 568 tests
+cargo test          # 587 tests
 cargo build
 ```
 
@@ -78,7 +78,7 @@ trustc run <file.tir> [@fn] [args…]        interpret a TIR function
 trustc legalize <file.tir> [file.target]   legalize for a target (TIR §6)
 trustc target <file.target>                parse and check a target description
 
-trustc build <file.tr>                     compile Trust source to TIR
+trustc tir <file.tr>                       compile Trust source to TIR
 trustc compile <file.tr|.tir> [@fn]        the whole way to TRISC-27 assembly
 
 tritium asm <file.t27> [-o <image>]        assemble source into an image
@@ -86,6 +86,32 @@ tritium run <image> [--mem N]              run a TRISC-27 image
 tritium dump <image>                       disassemble an image
 tritium profile <image>                    run it and report what ran
 ```
+
+## Using `trust`
+
+One command for the question asked most often — *what does this program
+print* — and the two a project wants around it.
+
+```
+trust run <file.tr> [--stats]              compile, link, execute
+trust build <file.tr>                      write the image to target/
+trust test <file.tr>                       run every `#[test]` in it
+trust check <file.tr>                      what is wrong with it, and stop
+```
+
+There is **no manifest**. A program is a root file and the files its `mod`
+declarations reach (Ch. 6 §1), which is already a complete description of
+one; `src/main.tr` is a convention and `target/` beside the root is where
+`build` writes. A test is a function marked `#[test]`, and because the
+machine has no unwinding (Ch. 5 §4) a failing one stops the run — so the
+name is printed before the test, and the last line with no `ok` after it is
+the one that failed.
+
+`trust --help` lists the rest, which is one command per pass: `lex`, `ast`,
+`file`, `symbols`, `uses`, `flat`, `layout`, `types`, `agree`, `tir`,
+`bundle`, `modules`. They exist so that a second implementation of each pass
+can be asked the same question and held to the same answer —
+`scripts/bootstrap.sh` is that comparison, and `docs/ddc.md` is why.
 
 The whole pipeline runs, from Trust source to the machine:
 

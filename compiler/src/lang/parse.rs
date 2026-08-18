@@ -307,11 +307,32 @@ impl Parser {
         // defines exactly one, `repr`, taking `lang` or `linear`.
         let mut repr = Repr::Lang;
         let mut derives: Vec<String> = Vec::new();
+        let mut is_test = false;
         while self.at_op("#") {
             let span = self.span();
             self.bump();
             self.expect_op("[")?;
             let name = self.expect_ident()?;
+            // An attribute with nothing in its parentheses has none: `test`
+            // says only that the item is one. It is the first attribute here
+            // that no chapter defines (G9.68).
+            if !self.at_op("(") {
+                match name.as_str() {
+                    "test" => is_test = true,
+                    other => {
+                        return Err(SyntaxError {
+                            span,
+                            message: format!(
+                                "`{other}` is not an attribute; draft 0.1 defines `repr` \
+                                 (Ch. 2 §1), `derive` (Ch. 4 §6), and `test`, which is a
+                                 tool convention and not a chapter's"
+                            ),
+                        });
+                    }
+                }
+                self.expect_op("]")?;
+                continue;
+            }
             self.expect_op("(")?;
             match name.as_str() {
                 "repr" => {
@@ -351,8 +372,9 @@ impl Parser {
                     return Err(SyntaxError {
                         span,
                         message: format!(
-                            "`{other}` is not an attribute; draft 0.1 defines `repr` (Ch. 2 §1) \
-                             and `derive` (Ch. 4 §6)"
+                            "`{other}` is not an attribute; draft 0.1 defines `repr` (Ch. 2 §1), \
+                             `derive` (Ch. 4 §6), and `test`, which is a tool convention \
+                             and not a chapter's"
                         ),
                     });
                 }
@@ -382,7 +404,9 @@ impl Parser {
             return Ok(Item::Alias(self.alias_item(public)?));
         }
         if self.at_kw("fn") {
-            return Ok(Item::Fn(self.fn_item(public)?));
+            let mut f = self.fn_item(public)?;
+            f.test = is_test;
+            return Ok(Item::Fn(f));
         }
         if self.at_kw("const") {
             return Ok(Item::Const(self.const_item(public)?));
@@ -1193,6 +1217,7 @@ impl Parser {
             Some(self.block()?)
         };
         Ok(FnItem {
+            test: false,
             public,
             name,
             name_span,

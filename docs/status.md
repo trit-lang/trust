@@ -80,7 +80,7 @@ the ISA and the assembly spec were written during implementation.
 ```
 
 ```sh
-trustc build   <f.tr>                 # parse, check, lower, print TIR
+trustc tir     <f.tr>                 # parse, check, lower, print TIR
 trustc compile <f.tr> @main           # the whole way to assembly
 trustc check   <f.tir>                # parse and verify a TIR module
 trustc run     <f.tir> @fn [args…]    # interpret a TIR function

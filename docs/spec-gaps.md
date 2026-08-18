@@ -2592,6 +2592,35 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.68 — a toolchain, and the three conventions it needed that no chapter
+gives.** `trust` could compile a file and run it, and could not build a
+project or run a test — which is the difference between a compiler and a
+toolchain, and it is `cargo`'s difference from `rustc`. Three decisions had
+to be made and none of them is in `spec/`:
+
+*What a project is.* **Nothing.** A program is a root file and the files its
+`mod` declarations reach (Ch. 6 §1), and that is already a complete
+description — a manifest would add a second one. `src/main.tr` is a
+convention and not a rule, and `trust build` writes its image to `target/`
+beside the root because something has to say where and that is the smallest
+thing that can.
+
+*What a test is.* A function marked **`#[test]`**, which is the first
+attribute this implementation reads that no chapter defines — `repr` is
+Ch. 2 §1's and `derive` is Ch. 4 §6's. It takes no arguments, which the
+attribute grammar had to learn: every attribute until now had parentheses.
+
+*What running them means.* There is no unwinding (Ch. 5 §4), so a failing
+test **stops the whole run** — it cannot be caught, counted and moved past.
+So the name is printed *before* the test rather than after it, and the last
+line with no `ok` after it is the one that failed. That is not a limitation
+to work around; it is what the abstract machine says a failure is, and a
+runner that pretended otherwise would be lying about the language.
+
+The rename that made room: `trust build` and `trustc build` printed TIR,
+which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
+`trustc tir` now, and `build` means what everyone means by it.
+
 **G9.67 — a closure's type was named after a counter nobody else can
 count.** `format!("{}.closure{}", self.name, self.counter)` — and
 `self.counter` is how many SSA values the *enclosing* function had made by
@@ -2788,7 +2817,7 @@ an aggregate parameter is copied in on entry.
 
 *`bootstrap/build.tr` did not prune and `bootstrap/program.tr` did.* A
 function nothing calls is a function the program does not contain, and
-`trustc build` cuts a *file* down to what `main` reaches exactly as it cuts
+`trustc tir` cuts a *file* down to what `main` reaches exactly as it cuts
 a program down. One driver had that and the other did not, so any corpus
 file with a `main` and an unreachable function would have disagreed —
 `bootstrap/lowered/01.tr` and `10.tr` both have a `main` and were saved

@@ -2,7 +2,7 @@
 //
 // The first slice of the compiler's *back* half, and the one that makes
 // `stage1` exist (docs/ddc.md §4). It answers with the same canonical text
-// `trustc build` prints — names included, `%v.3` and `%a.5` as much as the
+// `trustc tir` prints — names included, `%v.3` and `%a.5` as much as the
 // instructions, because equality is on the text and a comparison that
 // normalized the names away could not see two implementations emitting
 // different code.

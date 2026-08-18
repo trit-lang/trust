@@ -134,7 +134,7 @@ is the compiler's real output; the assembly and the image are downstream of
 it and are compared by the pipeline tests already. So the DDC comparison is:
 
 ```
-stage1.tir = trustc build bootstrap/main.tr        # cP(sA)
+stage1.tir = trustc tir bootstrap/main.tr          # cP(sA)
 stage2.tir = stage1 build bootstrap/main.tr        # stage1(sA)
 ```
 
@@ -179,14 +179,14 @@ Each step is checkable on its own, and none of them is only for DDC.
    *Begun: `trust types` and `trust agree` are both compared, the second by
    rule rather than by wording or position, since `bootstrap/`'s tree
    carries no spans.*
-3. **Lower to TIR** in Trust, compared against `trustc build` the way every
+3. **Lower to TIR** in Trust, compared against `trustc tir` the way every
    other pass is compared: same input, same module, character for character.
    This is the step that makes `stage1` exist.
 
    What that comparison is, exactly, now that the rest is in place:
 
    ```
-   $ trustc build tiny.tr
+   $ trustc tir tiny.tr
    tir 0.1 target "tritium"
 
    fn @add(%a: t27, %b: t27) -> t27 {
@@ -217,7 +217,7 @@ Each step is checkable on its own, and none of them is only for DDC.
    *Begun.* `bootstrap/lower.tr` emits parameters, a `let` of a scalar,
    Ch. 1's arithmetic, all six comparisons and `<=>`, calls, `return`, a
    tail, `if`/`else` and `while` — and `scripts/bootstrap.sh` compares it
-   against `trustc build` character for character, names included. A function
+   against `trustc tir` character for character, names included. A function
    it does not lower yet is left out rather than lowered wrongly, which is
    what keeps the comparison honest while the slice is still small.
 

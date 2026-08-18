@@ -19,10 +19,10 @@ trustc=target/release/trustc
 
 n=0
 for f in examples/trust/*.tr; do
-    for what in build asm; do
+    for what in tir asm; do
         case "$what" in
-            build) a=$("$trustc" build "$f") ; b=$("$trustc" build "$f") ;;
-            asm)   a=$("$trust" asm "$f")    ; b=$("$trust" asm "$f")    ;;
+            tir) a=$("$trustc" tir "$f") ; b=$("$trustc" tir "$f") ;;
+            asm) a=$("$trust" asm "$f")  ; b=$("$trust" asm "$f")  ;;
         esac
         if [ "$a" != "$b" ]; then
             echo "reproducible: $what of $f differs between two runs" >&2

@@ -12,7 +12,7 @@ usage:
     trustc fmt <file.tir>                      print a module in canonical form
     trustc run <file.tir> [@fn] [args…]        interpret a TIR function
     trustc legalize <file.tir> [file.target]   legalize for a target (TIR §6)
-    trustc build <file.tr>                     compile Trust source to TIR
+    trustc tir <file.tr>                       compile Trust source to TIR
     trustc compile <file.tr|.tir> [@fn]        the whole way to TRISC-27 assembly
     trustc target <file.target>                parse and check a target description
 
@@ -33,7 +33,7 @@ fn main() -> ExitCode {
         "fmt" => cmd_fmt(rest),
         "run" => cmd_run(rest),
         "legalize" => cmd_legalize(rest),
-        "build" => cmd_build(rest),
+        "tir" => cmd_build(rest),
         "compile" => cmd_compile(rest),
         "target" => cmd_target(rest),
         "-h" | "--help" | "help" => {
