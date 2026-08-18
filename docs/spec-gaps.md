@@ -2621,6 +2621,46 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.84 — the switch is made and three tests hold it back: `a[i][j] = x`.**
+The prelude's `Vec` is Trust now — `new`, `push`, `pop`, `index`,
+`index_mut`, `reserve`, `insert`, `remove`, `clear`, the growth policy and
+the destructor — the language item is off, and `Vec::new`/`with_capacity`
+are gone from the compiler. `let mut v: Vec<t27> = Vec::new(); v.push(3)`
+runs, and 595 of 598 tests pass. The work is on a stash, not on master,
+because of the three.
+
+Four things had to move with it, and all four are improvements on their own:
+
+*The coercion to `&[T]` reads fields by name.* It is the one thing about
+`Vec` the compiler still knows, which is what §2.6 asks it to know.
+
+*`unify` learned to read an instantiation.* `Pair<T, U>` against
+`Pair.t27.t9` was "not recoverable from the mangled name" — but what the
+name was *made from* is remembered, so the arguments unify positionally.
+`Vec` had been special-cased for exactly this; now every family gets it.
+
+*`type_of_place` learned that `v[i]` is a place for a type indexed by its
+own method*, without which `v[i].len()` read the element instead of
+borrowing it — G9.31 again, in the new spelling.
+
+*And `Raw::read` copies an aggregate out.* It answered with the position's
+*address*, so `remove`'s shift overwrote the element it had just taken.
+`read` moves the `T`; what the caller gets has to survive the position being
+written again, one line later.
+
+What is left is one rule the borrow checker does not have. `a[i][j] = x` is
+two nested `index_mut` calls, and the outer one's exclusive loan on
+`a[i]` is live while the inner one is taken — so the checker refuses. The
+same shape refuses `let bucket = &mut self.buckets[b]; bucket.len()`,
+because the loan is recorded against the place the reference came from and
+using the reference re-derives it. Both are **reborrows**: a borrow taken
+through a reference is not a second borrow of what that reference points at.
+The prelude's `HashMap` is the only thing in the library that needs it, and
+it needs it twice.
+
+That is a checker rule and not a workaround, so it is recorded rather than
+guessed at the end of a long day. The stash applies cleanly onto it.
+
 **G9.83 — a family may have a destructor now, and the two names met without
 translation.** Ch. 4 §5.2 on a generic type: one destructor per
 instantiation, named the way every other monomorphized method is (§2.5). A
