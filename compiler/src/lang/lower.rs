@@ -72,6 +72,12 @@ pub enum Ty {
     /// `Box<T>` — one `T` on the heap, owned (Ch. 5 §2.3). One word, never
     /// null, and dropped by dropping the `T` and then freeing.
     Boxed(Box<Ty>),
+    /// `Raw<T>` — room for some number of `T`, owned (Ch. 5 §2.7). Two
+    /// words: the allocation and how many positions it has. It knows
+    /// nothing about what is *in* them, so it drops by freeing and dropping
+    /// nothing — whatever knows which positions hold a `T` drops those
+    /// first, which is what `Vec`'s own destructor is for.
+    RawOf(Box<Ty>),
     /// `Vec<T>` — a growable array (Ch. 5 §2.6). Three words: the
     /// allocation, the number of elements in it, and how many it has room
     /// for. A language item for the same reason `Box` is, and one more: the
@@ -98,6 +104,7 @@ impl std::fmt::Display for Ty {
             Ty::TAddr => f.write_str("taddr"),
             Ty::Char => f.write_str("char"),
             Ty::Boxed(t) => write!(f, "Box<{t}>"),
+            Ty::RawOf(t) => write!(f, "Raw<{t}>"),
             Ty::VecOf(t) => write!(f, "Vec<{t}>"),
             Ty::Unit => f.write_str("()"),
             Ty::Dyn(t) => write!(f, "dyn {t}"),
@@ -140,6 +147,7 @@ impl Ty {
             | Ty::Struct(_)
             | Ty::Enum(_)
             | Ty::Ref(..)
+            | Ty::RawOf(_)
             | Ty::VecOf(_)
             | Ty::Slice(_) => Type::Ptr,
         }
@@ -214,6 +222,13 @@ impl Ty {
             // three words, in that order (Ch. 5 §2.6). The pointer is *not* a
             // `Box` here: an empty `Vec` has no allocation, so 0 is a value
             // it takes and not a niche it offers.
+            // `Raw` is the allocation and how many positions it has — two
+            // words, and the pointer is not a `Box` for the same reason
+            // (Ch. 5 §2.7): a `Raw` with no room has no allocation.
+            Ty::RawOf(_) => layout::Ty::Tuple(vec![
+                layout::Ty::Int(layout::IntTy::TAddr),
+                layout::Ty::Int(layout::IntTy::TAddr),
+            ]),
             Ty::VecOf(_) => layout::Ty::Tuple(vec![
                 layout::Ty::Int(layout::IntTy::TAddr),
                 layout::Ty::Int(layout::IntTy::TAddr),
@@ -1767,6 +1782,11 @@ pub const BUILTIN_METHODS: &[(&str, &str, &str)] = &[
         "checked_mul",
         "fn checked_mul(self, other: Self) -> Option<Self>",
     ),
+    // Ch. 5 §2.7: room that is not yet a `T`, which is the one thing the
+    // collections need and the language cannot say.
+    ("Raw", "room", "fn room(&self) -> taddr"),
+    ("Raw", "read", "fn read(&self, at: taddr) -> T"),
+    ("Raw", "write", "fn write(&mut self, at: taddr, value: T)"),
     // Ch. 5 §2: the growable array, whose storage is the compiler's.
     ("Vec", "len", "fn len(&self) -> taddr"),
     ("Vec", "is_empty", "fn is_empty(&self) -> bool"),
@@ -1795,6 +1815,7 @@ pub fn builtin_kind(ty: &str) -> Option<&'static str> {
         "trit" | "t9" | "t27" | "taddr" => Some("int"),
         "bool" => Some("bool"),
         "Vec" => Some("Vec"),
+        "Raw" => Some("Raw"),
         "str" => Some("str"),
         _ if ty.starts_with('[') => Some("slice"),
         _ => None,
@@ -3768,6 +3789,16 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
                 };
                 check_sized(inner, *span, "a `Box`'s contents")?;
                 return Ok(Ty::Boxed(Box::new(inner.clone())));
+            }
+            // `Raw<T>` is room for some number of `T`, and the smallest
+            // thing the compiler has to provide for the collections to be
+            // library code (Ch. 5 §2.7).
+            if name == "Raw" {
+                let [inner] = &args[..] else {
+                    return err(*span, "`Raw` takes one type argument");
+                };
+                check_sized(inner, *span, "a `Raw`'s positions")?;
+                return Ok(Ty::RawOf(Box::new(inner.clone())));
             }
             if name == "Vec" {
                 let [inner] = &args[..] else {
