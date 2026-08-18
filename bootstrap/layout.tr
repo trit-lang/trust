@@ -168,10 +168,13 @@ fn ranged(size: taddr, lo: t27, hi: t27) -> Layout {
 }
 
 /// Whether a type's size is not in the type: a slice and a `str` are runs
-/// whose length is not written, so a reference to one carries it (Ch. 2 §4).
+/// whose length is not written, and a trait object's type is not known at
+/// all — so a reference to one carries what is missing beside the address
+/// (Ch. 2 §4, Ch. 4 §3.1).
 fn unsized_(t: &Ty) -> bool {
     match t {
         Ty::Slice(inner) => true,
+        Ty::Dyn(name) => true,
         Ty::Name(segments) => segments[segments.len() - 1].same("str"),
         _ => false,
     }
@@ -208,6 +211,7 @@ pub fn of(defs: &Vec<Def>, t: &Ty, depth: taddr) -> Result<Layout, String> {
         }
         Ty::Tuple(args) => Result::Err("a tuple is not laid out here".to_string()),
         Ty::Array(held, len) => Result::Err("an array is not laid out here".to_string()),
+        Ty::Dyn(name) => Result::Err("a trait object has no size of its own".to_string()),
         Ty::Slice(inner) => Result::Err("a slice has no size of its own".to_string()),
         Ty::App(segments, args) => {
             let head = segments[segments.len() - 1].to_string();

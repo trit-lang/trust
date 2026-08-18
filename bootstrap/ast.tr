@@ -114,6 +114,10 @@ pub enum Ty {
     /// (Ch. 2 §3). `()` is not one of these: it is `Unit`, because a
     /// product of nothing is a value and not a shape.
     Tuple(Vec<Ty>),
+    /// `dyn Area` — a trait object: what is written where the type is not
+    /// known until it runs, and is carried as an address and a table of
+    /// its methods (Ch. 4 §3.1).
+    Dyn(String),
     /// `[T; N]` — an array. The length is kept as it was **written**,
     /// because a `const` parameter may be what says it and a number would
     /// not be able to say `N` (Ch. 2 §4).
@@ -652,6 +656,10 @@ pub fn show_ty(t: &Ty, out: &mut String) {
         }
         Ty::Unit => out.push_str("()"),
         Ty::SelfTy => out.push_str("Self"),
+        Ty::Dyn(name) => {
+            out.push_str("dyn ");
+            out.push_str(name);
+        }
         Ty::Array(held, len) => {
             out.push_str("[");
             show_ty(&*held, out);
@@ -1301,6 +1309,7 @@ pub fn copy_ty(t: &Ty) -> Ty {
         Ty::SelfTy => Ty::SelfTy,
         Ty::Tuple(args) => Ty::Tuple(copy_tys(args)),
         Ty::Array(held, len) => Ty::Array(Box::new(copy_ty(&*held)), len.to_string()),
+        Ty::Dyn(name) => Ty::Dyn(name.to_string()),
         Ty::ImplFn(kind, args, ret) => {
             let mut answer: Option<Box<Ty>> = Option::None;
             match ret {

@@ -1111,6 +1111,12 @@ fn type_name(p: &mut Parser) -> Result<ast::Ty, lex::Error> {
                 }
                 return Result::Ok(ast::Ty::Name(segments));
             }
+            // `dyn Area` — a trait object (Ch. 4 §3.1).
+            if k.same("dyn") {
+                p.at = next;
+                let held = ident(p)?;
+                return Result::Ok(ast::Ty::Dyn(held));
+            }
             // `impl Fn(A) -> R` — a parameter that takes anything callable
             // that way (Ch. 4 §4.1). Only the three callable traits are
             // read: an `impl Trait` of any other kind is a type this does

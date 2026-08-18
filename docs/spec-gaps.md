@@ -2621,6 +2621,26 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.74 — a trait object is read and measured, and a sixth thing printed
+as debug output.** `&dyn Area` parses on both sides now and lays out the
+same: two words, because a reference to something whose type is not known
+until it runs carries the table of its methods beside the address
+(Ch. 4 §3.1) — the same rule as `&str` and `&[T]`, for the same reason and
+in the same place.
+
+Getting there needed a sixth case added to `driver`'s tree printer, which
+had been rendering `dyn` as `Dyn("Area", Span { … })`. That is the fifth
+round in which the *comparison* was the thing that was broken rather than
+the Trust side, and the count is now: `impl Fn`, `(m.f)(x)`, `(A, B)`,
+`[T; N]`, a closure, and a trait object. All six had no case; all six
+reached `other =>`; all six printed spans a second implementation does not
+have.
+
+What is left is what a trait object *does*: a vtable as a global, the
+coercion that builds the fat pointer, and the indirect call through it. The
+first of those is a kind of output this emitter has never produced — every
+line it has written so far has been a function.
+
 **G9.73 — `Vec` is the compiler's code and not the language's, and it
 should not be.** `Vec::push`, `pop`, `len` and the rest are **compiler
 intrinsics**: `trustc` expands each into hand-written TIR — a capacity test,

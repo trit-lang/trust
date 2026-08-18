@@ -894,6 +894,10 @@ fn written_ty(t: &lang::ast::Ty) -> String {
             let args: Vec<String> = args.iter().map(written_ty).collect();
             format!("{n}<{}>", args.join(","))
         }
+        // `dyn Area` — a trait object, which is what is written where the
+        // type is not known until it runs (Ch. 4 §3.1). Without this it
+        // fell through to the debug form (G9.62).
+        Ty::Dyn(name, _) => format!("dyn {name}"),
         // `[T; N]` — an array, whose length is an expression (Ch. 2 §4).
         Ty::Array(elem, len, _) => {
             let mut out = String::new();
