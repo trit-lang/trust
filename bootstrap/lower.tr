@@ -297,6 +297,85 @@ pub fn referent_name(name: &str) -> String {
     "".to_string()
 }
 
+/// The name a trait object has here: `dyn.<Trait>`.
+///
+/// A trait object has no size of its own (Ch. 4 §3.1) and a *reference* to
+/// one is two words, which TIR has no name for. So what carries it is a
+/// definition nobody wrote — the data address and the table's — and this is
+/// what that definition is called.
+pub fn dyn_name(trait_name: &str) -> String {
+    let mut out: String = Vec::new();
+    out.push_str("dyn.");
+    out.push_str(trait_name);
+    out
+}
+
+/// The name the shape of a trait's table has: `vtable.<Trait>`, one field
+/// per method under the method's own name — which is what turns `x.twice()`
+/// into an index and the index into an offset (Ch. 4 §3.3).
+pub fn vtable_name(trait_name: &str) -> String {
+    let mut out: String = Vec::new();
+    out.push_str("vtable.");
+    out.push_str(trait_name);
+    out
+}
+
+/// Which trait a `dyn.<Trait>` is of, or nothing for a name that is not one.
+pub fn dyn_trait(name: &str) -> String {
+    let head = "dyn.";
+    if name.len() <= head.len() {
+        return "".to_string();
+    }
+    let mut i: taddr = 0;
+    while i < head.len() {
+        if name[i] != head[i] {
+            return "".to_string();
+        }
+        i += 1;
+    }
+    let mut out: String = Vec::new();
+    let mut k = head.len();
+    while k < name.len() {
+        out.push(name[k]);
+        k += 1;
+    }
+    out
+}
+
+/// The trait a written type is an object of, or nothing for one that is not.
+pub fn dyn_of(t: &ast::Ty) -> String {
+    match t {
+        ast::Ty::Dyn(name) => name.to_string(),
+        _ => "".to_string(),
+    }
+}
+
+/// The trait a written type is a *reference* to an object of, or nothing.
+pub fn dyn_referent(t: &ast::Ty) -> String {
+    match t {
+        ast::Ty::Ref(held, m) => dyn_of(&*held),
+        _ => "".to_string(),
+    }
+}
+
+/// The name a parameter's written type has here.
+///
+/// TIR's for everything it has a name for, and `&dyn.<Trait>` for a
+/// reference to a trait object — which TIR spells with no name at all,
+/// since it is two words and every TIR type of that width is one thing.
+/// It is the same job `&P` does for a plain reference (Ch. 3 §2.1).
+pub fn param_name(t: &ast::Ty) -> String {
+    let object = dyn_referent(t);
+    if object.len() > 0 {
+        let mut out: String = Vec::new();
+        out.push('&');
+        let held = dyn_name(&object);
+        out.push_str(&held);
+        return out;
+    }
+    tir_ty(t)
+}
+
 /// What TIR calls the type of a *field*.
 ///
 /// A field may be a reference, which TIR spells `ptr` — and a reference to
@@ -320,6 +399,10 @@ pub fn field_tir(t: &ast::Ty) -> String {
 fn unsized_ref(t: &ast::Ty) -> bool {
     match t {
         ast::Ty::Slice(inner) => true,
+        // A trait object's type is not known at all, so a reference to one
+        // carries the table beside the address (Ch. 4 §3.1) — which is the
+        // same two words, and the same reason `layout.tr` says so too.
+        ast::Ty::Dyn(name) => true,
         ast::Ty::Name(segments) => {
             let n = joined(segments);
             n.same("str")
@@ -672,6 +755,31 @@ pub fn function(
             e.insts.push(store);
             i += 1;
             continue;
+        }
+        // `&dyn Trait` is not one word but two: the data address and the
+        // table of the type's methods (Ch. 4 §3.1). It arrives as a pointer
+        // to those two words and is copied into storage of its own exactly
+        // as any two-field aggregate is — which is the whole of what the
+        // synthetic `dyn.<Trait>` is a definition for.
+        if ty.same("?") {
+            let held = subst_ty(&mut e, &tyvars, &key, &written_param);
+            let object = dyn_referent(&held);
+            if object.len() > 0 {
+                let named = dyn_name(&object);
+                let at = def_at(&e.defs, &named);
+                if at < 0 {
+                    return false;
+                }
+                header.push_str("%");
+                header.push_str(&name);
+                header.push_str(": ptr");
+                let copied = copy_in(&mut e, &name, at);
+                if !copied {
+                    return false;
+                }
+                i += 1;
+                continue;
+            }
         }
         // A parameter that is a *reference* is an address, and TIR spells
         // every address `ptr` — what the name `&P` is for is the
@@ -2381,6 +2489,15 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 e.stuck = true;
                 return unknown_value();
             }
+            // `&a` where a `&dyn Trait` is wanted is not one address but
+            // two: where the object is, and where the table of its type's
+            // methods is (Ch. 4 §3.2). The borrow is still no instruction —
+            // a slot *is* an address — and what is built is the pair.
+            let object = referent_name(want);
+            let named = dyn_trait(&object);
+            if named.len() > 0 {
+                return coerce(e, at, &object, &named);
+            }
             let mut out: String = Vec::new();
             out.push('&');
             out.push_str(&owner);
@@ -2620,6 +2737,14 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 e.insts.push(line);
                 slot = held;
             }
+            // A method through a trait object is the one call in this
+            // language that is not to a name: the receiver's two words say
+            // where the object is and where its table is, and the table
+            // says which function (Ch. 4 §3.3).
+            let named = dyn_trait(&owner);
+            if named.len() > 0 {
+                return dyn_call(e, &owner, &named, &slot, name, args);
+            }
             let mut full: String = Vec::new();
             full.push_str(&owner);
             full.push_str(".");
@@ -2767,6 +2892,152 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
     }
 }
 
+/// `&Concrete` where a `&dyn Trait` is wanted: the two words of a fat
+/// reference, in a temporary of their own (Ch. 4 §3.2).
+///
+/// The address is the local's slot, which is already what it is. The table
+/// is `@vt.<Type>.<Trait>`, and naming it is the whole of what asks for it:
+/// the tables are read back out of the finished text, in the order they
+/// first appear there.
+fn coerce(e: &mut Emit, at: taddr, object: &str, named: &str) -> Value {
+    let owner = e.locals[at].ty.to_string();
+    let slot = e.locals[at].slot.to_string();
+    // A table holds a type's size and its methods, so a receiver that is
+    // not a type the file defines is not one a table can be built for —
+    // and neither is a trait object, which has already forgotten which.
+    if def_at(&e.defs, &owner) < 0 || dyn_trait(&owner).len() > 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let self_ty = ast::Ty::Name(one_name(object));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return unknown_value();
+        }
+    };
+    let held = fresh(e, "tmp.slot");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&held);
+    line.push_str(" = slot tryte[");
+    push_int(&mut line, l.size as t27);
+    line.push_str("]");
+    e.slots.push(line);
+    store_into(e, "ptr", &slot, &held);
+    let where_ = offset_of(e, &held, l.offsets[1]);
+    let mut table: String = Vec::new();
+    table.push_str("@vt.");
+    table.push_str(&owner);
+    table.push_str(".");
+    table.push_str(named);
+    store_into(e, "ptr", &table, &where_);
+    Value { text: held, ty: object.to_string() }
+}
+
+/// `x.m(a)` where `x` is a trait object: the data address, then the table's,
+/// then the entry at `9 + 3 × index`, and a call to *that* (Ch. 4 §3.3).
+///
+/// Three words come before the methods — the type's size, its alignment and
+/// its destructor — because freeing what a `Box<dyn Trait>` points at needs
+/// them, and a slot added afterwards would move every index.
+fn dyn_call(
+    e: &mut Emit,
+    object: &str,
+    named: &str,
+    slot: &str,
+    name: &str,
+    args: &Vec<ast::Expr>,
+) -> Value {
+    let table = vtable_name(named);
+    let which = def_at(&e.defs, &table);
+    if which < 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    // Which entry it is, asked of the table's *shape* — whose fields are
+    // the trait's methods under their own names, so this is the same
+    // question a field read asks and the same answer.
+    let index = field_at(e, which, name);
+    if index < 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let self_ty = ast::Ty::Name(one_name(object));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return unknown_value();
+        }
+    };
+    let mut full: String = Vec::new();
+    full.push_str(object);
+    full.push_str(".");
+    full.push_str(name);
+    // What a call through a table answers with is what the *trait* said,
+    // and a trait that said something this cannot spell — an aggregate, or
+    // a method with parameters of its own — has said `?` and is refused.
+    let ty = call_type(e, &full);
+    if e.stuck {
+        return unknown_value();
+    }
+    let data = fresh(e, "p");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&data);
+    line.push_str(" = load ptr ");
+    line.push_str(slot);
+    e.insts.push(line);
+    let held = offset_of(e, slot, l.offsets[1]);
+    let vtable = fresh(e, "p");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&vtable);
+    line.push_str(" = load ptr ");
+    line.push_str(&held);
+    e.insts.push(line);
+    let entry = offset_of(e, &vtable, 9 + 3 * index);
+    let what = fresh(e, "p");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&what);
+    line.push_str(" = load ptr ");
+    line.push_str(&entry);
+    e.insts.push(line);
+    let mut texts: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < args.len() {
+        let each = param_type(e, &full, i + 1);
+        let v = value(e, &args[i], &each);
+        if e.stuck {
+            return unknown_value();
+        }
+        texts.push(v.text);
+        i += 1;
+    }
+    let out = fresh(e, "r");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&out);
+    line.push_str(" = call ");
+    line.push_str(&what);
+    line.push_str("(");
+    line.push_str(&data);
+    let mut k: taddr = 0;
+    while k < texts.len() {
+        line.push_str(", ");
+        line.push_str(&texts[k]);
+        k += 1;
+    }
+    line.push_str(") -> ");
+    let shown = tir_of(&ty);
+    line.push_str(&shown);
+    e.insts.push(line);
+    Value { text: out, ty: ty }
+}
+
 /// The nominal types the file defines, as the layout engine reads them.
 ///
 /// A generic type is not among them: it is one type per instantiation
@@ -2781,6 +3052,54 @@ pub fn definitions(items: &Vec<ast::Item>) -> Vec<layout::Def> {
             out.push(copy_def(&fams[i].def));
         }
         i += 1;
+    }
+    // And two nobody wrote, per trait (Ch. 4 §3.1). `dyn.<Trait>` is what a
+    // reference to a trait object *is* — the data address and the table's,
+    // which is the storage a parameter is copied into and any two fields to
+    // everything that reads it. `vtable.<Trait>` is the table's own shape,
+    // one field per method under the method's name, which is the only thing
+    // that says `twice` is the second entry.
+    let mut t: taddr = 0;
+    while t < items.len() {
+        match &items[t].what {
+            ast::What::Trait(n, params, supers, assoc, fns) => {
+                let mut two: Vec<ast::Ty> = Vec::new();
+                let mut named: Vec<String> = Vec::new();
+                let held = ast::Ty::Name(one_name("t27"));
+                two.push(ast::Ty::Ref(Box::new(held), false));
+                named.push("data".to_string());
+                two.push(ast::Ty::Name(one_name("taddr")));
+                named.push("vtable".to_string());
+                out.push(layout::Def {
+                    name: dyn_name(n),
+                    is_enum: false,
+                    linear: false,
+                    fields: two,
+                    field_names: named,
+                    counts: Vec::new(),
+                    discriminants: Vec::new(),
+                });
+                let mut slots: Vec<ast::Ty> = Vec::new();
+                let mut methods: Vec<String> = Vec::new();
+                let mut k: taddr = 0;
+                while k < fns.len() {
+                    slots.push(ast::Ty::Name(one_name("taddr")));
+                    methods.push(fns[k].name.to_string());
+                    k += 1;
+                }
+                out.push(layout::Def {
+                    name: vtable_name(n),
+                    is_enum: false,
+                    linear: false,
+                    fields: slots,
+                    field_names: methods,
+                    counts: Vec::new(),
+                    discriminants: Vec::new(),
+                });
+            }
+            _ => {}
+        }
+        t += 1;
     }
     out
 }
@@ -4112,17 +4431,10 @@ pub fn parameters(items: &Vec<ast::Item>) -> Vec<Sig> {
     while i < items.len() {
         match &items[i].what {
             ast::What::Function(f) => {
-                let mut all: String = Vec::new();
-                let mut k: taddr = 0;
-                while k < f.params.len() {
-                    if k > 0 {
-                        all.push(',');
-                    }
-                    let each = tir_ty(&f.params[k].ty);
-                    all.push_str(&each);
-                    k += 1;
-                }
-                out.push(Sig { name: f.name.to_string(), ret: all });
+                out.push(Sig {
+                    name: f.name.to_string(),
+                    ret: written_types(&f.params),
+                });
             }
             ast::What::Impl(gs, tr, ty, fns) => {
                 let owner = written_head(ty);
@@ -4137,7 +4449,7 @@ pub fn parameters(items: &Vec<ast::Item>) -> Vec<Sig> {
                         let each = if fns[k].params[j].name.same("self") {
                             "ptr".to_string()
                         } else {
-                            tir_ty(&fns[k].params[j].ty)
+                            param_name(&fns[k].params[j].ty)
                         };
                         all.push_str(&each);
                         j += 1;
@@ -4172,6 +4484,29 @@ pub fn parameters(items: &Vec<ast::Item>) -> Vec<Sig> {
         }
         g += 1;
     }
+    // And what a *trait* promises, under the name a trait object has. A
+    // call through a table names no function, and still has to know what
+    // comes back and what goes in (Ch. 4 §3.3).
+    let mut t: taddr = 0;
+    while t < items.len() {
+        match &items[t].what {
+            ast::What::Trait(n, params, supers, assoc, fns) => {
+                let mut k: taddr = 0;
+                while k < fns.len() {
+                    let mut full: String = Vec::new();
+                    let held = dyn_name(n);
+                    full.push_str(&held);
+                    full.push_str(".");
+                    full.push_str(&fns[k].name);
+                    let all = written_types(&fns[k].params);
+                    out.push(Sig { name: full, ret: all });
+                    k += 1;
+                }
+            }
+            _ => {}
+        }
+        t += 1;
+    }
     out
 }
 
@@ -4187,7 +4522,7 @@ fn written_types(params: &Vec<ast::Param>) -> String {
         let each = if params[j].name.same("self") {
             "ptr".to_string()
         } else {
-            tir_ty(&params[j].ty)
+            param_name(&params[j].ty)
         };
         all.push_str(&each);
         j += 1;
@@ -4259,6 +4594,33 @@ pub fn signatures(items: &Vec<ast::Item>) -> Vec<Sig> {
             _ => {}
         }
         g += 1;
+    }
+    // And what a *trait* promises, under the name a trait object has. A
+    // call through a table names no function, and still has to know what
+    // comes back and what goes in (Ch. 4 §3.3).
+    let mut t: taddr = 0;
+    while t < items.len() {
+        match &items[t].what {
+            ast::What::Trait(n, params, supers, assoc, fns) => {
+                let mut k: taddr = 0;
+                while k < fns.len() {
+                    let mut full: String = Vec::new();
+                    let held = dyn_name(n);
+                    full.push_str(&held);
+                    full.push_str(".");
+                    full.push_str(&fns[k].name);
+                    let ret = if fns[k].generics.len() > 0 {
+                        "?".to_string()
+                    } else {
+                        tir_ty(&fns[k].ret)
+                    };
+                    out.push(Sig { name: full, ret: ret });
+                    k += 1;
+                }
+            }
+            _ => {}
+        }
+        t += 1;
     }
     out
 }
@@ -4994,6 +5356,23 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
         z += 1;
     }
 
+    // The tables the coercions asked for. Nothing recorded them while they
+    // were lowered: a coercion writes `@vt.<Type>.<Trait>` and *that* is
+    // the record, so they are read back out of the finished text in the
+    // order they first appear — which is the order they were lowered,
+    // because functions are emitted in source order. TIR prints globals
+    // before functions, so they go to the front (Ch. 4 §3.3).
+    let mut all = tables(items, &out);
+    let mut t: taddr = 0;
+    while t < out.len() {
+        all.push(Made {
+            name: out[t].name.to_string(),
+            text: out[t].text.to_string(),
+        });
+        t += 1;
+    }
+    let out = all;
+
     let live = reachable(&out);
     let mut kept: Vec<Made> = Vec::new();
     let mut n: taddr = 0;
@@ -5024,6 +5403,234 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
         i += 1;
     }
     kept
+}
+
+/// The tables the module needs, in the order they were first named.
+///
+/// A coercion asks for one by writing `@vt.<Type>.<Trait>`, so the finished
+/// functions are the record of which were asked for — and reading it back
+/// is what keeps `Cx` from having to carry a list nothing else wants
+/// (Ch. 4 §3.3).
+fn tables(items: &Vec<ast::Item>, made: &Vec<Made>) -> Vec<Made> {
+    let mut names: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < made.len() {
+        let used = callees(&made[i].text);
+        let mut k: taddr = 0;
+        while k < used.len() {
+            if is_table(&used[k]) && !holds_name(&names, &used[k]) {
+                names.push(used[k].to_string());
+            }
+            k += 1;
+        }
+        i += 1;
+    }
+    let defs = definitions(items);
+    let drops = destructors(items);
+    let mut out: Vec<Made> = Vec::new();
+    let mut n: taddr = 0;
+    while n < names.len() {
+        let text = one_table(items, &defs, &drops, &names[n]);
+        // A table this cannot build is left out, and the module is then
+        // refused whole: something kept names it, and a name nothing
+        // defines is not a program (docs/ddc.md §4).
+        if text.len() > 0 {
+            out.push(Made { name: names[n].to_string(), text: text });
+        }
+        n += 1;
+    }
+    out
+}
+
+/// Whether a name is a table's.
+fn is_table(name: &str) -> bool {
+    let head = "vt.";
+    if name.len() <= head.len() {
+        return false;
+    }
+    let mut i: taddr = 0;
+    while i < head.len() {
+        if name[i] != head[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The type a table's name is for: everything between `vt.` and the last
+/// `.`, since an instantiation's own name holds dots and the trait's does
+/// not (Ch. 6 §4).
+fn table_owner(symbol: &str) -> String {
+    let mut cut: taddr = 0 - 1;
+    let mut i: taddr = 0;
+    while i < symbol.len() {
+        if symbol[i] == '.' {
+            cut = i;
+        }
+        i += 1;
+    }
+    let mut out: String = Vec::new();
+    if cut < 3 {
+        return out;
+    }
+    let mut k: taddr = 3;
+    while k < cut {
+        out.push(symbol[k]);
+        k += 1;
+    }
+    out
+}
+
+/// The trait a table's name is of.
+fn table_trait(symbol: &str) -> String {
+    let mut cut: taddr = 0 - 1;
+    let mut i: taddr = 0;
+    while i < symbol.len() {
+        if symbol[i] == '.' {
+            cut = i;
+        }
+        i += 1;
+    }
+    let mut out: String = Vec::new();
+    if cut < 3 {
+        return out;
+    }
+    let mut k = cut + 1;
+    while k < symbol.len() {
+        out.push(symbol[k]);
+        k += 1;
+    }
+    out
+}
+
+/// One table, as the global TIR prints it (Ch. 4 §3.3).
+///
+/// Three words — the type's size, its alignment, a slot for its destructor
+/// — and then one address per method **in the trait's declaration order**,
+/// provided bodies included. They are written as trytes, so a number is
+/// itself and two zeros, and an address is the one item that is three.
+///
+/// `size` and `align` are there for a `Box<dyn Trait>` that has to free
+/// what it points at, and adding a slot later would move every index — so
+/// they are in the table before anything needs them.
+fn one_table(
+    items: &Vec<ast::Item>,
+    defs: &Vec<layout::Def>,
+    drops: &Vec<String>,
+    symbol: &str,
+) -> String {
+    let owner = table_owner(symbol);
+    let named = table_trait(symbol);
+    if owner.len() == 0 || named.len() == 0 {
+        return "".to_string();
+    }
+    let at = trait_at(items, &named);
+    if at < 0 {
+        return "".to_string();
+    }
+    let self_ty = ast::Ty::Name(one_name(&owner));
+    let l = match layout::of(defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => return "".to_string(),
+    };
+    // A word is three trytes and a tryte holds −9841 … +9841 (Ch. 1 §2),
+    // so a size that does not fit the first of them is not `n, 0, 0`.
+    if l.size > 9841 || l.align > 9841 {
+        return "".to_string();
+    }
+    // The third word is the type's destructor, and a **zero** there is a
+    // claim that it has none — which Ch. 3 §1.2 makes about what a type
+    // *holds* and not only about what it wrote. What this can answer is
+    // which types wrote an `impl Drop`, so anything it cannot see through
+    // is refused rather than called destructor-less.
+    if owns_drop(defs, drops, &owner, 0) {
+        return "".to_string();
+    }
+    match &items[at].what {
+        ast::What::Trait(n, params, supers, assoc, fns) => {
+            // A supertrait's methods come first in a table (Ch. 4 §3.3) and
+            // this does not read them, so a trait that has one is refused.
+            if supers.len() > 0 {
+                return "".to_string();
+            }
+            let mut k: taddr = 0;
+            while k < fns.len() {
+                // Ch. 4 §3.4: a method a trait object cannot call is a
+                // method a table has no address to put.
+                if fns[k].generics.len() > 0 {
+                    return "".to_string();
+                }
+                if fns[k].params.len() == 0 {
+                    return "".to_string();
+                }
+                if !fns[k].params[0].name.same("self") {
+                    return "".to_string();
+                }
+                k += 1;
+            }
+            let mut out: String = Vec::new();
+            out.push_str("global @");
+            out.push_str(symbol);
+            out.push_str(" : tryte[");
+            push_int(&mut out, 9 + 3 * (fns.len() as t27));
+            out.push_str("] = [");
+            push_int(&mut out, l.size as t27);
+            out.push_str(", 0, 0, ");
+            push_int(&mut out, l.align as t27);
+            out.push_str(", 0, 0, 0, 0, 0");
+            let mut k: taddr = 0;
+            while k < fns.len() {
+                out.push_str(", addr @");
+                out.push_str(&owner);
+                out.push_str(".");
+                out.push_str(&fns[k].name);
+                k += 1;
+            }
+            out.push_str("]\n");
+            out
+        }
+        _ => "".to_string(),
+    }
+}
+
+/// Whether anything runs when a value of this type dies — or whether this
+/// cannot say, which is the same answer to everyone who has to be sure.
+///
+/// Ch. 3 §1.2: a type owns a destructor when it wrote one or when it holds
+/// something that did. A reference owns nothing; a scalar owns nothing; and
+/// a field whose type has no name here is not answered for.
+fn owns_drop(
+    defs: &Vec<layout::Def>,
+    drops: &Vec<String>,
+    name: &str,
+    depth: taddr,
+) -> bool {
+    if depth > 16 {
+        return true;
+    }
+    if holds_name(drops, name) {
+        return true;
+    }
+    let at = def_at(defs, name);
+    if at < 0 {
+        return scalar_named(name).same("?");
+    }
+    let mut i: taddr = 0;
+    while i < defs[at].fields.len() {
+        let held = field_tir(&defs[at].fields[i]);
+        if !held.same("ptr") {
+            let inner = name_head(&defs[at].fields[i]);
+            if inner.len() == 0 {
+                return true;
+            }
+            if owns_drop(defs, drops, &inner, depth + 1) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Which functions a program contains: the ones `main` reaches, or all of
@@ -5085,38 +5692,51 @@ fn made_at(made: &Vec<Made>, name: &str) -> taddr {
     0 - 1
 }
 
-/// Every `call @name` in a function's text.
+/// Every `@name` a function's text mentions.
 ///
 /// Read back out of what was written rather than collected while writing:
-/// what a function calls is what its text says it calls, and a second list
+/// what a function needs is what its text says it needs, and a second list
 /// would be a second thing to keep right.
+///
+/// Every `@` and not only a call's, because **a table is a use**: `@Re.twice`
+/// is in the module because a vtable holds its address and not because
+/// anything calls it (Ch. 4 §3.3), and a coercion names the table the same
+/// silent way. A function's own header names itself, which is a use that
+/// asks for nothing.
 pub fn callees(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut i: taddr = 0;
-    let want = "call @";
-    while i + want.len() < text.len() {
-        let mut hit = true;
-        let mut k: taddr = 0;
-        while k < want.len() {
-            if text[i + k] != want[k] {
-                hit = false;
-            }
-            k += 1;
-        }
-        if hit {
-            let mut name: String = Vec::new();
-            let mut j = i + want.len();
-            while j < text.len() && text[j] != '(' {
-                name.push(text[j]);
-                j += 1;
-            }
-            out.push(name);
-            i = j;
-        } else {
+    while i < text.len() {
+        if text[i] != '@' {
             i += 1;
+            continue;
         }
+        let mut name: String = Vec::new();
+        let mut j = i + 1;
+        while j < text.len() && in_name(text[j]) {
+            name.push(text[j]);
+            j += 1;
+        }
+        if name.len() > 0 {
+            out.push(name);
+        }
+        i = j;
     }
     out
+}
+
+/// Whether a character can be part of the name after an `@` (TIR §1).
+fn in_name(c: char) -> bool {
+    if c >= 'a' && c <= 'z' {
+        return true;
+    }
+    if c >= 'A' && c <= 'Z' {
+        return true;
+    }
+    if c >= '0' && c <= '9' {
+        return true;
+    }
+    c == '.' || c == '_' || c == '#'
 }
 
 /// Every instantiation the queue asks for, drained: the members of each

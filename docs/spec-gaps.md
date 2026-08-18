@@ -2668,7 +2668,7 @@ exist — and the file that would have caught it is the one being written
 *after* the feature it checks. Which is the wrong order, and is why G9.90
 was designed before it was built: the program to compare on comes first.
 
-**G9.90 — what `bootstrap/` still owes: `dyn Trait`.**
+**G9.90 — what `bootstrap/` still owed: `dyn Trait` — RESOLVED.**
 
 `trustc` lowers trait objects fully — vtable globals, the fat-pointer
 coercion, the indirect call — and `bootstrap/lower.tr` lowers none of it. It
@@ -2754,6 +2754,48 @@ parameter loop, one in `value`'s `Borrow` arm for the coercion, one in its
 `Method` arm for the indirect call, and a scan in `module`. No change to
 `Cx`, no change to `Emit`, and G9.91 already put `&x` and `&T` parameters
 underneath it.
+
+**Built.** `bootstrap/lowered/16.tr` is the file, and it is the program
+above with three things added: a method whose argument is a *call*, so that
+the order the receiver and the table are resolved in is written down; a
+`&dyn` passed onwards, which is the parameter's own slot again; and the same
+coercion twice, which is one table.
+
+The five changes were the five predicted, and one of them was predicted
+wrong. **A table is named where it is stored, not where it is taken**: the
+coercion emits `store ptr @vt.Sq.Area, %p.7`, so a `callees` that learned to
+read `addr @…` would still have found nothing in `main` and pruned the table
+away. What it reads now is every `@name` a function's text holds, which is
+what a TIR name is — a function's own header names itself, and a use that
+asks for nothing costs nothing.
+
+Three things `trustc` decides and `bootstrap/` refuses rather than guesses,
+each written where it is refused:
+
+- A **supertrait**. Its methods come first in the table (Ch. 4 §3.3) and
+  nothing here reads them, so a trait that has one has no table.
+- A method that is **not object-safe** — one with type parameters of its
+  own, or one without a `self`. Ch. 4 §3.4 says a trait object cannot call
+  it, so the table has no address to put rather than an address that must
+  never be used.
+- The **destructor slot**. A zero there is a claim that the type has none,
+  and Ch. 3 §1.2 makes that claim about what a type *holds* and not only
+  about what it wrote — while what `bootstrap/` has is the list of types
+  that wrote an `impl Drop`. A type it cannot read down to scalars is
+  refused rather than called destructor-less.
+
+And one that is a hole rather than a decision: a trait object in a
+**program** rather than a file. `dyn Area` parses as a bare identifier, and
+the resolver of Ch. 6 §3.1 rewrites paths and not that — so a `dyn` whose
+trait is in another module looks for a definition under the name that was
+written, finds none, and the module is refused. `trustc` calls that table
+`@vt.shapes.Sq.shapes.Area`, which reading the trait off the last `.` here
+would get wrong as well: two holes, and one file in
+`bootstrap/programs/` will close both.
+
+Each refusal is the whole file emitting nothing, which is what refusal has
+meant here since the first slice: half a lowering is two implementations
+disagreeing quietly, and that is the one thing DDC must not have.
 
 **G9.89 — `Raw::try_alloc`, and the turbofish that never worked.**
 

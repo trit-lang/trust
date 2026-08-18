@@ -1,0 +1,68 @@
+// A trait object, and the one call in this language that is not to a name
+// (Ch. 4 §3).
+//
+// `dyn Area` is what is written where the type is not known until it runs.
+// It has no size of its own — `layout.tr` says so and is right — so what is
+// passed is never the object but a **reference** to it, and that reference
+// is two words: where the object is, and where the table of its type's
+// methods is (Ch. 2 §4, Ch. 4 §3.1).
+//
+// Four mechanisms, and each of them is a different one:
+//
+// *The table.* One global per (type, trait) pair, before every function.
+// Its first three words are the type's size, its alignment and its
+// destructor — `0, 0, 0` where it has none — and then one address per
+// method in the **trait's** declaration order, provided bodies included.
+//
+// *The parameter.* `&dyn Area` is `%x: ptr` in the signature and
+// `slot tryte[6]` inside, copied in exactly as any two-field aggregate is.
+//
+// *The coercion.* `&a` where a `&dyn Area` is wanted builds those two
+// words. The borrow is still no instruction — a slot **is** an address
+// (G9.91) — and what is emitted is the pair.
+//
+// *The call.* Load the data pointer, load the table's, offset by
+// `9 + 3 × index`, load, and call that.
+//
+// And one consequence that is easy to miss: **a table is a use**.
+// `@Re.twice` is in the module below because the table holds its address
+// and not because anything calls it, so a `reachable` that followed only
+// calls would prune away the function the table points at.
+
+trait Area {
+    fn area(&self) -> t27;
+    fn twice(&self) -> t27 { self.area() + self.area() }
+    fn plus(&self, d: t27) -> t27 { self.area() + d }
+}
+
+struct Sq { s: t27 }
+
+struct Re { w: t27, h: t27 }
+
+impl Area for Sq {
+    fn area(&self) -> t27 { self.s * self.s }
+    // Written here, so the trait's is not what this type's table points at.
+    fn plus(&self, d: t27) -> t27 { self.s + d }
+}
+
+impl Area for Re {
+    fn area(&self) -> t27 { self.w * self.h }
+}
+
+fn side(n: t27) -> t27 { n + 1 }
+
+// Every entry of the table: the one the trait declared, the one it wrote a
+// body for, and the one taking an argument besides the receiver — whose
+// argument is a call, so that what is evaluated first is written down.
+fn total(x: &dyn Area) -> t27 { x.area() + x.twice() + x.plus(side(2)) }
+
+// A fat reference passed onwards is the same two words again, and the
+// second function's parameter is the first's slot.
+fn through(x: &dyn Area) -> t27 { total(x) + 1 }
+
+fn main() -> t27 {
+    let a = Sq { s: 3 };
+    let b = Re { w: 2, h: 5 };
+    // The same table asked for twice, which is one global.
+    total(&a) + through(&b) + total(&a)
+}

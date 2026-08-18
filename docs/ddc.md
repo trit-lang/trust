@@ -118,9 +118,19 @@ checker's business. What needed building is a trait method *with a body*,
 which is one function per implementing type named after the type
 (`Re.twice`), and type arguments that are aggregates (`@sum.Sq`).
 
-Closures are done, captures and all. What is left is `dyn Trait` and its
-vtables (Ch. 4 §3), and Ch. 5's `Vec` and `String` — and those two are a
-different kind of thing.
+Closures are done, captures and all. So is **`dyn Trait`** (Ch. 4 §3): a
+table per (type, trait) pair before every function, a `&dyn` parameter that
+is two words rather than one, the coercion that builds them, and the
+indirect call — the one call in this language that is not to a name.
+`bootstrap/lowered/16.tr` is the program the two agree about, and what it
+turns on is that **a table is a use**: `@Re.twice` is in the module because
+the table holds its address, not because anything calls it, so a `reachable`
+that followed only calls would prune away what the table points at. A
+supertrait, a method that is not object-safe, and a type whose destructor
+this cannot answer for are refused rather than guessed (G9.90).
+
+What is left is Ch. 5's `Vec` and `String` — and those two are a different
+kind of thing.
 
 **`Vec` is being moved into the library**, and the road is now paved end to
 end: `Raw<T>` exists (Ch. 5 §2.7), `v[i]` resolves to a method (Ch. 2 §3.1),
