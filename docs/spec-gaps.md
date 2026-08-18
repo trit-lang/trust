@@ -2621,6 +2621,37 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.86 — two-phase borrows landed, and one shape is left:
+`a[i][j] = x`.** The reservation is on master and costs nothing: a method
+takes its receiver exclusively, and an argument evaluated *before* the call
+may still read it, so `v.push(v.len())` says nothing wrong. A reserved loan
+conflicts with everything that would change the place — which is what makes
+it a borrow — and not with reading, which is what makes the call writable at
+all. It is one-shot, because the receiver is the first borrow a call lowers.
+
+That cleared most of `bootstrap/`. What is left is one shape and it is the
+one G9.84 named:
+
+```
+e.blocks[b].insts[j] = fixed;
+```
+
+`*(*e.blocks.index_mut(b)).insts.index_mut(j) = fixed` — two exclusive
+borrows, the outer live while the inner is taken. Reservation does not help:
+both are borrows and neither is a read.
+
+The rule that would is **reborrowing through a projection**: a borrow of
+`p.f` while `p` is exclusively borrowed is fine *if it goes through that
+borrow*, and a path-based checker cannot see the difference between that and
+aliasing — `let r = &mut v; v[0] = 1;` has the same shape and must be
+refused. Rust distinguishes them because the reborrow is written through the
+reference's own name; here the reference has no name, because `[]` made it.
+
+So the honest statement of where this stands: the library's `Vec` compiles,
+runs, and passes all 598 tests; `bootstrap/` needs one more checker rule,
+and that rule needs a way to say "through this borrow" that a place path
+does not have. It is on a stash and it is one rule away.
+
 **G9.85 — the switch passes every test and `bootstrap/` says no: two-phase
 borrows.** The second attempt got the whole library through — 598 of 598
 tests, `for x in v`, `HashMap`, `String`, the coercion, `derive` — and then
