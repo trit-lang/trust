@@ -9104,6 +9104,7 @@ impl Fn<'_> {
                 // to reproduce (docs/ddc.md §3.1).
                 let saved = self.scopes.len();
                 let slots = self.slots.len();
+                let counter = self.counter;
                 self.scopes.push(HashMap::new());
                 for ((n, _), t) in params.iter().zip(&param_tys) {
                     self.declare(n, t.clone(), false);
@@ -9111,6 +9112,11 @@ impl Fn<'_> {
                 let guess = self.peek_ty(body)?;
                 self.scopes.truncate(saved);
                 self.slots.truncate(slots);
+                // And the numbers they took. `peek_ty` reads types and emits
+                // nothing, so nothing outside can be holding one — and a
+                // *gap* in the numbering is as much text as a name is
+                // (G9.67).
+                self.counter = counter;
                 match guess {
                     Some(t) => t,
                     None => {

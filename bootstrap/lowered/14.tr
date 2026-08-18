@@ -11,16 +11,30 @@
 // The name is `main.closure1` — which closure of which function, and
 // nothing about how either was numbered (G9.67).
 //
-// A closure that *captures* is not here: reading a capture is a dereference
-// of a reference value, and that is the one expression this lowering has
-// never had. Such a closure is refused, and because a refused `.call` would
-// leave `main` calling a name nothing defines, the whole module is refused
-// with it.
+// A closure that **captures** is here too. `k` inside the body is a field
+// of the closure holding `k`'s address, so it is read as `(*self.k)` — and
+// every rule about fields and references then applies to it unchanged. That
+// needed the one expression this lowering had never had: a dereference of a
+// reference *value*, which needs the emitter to carry `&t27` and not just
+// `ptr`, because TIR spells every reference the same way and only the name
+// says how wide the thing at the other end is.
+//
+// The `.call` functions come out most-recently-found first, which is what a
+// stack gives back — the same question G9.58 asked about instantiations.
 
 fn apply(g: impl Fn(t27) -> t27, x: t27) -> t27 { g(x) }
+
+fn none(g: impl Fn() -> t27) -> t27 { g() }
 
 fn twice(g: impl Fn(t27) -> t27, x: t27) -> t27 { apply(g, x) }
 
 fn main() -> t27 {
-    apply(|x: t27| x + 1, 2)
+    let k = 10;
+    // Bound by a `let`, which renames the temporary it was built in.
+    let f = |x: t27| x + 1;
+    // A block body, two parameters, a written answer, and a capture.
+    let h = |a: t27, b: t27| -> t27 { a * b + k };
+    // Written where it is used, and one that captures nothing at all.
+    apply(f, 2) + apply(|y: t27| y * k, 3) + none(|| 7) + h(2, 3)
+        + twice(|z: t27| z - k, 4)
 }

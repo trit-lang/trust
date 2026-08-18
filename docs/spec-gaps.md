@@ -2621,6 +2621,34 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.72 — a capture is a dereference, and a peek is not free.** Closures
+that capture work now. `k` inside the body is a field of the closure holding
+`k`'s address, so it is read as `(*self.k)` and every rule about fields and
+references applies to it unchanged — the whole feature is one rewrite of the
+body plus one expression the lowering had never had.
+
+That expression is a dereference of a reference **value**, and it needed the
+emitter to carry `&t27` where it had carried `ptr`. TIR spells every
+reference the same way; the *name* is the only place the referent survives,
+and a dereference is the only thing that needs it. A field that is a
+reference answers with `&T` now, and `tir_of` maps any name beginning with
+`&` to `ptr` — so nothing else had to change.
+
+Two more artifacts fell out, both in `trustc` and both the same shape as
+G9.67 and G9.69.
+
+Guessing a closure's result type reads its body, which declares its
+parameters, which **takes numbers from the value counter**. The slots were
+already being thrown away; the numbers were not, so a closure bound by a
+`let` left `%f.slot.3` where `%f.slot.2` was expected and a second
+implementation could not tell why. `peek_ty` emits nothing, so nothing can
+be holding one: the counter is restored with the slots now.
+
+And the `.call` functions come out **most-recently-found first**, because
+the queue they are drained from is a stack — the same question G9.58 asked
+about instantiations, found again the same way, by two implementations
+producing the same functions in different orders.
+
 **G9.71 — a closure is three things, and a program with a dangling call is
 not a program.** The Trust lowering emits a closure now, as far as one that
 captures nothing goes, and what it emits is three things from one
