@@ -2621,6 +2621,30 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.83 — a family may have a destructor now, and the two names met without
+translation.** Ch. 4 §5.2 on a generic type: one destructor per
+instantiation, named the way every other monomorphized method is (§2.5). A
+collection that drops its elements before its room goes is writable, which
+is the last thing a library `Vec` needed.
+
+The pleasant part is that the naming worked out by itself. `expand` turns a
+destructor into a function keyed `drop.Held`; the drop glue at a use writes
+`drop.` followed by the instantiation's name, `drop.Held.t27`; and
+monomorphizing `drop.Held` at `t27` mangles to `drop.Held.t27` by Ch. 6 §4.
+The two spellings coincide, so nothing had to translate between them — the
+call site's name was already the instantiation's name.
+
+Three refusals had to come out, and each was honest about a different thing:
+the check that a destructor's type is declared in this file, which looked
+only at instantiations; an explicit "a destructor on a generic type is not
+implemented", which was true; and `expand` keeping the name `drop` so that
+`fn_key` could read the parameter's type — which works for `Held` and not
+for `Held<T>`, because the second is an application and not a name.
+
+And `needs_drop` learned to ask a *family*: whether `Held.t27` needs
+dropping is not written on `Held.t27`, which nobody declared, but on the
+`Held` it was made from.
+
 **G9.82 — a generic type cannot have a destructor, and `Vec` needs one.**
 Writing the prelude's `Vec` found the last prerequisite by hitting it:
 

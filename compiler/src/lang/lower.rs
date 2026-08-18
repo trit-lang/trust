@@ -610,12 +610,14 @@ impl Types {
             Ty::Struct(n) => {
                 let fields = self.structs.borrow()[n].clone();
                 self.destructors.contains(n)
+                    || self.family_drops(n)
                     || self.no_copy.contains(n)
                     || fields.iter().any(|(_, t)| self.needs_drop(t))
             }
             Ty::Enum(n) => {
                 let variants = self.enums.borrow()[n].clone();
                 self.destructors.contains(n)
+                    || self.family_drops(n)
                     || self.no_copy.contains(n)
                     || variants
                         .iter()
@@ -630,6 +632,15 @@ impl Types {
             Ty::Boxed(_) | Ty::VecOf(_) | Ty::RawOf(_) => true,
             _ => false,
         }
+    }
+
+    /// Whether this name is an instantiation of a family that has a
+    /// destructor — which every instantiation of it then has (Ch. 4 §5.2).
+    fn family_drops(&self, name: &str) -> bool {
+        let Some((base, _)) = self.instantiations.borrow().get(name).cloned() else {
+            return false;
+        };
+        self.destructors.contains(&base)
     }
 
     /// A type is copyable if it has no destructor and everything it contains
@@ -2405,16 +2416,6 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
             });
             continue;
         }
-        if !imp.generics.is_empty() && imp.trait_name.as_deref() == Some("Drop") {
-            errs.push(SyntaxError {
-                span: imp.span,
-                message: "a destructor on a generic type is not implemented; whether a \
-                          type needs dropping is decided before its instantiations exist"
-                    .into(),
-            });
-            continue;
-        }
-
         // A trait with parameters may be implemented by one type many
         // times, so the arguments are part of what identifies the impl —
         // and of what identifies each of its methods.
@@ -2614,8 +2615,15 @@ fn expand_impls(file: &ast::File, types: &Types) -> (Vec<ast::FnItem>, Vec<Error
                 });
                 continue;
             }
+            // A destructor keeps the name `drop` so that `fn_key` reads its
+            // parameter's type and gives `drop.Type` — except on a family,
+            // whose parameter is written `Held<T>` and whose destructor is
+            // one function per instantiation. That one takes the key as its
+            // name, like every other method of a parameterized impl, and is
+            // then found in the same table they are (Ch. 4 §2.5).
+            let keeps_its_name = is_destructor && imp.generics.is_empty();
             out.push(ast::FnItem {
-                name: if is_destructor { f.name.clone() } else { key },
+                name: if keeps_its_name { f.name.clone() } else { key },
                 ..f
             });
         }
@@ -3627,8 +3635,17 @@ fn build_types(file: &ast::File) -> R<Types> {
         if imp.trait_name.as_deref() != Some("Drop") {
             continue;
         }
+        // A destructor may be written on a *family*, and then it is one
+        // destructor per instantiation, named the way every other
+        // monomorphized method is (Ch. 4 §2.5). `expand` has already made
+        // it a generic function called `drop.Held`, and an instantiation's
+        // glue is `drop.Held.t27` — which is what `mangle` produces from
+        // the two, so the two spellings coincide and nothing has to
+        // translate between them.
         if !types.structs.borrow().contains_key(&imp.self_ty)
             && !types.enums.borrow().contains_key(&imp.self_ty)
+            && !types.generic_structs.contains_key(&imp.self_ty)
+            && !types.generic_enums.contains_key(&imp.self_ty)
         {
             return err(
                 imp.span,
@@ -5252,6 +5269,27 @@ impl Fn<'_> {
         let key = format!("drop.{name}");
         if self.types.destructors.contains(name) || self.sigs.borrow().contains_key(&key) {
             return Ok(());
+        }
+        // An instantiation of a family that has a destructor gets the
+        // family's, at its own arguments (Ch. 4 §5.2). `expand` made that
+        // destructor the generic function `drop.Held`, and mangling it with
+        // `t27` gives `drop.Held.t27` — which is the name the call site
+        // already wrote, so the two spellings meet without translation.
+        let held = self.types.instantiations.borrow().get(name).cloned();
+        if let Some((base, args)) = held {
+            let family = format!("drop.{base}");
+            if self.types.destructors.contains(&base)
+                && let Some(def) = self.generic_def(&family)
+            {
+                let env: HashMap<String, Ty> = def
+                    .generics
+                    .iter()
+                    .map(|p| p.name().to_string())
+                    .zip(args)
+                    .collect();
+                self.instantiate_with(&family, env, span)?;
+                return Ok(());
+            }
         }
         self.sigs
             .borrow_mut()

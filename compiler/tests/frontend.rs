@@ -4882,3 +4882,45 @@ fn a_growable_array_is_writable_in_trust() {
     // capacity of 16 — four doubled twice, which is §2.6's policy in Trust.
     assert_eq!(run(src).0, 161);
 }
+
+#[test]
+fn a_family_may_have_a_destructor() {
+    // Ch. 4 §5.2 on a generic type: one destructor per instantiation, named
+    // the way every other monomorphized method is (§2.5). Both run, and the
+    // one written for `t27` is not the one written for `trit`.
+    let src = "struct Held<T> { v: T }
+    impl<T> Drop for Held<T> { fn drop(self) { putchar(65); } }
+    fn main() -> t27 {
+        let a = Held { v: 1 };
+        let b = Held { v: 0t };
+        0
+    }";
+    assert_eq!(run(src).1, "AA");
+}
+
+#[test]
+fn a_generic_collection_drops_its_elements() {
+    // What a library `Vec` needs from §5.2: the elements go before the room
+    // does, and the element's own destructor is what takes them.
+    let src = "struct Noisy { n: t27 }
+    impl Drop for Noisy { fn drop(self) { putchar((48 + self.n) as t9); } }
+    struct Grow<T> { held: Raw<T>, n: taddr }
+    impl<T> Grow<T> {
+        fn new() -> Grow<T> { Grow { held: Raw::alloc(4), n: 0 } }
+        fn push(&mut self, value: T) { self.held.write(self.n, value); self.n += 1; }
+    }
+    impl<T> Drop for Grow<T> {
+        fn drop(self) {
+            let mut i: taddr = 0;
+            while i < self.n { let held = self.held.read(i); i += 1; }
+        }
+    }
+    fn main() -> t27 {
+        let mut v: Grow<Noisy> = Grow::new();
+        v.push(Noisy { n: 1 });
+        v.push(Noisy { n: 2 });
+        v.push(Noisy { n: 3 });
+        0
+    }";
+    assert_eq!(run(src).1, "123");
+}
