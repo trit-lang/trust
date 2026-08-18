@@ -718,36 +718,315 @@ fn one_name(name: &str) -> Vec<String> {
 /// A body whose answer is an aggregate: it is written into the storage the
 /// caller gave, and the function answers nothing.
 fn aggregate_body(e: &mut Emit, b: &ast::Block, owner: &str) {
+    aggregate_block(e, b, "%sret", owner);
+    if e.stuck {
+        return;
+    }
+    e.insts.push("    ret".to_string());
+}
+
+
+
+/// `match e { … }` (§5.4): the discriminant once, a three-way test per arm,
+/// and a slot the arms agree to leave the answer in.
+///
+/// With a destination there is no such slot: an aggregate has no value, it
+/// **is** its storage (TIR §3), so each arm writes the storage it was given
+/// and the join has nothing to load. One lowering either way.
+fn match_expr(
+    e: &mut Emit,
+    scrutinee: &ast::Expr,
+    arms: &Vec<ast::Arm>,
+    want: &str,
+    dest: &str,
+    answer: &str,
+) -> Value {
+            let base = match scrutinee {
+                ast::Expr::Name(n) => {
+                    let at = local_at(e, n);
+                    if at < 0 {
+                        e.stuck = true;
+                        return unknown_value();
+                    }
+                    e.locals[at].slot.to_string()
+                }
+                _ => {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+            };
+            let owner = match scrutinee {
+                ast::Expr::Name(n) => {
+                    let at = local_at(e, n);
+                    e.locals[at].ty.to_string()
+                }
+                _ => "".to_string(),
+            };
+            let which = def_at(&e.defs, &owner);
+            if which < 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let self_ty = ast::Ty::Name(one_name(&owner));
+            let l = match layout::of(&e.defs, &self_ty, 0) {
+                Result::Ok(x) => x,
+                Result::Err(why) => {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+            };
+            let tag = match &l.tag {
+                layout::Tag::Direct(width, at) => {
+                    if width == 1 {
+                        "t9".to_string()
+                    } else {
+                        "t27".to_string()
+                    }
+                }
+                _ => {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+            };
+            let d = fresh(e, "d");
+            let mut read: String = Vec::new();
+            read.push_str("    ");
+            read.push_str(&d);
+            read.push_str(" = load ");
+            read.push_str(&tag);
+            read.push_str(" ");
+            read.push_str(&base);
+            e.insts.push(read);
+            let join = label(e, "match.join");
+
+            let mut held: String = Vec::new();
+            let mut ty: String = Vec::new();
+            let mut a: taddr = 0;
+            while a < arms.len() {
+                let arm_at = label(e, "arm");
+                let next_at = label(e, "arm.next");
+                let index = arm_variant(e, which, &arms[a]);
+                if index < 0 {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+                let c = fresh(e, "c");
+                let mut test: String = Vec::new();
+                test.push_str("    ");
+                test.push_str(&c);
+                test.push_str(" = cmp ");
+                test.push_str(&tag);
+                test.push_str(" ");
+                test.push_str(&d);
+                test.push_str(", const ");
+                test.push_str(&tag);
+                test.push_str(" ");
+                push_int(&mut test, l.discriminants[index]);
+                e.insts.push(test);
+                let mut br: String = Vec::new();
+                br.push_str("    br3 ");
+                br.push_str(&c);
+                br.push_str(", ");
+                br.push_str(&next_at);
+                br.push_str(", ");
+                br.push_str(&arm_at);
+                br.push_str(", ");
+                br.push_str(&next_at);
+                e.insts.push(br);
+
+                start(e, &arm_at);
+                let mark = e.locals.len();
+                bind_payload(e, which, index, &base, &l, &arms[a]);
+                if e.stuck {
+                    return unknown_value();
+                }
+                if dest.len() > 0 {
+                    aggregate_tail(e, &arms[a].body, dest, answer);
+                } else {
+                    let v = value(e, &arms[a].body, want);
+                    if e.stuck {
+                        return unknown_value();
+                    }
+                    if held.len() == 0 {
+                        ty = v.ty.to_string();
+                        held = slot_for(e, "tmp", &ty);
+                    }
+                    store_into(e, &ty, &v.text, &held);
+                }
+                if e.stuck {
+                    return unknown_value();
+                }
+                jump(e, &join);
+                forget(e, mark);
+                start(e, &next_at);
+                a += 1;
+            }
+            // Exhaustiveness was checked, so control cannot arrive here in a
+            // well-typed program — but TIR wants a terminator.
+            e.insts.push("    trap F_TRAP".to_string());
+            e.done = true;
+
+            start(e, &join);
+            if dest.len() > 0 {
+                return Value { text: dest.to_string(), ty: answer.to_string() };
+            }
+            let name = fresh(e, "v");
+            let mut line: String = Vec::new();
+            line.push_str("    ");
+            line.push_str(&name);
+            line.push_str(" = load ");
+            let shown = tir_of(&ty);
+            line.push_str(&shown);
+            line.push_str(" ");
+            line.push_str(&held);
+            e.insts.push(line);
+            Value { text: name, ty: ty }
+}
+
+/// `if c { … } else { … }` as a value (§5.3).
+///
+/// With a destination it is not a value at all: an aggregate has none, it
+/// **is** its storage (TIR §3), so where it is going is handed to each arm
+/// and there is nothing to join. One lowering either way, because two would
+/// be two things to keep in step.
+fn if_expr(
+    e: &mut Emit,
+    c: &ast::Expr,
+    t: &ast::Block,
+    o: &Option<Box<ast::Expr>>,
+    want: &str,
+    dest: &str,
+    owner: &str,
+) -> Value {
+            let cond = value(e, c, "t1");
+            if e.stuck {
+                return unknown_value();
+            }
+            let then_at = label(e, "then");
+            let else_at = label(e, "else");
+            let join_at = label(e, "join");
+            let mut br: String = Vec::new();
+            br.push_str("    br2 ");
+            br.push_str(&cond.text);
+            br.push_str(", ");
+            br.push_str(&then_at);
+            br.push_str(", ");
+            br.push_str(&else_at);
+            e.insts.push(br);
+
+            start(e, &then_at);
+            if dest.len() > 0 {
+                aggregate_block(e, t, dest, owner);
+                if e.stuck {
+                    return unknown_value();
+                }
+                jump(e, &join_at);
+                start(e, &else_at);
+                match o {
+                    Option::Some(x) => {
+                        aggregate_tail(e, x, dest, owner);
+                        if e.stuck {
+                            return unknown_value();
+                        }
+                    }
+                    // An `if` with no `else` has no value, and an aggregate
+                    // is a value (§5.3).
+                    Option::None => {
+                        e.stuck = true;
+                        return unknown_value();
+                    }
+                }
+                jump(e, &join_at);
+                start(e, &join_at);
+                return Value { text: dest.to_string(), ty: owner.to_string() };
+            }
+            let a = branch_block(e, t, want);
+            if e.stuck {
+                return unknown_value();
+            }
+            let ty = a.ty.to_string();
+            // The slot is made where the first arm has its answer ready,
+            // which is what decides the number it gets.
+            let held = slot_for(e, "tmp", &ty);
+            store_into(e, &ty, &a.text, &held);
+            jump(e, &join_at);
+
+            start(e, &else_at);
+            match o {
+                Option::Some(x) => {
+                    let b = value(e, x, &ty);
+                    if e.stuck {
+                        return unknown_value();
+                    }
+                    store_into(e, &ty, &b.text, &held);
+                }
+                Option::None => {}
+            }
+            jump(e, &join_at);
+
+            start(e, &join_at);
+            let name = fresh(e, "v");
+            let mut line: String = Vec::new();
+            line.push_str("    ");
+            line.push_str(&name);
+            line.push_str(" = load ");
+            let shown = tir_of(&ty);
+            line.push_str(&shown);
+            line.push_str(" ");
+            line.push_str(&held);
+            e.insts.push(line);
+            Value { text: name, ty: ty }
+}
+
+/// A block whose value is an aggregate: its statements, then its tail
+/// written where the value is going.
+fn aggregate_block(e: &mut Emit, b: &ast::Block, dest: &str, owner: &str) {
     let mut i: taddr = 0;
     while i < b.stmts.len() {
         stmt(e, &b.stmts[i], "");
+        if e.stuck {
+            return;
+        }
         i += 1;
     }
     match &b.tail {
-        Option::Some(x) => {
-            match x {
-                // Built where it is wanted, rather than built and copied.
-                ast::Expr::Aggregate(path, fields) => {
-                    let made = aggregate_type(e, path, owner, fields);
-                    if made.len() == 0 {
-                        e.stuck = true;
-                        return;
-                    }
-                    let variant = variant_of(path);
-                    fill(e, "%sret", &made, &variant, fields);
-                }
-                _ => {
-                    let v = value(e, x, "");
-                    if e.stuck {
-                        return;
-                    }
-                    copy_between(e, &v.text, "%sret", owner);
-                }
+        Option::Some(x) => aggregate_tail(e, x, dest, owner),
+        Option::None => e.stuck = true,
+    }
+}
+
+/// An expression whose value is an aggregate, written into the storage it
+/// is going into rather than into a temporary that is then copied.
+///
+/// An aggregate has no value in TIR — it **is** its storage (TIR §3) — so
+/// where it is going has to be known before it is computed. An `if` does
+/// not join two aggregates, because there is nothing to join: it hands the
+/// destination to each of its arms, and both write the same storage.
+fn aggregate_tail(e: &mut Emit, x: &ast::Expr, dest: &str, owner: &str) {
+    match x {
+        // Built where it is wanted, rather than built and copied.
+        ast::Expr::Aggregate(path, fields) => {
+            let made = aggregate_type(e, path, owner, fields);
+            if made.len() == 0 {
+                e.stuck = true;
+                return;
             }
-            e.insts.push("    ret".to_string());
+            let variant = variant_of(path);
+            fill(e, dest, &made, &variant, fields);
         }
-        Option::None => {
-            e.stuck = true;
+        ast::Expr::Nested(held) => aggregate_block(e, &*held, dest, owner),
+        ast::Expr::If(c, t, o) => {
+            if_expr(e, c, t, o, "", dest, owner);
+        }
+        ast::Expr::Match(scrutinee, arms) => {
+            match_expr(e, scrutinee, arms, "", dest, owner);
+        }
+        _ => {
+            let v = value(e, x, owner);
+            if e.stuck {
+                return;
+            }
+            copy_between(e, &v.text, dest, owner);
         }
     }
 }
@@ -1791,59 +2070,8 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
         // value (§5.1) — which is what an `else` arm is.
         ast::Expr::Nested(b) => branch_block(e, b, want),
         ast::Expr::If(c, t, o) => {
-            let cond = value(e, c, "t1");
-            if e.stuck {
-                return unknown_value();
-            }
-            let then_at = label(e, "then");
-            let else_at = label(e, "else");
-            let join_at = label(e, "join");
-            let mut br: String = Vec::new();
-            br.push_str("    br2 ");
-            br.push_str(&cond.text);
-            br.push_str(", ");
-            br.push_str(&then_at);
-            br.push_str(", ");
-            br.push_str(&else_at);
-            e.insts.push(br);
-
-            start(e, &then_at);
-            let a = branch_block(e, t, want);
-            if e.stuck {
-                return unknown_value();
-            }
-            let ty = a.ty.to_string();
-            // The slot is made where the first arm has its answer ready,
-            // which is what decides the number it gets.
-            let held = slot_for(e, "tmp", &ty);
-            store_into(e, &ty, &a.text, &held);
-            jump(e, &join_at);
-
-            start(e, &else_at);
-            match o {
-                Option::Some(x) => {
-                    let b = value(e, x, &ty);
-                    if e.stuck {
-                        return unknown_value();
-                    }
-                    store_into(e, &ty, &b.text, &held);
-                }
-                Option::None => {}
-            }
-            jump(e, &join_at);
-
-            start(e, &join_at);
-            let name = fresh(e, "v");
-            let mut line: String = Vec::new();
-            line.push_str("    ");
-            line.push_str(&name);
-            line.push_str(" = load ");
-            let shown = tir_of(&ty);
-            line.push_str(&shown);
-            line.push_str(" ");
-            line.push_str(&held);
-            e.insts.push(line);
-            Value { text: name, ty: ty }
+            let none: String = Vec::new();
+            if_expr(e, c, t, o, want, &none, "")
         }
         // `p.x` — the field's offset from Ch. 2, and a load (§4).
         ast::Expr::Field(base, field) => {
@@ -1951,136 +2179,8 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
         // `match e { … }` — the discriminant once, then a three-way test per
         // arm, and a slot the arms agree to leave the answer in (§5.4).
         ast::Expr::Match(scrutinee, arms) => {
-            let base = match scrutinee {
-                ast::Expr::Name(n) => {
-                    let at = local_at(e, n);
-                    if at < 0 {
-                        e.stuck = true;
-                        return unknown_value();
-                    }
-                    e.locals[at].slot.to_string()
-                }
-                _ => {
-                    e.stuck = true;
-                    return unknown_value();
-                }
-            };
-            let owner = match scrutinee {
-                ast::Expr::Name(n) => {
-                    let at = local_at(e, n);
-                    e.locals[at].ty.to_string()
-                }
-                _ => "".to_string(),
-            };
-            let which = def_at(&e.defs, &owner);
-            if which < 0 {
-                e.stuck = true;
-                return unknown_value();
-            }
-            let self_ty = ast::Ty::Name(one_name(&owner));
-            let l = match layout::of(&e.defs, &self_ty, 0) {
-                Result::Ok(x) => x,
-                Result::Err(why) => {
-                    e.stuck = true;
-                    return unknown_value();
-                }
-            };
-            let tag = match &l.tag {
-                layout::Tag::Direct(width, at) => {
-                    if width == 1 {
-                        "t9".to_string()
-                    } else {
-                        "t27".to_string()
-                    }
-                }
-                _ => {
-                    e.stuck = true;
-                    return unknown_value();
-                }
-            };
-            let d = fresh(e, "d");
-            let mut read: String = Vec::new();
-            read.push_str("    ");
-            read.push_str(&d);
-            read.push_str(" = load ");
-            read.push_str(&tag);
-            read.push_str(" ");
-            read.push_str(&base);
-            e.insts.push(read);
-            let join = label(e, "match.join");
-
-            let mut held: String = Vec::new();
-            let mut ty: String = Vec::new();
-            let mut a: taddr = 0;
-            while a < arms.len() {
-                let arm_at = label(e, "arm");
-                let next_at = label(e, "arm.next");
-                let index = arm_variant(e, which, &arms[a]);
-                if index < 0 {
-                    e.stuck = true;
-                    return unknown_value();
-                }
-                let c = fresh(e, "c");
-                let mut test: String = Vec::new();
-                test.push_str("    ");
-                test.push_str(&c);
-                test.push_str(" = cmp ");
-                test.push_str(&tag);
-                test.push_str(" ");
-                test.push_str(&d);
-                test.push_str(", const ");
-                test.push_str(&tag);
-                test.push_str(" ");
-                push_int(&mut test, l.discriminants[index]);
-                e.insts.push(test);
-                let mut br: String = Vec::new();
-                br.push_str("    br3 ");
-                br.push_str(&c);
-                br.push_str(", ");
-                br.push_str(&next_at);
-                br.push_str(", ");
-                br.push_str(&arm_at);
-                br.push_str(", ");
-                br.push_str(&next_at);
-                e.insts.push(br);
-
-                start(e, &arm_at);
-                let mark = e.locals.len();
-                bind_payload(e, which, index, &base, &l, &arms[a]);
-                if e.stuck {
-                    return unknown_value();
-                }
-                let v = value(e, &arms[a].body, want);
-                if e.stuck {
-                    return unknown_value();
-                }
-                if held.len() == 0 {
-                    ty = v.ty.to_string();
-                    held = slot_for(e, "tmp", &ty);
-                }
-                store_into(e, &ty, &v.text, &held);
-                jump(e, &join);
-                forget(e, mark);
-                start(e, &next_at);
-                a += 1;
-            }
-            // Exhaustiveness was checked, so control cannot arrive here in a
-            // well-typed program — but TIR wants a terminator.
-            e.insts.push("    trap F_TRAP".to_string());
-            e.done = true;
-
-            start(e, &join);
-            let name = fresh(e, "v");
-            let mut line: String = Vec::new();
-            line.push_str("    ");
-            line.push_str(&name);
-            line.push_str(" = load ");
-            let shown = tir_of(&ty);
-            line.push_str(&shown);
-            line.push_str(" ");
-            line.push_str(&held);
-            e.insts.push(line);
-            Value { text: name, ty: ty }
+            let none: String = Vec::new();
+            match_expr(e, scrutinee, arms, want, &none, "")
         }
         ast::Expr::Assign(op, target, v) => {
             if !op.same("=") {

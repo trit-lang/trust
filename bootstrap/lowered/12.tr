@@ -68,4 +68,34 @@ fn main() -> t27 {
     let full = Held::Full(P { a: 1, b: 2 });
 
     some.unwrap_or(0) + none.unwrap_or(4) + (wide.unwrap_or(1) as t27)
+        + used()
+}
+
+// An `if` and a `match` whose value is an aggregate: each arm builds into
+// the storage the caller gave, because there is nothing to join — an
+// aggregate is its storage (TIR §3) and has no value to leave in a slot.
+fn chosen(n: t27) -> Opt<t27> {
+    if n > 0 {
+        Opt::Some(n)
+    } else {
+        Opt::None
+    }
+}
+
+fn shaped(n: t27) -> P {
+    if n > 0 { P { a: n, b: 1 } } else { P { a: 0, b: 2 } }
+}
+
+fn unwrapped(o: Opt<t27>, d: P) -> P {
+    match o {
+        Opt::Some(v) => P { a: v, b: 1 },
+        Opt::None => d,
+    }
+}
+
+fn used() -> t27 {
+    let a = chosen(1);
+    let b = shaped(2);
+    let c = unwrapped(chosen(3), b);
+    a.unwrap_or(0) + c.a
 }

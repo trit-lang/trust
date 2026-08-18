@@ -7,11 +7,16 @@
 // which the two implementations have to agree about as much as they agree
 // about what is.
 
-// What is *not* here: `fn pick(n) -> Option<t27> { if n > 0 { … } else { … } }`.
-// An `if` whose value is an aggregate has to build each arm into the
-// storage the caller gave, and this builds it in a temporary and copies —
-// which is a `store` of an aggregate, and TIR has none (TIR §3). It is
-// refused rather than written, which is what leaving it out of here means.
+// An `if` whose value is an aggregate builds each arm into the storage the
+// caller gave, because there is no value to join: an aggregate *is* its
+// storage (TIR §3).
+fn pick(n: t27) -> Option<t27> {
+    if n > 0 {
+        Option::Some(n)
+    } else {
+        Option::None
+    }
+}
 
 fn some(n: t27) -> Option<t27> { Option::Some(n) }
 
@@ -24,8 +29,10 @@ fn main() -> t27 {
     let a: Option<t27> = Option::Some(7);
     let b: Option<t27> = Option::None;
     let c = some(3);
+    let f = pick(5);
+    let g = pick(0);
     let d = none();
     let e: Option<t9> = Option::Some(1);
     a.unwrap_or(0) + b.unwrap_or(1) + c.unwrap_or(2) + d.unwrap_or(4)
-        + (e.unwrap_or(1) as t27)
+        + (e.unwrap_or(1) as t27) + f.unwrap_or(5) + g.unwrap_or(6)
 }

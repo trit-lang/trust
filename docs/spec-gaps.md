@@ -2592,6 +2592,27 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.65 — an aggregate has no value, so an `if` has nothing to join.**
+`fn pick(n) -> Option<t27> { if n > 0 { Option::Some(n) } else { Option::None } }`
+is the shape half the library is written in, and it was the last thing
+G9.64's guard refused: the lowering built each arm in a temporary, joined
+the two into a third, and copied that into `%sret` — three copies, and the
+join was a `store` of an aggregate, which TIR has none of (TIR §3).
+
+The rule is one line and the whole of it: **where a value is going is known
+before it is computed**, so an `if` hands its destination to both arms and
+they write the same storage; there is no slot, no join load, and no copy.
+The same for a `match`, whose arms already agree to leave the answer
+somewhere — they leave it in the caller's storage instead of a temporary.
+
+What is worth recording is not the rule but what it cost to add it
+*safely*. There are now two ways to lower an `if` and two to lower a
+`match`, and G9.61 says two copies of an answer diverge on the case neither
+was written for. So there are not two copies: `if_expr` and `match_expr`
+each take a destination, and having one means the arms, the labels, the
+counter and the block order are the same code whether the answer is a word
+or a struct. The bodies differ in four lines each.
+
 **G9.64 — the library compiles, as far as `Option` goes, and three things
 had to stop lying first.**
 
