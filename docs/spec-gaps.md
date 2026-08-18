@@ -2621,6 +2621,49 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.85 — the switch passes every test and `bootstrap/` says no: two-phase
+borrows.** The second attempt got the whole library through — 598 of 598
+tests, `for x in v`, `HashMap`, `String`, the coercion, `derive` — and then
+`bootstrap/`, the largest Trust there is, refused to compile:
+
+```
+`e.locals` cannot be borrowed here: it is exclusively borrowed on line 1573
+```
+
+for `e.locals.push(Slot { ty: e.locals[at].ty.to_string(), … })`. The
+receiver's exclusive loan is taken before the arguments are evaluated, so an
+argument that reads the receiver conflicts with the call it is an argument
+to. Every `Vec` in `bootstrap/` is used that way, and none of it was a
+problem while `push` was an intrinsic taking a *place* and no loan at all.
+
+The rule that fixes it is Rust's **two-phase borrow**, and it is one
+sentence: a method's exclusive borrow of its receiver begins when the call
+does, not when the receiver is named. That is a language decision — it is
+visible to every program — and it is the third one this move has turned up,
+after `Raw<T>` and `[]`-as-a-method.
+
+Four other things it found on the way, all fixed and all improvements:
+
+*A borrow records the place after it is computed.* `&mut v[i]` is
+`&mut *v.index_mut(i)`, and a loan on `v[…]` taken first conflicts with the
+call about to take it — a borrow refusing itself, one expression long. Fixed
+on master.
+
+*A match arm's borrow is live in its sibling.* `Option::Some(x) =>
+back.push(x)` and `Option::None => return VecIter { back }` are exclusive
+and a move, in two arms of one `match`, and the checker sees one statement.
+The prelude is written around it; the checker should know better.
+
+*`loans[loans_before..]` panicked.* Loans retire while an initializer is
+lowered, so an index taken before it can be past the end after. Fixed on
+master — it was latent, and more loans is what found it.
+
+*And `INSTANTIATION_LIMIT` counts the queue, not the depth.* §2.7 is about a
+generic that instantiates itself at a larger type; the check is on how many
+instantiations are outstanding. Sixty-four was plenty while `Vec` was the
+compiler's, and is nothing now that it is nine methods per element type.
+`Job` already carries a `depth` field that nothing sets.
+
 **G9.84 — the switch is made and three tests hold it back: `a[i][j] = x`.**
 The prelude's `Vec` is Trust now — `new`, `push`, `pop`, `index`,
 `index_mut`, `reserve`, `insert`, `remove`, `clear`, the growth policy and
