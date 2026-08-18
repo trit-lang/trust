@@ -85,6 +85,34 @@ fused check is a single branch on `tmin(sign(i), i <=> N)`... (informative;
 the normative requirement is only that out-of-bounds access faults or
 panics per the safety chapter, never proceeds).
 
+### 3.1 `v[i]` on a type the language does not know
+
+Indexing is defined above for an array and in Ch. 3 §5 for a slice, and
+those are the types this chapter knows. A type a *program* defines is
+indexed by writing the operation down:
+
+```
+impl<T> Vec<T> {
+    fn index(&self, i: taddr) -> &T;
+    fn index_mut(&mut self, i: taddr) -> &mut T;
+}
+```
+
+`v[i]` is `*v.index(i)` where the value is read and `*v.index_mut(i)` where
+it is written, and those are **places** — so `&v[i]`, `v[i] = x`,
+`v[i] += 1` and `&mut v[i]` all mean what they mean for an array. A type
+with neither method cannot be indexed, and the diagnostic says so.
+
+This is not operator overloading and does not open the door to it. It is one
+operator, resolved to a method of one name, in the same way `for x in v`
+resolves to `into_iter` (Ch. 5 §3.2) and a destructor resolves to `drop`
+(Ch. 3 §1.4) — the language names an operation and a library provides it.
+Draft 0.1 has no `Add` and reserves the question; what it has is a small,
+closed list of names the language will look for, and this adds two to it.
+
+The reason it exists is that `Vec` is library code (Ch. 5 §2.6), and a `Vec`
+that cannot be indexed is not one.
+
 **Packed trit arrays are not `[trit; N]`.** Per Ch. 1 §7, `[trit; N]`
 occupies N full trytes. The standard library provides `TritSlab<N>`
 (⌈N/9⌉ trytes, 9 trits per tryte) as the packed form, built on `unsafe`;

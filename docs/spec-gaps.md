@@ -2621,6 +2621,32 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.78 — `[]` names a method, and that is not operator overloading.**
+G9.77 left one question: a library `Vec` cannot be indexed, and every `Vec`
+in `bootstrap/` is. Two answers were available — an `Index` trait, which is
+the general one and brings operator overloading with it, or `[]` resolving
+to a method of a fixed name, which is the narrow one.
+
+**Chosen: the narrow one**, and written into Ch. 2 §3.1. `v[i]` is
+`*v.index(i)` where it is read and `*v.index_mut(i)` where it is written,
+and both are *places* — so `&v[i]`, `v[i] = x`, `v[i] += 1` and
+`&mut v[i]` mean what they mean for an array, which is what makes it a
+replacement rather than an approximation.
+
+It is worth being clear about why this is not the door to operator
+overloading. The language already names operations that a library provides:
+`for x in v` resolves to `into_iter` (Ch. 5 §3.2), a destructor resolves to
+`drop` (Ch. 3 §1.4), and `derive(Eq)` *writes* a function rather than
+overloading `==` (Ch. 4 §6). What draft 0.1 has is a small closed list of
+names the language looks for, and this adds two. An `Index` trait would
+instead say that operators are things traits may claim, which is a different
+and much larger commitment.
+
+The implementation needs one thing it has not got: a method call whose
+result is a **place**. `*w.first()` works today and `*w.first_mut() = 7`
+does not — the compiler can produce the reference but not treat it as
+somewhere to write. That is the whole of the work.
+
 **G9.77 — what stands between `Raw<T>` and a library `Vec`: one operator.**
 With §2.7 implemented, the move can be planned exactly. Two of the three
 things it needs turned out to be there already.

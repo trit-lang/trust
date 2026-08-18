@@ -431,6 +431,9 @@ overwrites what it has yet to read.
 A slice's own `copy_within` — the same operation where a program can call it —
 is §7's, and is not defined.
 
+`v[i]` is `index`/`index_mut` by Ch. 2 §3.1, which is the rule that lets a
+library type be indexed at all.
+
 Indexing is bounds-checked against the **length**, not the capacity — the room
 beyond it holds nothing a program may read. `capacity` is the only method that
 can see that room, and it can see only how much of it there is.
