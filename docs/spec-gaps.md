@@ -2621,6 +2621,31 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.79 — indexing by method, and the two things it needed.** Ch. 2 §3.1 is
+implemented: a type with `index` is read through it and a type with
+`index_mut` is written through it, and `p[0] = 10`, `p[1] += 5`, `&p[1]` and
+`p[0] + p[1]` all mean what they mean for an array.
+
+Two things had to be added, and both are smaller than the feature.
+
+*A reference a call answered with is a place.* `*w.first_mut() = 7` was
+refused with "`*` applies to a reference" — not because the reference was
+wrong but because `check_writable` asked `type_of_place` and a call is not
+one, then fell through to the error rather than asking what the expression's
+*type* was. Whether a reference may be written through is a fact about the
+reference, not about where it came from.
+
+*And `peek_ty` had to learn to look up a method.* It knew `len` and
+`capacity` by name and answered `None` for everything else, so nothing could
+be said about `w.first_mut()` without lowering it. It reads the signature
+now — a lookup, emitting nothing, resolving exactly what a call would.
+
+Which of the two methods an index means is decided by **which side of the
+`=` it is on**, which is one flag set around one call in `assign` rather
+than a parameter threaded through `place`. Nothing else in `place` needs to
+know, and a read of a `mut` binding does not take an exclusive borrow it
+does not need — which is what `p[0] + p[1]` would have failed on.
+
 **G9.78 — `[]` names a method, and that is not operator overloading.**
 G9.77 left one question: a library `Vec` cannot be indexed, and every `Vec`
 in `bootstrap/` is. Two answers were available — an `Index` trait, which is

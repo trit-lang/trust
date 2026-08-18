@@ -4760,3 +4760,50 @@ fn a_position_may_hold_an_aggregate() {
     }";
     assert_eq!(run(src).0, 30);
 }
+
+// ------------------------------------- Chapter 2 §3.1: `v[i]` names a method
+
+#[test]
+fn a_program_indexes_its_own_type() {
+    // §3.1: `v[i]` is `*v.index(i)` where it is read and `*v.index_mut(i)`
+    // where it is written, and both are places — so everything `[]` means
+    // for an array means the same here.
+    let src = "struct Pair { a: t27, b: t27 }
+    impl Pair {
+        fn index(&self, i: taddr) -> &t27 { if i == 0 { &self.a } else { &self.b } }
+        fn index_mut(&mut self, i: taddr) -> &mut t27 {
+            if i == 0 { &mut self.a } else { &mut self.b }
+        }
+    }
+    fn main() -> t27 {
+        let mut p = Pair { a: 1, b: 2 };
+        p[0] = 10;
+        p[1] += 5;
+        p[0] + p[1] + *(&p[1])
+    }";
+    assert_eq!(run(src).0, 24);
+}
+
+#[test]
+fn indexing_a_type_with_neither_method_says_so() {
+    let src = "struct W { a: t27 }
+    fn main() -> t27 { let w = W { a: 1 }; w[0] }";
+    assert!(
+        error(src).contains("cannot be indexed"),
+        "a type with no `index` should say it cannot be indexed"
+    );
+}
+
+#[test]
+fn a_method_may_be_written_through() {
+    // What `v[i] = x` rests on: a reference a call answered with is a place
+    // like any other (Ch. 3 §2.2).
+    let src = "struct W { a: t27, b: t27 }
+    impl W { fn first_mut(&mut self) -> &mut t27 { &mut self.a } }
+    fn main() -> t27 {
+        let mut w = W { a: 1, b: 2 };
+        *w.first_mut() = 7;
+        w.a + w.b
+    }";
+    assert_eq!(run(src).0, 9);
+}

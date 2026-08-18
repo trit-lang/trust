@@ -4169,6 +4169,10 @@ struct Fn<'a> {
     match_mut: bool,
     /// Set once the current block has been terminated.
     done: bool,
+    /// Whether the place being lowered is about to be written, which is
+    /// what tells `v[i] = x`'s `index_mut` from `v[i]`'s `index`
+    /// (Ch. 2 §3.1).
+    writing: bool,
 }
 
 /// Whether two sets of field names hold the same names.
@@ -4343,6 +4347,7 @@ fn function(
         loops_made: 0,
         match_mut: false,
         done: false,
+        writing: false,
     };
 
     // Parameters arrive as SSA values and are spilled into slots at once, so
@@ -6339,7 +6344,15 @@ impl Fn<'_> {
         if let Some(path) = self.path_of(target) {
             self.check_access(&path, Access::Write, span)?;
         }
-        let (addr, ty) = self.place(target, span)?;
+        // `v[i] = x` is `*v.index_mut(i) = x` and `v[i]` alone is
+        // `*v.index(i)`, so which method an index means depends on which
+        // side of the `=` it is on (Ch. 2 §3.1). Nothing else in `place`
+        // needs to know, which is why this is a flag around one call and
+        // not a parameter threaded through it.
+        let held = std::mem::replace(&mut self.writing, true);
+        let placed = self.place(target, span);
+        self.writing = held;
+        let (addr, ty) = placed?;
 
         let v = if op == "=" {
             let (v, vt) = self.expr(value, Some(&ty))?;
@@ -6444,7 +6457,18 @@ impl Fn<'_> {
                         *l,
                         "cannot write through a shared reference; it would need `&mut`",
                     ),
-                    _ => err(*l, "`*` applies to a reference"),
+                    // A reference that is not itself in a place: what
+                    // `*v.index_mut(i) = x` writes through (Ch. 2 §3.1).
+                    // Whether it may be written through is a fact about the
+                    // reference and not about where it came from.
+                    _ => match self.peek_ty(inner)? {
+                        Some(Ty::Ref(_, true)) | Some(Ty::Boxed(_)) => Ok(()),
+                        Some(Ty::Ref(_, false)) => err(
+                            *l,
+                            "cannot write through a shared reference; it would need `&mut`",
+                        ),
+                        _ => err(*l, "`*` applies to a reference"),
+                    },
                 }
             }
             _ => err(span, "this expression is not a place"),
@@ -9018,7 +9042,29 @@ impl Fn<'_> {
             E::Method(_, name, _, args, _) if name == "capacity" && args.is_empty() => {
                 Some(Ty::TAddr)
             }
-            E::Method(..) => None,
+            // Any other method: what its signature says it answers with.
+            // Only a *lookup* — nothing is emitted and nothing is resolved
+            // that a call would not resolve the same way — and it is what
+            // lets `*v.index_mut(i) = x` be seen as a place before it is
+            // lowered as one (Ch. 2 §3.1).
+            E::Method(recv, name, _, _, span) => {
+                let mut found = None;
+                if let Some(rt) = self.peek_ty(recv)? {
+                    let mut base = rt;
+                    while let Ty::Ref(inner, _) = base.clone() {
+                        if inner.is_unsized() {
+                            break;
+                        }
+                        base = *inner;
+                    }
+                    if let Some(tn) = nominal_name(&base)
+                        && let Ok(key) = self.method_key(&tn, name, *span)
+                    {
+                        found = self.sigs.borrow().get(&key).map(|(_, r)| r.clone());
+                    }
+                }
+                found
+            }
             _ => None,
         })
     }
@@ -10201,7 +10247,18 @@ impl Fn<'_> {
                         };
                         ((**elem).clone(), Length::Dynamic)
                     }
-                    other => return err(*l, format!("{other} cannot be indexed")),
+                    // A type the language does not know is indexed by the
+                    // method it wrote down (Ch. 2 §3.1). `v[i]` is
+                    // `*v.index_mut(i)` where it is written and
+                    // `*v.index(i)` where it is read, and both are places —
+                    // which is what makes `&v[i]` and `v[i] = x` mean here
+                    // what they mean for an array.
+                    other => {
+                        if let Some(out) = self.indexed_by_method(base, index, other, *l)? {
+                            return Ok(out);
+                        }
+                        return err(*l, format!("{other} cannot be indexed"));
+                    }
                 };
                 let (base_addr, len_value) = match len {
                     Length::Fixed(n) => (addr, Operand::Const(Type::Int(27), Bt::from_i128(n))),
@@ -10237,6 +10294,54 @@ impl Fn<'_> {
 
             _ => err(span, "this expression is not a place"),
         }
+    }
+
+    /// `v[i]` where `v`'s type is a program's own: the place `index_mut`
+    /// answers with, or `index`'s where there is no `index_mut`
+    /// (Ch. 2 §3.1).
+    ///
+    /// Written as the desugaring rather than checked and then lowered
+    /// separately, so that everything a method call already does — the
+    /// borrow of the receiver, the bounds check inside it, the coercions —
+    /// happens here for free and cannot drift.
+    fn indexed_by_method(
+        &mut self,
+        base: &ast::Expr,
+        index: &ast::Expr,
+        ty: &Ty,
+        span: Span,
+    ) -> R<Option<(Operand, Ty)>> {
+        let Some(name) = nominal_name(ty) else {
+            return Ok(None);
+        };
+        let (first, second) = match self.writing {
+            true => ("index_mut", "index"),
+            false => ("index", "index_mut"),
+        };
+        let mut which = first;
+        let mut key = self.method_key(&name, which, span)?;
+        if !self.sigs.borrow().contains_key(&key) && self.generic_def(&key).is_none() {
+            which = second;
+            key = self.method_key(&name, which, span)?;
+            if !self.sigs.borrow().contains_key(&key) && self.generic_def(&key).is_none() {
+                return Ok(None);
+            }
+        }
+        let call = ast::Expr::Method(
+            Box::new(base.clone()),
+            which.to_string(),
+            span,
+            vec![index.clone()],
+            span,
+        );
+        let (v, got) = self.expr(&call, None)?;
+        let (Ty::Ref(target, _) | Ty::Boxed(target)) = got else {
+            return err(
+                span,
+                format!("`{which}` answers with something that is not a reference"),
+            );
+        };
+        Ok(Some((v, *target)))
     }
 
     /// A place, dereferencing automatically through a reference — which is
