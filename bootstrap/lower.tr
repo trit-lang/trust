@@ -410,7 +410,7 @@ pub fn function(
     // read without one, and a key that does not fit the family it is for.
     // The receiver's parameters come first: a method of an
     // `impl<T> Pair<T>` is read under `T` and then under its own.
-    let mut tyvars = copy_names(&outer);
+    let mut tyvars = ast::copy_names(&outer);
     let own = generic_names(&f.generics);
     let mut g: taddr = 0;
     while g < own.len() {
@@ -437,8 +437,8 @@ pub fn function(
         self_ty: owner.to_string(),
         families: cx.families,
         jobs: copy_jobs(queued),
-        tyvars: copy_names(&tyvars),
-        key: copy_names(&key),
+        tyvars: ast::copy_names(&tyvars),
+        key: ast::copy_names(&key),
         tyfams: cx.tyfams,
         rets: cx.rets,
         instances: Vec::new(),
@@ -585,7 +585,7 @@ pub fn function(
     while q < e.jobs.len() {
         queued.push(Job {
             name: e.jobs[q].name.to_string(),
-            key: copy_names(&e.jobs[q].key),
+            key: ast::copy_names(&e.jobs[q].key),
         });
         q += 1;
     }
@@ -1687,8 +1687,8 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
             // with nothing to infer from is told by (Ch. 4 §2.3).
             let hint = match written {
                 Option::Some(t) => {
-                    let tyvars = copy_names(&e.tyvars);
-                    let key = copy_names(&e.key);
+                    let tyvars = ast::copy_names(&e.tyvars);
+                    let key = ast::copy_names(&e.key);
                     let held = subst_ty(e, &tyvars, &key, t);
                     let named = nominal(e, &held);
                     if def_at(&e.defs, &named) >= 0 {
@@ -2257,7 +2257,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             let given = if inst < 0 {
                 none
             } else {
-                copy_names(&e.instances[inst].key)
+                ast::copy_names(&e.instances[inst].key)
             };
             let mut under: String = Vec::new();
             under.push_str(&base);
@@ -2394,7 +2394,7 @@ pub fn type_families(items: &Vec<ast::Item>) -> Vec<TyFamily> {
                 let mut k: taddr = 0;
                 while k < fields.len() {
                     names.push(fields[k].name.to_string());
-                    tys.push(copy_ty(&fields[k].ty));
+                    tys.push(ast::copy_ty(&fields[k].ty));
                     k += 1;
                 }
                 out.push(TyFamily {
@@ -2422,7 +2422,7 @@ pub fn type_families(items: &Vec<ast::Item>) -> Vec<TyFamily> {
                     let mut n: taddr = 0;
                     let mut k: taddr = 0;
                     while k < variants[v].fields.len() {
-                        tys.push(copy_ty(&variants[v].fields[k]));
+                        tys.push(ast::copy_ty(&variants[v].fields[k]));
                         n += 1;
                         k += 1;
                     }
@@ -2550,7 +2550,7 @@ pub fn returns(items: &Vec<ast::Item>) -> Vec<RetTy> {
     while i < items.len() {
         match &items[i].what {
             ast::What::Function(f) => {
-                out.push(RetTy { name: f.name.to_string(), ty: copy_ty(&f.ret) });
+                out.push(RetTy { name: f.name.to_string(), ty: ast::copy_ty(&f.ret) });
             }
             ast::What::Impl(gs, tr, ty, fns) => {
                 let owner = written_head(ty);
@@ -2560,7 +2560,7 @@ pub fn returns(items: &Vec<ast::Item>) -> Vec<RetTy> {
                     full.push_str(&owner);
                     full.push_str(".");
                     full.push_str(&fns[k].name);
-                    out.push(RetTy { name: full, ty: copy_ty(&fns[k].ret) });
+                    out.push(RetTy { name: full, ty: ast::copy_ty(&fns[k].ret) });
                     k += 1;
                 }
             }
@@ -2578,7 +2578,7 @@ pub fn returns(items: &Vec<ast::Item>) -> Vec<RetTy> {
                 if k >= 0 {
                     out.push(RetTy {
                         name: given_name(&given[g]),
-                        ty: copy_ty(&tfns[k].ret),
+                        ty: ast::copy_ty(&tfns[k].ret),
                     });
                 }
             }
@@ -2608,7 +2608,7 @@ fn returned_aggregate(e: &mut Emit, name: &str) -> String {
     let mut i: taddr = 0;
     while i < e.rets.len() {
         if e.rets[i].name.same(name) {
-            let written = copy_ty(&e.rets[i].ty);
+            let written = ast::copy_ty(&e.rets[i].ty);
             let none: Vec<String> = Vec::new();
             let empty: Vec<String> = Vec::new();
             let made = subst_ty(e, &none, &empty, &written);
@@ -2847,7 +2847,7 @@ fn copy_def(d: &layout::Def) -> layout::Def {
     let mut tys: Vec<ast::Ty> = Vec::new();
     let mut i: taddr = 0;
     while i < d.fields.len() {
-        tys.push(copy_ty(&d.fields[i]));
+        tys.push(ast::copy_ty(&d.fields[i]));
         i += 1;
     }
     let mut counts: Vec<taddr> = Vec::new();
@@ -2867,7 +2867,7 @@ fn copy_def(d: &layout::Def) -> layout::Def {
         is_enum: d.is_enum,
         linear: d.linear,
         fields: tys,
-        field_names: copy_names(&d.field_names),
+        field_names: ast::copy_names(&d.field_names),
         counts: counts,
         discriminants: discs,
     }
@@ -2939,7 +2939,7 @@ fn instantiate(e: &mut Emit, head: &str, key: &Vec<String>) -> String {
         return "".to_string();
     }
     e.making.push(full.to_string());
-    let tyvars = copy_names(&e.tyfams[at].tyvars);
+    let tyvars = ast::copy_names(&e.tyfams[at].tyvars);
     let source = copy_def(&e.tyfams[at].def);
     let mut fields: Vec<ast::Ty> = Vec::new();
     let mut i: taddr = 0;
@@ -2954,7 +2954,7 @@ fn instantiate(e: &mut Emit, head: &str, key: &Vec<String>) -> String {
     e.instances.push(Inst {
         full: full.to_string(),
         base: head.to_string(),
-        key: copy_names(key),
+        key: ast::copy_names(key),
     });
     full
 }
@@ -3026,14 +3026,14 @@ fn subst_ty(
                 let each = subst_ty(e, tyvars, key, &args[i]);
                 let name = nominal(e, &each);
                 if name.len() == 0 {
-                    return copy_ty(t);
+                    return ast::copy_ty(t);
                 }
                 inner.push(name);
                 i += 1;
             }
             let full = instantiate(e, &head, &inner);
             if full.len() == 0 {
-                return copy_ty(t);
+                return ast::copy_ty(t);
             }
             ast::Ty::Name(one_name(&full))
         }
@@ -3041,48 +3041,14 @@ fn subst_ty(
         ast::Ty::Slice(held) => ast::Ty::Slice(Box::new(subst_ty(e, tyvars, key, held))),
         ast::Ty::Unit => ast::Ty::Unit,
         ast::Ty::SelfTy => ast::Ty::SelfTy,
-        ast::Ty::ImplFn(kind, args, ret) => copy_impl_fn(kind, args, ret),
-        ast::Ty::Tuple(args) => ast::Ty::Tuple(copy_tys(args)),
-        ast::Ty::Array(held, len) => {
-            ast::Ty::Array(Box::new(copy_ty(&*held)), len.to_string())
-        }
+        // Nothing inside a closure type, a tuple or an array names a type
+        // parameter that this reads: they are copied as they were written,
+        // and refused where they are used.
+        _ => ast::copy_ty(t),
     }
 }
 
-/// A type, copied. There is no `Clone` here and a type is a tree.
-fn copy_ty(t: &ast::Ty) -> ast::Ty {
-    match t {
-        ast::Ty::Name(segments) => ast::Ty::Name(copy_names(segments)),
-        ast::Ty::App(segments, args) => {
-            let mut out: Vec<ast::Ty> = Vec::new();
-            let mut i: taddr = 0;
-            while i < args.len() {
-                out.push(copy_ty(&args[i]));
-                i += 1;
-            }
-            ast::Ty::App(copy_names(segments), out)
-        }
-        ast::Ty::Ref(inner, m) => ast::Ty::Ref(Box::new(copy_ty(inner)), m),
-        ast::Ty::Slice(inner) => ast::Ty::Slice(Box::new(copy_ty(inner))),
-        ast::Ty::Unit => ast::Ty::Unit,
-        ast::Ty::SelfTy => ast::Ty::SelfTy,
-        ast::Ty::ImplFn(kind, args, ret) => copy_impl_fn(kind, args, ret),
-        ast::Ty::Tuple(args) => ast::Ty::Tuple(copy_tys(args)),
-        ast::Ty::Array(held, len) => {
-            ast::Ty::Array(Box::new(copy_ty(&*held)), len.to_string())
-        }
-    }
-}
 
-fn copy_names(from: &Vec<String>) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut i: taddr = 0;
-    while i < from.len() {
-        out.push(from[i].to_string());
-        i += 1;
-    }
-    out
-}
 
 /// Which types have a destructor: the ones an `impl Drop` is written for
 /// (Ch. 3 §1.4). A type containing one has a destructor too, and that is
@@ -3380,7 +3346,7 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                             full.push_str(&owner);
                             full.push_str(".");
                             full.push_str(&fns[k].name);
-                            let mut tyvars = copy_names(&outer);
+                            let mut tyvars = ast::copy_names(&outer);
                             let own = generic_names(&fns[k].generics);
                             let mut g: taddr = 0;
                             while g < own.len() {
@@ -3558,7 +3524,7 @@ fn generic_call(
         e.stuck = true;
         return unknown_value();
     }
-    let front = copy_names(&e.families[fam].tyvars);
+    let front = ast::copy_names(&e.families[fam].tyvars);
     let declared = split_types(&e.families[fam].params);
     if declared.len() != args.len() {
         e.stuck = true;
@@ -3589,7 +3555,7 @@ fn generic_call(
     // argument written where it was named turned out to be. A parameter
     // named nowhere is a parameter the arguments cannot say anything about,
     // and a key that is not a type TIR can spell is not one this emits.
-    let mut key: Vec<String> = copy_names(given);
+    let mut key: Vec<String> = ast::copy_names(given);
     let mut t: taddr = key.len();
     while t < e.families[fam].tyvars.len() {
         let each = e.families[fam].tyvars[t].to_string();
@@ -3710,7 +3676,7 @@ fn queue(e: &mut Emit, name: &str, key: &Vec<String>) {
         }
         i += 1;
     }
-    e.jobs.push(Job { name: name.to_string(), key: copy_names(key) });
+    e.jobs.push(Job { name: name.to_string(), key: ast::copy_names(key) });
 }
 
 /// The jobs, copied. A `&mut Vec<Job>` is not a `Vec<Job>` and the emitter
@@ -3721,7 +3687,7 @@ fn copy_jobs(from: &Vec<Job>) -> Vec<Job> {
     while i < from.len() {
         out.push(Job {
             name: from[i].name.to_string(),
-            key: copy_names(&from[i].key),
+            key: ast::copy_names(&from[i].key),
         });
         i += 1;
     }
@@ -3978,7 +3944,7 @@ pub fn instantiations(items: &Vec<ast::Item>, queued: &mut Vec<Job>) -> Vec<Made
             return made;
         }
         let name = queued[at].name.to_string();
-        let key = copy_names(&queued[at].key);
+        let key = ast::copy_names(&queued[at].key);
         let full = mangled(&name, &key);
         done.push(full.to_string());
         let mut text: String = Vec::new();
@@ -3990,7 +3956,7 @@ pub fn instantiations(items: &Vec<ast::Item>, queued: &mut Vec<Job>) -> Vec<Made
                     if !ok && f.name.same(&name) && f.generics.len() > 0 {
                         ok = function(
                             f, context(items), "".to_string(), Vec::new(),
-                            copy_names(&key), queued, &mut text);
+                            ast::copy_names(&key), queued, &mut text);
                     }
                 }
                 ast::What::Impl(gs, tr, ty, fns) => {
@@ -4009,7 +3975,7 @@ pub fn instantiations(items: &Vec<ast::Item>, queued: &mut Vec<Job>) -> Vec<Made
                         if !ok && m.same(&name) && is_family(&fns[k], outer.len()) {
                             ok = function(
                                 &fns[k], context(items), owner.to_string(),
-                                copy_names(&outer), copy_names(&key),
+                                ast::copy_names(&outer), ast::copy_names(&key),
                                 queued, &mut text);
                         }
                         k += 1;
@@ -4173,34 +4139,4 @@ fn push_int(out: &mut String, v: t27) {
     }
 }
 
-/// An `impl Fn(A) -> R`, copied. There is no `Clone` here and a type is a
-/// tree (Ch. 4 §4.1).
-fn copy_impl_fn(
-    kind: &str,
-    args: &Vec<ast::Ty>,
-    ret: &Option<Box<ast::Ty>>,
-) -> ast::Ty {
-    let mut out: Vec<ast::Ty> = Vec::new();
-    let mut i: taddr = 0;
-    while i < args.len() {
-        out.push(copy_ty(&args[i]));
-        i += 1;
-    }
-    let mut answer: Option<Box<ast::Ty>> = Option::None;
-    match ret {
-        Option::Some(r) => answer = Option::Some(Box::new(copy_ty(&*r))),
-        Option::None => {}
-    }
-    ast::Ty::ImplFn(kind.to_string(), out, answer)
-}
 
-/// A list of types, copied.
-fn copy_tys(from: &Vec<ast::Ty>) -> Vec<ast::Ty> {
-    let mut out: Vec<ast::Ty> = Vec::new();
-    let mut i: taddr = 0;
-    while i < from.len() {
-        out.push(copy_ty(&from[i]));
-        i += 1;
-    }
-    out
-}

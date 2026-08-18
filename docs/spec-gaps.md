@@ -2621,6 +2621,29 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.70 — three copies of "copy a type", and what merging them found.**
+`copy_ty` was written out in `lower.tr` and in `types.tr`, and each grew a
+`copy_names`, a `copy_tys` and a `copy_impl_fn` beside it. Closures needed a
+`copy_expr` — a closure's body becomes the body of a function that did not
+exist when the file was read — and writing a *fourth* copy of the same idea
+was the moment to stop: they are all one function about the AST, and they
+live with the AST now.
+
+Merging them made a program that used one, and that program found a
+disagreement neither implementation had been asked about before: what an
+instantiation whose argument is *itself* generic is called.
+
+`Option<Box<Ty>>` is `Option.Box_Ty_` and `Holder<Option<t27>>` is
+`Holder.Option.t27`, and the rule behind the two is not "flatten" or "join
+with dots" but which of the arguments is a **type by then**. An `Option<t27>`
+has been instantiated and has a name, so it contributes it; a `Box<Ty>` is
+kept structural by the compiler and has none, so what it contributes is what
+was written with every character a name cannot hold made `_` (Ch. 6 §4).
+
+The Trust side joined everything with dots, which is wrong twice over: it
+disagreed, and `Holder.Pair.t27` cannot be read back — the dots do not say
+where one argument stops.
+
 **G9.69 — and two more names that were not functions of the program.**
 Fixing the closure's name (G9.67) turned up the same mistake twice more, in
 the same file and both invisible until something counted.

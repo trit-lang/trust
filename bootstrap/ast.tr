@@ -1093,3 +1093,243 @@ pub fn push_int(out: &mut String, v: t27) {
         out.push(char::try_from(('0' as t27) + digits[i]).unwrap());
     }
 }
+
+// ---------------------------------------------------------------- copying
+
+/// A tree, copied. There is no `Clone` here and an expression is a tree.
+///
+/// It is here rather than in a pass because a closure's body has to become
+/// the body of a function that did not exist when the file was read
+/// (Ch. 4 §4.1), and that is the one thing in this compiler that needs a
+/// piece of the tree twice.
+pub fn copy_expr(x: &Expr) -> Expr {
+    match x {
+        Expr::Int(v) => Expr::Int(v),
+        Expr::Char(v) => Expr::Char(v),
+        Expr::Trit(v) => Expr::Trit(v),
+        Expr::Name(n) => Expr::Name(n.to_string()),
+        Expr::Str(text) => Expr::Str(text.to_string()),
+        Expr::Bool(b) => Expr::Bool(b),
+        Expr::Unit => Expr::Unit,
+        Expr::Continue => Expr::Continue,
+        Expr::Binary(op, a, b) => {
+            Expr::Binary(op.to_string(), Box::new(copy_expr(&*a)), Box::new(copy_expr(&*b)))
+        }
+        Expr::Unary(op, a) => Expr::Unary(op.to_string(), Box::new(copy_expr(&*a))),
+        Expr::Call(f, args) => Expr::Call(f.to_string(), copy_exprs(args)),
+        Expr::CallExpr(callee, args) => {
+            Expr::CallExpr(Box::new(copy_expr(&*callee)), copy_exprs(args))
+        }
+        Expr::Closure(params, ret, body) => {
+            let mut ps: Vec<Named> = Vec::new();
+            let mut i: taddr = 0;
+            while i < params.len() {
+                ps.push(Named {
+                    name: params[i].name.to_string(),
+                    ty: copy_ty(&params[i].ty),
+                });
+                i += 1;
+            }
+            let mut answer: Option<Ty> = Option::None;
+            match ret {
+                Option::Some(r) => answer = Option::Some(copy_ty(r)),
+                Option::None => {}
+            }
+            Expr::Closure(ps, answer, Box::new(copy_expr(&*body)))
+        }
+        Expr::Array(items) => Expr::Array(copy_exprs(items)),
+        Expr::Repeat(v, n) => {
+            Expr::Repeat(Box::new(copy_expr(&*v)), Box::new(copy_expr(&*n)))
+        }
+        Expr::Aggregate(path, fields) => {
+            let mut out: Vec<Field> = Vec::new();
+            let mut i: taddr = 0;
+            while i < fields.len() {
+                out.push(Field {
+                    name: fields[i].name.to_string(),
+                    value: copy_expr(&fields[i].value),
+                });
+                i += 1;
+            }
+            Expr::Aggregate(path.to_string(), out)
+        }
+        Expr::Borrow(a, m) => Expr::Borrow(Box::new(copy_expr(&*a)), m),
+        Expr::Deref(a) => Expr::Deref(Box::new(copy_expr(&*a))),
+        Expr::Index(a, at) => {
+            Expr::Index(Box::new(copy_expr(&*a)), Box::new(copy_expr(&*at)))
+        }
+        Expr::Cast(a, t) => Expr::Cast(Box::new(copy_expr(&*a)), copy_ty(t)),
+        Expr::Try(a) => Expr::Try(Box::new(copy_expr(&*a))),
+        Expr::Tuple(items) => Expr::Tuple(copy_exprs(items)),
+        Expr::Match(scrutinee, arms) => {
+            let mut out: Vec<Arm> = Vec::new();
+            let mut i: taddr = 0;
+            while i < arms.len() {
+                let mut guard: Option<Expr> = Option::None;
+                match &arms[i].guard {
+                    Option::Some(g) => guard = Option::Some(copy_expr(g)),
+                    Option::None => {}
+                }
+                out.push(Arm {
+                    patterns: copy_patterns(&arms[i].patterns),
+                    guard: guard,
+                    body: copy_expr(&arms[i].body),
+                });
+                i += 1;
+            }
+            Expr::Match(Box::new(copy_expr(&*scrutinee)), out)
+        }
+        Expr::Group(a) => Expr::Group(Box::new(copy_expr(&*a))),
+        Expr::Field(a, name) => Expr::Field(Box::new(copy_expr(&*a)), name.to_string()),
+        Expr::Method(recv, name, args) => {
+            Expr::Method(Box::new(copy_expr(&*recv)), name.to_string(), copy_exprs(args))
+        }
+        Expr::Assign(op, target, v) => Expr::Assign(
+            op.to_string(),
+            Box::new(copy_expr(&*target)),
+            Box::new(copy_expr(&*v)),
+        ),
+        Expr::Nested(b) => Expr::Nested(Box::new(copy_block(&*b))),
+        Expr::If(c, t, o) => {
+            let mut other: Option<Box<Expr>> = Option::None;
+            match o {
+                Option::Some(x) => other = Option::Some(Box::new(copy_expr(&*x))),
+                Option::None => {}
+            }
+            Expr::If(Box::new(copy_expr(&*c)), Box::new(copy_block(&*t)), other)
+        }
+        Expr::For(name, over, body) => Expr::For(
+            name.to_string(),
+            Box::new(copy_expr(&*over)),
+            Box::new(copy_block(&*body)),
+        ),
+        Expr::While(c, body) => {
+            Expr::While(Box::new(copy_expr(&*c)), Box::new(copy_block(&*body)))
+        }
+        Expr::Loop(body) => Expr::Loop(Box::new(copy_block(&*body))),
+        Expr::Return(v) => Expr::Return(copy_option(v)),
+        Expr::Break(v) => Expr::Break(copy_option(v)),
+    }
+}
+
+/// A list of expressions, copied.
+pub fn copy_exprs(from: &Vec<Expr>) -> Vec<Expr> {
+    let mut out: Vec<Expr> = Vec::new();
+    let mut i: taddr = 0;
+    while i < from.len() {
+        out.push(copy_expr(&from[i]));
+        i += 1;
+    }
+    out
+}
+
+/// An expression that may not be there, copied.
+fn copy_option(v: &Option<Box<Expr>>) -> Option<Box<Expr>> {
+    match v {
+        Option::Some(x) => Option::Some(Box::new(copy_expr(&*x))),
+        Option::None => Option::None,
+    }
+}
+
+/// A block, copied.
+pub fn copy_block(b: &Block) -> Block {
+    let mut stmts: Vec<Stmt> = Vec::new();
+    let mut i: taddr = 0;
+    while i < b.stmts.len() {
+        stmts.push(copy_stmt(&b.stmts[i]));
+        i += 1;
+    }
+    Block { stmts: stmts, tail: copy_option(&b.tail) }
+}
+
+fn copy_stmt(s: &Stmt) -> Stmt {
+    match s {
+        Stmt::Let(mutable, name, written, v) => {
+            let mut ty: Option<Ty> = Option::None;
+            match written {
+                Option::Some(t) => ty = Option::Some(copy_ty(t)),
+                Option::None => {}
+            }
+            Stmt::Let(mutable, name.to_string(), ty, copy_expr(v))
+        }
+        Stmt::LetPattern(p, v) => Stmt::LetPattern(copy_pattern(p), copy_expr(v)),
+        Stmt::Do(v) => Stmt::Do(copy_expr(v)),
+    }
+}
+
+fn copy_patterns(from: &Vec<Pattern>) -> Vec<Pattern> {
+    let mut out: Vec<Pattern> = Vec::new();
+    let mut i: taddr = 0;
+    while i < from.len() {
+        out.push(copy_pattern(&from[i]));
+        i += 1;
+    }
+    out
+}
+
+fn copy_pattern(p: &Pattern) -> Pattern {
+    match p {
+        Pattern::Wild => Pattern::Wild,
+        Pattern::Bind(n) => Pattern::Bind(n.to_string()),
+        Pattern::Int(v) => Pattern::Int(v),
+        Pattern::Bool(b) => Pattern::Bool(b),
+        Pattern::Tuple(items) => Pattern::Tuple(copy_patterns(items)),
+        Pattern::Aggregate(path, fields) => {
+            let mut out: Vec<PatField> = Vec::new();
+            let mut i: taddr = 0;
+            while i < fields.len() {
+                out.push(PatField {
+                    name: fields[i].name.to_string(),
+                    pat: copy_pattern(&fields[i].pat),
+                });
+                i += 1;
+            }
+            Pattern::Aggregate(path.to_string(), out)
+        }
+    }
+}
+
+/// A type, copied. Here rather than in each pass that wanted one, because a
+/// type is a tree too and three of them had written this out.
+pub fn copy_ty(t: &Ty) -> Ty {
+    match t {
+        Ty::Name(segments) => Ty::Name(copy_names(segments)),
+        Ty::App(segments, args) => Ty::App(copy_names(segments), copy_tys(args)),
+        Ty::Ref(inner, m) => Ty::Ref(Box::new(copy_ty(&*inner)), m),
+        Ty::Slice(inner) => Ty::Slice(Box::new(copy_ty(&*inner))),
+        Ty::Unit => Ty::Unit,
+        Ty::SelfTy => Ty::SelfTy,
+        Ty::Tuple(args) => Ty::Tuple(copy_tys(args)),
+        Ty::Array(held, len) => Ty::Array(Box::new(copy_ty(&*held)), len.to_string()),
+        Ty::ImplFn(kind, args, ret) => {
+            let mut answer: Option<Box<Ty>> = Option::None;
+            match ret {
+                Option::Some(r) => answer = Option::Some(Box::new(copy_ty(&*r))),
+                Option::None => {}
+            }
+            Ty::ImplFn(kind.to_string(), copy_tys(args), answer)
+        }
+    }
+}
+
+/// A list of types, copied.
+pub fn copy_tys(from: &Vec<Ty>) -> Vec<Ty> {
+    let mut out: Vec<Ty> = Vec::new();
+    let mut i: taddr = 0;
+    while i < from.len() {
+        out.push(copy_ty(&from[i]));
+        i += 1;
+    }
+    out
+}
+
+/// A list of names, copied.
+pub fn copy_names(from: &Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < from.len() {
+        out.push(from[i].to_string());
+        i += 1;
+    }
+    out
+}
