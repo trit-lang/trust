@@ -2621,6 +2621,39 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.94 — a field of a field.**
+
+`b.p.x` was refused. `value`'s `Field` arm read its base with one `match`
+that took a name and nothing else, so the only place it could read from was
+a local — and a field that is itself an aggregate had no arm at all, since
+the arm always ended in a `load` and an aggregate has no value to load: it
+**is** the storage at that offset (TIR §3).
+
+Both halves are one function now. `place` answers "where is this, and what
+is there", for a name and for a field of a place, and the `Field` arm asks
+it once and then does its own offset. Which makes the inner offset come off
+the pointer to the *outer* field rather than off the base — the rule
+`copy_fields` already followed, and one instruction more than it needs to
+be, and what `trustc` emits.
+
+A **method** on a field is the same question and was refused the same way,
+and it is worth naming separately because it is the shape almost every line
+of this compiler is written in: `e.insts.push(…)` and `b.stmts.len()` are 60
+of the occurrences in `bootstrap/`'s own source. The receiver is a place,
+and handing it over is all a call needs. What tells the two loads apart is
+the prefix: `self.area()` loads the receiver and calls it `%v`, while
+`self.a.get()` loads a step on the way and calls it `%p` — so `place` names
+what it walks through, and only a receiver written as a bare name still does
+its own reading-through.
+
+The corpus is the finding again, and this time the file said so out loud:
+`bootstrap/lowered/15.tr` had declared `struct Pair { l: P, r: P }` and used
+it in **nothing**. A type that no function mentions is a type neither
+implementation was ever asked about — G9.91's `&x` in a different costume,
+in the same file. It is read through now, by value, by reference, through
+`self`, and as a receiver; `lowered/05.tr` asks the same of an aggregate
+parameter.
+
 **G9.93 — a binding took over storage that was not its to take.**
 
 `stmt::Let` renamed the value's storage into the binding's name whenever the

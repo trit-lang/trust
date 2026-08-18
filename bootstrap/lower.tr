@@ -2428,41 +2428,15 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
         }
         // `p.x` — the field's offset from Ch. 2, and a load (§4).
         ast::Expr::Field(base, field) => {
-            let name = match base {
-                ast::Expr::Name(n) => n.to_string(),
-                _ => {
-                    e.stuck = true;
-                    return unknown_value();
-                }
-            };
-            let at = local_at(e, &name);
-            if at < 0 {
-                e.stuck = true;
+            // Where the thing this reads a field of *is*. A field of a
+            // field asks the same question one layer down, which is the
+            // whole of what makes `d.p.x` work.
+            let held = place(e, base);
+            if e.stuck {
                 return unknown_value();
             }
-            let mut owner = e.locals[at].ty.to_string();
-            let mut slot = e.locals[at].slot.to_string();
-            // A local holding an *address* is read through: the address
-            // first, and then what it points at. Which type that is comes
-            // from the name where there is one — `&P` says P — and from the
-            // receiver where there is not, because `self` is the parameter
-            // whose type the impl says rather than the parameter list.
-            let points_at = referent_name(&owner);
-            if owner.same("ptr") || points_at.len() > 0 {
-                owner = if points_at.len() > 0 {
-                    points_at
-                } else {
-                    e.self_ty.to_string()
-                };
-                let p = fresh(e, "p");
-                let mut line: String = Vec::new();
-                line.push_str("    ");
-                line.push_str(&p);
-                line.push_str(" = load ptr ");
-                line.push_str(&slot);
-                e.insts.push(line);
-                slot = p;
-            }
+            let owner = held.ty.to_string();
+            let slot = held.text.to_string();
             let which = def_at(&e.defs, &owner);
             if which < 0 {
                 e.stuck = true;
@@ -2484,13 +2458,19 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             let ty = field_tir(&e.defs[which].fields[index]);
             // A field that is a reference answers with *what kind* of
             // reference, because that is what a dereference of it needs.
-            let held = ref_name(&e.defs[which].fields[index]);
-            let answers = if held.len() > 0 {
-                held
+            let named = ref_name(&e.defs[which].fields[index]);
+            let answers = if named.len() > 0 {
+                named
             } else {
                 ty.to_string()
             };
             let src = offset_of(e, &slot, l.offsets[index]);
+            // A field that is itself an aggregate has no value to load: it
+            // **is** the storage at that offset (TIR §3).
+            let inner = name_head(&e.defs[which].fields[index]);
+            if def_at(&e.defs, &inner) >= 0 {
+                return Value { text: src, ty: inner };
+            }
             let v = fresh(e, "v");
             let mut load: String = Vec::new();
             load.push_str("    ");
@@ -2751,18 +2731,31 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 ast::Expr::Name(n) => local_at(e, n),
                 _ => missing,
             };
-            if at < 0 {
-                e.stuck = true;
+            // A receiver that is not a name is a **place**: `b.a.get()`
+            // asks where `b.a` is and hands that address over. Walking into
+            // a place loads `%p` and not `%v`, because what is loaded is a
+            // step on the way to the object rather than the object itself
+            // — and `place` has already done any reading-through, so only
+            // the plain name below still has one to do (G9.94).
+            let found = if at < 0 {
+                place(e, recv)
+            } else {
+                Value {
+                    text: e.locals[at].slot.to_string(),
+                    ty: e.locals[at].ty.to_string(),
+                }
+            };
+            if e.stuck {
                 return unknown_value();
             }
-            let mut owner = e.locals[at].ty.to_string();
-            let mut slot = e.locals[at].slot.to_string();
+            let mut owner = found.ty;
+            let mut slot = found.text;
             // A receiver that is itself a reference holds the *address* of
             // the object, so what a method is given is what the slot holds
             // and not the slot: `self.area()` inside a `&self` method reads
             // through `self` exactly as `self.field` does (Ch. 3 §2.2).
             let points_at = referent_name(&owner);
-            if owner.same("ptr") || points_at.len() > 0 {
+            if at >= 0 && (owner.same("ptr") || points_at.len() > 0) {
                 owner = if points_at.len() > 0 {
                     points_at
                 } else {
@@ -2924,6 +2917,86 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             line.push_str(&shown);
             e.insts.push(line);
             Value { text: name, ty: ty }
+        }
+        _ => {
+            e.stuck = true;
+            unknown_value()
+        }
+    }
+}
+
+/// Where a place is, and what is there: the **storage** an expression names
+/// rather than the value in it.
+///
+/// A field is read from a place and is itself one, so this is the question
+/// `b.p.x` asks twice — and the inner offset is taken from the pointer to
+/// the outer field rather than recomputed from the base, which is the rule
+/// `copy_fields` already follows and the text `trustc` already emits.
+fn place(e: &mut Emit, x: &ast::Expr) -> Value {
+    match x {
+        ast::Expr::Name(n) => {
+            let at = local_at(e, n);
+            if at < 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let mut owner = e.locals[at].ty.to_string();
+            let mut slot = e.locals[at].slot.to_string();
+            // A local holding an *address* is read through: the address
+            // first, and then what it points at. Which type that is comes
+            // from the name where there is one — `&P` says P — and from the
+            // receiver where there is not, because `self` is the parameter
+            // whose type the impl says rather than the parameter list.
+            let points_at = referent_name(&owner);
+            if owner.same("ptr") || points_at.len() > 0 {
+                owner = if points_at.len() > 0 {
+                    points_at
+                } else {
+                    e.self_ty.to_string()
+                };
+                let p = fresh(e, "p");
+                let mut line: String = Vec::new();
+                line.push_str("    ");
+                line.push_str(&p);
+                line.push_str(" = load ptr ");
+                line.push_str(&slot);
+                e.insts.push(line);
+                slot = p;
+            }
+            Value { text: slot, ty: owner }
+        }
+        ast::Expr::Field(base, field) => {
+            let held = place(e, base);
+            if e.stuck {
+                return unknown_value();
+            }
+            let which = def_at(&e.defs, &held.ty);
+            if which < 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let index = field_at(e, which, field);
+            if index < 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let self_ty = ast::Ty::Name(one_name(&held.ty));
+            let l = match layout::of(&e.defs, &self_ty, 0) {
+                Result::Ok(x) => x,
+                Result::Err(why) => {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+            };
+            // Only an aggregate field is a place this can go on from: a
+            // scalar is a value and a reference is one address more.
+            let inner = name_head(&e.defs[which].fields[index]);
+            if def_at(&e.defs, &inner) < 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let src = offset_of(e, &held.text, l.offsets[index]);
+            Value { text: src, ty: inner }
         }
         _ => {
             e.stuck = true;

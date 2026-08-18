@@ -38,9 +38,27 @@ fn asked(p: &P) -> t27 { p.sum() }
 // (Ch. 3 §1.1).
 fn copied(p: &P) -> t27 { let q = *p; q.a + q.b }
 
+impl Pair {
+    // The same question from inside: `self` is an address, the outer field
+    // is an offset from it, and the inner field is an offset from *that*.
+    fn left(&self) -> t27 { self.l.a }
+    // And a *method* on a field, which is the same place handed over as a
+    // receiver — the shape almost every line of this compiler is written in.
+    fn asked(&self) -> t27 { self.r.sum() }
+}
+
+// A field of a field, reached by reference. `Pair` had been declared here
+// and used by nothing, which is why neither implementation had ever been
+// asked to read through one (G9.94).
+fn deep(w: &Pair) -> t27 { w.l.a + w.r.b }
+
+fn onfield(w: &Pair) -> t27 { w.l.sum() }
+
 fn main() -> t27 {
     let one = P { a: 1, b: 2 };
     let two = P { a: 3, b: 4 };
+    let pair = Pair { l: P { a: 5, b: 6 }, r: P { a: 7, b: 8 } };
     get(&one) + both(&two) + through(&one) + wider(&one, &two) + asked(&two)
-        + copied(&one)
+        + copied(&one) + deep(&pair) + pair.left() + pair.l.b
+        + onfield(&pair) + pair.asked() + pair.r.sum()
 }

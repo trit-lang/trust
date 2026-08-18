@@ -1,5 +1,6 @@
 struct P { x: t27, y: t9 }
 struct Wide { a: t9, b: taddr, c: bool }
+struct Deep { p: P, q: P }
 #[repr(linear)]
 struct Wire { a: t9, b: taddr, c: trit }
 
@@ -10,4 +11,10 @@ fn reordered(w: Wide) -> taddr { w.b }
 fn flag(w: Wide) -> bool { w.c }
 fn declared(w: Wire) -> taddr { w.b }
 fn two(p: P, q: P) -> t27 { p.x + q.x }
+// A field of a field. The inner offset is taken from the pointer to the
+// outer one and not recomputed from the base, which is the same rule a
+// field-by-field copy follows — and `d.p.x` at offset zero is the base
+// itself, so it is one load and no `offset` at all.
+fn inner(d: Deep) -> t27 { d.p.x }
+fn outer(d: Deep) -> t9 { d.q.y }
 fn branch(p: P) -> t27 { if p.x > 0 { p.x } else { 0 } }
