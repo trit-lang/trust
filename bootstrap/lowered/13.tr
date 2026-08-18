@@ -16,6 +16,13 @@
 // implementation had where a method is called on a receiver that is itself
 // a reference. What a method is given is the address the slot *holds*, not
 // the slot.
+//
+// **Where** one of those is emitted is the other half, and it took two
+// types each given something to see it: a method the trait wrote goes
+// beside the ones the impl wrote, not after every impl in the file. `Sq`
+// is given `plus` and `Re` is given `twice` and `plus`, and until `a.plus`
+// was written here `Sq.plus` was reached by nothing and the two orders
+// could not disagree (G9.92).
 
 trait Area {
     fn area(&self) -> t27;
@@ -42,5 +49,5 @@ fn sum<T: Area>(x: T) -> t27 { x.area() }
 fn main() -> t27 {
     let a = Sq { s: 3 };
     let b = Re { w: 2, h: 5 };
-    sum(a) + sum(b) + a.twice() + b.twice() + b.plus(1)
+    sum(a) + sum(b) + a.twice() + b.twice() + b.plus(1) + a.plus(2)
 }

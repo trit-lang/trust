@@ -4880,6 +4880,12 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
         }
         k += 1;
     }
+    // Each impl, and then what the *trait* gave it. A method the trait wrote
+    // and the impl did not is a function of the type (Ch. 4 §1.7), and it
+    // belongs beside the ones the impl did write: emitting every impl and
+    // then every given puts `Sq.plus` after `Re.area`, which is the same
+    // program in a different order — and the order is the text (G9.92).
+    let given = givens(items);
     let mut d: taddr = 0;
     while d < items.len() {
         match &items[d].what {
@@ -4920,35 +4926,40 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
                     }
                     m += 1;
                 }
-            }
-            _ => {}
-        }
-        d += 1;
-    }
-    // What a trait gave a type is a function of the type, emitted after
-    // the impls that are written and before the instantiations that are
-    // asked for (Ch. 4 §1.7).
-    let given = givens(items);
-    let mut g: taddr = 0;
-    while g < given.len() {
-        let at = trait_at(items, &given[g].trait_name);
-        let mut text: String = Vec::new();
-        let mut made = false;
-        match &items[at].what {
-            ast::What::Trait(n, params, supers, assoc, tfns) => {
-                let k = named_fn(tfns, &given[g].name);
-                if k >= 0 {
-                    made = function(
-                        &tfns[k], context(items), given[g].owner.to_string(),
-                        Vec::new(), Vec::new(), &mut work, &mut text);
+                let mut g: taddr = 0;
+                while g < given.len() {
+                    if !given[g].owner.same(&owner)
+                        || !given[g].trait_name.same(&named)
+                    {
+                        g += 1;
+                        continue;
+                    }
+                    let at = trait_at(items, &given[g].trait_name);
+                    let mut text: String = Vec::new();
+                    let mut made = false;
+                    let mine = given[g].owner.to_string();
+                    match &items[at].what {
+                        ast::What::Trait(n, params, supers, assoc, tfns) => {
+                            let k = named_fn(tfns, &given[g].name);
+                            if k >= 0 {
+                                made = function(
+                                    &tfns[k], context(items), mine,
+                                    Vec::new(), Vec::new(),
+                                    &mut work, &mut text);
+                            }
+                        }
+                        _ => {}
+                    }
+                    if made {
+                        let full = given_name(&given[g]);
+                        out.push(Made { name: full, text: text });
+                    }
+                    g += 1;
                 }
             }
             _ => {}
         }
-        if made {
-            out.push(Made { name: given_name(&given[g]), text: text });
-        }
-        g += 1;
+        d += 1;
     }
 
     // A closure's body is a function of its own, and it is emitted before

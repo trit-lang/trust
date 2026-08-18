@@ -2621,6 +2621,24 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.92 — a method a trait gave a type is emitted where the impl is.**
+
+`bootstrap/lower.tr` emitted every `impl` and then every method a trait had
+given one, which puts `Sq.plus` after `Re.area`. `trustc` emits an impl's own
+methods and then its givens, and only then reaches the next impl. The same
+functions either way, in two orders — and the order **is** the text
+(docs/ddc.md §4).
+
+Nothing had disagreed because nothing had asked. `bootstrap/lowered/13.tr`
+gives `Sq` a `plus` and `Re` a `twice` and a `plus`, and the only ones `main`
+reached were `Re`'s — so exactly one impl contributed a given, and one of
+anything is in order whatever the rule is. `a.plus(2)` in that `main` is the
+whole of what was missing, and it is one call.
+
+Which is G9.91's lesson under a different feature, found the same way: by
+writing the program the *next* thing needs — G9.90's trait objects — and
+watching something one layer down fail first.
+
 **G9.91 — `&self` was the only reference `bootstrap/` had ever lowered.**
 
 Starting on G9.90's trait objects found something one layer under them: the
