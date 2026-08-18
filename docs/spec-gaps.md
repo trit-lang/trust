@@ -2621,6 +2621,67 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.90 — what `bootstrap/` still owes: `dyn Trait`.**
+
+`trustc` lowers trait objects fully — vtable globals, the fat-pointer
+coercion, the indirect call — and `bootstrap/lower.tr` lowers none of it. It
+*parses* `dyn` and lays it out (`layout.tr` says a trait object has no size
+of its own, which is right), and then refuses every function that touches
+one, so the file emits nothing at all rather than something wrong.
+
+This is written down rather than done because the shape is now known exactly,
+and knowing it is most of the work. The program to compare on:
+
+```
+trait Area {
+    fn area(&self) -> t27;
+    fn twice(&self) -> t27 { self.area() + self.area() }
+}
+struct Sq { s: t27 }
+struct Re { w: t27, h: t27 }
+impl Area for Sq { fn area(&self) -> t27 { self.s * self.s } }
+impl Area for Re { fn area(&self) -> t27 { self.w * self.h } }
+fn total(x: &dyn Area) -> t27 { x.area() + x.twice() }
+fn main() -> t27 {
+    let a = Sq { s: 3 };
+    let b = Re { w: 2, h: 5 };
+    total(&a) + total(&b)
+}
+```
+
+and the four things it needs, each of which is a different mechanism:
+
+*The table.* One global per (type, trait) pair, in the order the coercions
+were seen, before every function:
+
+```
+global @vt.Sq.Area : tryte[15] = [3, 0, 0, 3, 0, 0, 0, 0, 0, addr @Sq.area, addr @Sq.twice]
+```
+
+Five words: the type's size, its alignment, a slot for its destructor —
+`0, 0, 0` where it has none — and then one address per method **in the
+trait's declaration order**, provided bodies included.
+
+*A parameter that is a fat reference.* `&dyn Area` is `%x: ptr` in the
+signature and `slot tryte[6]` inside, copied in exactly as a two-field
+aggregate is: field 0 loaded as `ptr`, field 1 as `t27`. `copy_in` already
+does this given a `Def` — so the piece missing is a synthetic def per trait,
+two fields wide, which `Ty::Ref(t27)` and `taddr` describe exactly.
+
+*The coercion.* `&a` where a `&dyn Area` is wanted builds those two words:
+the data pointer at 0, and `addr @vt.Sq.Area` at 3 (Ch. 4 §3.2).
+
+*The call.* Load the data pointer, load the vtable pointer, offset by
+`9 + 3 * index`, load, and call *that* — the only call in this language that
+is not to a name.
+
+And one consequence that is easy to miss: **a vtable is a use**. `@Re.twice`
+exists in the module above because the table holds its address, not because
+anything called it — so building a table has to queue every method of the
+trait for that type, provided bodies included, the same way a call does. A
+`reachable` pass that only follows calls would prune away the function the
+table points at.
+
 **G9.89 — `Raw::try_alloc`, and the turbofish that never worked.**
 
 §2.7's fallible half is written. It is `Box::try_new`'s shape one layer out
