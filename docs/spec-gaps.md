@@ -2621,6 +2621,39 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.80 — `Raw<T>` needed four position operations, not two, and writing
+`Vec` is what said so.** §2.7 as written gave `read` and `write`. Starting
+to write `Vec` on top of it found that `index` cannot be written with
+either: it answers with `&T`, a reference **into** the room, and `read`
+moves out while `write` puts in.
+
+The four are four because none is the others:
+
+- `at` and `at_mut` are a position that *is* a `T`, as a place — what
+  `index` and `index_mut` are built on (Ch. 2 §3.1).
+- `write` makes a position a `T` and **does not drop** what was there,
+  because what was there was not one.
+- `read` **moves** a `T` out, leaving a position that is not one again.
+
+`*r.at_mut(i) = v` is not `r.write(i, v)` — the first drops the `T` that was
+there — and `r.read(i)` is not `*r.at(i)`, because the second is a move out
+of a place reached through a reference, which Ch. 3 §1.2 refuses and G9.45
+refused for a reason. Here the operation *is* that move, which is why it has
+a name of its own.
+
+The chapter is amended and the compiler follows it. A program can now build
+an indexable collection with nothing the language does not give it:
+
+```
+struct Bag { held: Raw<t27>, n: taddr }
+impl Bag {
+    fn index(&self, i: taddr) -> &t27 { self.held.at(i) }
+    fn index_mut(&mut self, i: taddr) -> &mut t27 { self.held.at_mut(i) }
+}
+```
+
+which is `Vec` with the growth taken out — and the growth is Trust.
+
 **G9.79 — indexing by method, and the two things it needed.** Ch. 2 §3.1 is
 implemented: a type with `index` is read through it and a type with
 `index_mut` is written through it, and `p[0] = 10`, `p[1] += 5`, `&p[1]` and

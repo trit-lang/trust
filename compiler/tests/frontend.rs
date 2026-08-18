@@ -4807,3 +4807,24 @@ fn a_method_may_be_written_through() {
     }";
     assert_eq!(run(src).0, 9);
 }
+
+#[test]
+fn a_program_builds_an_indexable_type_on_raw() {
+    // Ch. 5 §2.7 and Ch. 2 §3.1 together: room, a position as a place, and
+    // `[]` resolving to the methods written on it. This is the whole of what
+    // `Vec` needs from the compiler, in one program.
+    let src = "struct Bag { held: Raw<t27>, n: taddr }
+    impl Bag {
+        fn index(&self, i: taddr) -> &t27 { self.held.at(i) }
+        fn index_mut(&mut self, i: taddr) -> &mut t27 { self.held.at_mut(i) }
+    }
+    fn main() -> t27 {
+        let mut b = Bag { held: Raw::alloc(3), n: 0 };
+        b.held.write(0, 1);
+        b.held.write(1, 2);
+        b.held.write(2, 4);
+        b[1] += 10;
+        b[0] + b[1] + b[2]
+    }";
+    assert_eq!(run(src).0, 17);
+}

@@ -482,10 +482,27 @@ impl<T> Raw<T> {
     fn alloc(n: taddr) -> Raw<T>;           // room for n; traps if it cannot
     fn try_alloc(n: taddr) -> Option<Raw<T>>;
     fn room(&self) -> taddr;                // how many positions there are
-    fn read(&self, i: taddr) -> T;          // the i-th, as a T
+    fn at(&self, i: taddr) -> &T;           // the i-th, which must be a T
+    fn at_mut(&mut self, i: taddr) -> &mut T;
+    fn read(&self, i: taddr) -> T;          // the i-th, moved out
     fn write(&mut self, i: taddr, value: T);
 }
 ```
+
+The four position operations are four because none of them is the others:
+
+| | |
+|---|---|
+| `at`, `at_mut` | a position that **is** a `T`, as a place — what `index` and `index_mut` are built on (Ch. 2 §3.1) |
+| `write` | makes a position a `T`, and **does not drop** what was there, because what was there was not one |
+| `read` | **moves** a `T` out, leaving a position that is not one again |
+
+`*r.at_mut(i) = v` is not `r.write(i, v)`: the first drops the `T` that was
+there and the second does not, and only one of those is right for room that
+has never held one. `r.read(i)` is not `*r.at(i)` either: the second would
+be a move out of a place reached through a reference, which Ch. 3 §1.2
+refuses, and it is refused because in general it is wrong — here it is the
+operation itself.
 
 A `Raw<T>` **owns room** and knows nothing about what is in it. It is:
 

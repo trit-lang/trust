@@ -1790,6 +1790,8 @@ pub const BUILTIN_METHODS: &[(&str, &str, &str)] = &[
     // Ch. 5 §2.7: room that is not yet a `T`, which is the one thing the
     // collections need and the language cannot say.
     ("Raw", "room", "fn room(&self) -> taddr"),
+    ("Raw", "at", "fn at(&self, at: taddr) -> &T"),
+    ("Raw", "at_mut", "fn at_mut(&mut self, at: taddr) -> &mut T"),
     ("Raw", "read", "fn read(&self, at: taddr) -> T"),
     ("Raw", "write", "fn write(&mut self, at: taddr, value: T)"),
     // Ch. 5 §2: the growable array, whose storage is the compiler's.
@@ -7694,6 +7696,15 @@ impl Fn<'_> {
                 }
                 let at = self.offset(v, 3);
                 Ok((self.load_from(at, &Ty::TAddr), Ty::TAddr))
+            }
+            // `at` and `at_mut` answer with the position itself, which is
+            // a place — what `index` and `index_mut` are built on
+            // (Ch. 2 §3.1). Nothing is read: the address *is* the answer.
+            "at" | "at_mut" if matches!(peel(&ty), Ty::RawOf(_)) => {
+                let elem = raw_elem(&ty, name, span)?;
+                let i = one_arg(self, &Ty::TAddr)?;
+                let at = self.raw_position(v, &elem, i, span)?;
+                Ok((at, Ty::Ref(Box::new(elem), name == "at_mut")))
             }
             "read" if matches!(peel(&ty), Ty::RawOf(_)) => {
                 let elem = raw_elem(&ty, "read", span)?;
