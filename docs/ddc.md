@@ -118,9 +118,20 @@ checker's business. What needed building is a trait method *with a body*,
 which is one function per implementing type named after the type
 (`Re.twice`), and type arguments that are aggregates (`@sum.Sq`).
 
-Compiling *all* of the library is what is left: `dyn Trait` and its
-vtables, closures and their captures (Ch. 4 §§3–4), and Ch. 5's `Vec` and
-`String`, which are the compiler's rather than the library's.
+Closures are done, captures and all. What is left is `dyn Trait` and its
+vtables (Ch. 4 §3), and Ch. 5's `Vec` and `String` — and those two are a
+different kind of thing.
+
+**`Vec` is the compiler's code, not the language's.** Its methods are
+intrinsics: `trustc` expands `push` into hand-written TIR, and no chapter
+says what that TIR is. A second implementation cannot derive it, only copy
+it, which is exactly §3.4's warning. The decision is to **move them into the
+library** — Trust source in the prelude, with `alloc` and `free` left as the
+compiler's, because those are the target's and not the language's
+(Ch. 5 §2.1). The prerequisite is a language one: Trust cannot name a raw
+pointer, which is why `Box` is the compiler's today. So the order is decide
+how a pointer is written, then move the library, then this comparison can
+reach the whole of it (G9.73).
 
 Until then, what a program may use of the library is what the Trust side
 lowers, and what it may not is refused rather than lowered wrongly — which

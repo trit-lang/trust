@@ -2621,6 +2621,33 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.73 — `Vec` is the compiler's code and not the language's, and it
+should not be.** `Vec::push`, `pop`, `len` and the rest are **compiler
+intrinsics**: `trustc` expands each into hand-written TIR — a capacity test,
+a `vec.grow` block, an `alloc`, a copy loop. None of it is Trust source and
+none of it is in `spec/`.
+
+That is fine for one compiler and fatal for two. A second implementation
+cannot *derive* `Vec::push`'s instructions from the chapters, because the
+chapters do not contain them; it can only copy this implementation
+instruction for instruction, which is the thing `docs/ddc.md` §3.4 exists to
+warn about and which G9.58, G9.67, G9.69 and G9.72 were each a small version
+of. The difference is that those were **names and orders**, and could be
+made functions of the program by fixing them here. This one cannot: there is
+no fact about the program that says what `push` compiles to.
+
+**Decided: `Vec` and `String` become library code**, written in Trust in the
+prelude, leaving `alloc` and `free` as the only things the compiler
+provides — which is right, because those are the target's and not the
+language's (Ch. 5 §2.1).
+
+It has a prerequisite the language does not meet. To write `Vec` in Trust,
+Trust must be able to **name a raw pointer**, and it cannot; this is why
+`Box` is the compiler's and not the library's, and `lower.rs` says so in as
+many words. So the order is: decide how a pointer is written, then move the
+library. Recorded here rather than started, because it is a decision about
+the *language* and not about either implementation of it.
+
 **G9.72 — a capture is a dereference, and a peek is not free.** Closures
 that capture work now. `k` inside the body is a field of the closure holding
 `k`'s address, so it is read as `(*self.k)` and every rule about fields and
