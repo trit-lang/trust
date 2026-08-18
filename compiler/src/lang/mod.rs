@@ -35,6 +35,131 @@ pub const PRELUDE: &str = r#"
 enum Option<T> { None, Some(T) }
 enum Result<T, E> { Ok(T), Err(E) }
 
+// --- Ch. 5 §2.6: the growable array ----------------------------------------
+
+// `Vec<T>` is **library code**. Every decision §2.6 makes is here rather than
+// in the compiler: growth doubles from a first allocation of four, `reserve`
+// does not double, `insert` shifts downwards, and indexing is checked against
+// the length and not the room. What the compiler provides is `Raw<T>` (§2.7)
+// and nothing else — which is what lets a second implementation *compile*
+// this rather than reproduce it (docs/ddc.md §3.4).
+
+struct Vec<T> { held: Raw<T>, n: taddr }
+
+impl<T> Vec<T> {
+    fn new() -> Vec<T> { Vec { held: Raw::new(), n: 0 } }
+
+    fn with_capacity(n: taddr) -> Vec<T> { Vec { held: Raw::alloc(n), n: 0 } }
+
+    fn len(&self) -> taddr { self.n }
+    fn is_empty(&self) -> bool { self.n == 0 }
+    fn capacity(&self) -> taddr { self.held.room() }
+
+    // Ch. 2 §3.1: `v[i]` is these two, and the check is against the length —
+    // the room beyond it holds nothing a program may read.
+    fn index(&self, i: taddr) -> &T {
+        if i >= self.n { trap(); }
+        self.held.at(i)
+    }
+    fn index_mut(&mut self, i: taddr) -> &mut T {
+        if i >= self.n { trap(); }
+        self.held.at_mut(i)
+    }
+
+    // Three steps, because there is no `realloc` (§7): allocate, move, free.
+    // The free is `self.held = fresh` — the old room is dropped, and nothing
+    // in it is dropped with it, because every element was moved out (§2.7).
+    fn regrow(&mut self, want: taddr) {
+        let mut fresh: Raw<T> = Raw::alloc(want);
+        let mut i: taddr = 0;
+        while i < self.n {
+            fresh.write(i, self.held.read(i));
+            i += 1;
+        }
+        self.held = fresh;
+    }
+
+    fn grown(&mut self) {
+        let mut want: taddr = 4;
+        if self.held.room() > 0 { want = self.held.room() * 2; }
+        self.regrow(want);
+    }
+
+    // A program that says how much it wants has said something the guess
+    // cannot improve on, so it gets `len + n` exactly.
+    fn reserve(&mut self, more: taddr) {
+        let want = self.n + more;
+        if want > self.held.room() { self.regrow(want); }
+    }
+
+    fn push(&mut self, value: T) {
+        if self.n == self.held.room() { self.grown(); }
+        self.held.write(self.n, value);
+        self.n += 1;
+    }
+
+    // The length comes down first, so what is returned is no longer inside
+    // the `Vec` and will not be dropped twice.
+    fn pop(&mut self) -> Option<T> {
+        if self.n == 0 { return Option::None; }
+        self.n -= 1;
+        Option::Some(self.held.read(self.n))
+    }
+
+    // Front to back, which is the order a `Vec`'s own destructor drops in
+    // and therefore the order a program has already seen. §2.6 does not say,
+    // and two orders a program can tell apart should not be left to which
+    // way a loop happened to be written.
+    fn clear(&mut self) {
+        let mut i: taddr = 0;
+        while i < self.n {
+            let held = self.held.read(i);
+            i += 1;
+        }
+        self.n = 0;
+    }
+
+    // `insert` accepts `i == len`, which is `push`. The shift runs
+    // **downwards**, because a forward copy moving a block up overwrites
+    // what it has yet to read.
+    fn insert(&mut self, at: taddr, value: T) {
+        if at > self.n { trap(); }
+        if self.n == self.held.room() { self.grown(); }
+        let mut i = self.n;
+        while i > at {
+            self.held.write(i, self.held.read(i - 1));
+            i -= 1;
+        }
+        self.held.write(at, value);
+        self.n += 1;
+    }
+
+    // The element is read before the shift, so the shift does not drop it.
+    fn remove(&mut self, at: taddr) -> T {
+        if at >= self.n { trap(); }
+        let out = self.held.read(at);
+        let mut i = at;
+        while i + 1 < self.n {
+            self.held.write(i, self.held.read(i + 1));
+            i += 1;
+        }
+        self.n -= 1;
+        out
+    }
+}
+
+// Every element, and then the room — the elements first, for the reason a
+// `Box` gives (§2.3). `Raw`'s own drop takes the room, and drops nothing.
+impl<T> Drop for Vec<T> {
+    fn drop(self) {
+        let mut i: taddr = 0;
+        while i < self.n {
+            let held = self.held.read(i);
+            i += 1;
+        }
+    }
+}
+
 // --- Ch. 5 §4: what a failure does when nobody said ------------------------
 
 // `unwrap` traps: there is no unwinding and no handler (AM §4), so it is the
@@ -367,15 +492,20 @@ impl<T> Iterator for VecIter<T> {
 impl<T> IntoIterator for Vec<T> {
     type Item = T;
     type IntoIter = VecIter<T>;
+    // The two halves are in two statements, not two arms of one: a borrow
+    // taken in an arm is live in its sibling, so pushing in one arm and
+    // moving `back` out of the other is a borrow across a move (Ch. 3 §2.2).
     fn into_iter(self) -> VecIter<T> {
         let mut from = self;
         let mut back: Vec<T> = Vec::new();
-        loop {
+        let mut going = true;
+        while going {
             match from.pop() {
                 Option::Some(x) => back.push(x),
-                Option::None => return VecIter { back: back },
+                Option::None => going = false,
             }
         }
+        VecIter { back: back }
     }
 }
 
@@ -493,10 +623,11 @@ impl<K: Key, V> HashMap<K, V> {
     /// The value for `k`, or `None`.
     fn get(&self, k: &K) -> Option<&V> {
         let b = self.which(k);
+        let bucket = &self.buckets[b];
         let mut i: taddr = 0;
-        while i < self.buckets[b].len() {
-            if self.buckets[b][i].k == *k {
-                return Option::Some(&self.buckets[b][i].v);
+        while i < bucket.len() {
+            if bucket[i].k == *k {
+                return Option::Some(&bucket[i].v);
             }
             i += 1;
         }
@@ -512,17 +643,23 @@ impl<K: Key, V> HashMap<K, V> {
     }
 
     /// Put `v` under `k`, replacing whatever was there.
+    ///
+    /// The bucket is borrowed once and indexed through that, rather than
+    /// `self.buckets[b][i]` twice: the outer borrow is live while the inner
+    /// one is taken, and Ch. 3 §2.2 does not let a second exclusive borrow
+    /// begin inside the first.
     fn insert(&mut self, k: K, v: V) {
         let b = self.which(&k);
+        let bucket = &mut self.buckets[b];
         let mut i: taddr = 0;
-        while i < self.buckets[b].len() {
-            if self.buckets[b][i].k == k {
-                self.buckets[b][i].v = v;
+        while i < bucket.len() {
+            if bucket[i].k == k {
+                bucket[i].v = v;
                 return;
             }
             i += 1;
         }
-        self.buckets[b].push(Entry { k: k, v: v });
+        bucket.push(Entry { k: k, v: v });
         self.n += 1;
     }
 }

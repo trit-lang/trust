@@ -819,12 +819,14 @@ fn flattened(t: &ast::Ty) -> String {
     // An argument that is itself a *type the program defines* is one type
     // by then, and contributes the name that type has: `Holder<Option<t27>>`
     // is `Holder.Option.t27`. One the compiler keeps structural — a `Box`, a
-    // `Vec`, a reference — has no such name, so what it contributes is what
-    // was written, with every character a name cannot hold made `_`.
+    // reference — has no such name, so what it contributes is what was
+    // written, with every character a name cannot hold made `_`. `Vec` was
+    // in that list while it was a type the compiler knew; it is a type the
+    // library defines now, and has a name like any other (G9.86).
     let structural = match t {
         ast::Ty::App(segments, args) => {
             let head = joined(segments);
-            head.same("Box") || head.same("Vec")
+            head.same("Box")
         }
         ast::Ty::Name(segments) => false,
         _ => true,
@@ -864,12 +866,13 @@ pub fn show_type(t: &ast::Ty, out: &mut String) {
                 ast::show_ty(t, out);
             }
         }
+        // Every instantiation prints under the name it was made with —
+        // `Pair.t27`, and `Vec.char` with it. `Vec` used to be spelled the
+        // way it is written, because it used to be a type the compiler
+        // knew; it is library code now and is no more special than `Pair`
+        // (G9.86).
         ast::Ty::App(segments, args) => {
             let head = joined(segments);
-            if head.same("Vec") {
-                ast::show_ty(t, out);
-                return;
-            }
             out.push_str(&head);
             let mut i: taddr = 0;
             while i < args.len() {

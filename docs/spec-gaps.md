@@ -2621,36 +2621,55 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
-**G9.86 — two-phase borrows landed, and one shape is left:
-`a[i][j] = x`.** The reservation is on master and costs nothing: a method
-takes its receiver exclusively, and an argument evaluated *before* the call
-may still read it, so `v.push(v.len())` says nothing wrong. A reserved loan
-conflicts with everything that would change the place — which is what makes
-it a borrow — and not with reading, which is what makes the call writable at
-all. It is one-shot, because the receiver is the first borrow a call lowers.
+**G9.86 — what the library's `Vec` needed, and it was four things, and
+none of them was the rule I thought.**
 
-That cleared most of `bootstrap/`. What is left is one shape and it is the
-one G9.84 named:
+`Vec` moved out of the compiler and into the prelude, and `bootstrap/`
+stopped compiling. The four refusals looked like one gap and were four.
 
-```
-e.blocks[b].insts[j] = fixed;
-```
+*A borrow taken twice for one write.* `e.blocks[b].insts[j] = fixed` is
+`*(*e.blocks.index_mut(b)).insts.index_mut(j) = fixed`, and the inner call
+was built by handing `index_mut` the **expression** `e.blocks[b].insts` to
+lower again. So it lowered twice: two calls, two borrows of `e.blocks`, and
+a program refusing itself over a borrow it never wrote. `[]` now hands the
+method the address the caller already has. The gap was not the borrow rule.
+It was that lowering an expression twice is not the same as lowering it.
 
-`*(*e.blocks.index_mut(b)).insts.index_mut(j) = fixed` — two exclusive
-borrows, the outer live while the inner is taken. Reservation does not help:
-both are borrows and neither is a read.
+*A borrow in one arm, live in its sibling.* Arms are alternatives — only one
+of them runs — but a `match` is one statement, so the statement counter that
+retires borrows never advanced between them, and one arm's `stmts.push(…)`
+was still holding `stmts` when the next arm pushed. An arm's borrows now
+retire when the arm ends. A borrow can outlive an arm only by being *in* the
+arm's value, so this retires nothing when the value holds a reference, and
+nothing whose death some binding already put off.
 
-The rule that would is **reborrowing through a projection**: a borrow of
-`p.f` while `p` is exclusively borrowed is fine *if it goes through that
-borrow*, and a path-based checker cannot see the difference between that and
-aliasing — `let r = &mut v; v[0] = 1;` has the same shape and must be
-refused. Rust distinguishes them because the reborrow is written through the
-reference's own name; here the reference has no name, because `[]` made it.
+*A position in a list is not a name.* The first version of that marked the
+arm's borrows by where they sat in `loans` — and loans retire from the
+middle, so everything after them moves and the mark pointed at a stranger.
+Loans are numbered now. This one is the general lesson twice over: the
+correction for "a member of a class must be named in every list that names
+the class" is not another list.
 
-So the honest statement of where this stands: the library's `Vec` compiles,
-runs, and passes all 598 tests; `bootstrap/` needs one more checker rule,
-and that rule needs a way to say "through this borrow" that a place path
-does not have. It is on a stash and it is one rule away.
+*A reference to what it is, not to what is wanted.* `make().same("str")`
+was false and `let s = make(); s.same("str")` was true. A `Vec<char>` gets
+`str`'s methods by a coercion (§2.6) that keeps the pointer and the length
+and leaves the capacity behind — and a receiver that was already a value
+skipped it, on the reasoning that "an aggregate is already an address, which
+is what a reference to it is". It is: a reference **to a `Vec<char>`**, and
+the method was handed a capacity where a length goes. It was invisible while
+`String` was two words the compiler laid out itself, because then the
+reasoning was true.
+
+That last one is the whole argument for the change, arriving as a bug. A
+type the compiler knows is a type whose every use the compiler has already
+agreed with itself about. Making `Vec` ordinary is what made the disagreement
+sayable — and DDC wants exactly that: an observable that is a function of the
+program, not of what the implementation happens to know.
+
+Both implementations now print `Vec.char` where they used to print
+`Vec<char>`, because an instantiation prints under the name it was made
+with and `Vec` is no more special than `Pair`. Two places in
+`bootstrap/types.tr` had `Vec` written into them by name; both are gone.
 
 **G9.85 — the switch passes every test and `bootstrap/` says no: two-phase
 borrows.** The second attempt got the whole library through — 598 of 598

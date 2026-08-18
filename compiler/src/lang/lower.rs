@@ -288,6 +288,10 @@ impl PlacePath {
 struct Loan {
     place: PlacePath,
     mutable: bool,
+    /// When this loan was taken, counting up over the whole function. A
+    /// position in `loans` is not an answer to that — loans retire from the
+    /// middle and everything after them moves (G9.86).
+    seq: u32,
     /// The statement after which this loan is dead. A borrow lives to its
     /// last use, not to the end of its scope (Ch. 3 §4.2).
     dies: u32,
@@ -366,6 +370,9 @@ pub struct Types {
     db: RefCell<layout::TypeDb>,
     /// Types with a destructor of their own.
     destructors: std::collections::BTreeSet<String>,
+    /// The types that have a `cmp`: the ones that derived one and the ones
+    /// an impl wrote one for (Ch. 4 §6).
+    comparable: std::collections::BTreeSet<String>,
     /// Types that opted out of copying with `impl !Copy` (Ch. 4 §5.1).
     no_copy: std::collections::BTreeSet<String>,
     /// Field names and semantic types of each struct, in declaration order.
@@ -643,6 +650,36 @@ impl Types {
             Ty::Boxed(_) | Ty::VecOf(_) | Ty::RawOf(_) => true,
             _ => false,
         }
+    }
+
+    /// Whether a nominal type has a `cmp` to derive a comparison from: one
+    /// it derived, or one an impl wrote. An instantiation is asked about the
+    /// family it was made from, which is where the `derive` was written.
+    fn has_comparison(&self, name: &str) -> bool {
+        if self.comparable.contains(name) {
+            return true;
+        }
+        match self.instantiations.borrow().get(name) {
+            Some((base, _)) => self.comparable.contains(base),
+            None => false,
+        }
+    }
+
+    /// The element type where this is the library's `Vec`, and nothing
+    /// otherwise (Ch. 5 §2.6).
+    ///
+    /// The compiler knows `Vec` by name in exactly two places — this and the
+    /// coercion to `&[T]` — and both are things §2.6 asks it to know. Its
+    /// methods, its growth and its bounds rule are the library's.
+    fn vec_element(&self, ty: &Ty) -> Option<Ty> {
+        let Ty::Struct(name) = ty else {
+            return None;
+        };
+        let (base, args) = self.instantiations.borrow().get(name).cloned()?;
+        if base != "Vec" {
+            return None;
+        }
+        args.first().cloned()
     }
 
     /// Whether this name is an instantiation of a family that has a
@@ -3082,23 +3119,29 @@ fn signature_of(
 ///
 /// Deliberately partial: what it cannot match it leaves unbound, and the
 /// caller reports the parameter it could not determine rather than guessing.
-fn unify(written: &ast::Ty, got: &Ty, params: &[ast::GenericParam], env: &mut HashMap<String, Ty>) {
+fn unify(
+    written: &ast::Ty,
+    got: &Ty,
+    params: &[ast::GenericParam],
+    types: &Types,
+    env: &mut HashMap<String, Ty>,
+) {
     match written {
         ast::Ty::Name(n, _) if params.iter().any(|p| p.name() == n) => {
             env.entry(n.clone()).or_insert_with(|| got.clone());
         }
         ast::Ty::Ref(inner, _, _) => {
             if let Ty::Ref(t, _) = got {
-                unify(inner, t, params, env);
+                unify(inner, t, params, types, env);
             }
         }
         ast::Ty::Slice(inner, _) => match got {
-            Ty::Slice(t) | Ty::Array(t, _) => unify(inner, t, params, env),
+            Ty::Slice(t) | Ty::Array(t, _) => unify(inner, t, params, types, env),
             _ => {}
         },
         ast::Ty::Array(inner, _, _) => {
             if let Ty::Array(t, _) = got {
-                unify(inner, t, params, env);
+                unify(inner, t, params, types, env);
             }
         }
         ast::Ty::Tuple(ws, _) => {
@@ -3106,7 +3149,7 @@ fn unify(written: &ast::Ty, got: &Ty, params: &[ast::GenericParam], env: &mut Ha
                 && ws.len() == ts.len()
             {
                 for (w, t) in ws.iter().zip(ts) {
-                    unify(w, t, params, env);
+                    unify(w, t, params, types, env);
                 }
             }
         }
@@ -3114,14 +3157,20 @@ fn unify(written: &ast::Ty, got: &Ty, params: &[ast::GenericParam], env: &mut Ha
             // `Vec<T>` keeps its element *in the type* rather than in a
             // name, so this one application unifies structurally — and it is
             // the one a program passes by reference all day.
-            if name == "Vec"
-                && let (Some(w), Ty::VecOf(t)) = (wargs.first(), got)
+            // `Pair<T, U>` against `Pair.t27.t9`: the mangled name does not
+            // say where one argument stops, but what it was *made from* is
+            // remembered, so the arguments are unified positionally. That is
+            // what lets `fn n<T>(v: &Vec<T>)` be called without writing `T`,
+            // and it works the same for every family rather than for one.
+            if let Ty::Struct(mangled) | Ty::Enum(mangled) = got
+                && let Some((base, args)) = types.instantiations.borrow().get(mangled).cloned()
+                && &base == name
+                && args.len() == wargs.len()
             {
-                unify(w, t, params, env);
+                for (w, t) in wargs.iter().zip(&args) {
+                    unify(w, t, params, types, env);
+                }
             }
-            // Anything else: `Pair<T, U>` against `Pair.t27.t9`. The
-            // instantiation's arguments are not recoverable from the mangled
-            // name here, so the call site has to write them (Ch. 4 §2.3).
         }
         _ => {}
     }
@@ -3277,7 +3326,14 @@ fn derive_cmp(
             // or an `enum` has one: a `Vec`, a slice or a reference has a
             // name and no comparison, and draft 0.1 emitted a call to one
             // that was never defined (G9.33).
-            let comparable = matches!(fty, Ty::Struct(_) | Ty::Enum(_));
+            // A field that is itself nominal compares with its own `cmp` —
+            // if it has one. Being a struct is not enough: the library's
+            // `Vec` is one, and a `Vec` has no comparison, so what is asked
+            // is whether the type *has* the method rather than what kind of
+            // type it is (G9.33 again, in the spelling a library `Vec`
+            // gives it).
+            let comparable = matches!(fty, Ty::Struct(_) | Ty::Enum(_))
+                && nominal_name(fty).is_some_and(|n| types.has_comparison(&n));
             let Some(fname) = nominal_name(fty).filter(|_| comparable) else {
                 return Err(format!(
                     "`{name}` has a field of type {fty}, which has no comparison to derive \
@@ -3451,8 +3507,20 @@ struct Job {
     depth: u32,
 }
 
-/// How deep §2.7's termination check lets instantiation go.
-const INSTANTIATION_LIMIT: u32 = 64;
+/// How much outstanding instantiation §2.7's termination check allows.
+///
+/// A *proxy* for what the section asks, and worth saying so: the section is
+/// about **depth** — a generic that instantiates itself at a larger type —
+/// and this counts the queue. The two agree on a runaway, which grows the
+/// queue without bound, and disagree on a large program, which has many
+/// instantiations outstanding and none of them deep.
+///
+/// 64 was enough while `Vec` was the compiler's. It is not now that `Vec`
+/// is library code with nine methods, each one function per element type:
+/// `bootstrap/` has hundreds outstanding and nothing recursive at all. The
+/// right check is the depth of the chain, and `Job` already carries the
+/// field for it (G9.85).
+const INSTANTIATION_LIMIT: u32 = 4096;
 
 /// The name an instantiation is known by.
 ///
@@ -3533,6 +3601,7 @@ fn build_types(file: &ast::File) -> R<Types> {
     let mut types = Types {
         db: RefCell::new(layout::TypeDb::new()),
         destructors: std::collections::BTreeSet::new(),
+        comparable: std::collections::BTreeSet::new(),
         no_copy: std::collections::BTreeSet::new(),
         structs: RefCell::new(HashMap::new()),
         enums: RefCell::new(HashMap::new()),
@@ -3635,6 +3704,41 @@ fn build_types(file: &ast::File) -> R<Types> {
         pending = again;
         if pending.len() == before {
             return Err(last.expect("a failure, since nothing moved"));
+        }
+    }
+
+    // Which types have a comparison, for the same reason and at the same
+    // time: a derived `Eq` compares field by field, and whether a field can
+    // be compared is whether *its* type has one (Ch. 4 §6).
+    for item in &file.items {
+        let (name, derives) = match item {
+            ast::Item::Struct(x) => (&x.name, &x.derives),
+            ast::Item::Enum(x) => (&x.name, &x.derives),
+            ast::Item::Impl(imp) => {
+                if matches!(imp.trait_name.as_deref(), Some("Ord") | Some("Eq")) {
+                    // `impl Eq for Vec<char>` is a comparison for *that*
+                    // instantiation and not for the family: a `Vec<t27>` has
+                    // none, which is the whole of what this decides
+                    // (Ch. 4 §2.1's impl for one instantiation).
+                    let mut name = imp.self_ty.clone();
+                    for a in &imp.self_args {
+                        let ast::Ty::Name(n, _) = a else {
+                            name.clear();
+                            break;
+                        };
+                        name.push('.');
+                        name.push_str(n);
+                    }
+                    if !name.is_empty() {
+                        types.comparable.insert(name);
+                    }
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        if derives.iter().any(|d| d == "Ord" || d == "Eq") {
+            types.comparable.insert(name.clone());
         }
     }
 
@@ -3851,23 +3955,6 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
                 };
                 check_sized(inner, *span, "a `Raw`'s positions")?;
                 return Ok(Ty::RawOf(Box::new(inner.clone())));
-            }
-            if name == "Vec" {
-                let [inner] = &args[..] else {
-                    return err(*span, "`Vec` takes one type argument");
-                };
-                check_sized(inner, *span, "a `Vec`'s elements")?;
-                // A `Vec` is a language item *and* a nominal type, so that
-                // the library can write `impl<A> FromIterator<A> for Vec<A>`
-                // the way Ch. 5 §3.3 says it does. Registering the
-                // instantiation is the whole of it: method resolution finds a
-                // generic impl by asking what a mangled name was made from.
-                types
-                    .instantiations
-                    .borrow_mut()
-                    .entry(mangle("Vec", &args))
-                    .or_insert_with(|| ("Vec".to_string(), args.clone()));
-                return Ok(Ty::VecOf(Box::new(inner.clone())));
             }
             types.instantiate(name, &args, *span)
         }
@@ -4161,6 +4248,8 @@ struct Fn<'a> {
     /// reachable. Draft 0.1 stored names and resolved them at scope exit, so
     /// a shadowed binding leaked and its shadower was dropped twice.
     owned: Vec<Owned>,
+    /// How many borrows this function has taken, ever. Names each one.
+    loan_seq: u32,
     /// Live borrows, and the statement each dies after (Ch. 3 §4.2).
     loans: Vec<Loan>,
     /// Whether the arm just lowered reaches the `match`'s join.
@@ -4365,6 +4454,7 @@ fn function(
         loops: Vec::new(),
         arm_reaches: true,
         owned: Vec::new(),
+        loan_seq: 0,
         loans: Vec::new(),
         stmt: 0,
         stmt_index: 0,
@@ -4936,6 +5026,34 @@ impl Fn<'_> {
         }
     }
 
+    /// Lower one arm's body, and retire the borrows it took.
+    ///
+    /// Arms are alternatives: what one arm borrows, its sibling never sees,
+    /// because only one of them runs. The statement counter does not advance
+    /// between them — a `match` is one statement — so without this a
+    /// `v.push(..)` in one arm is still holding `v` when its sibling pushes
+    /// too, and the program refuses itself over a borrow that cannot exist
+    /// at the same time as the one it conflicts with (G9.86).
+    ///
+    /// A borrow made inside an arm outlives the arm only by being *in* the
+    /// arm's value, so this retires nothing when the value holds a
+    /// reference, and nothing whose death was already put off — that is a
+    /// borrow some binding holds, and the binding says when it dies.
+    fn arm_value(&mut self, body: &ast::Expr, expected: Option<&Ty>) -> R<(Operand, Ty)> {
+        let mark = self.loan_seq;
+        let out = self.expr(body, expected);
+        if let Ok((_, ty)) = &out
+            && !contains_reference(ty)
+        {
+            // The statement the arm *ended* on: an arm may be a block, and a
+            // borrow taken by its last statement is as dead at the end of
+            // the arm as one taken by its first.
+            let now = self.stmt;
+            self.loans.retain(|l| l.seq <= mark || l.dies > now);
+        }
+        out
+    }
+
     /// Retire the loans that are dead at this statement.
     fn retire_loans(&mut self) {
         let now = self.stmt;
@@ -5034,9 +5152,11 @@ impl Fn<'_> {
         // the first borrow a call lowers. An argument that is itself a
         // borrow is an ordinary one and takes an ordinary loan.
         let reserved = std::mem::replace(&mut self.reserving, false);
+        self.loan_seq += 1;
         self.loans.push(Loan {
             place: path,
             mutable,
+            seq: self.loan_seq,
             dies,
             reserved,
             span,
@@ -5552,7 +5672,12 @@ impl Fn<'_> {
                     .is_some_and(|n| self.types.closures.borrow().contains_key(&n));
                 if contains_reference(&ty) || is_closure {
                     let dies = self.last_use.get(name).copied().unwrap_or(self.stmt);
-                    for loan in self.loans[loans_before..].iter_mut() {
+                    // Loans are *retired* while the initializer is lowered,
+                    // so the index taken before it can be past the end by
+                    // the time it is used. It names "everything added
+                    // since", and everything since may be nothing.
+                    let from = loans_before.min(self.loans.len());
+                    for loan in self.loans[from..].iter_mut() {
                         loan.dies = loan.dies.max(dies);
                     }
                 }
@@ -6598,7 +6723,7 @@ impl Fn<'_> {
                     .find(|(n, _, _)| n == field)
                     .map(|(_, t, _)| t)
             }
-            ast::Expr::Index(base, _, _) => {
+            ast::Expr::Index(base, _, l) => {
                 let Some(bt) = self.type_of_place(base)? else {
                     return Ok(None);
                 };
@@ -6615,7 +6740,35 @@ impl Fn<'_> {
                         Ty::Slice(elem) => Some(*elem),
                         _ => None,
                     },
-                    _ => None,
+                    // A type indexed by its own method: the place is what
+                    // `index` answers with, and knowing that here is what
+                    // keeps `v[i].len()` a *borrow* of the element rather
+                    // than a read of it (Ch. 2 §3.1, G9.31).
+                    other => {
+                        let Some(name) = nominal_name(&other) else {
+                            return Ok(None);
+                        };
+                        let mut key = self.method_key(&name, "index", *l)?;
+                        if !self.sigs.borrow().contains_key(&key)
+                            && self.generic_def(&key).is_none()
+                        {
+                            key = self.method_key(&name, "index_mut", *l)?;
+                        }
+                        let held = self
+                            .sigs
+                            .borrow()
+                            .get(&key)
+                            .map(|(_, r)| r.clone())
+                            .or_else(|| {
+                                self.generic_def(&key)
+                                    .and_then(|d| d.ret.clone())
+                                    .and_then(|t| resolve_ty(&t, self.types).ok())
+                            });
+                        match held {
+                            Some(Ty::Ref(target, _)) => Some(*target),
+                            _ => None,
+                        }
+                    }
                 }
             }
             ast::Expr::Deref(inner, _) => match self.type_of_place(inner)? {
@@ -6934,12 +7087,12 @@ impl Fn<'_> {
             env.insert(p.name().to_string(), self.resolve(t)?);
         }
         if let (Some(want), Some(ret)) = (expected, &def.ret) {
-            unify(ret, want, &def.generics, &mut env);
+            unify(ret, want, &def.generics, self.types, &mut env);
         }
         let mut args = args.to_vec();
         for (want, arg) in def.params.iter().map(|p| &p.ty).zip(&mut args) {
             if let Some(got) = self.peek_ty(arg)? {
-                unify(want, &got, &def.generics, &mut env);
+                unify(want, &got, &def.generics, self.types, &mut env);
                 continue;
             }
             // A closure has no type until it is lowered, so lower it now and
@@ -6955,7 +7108,7 @@ impl Fn<'_> {
                     };
                     let bound = self.bind_existing(slot, got.clone());
                     *arg = ast::Expr::Path(bound, span);
-                    unify(want, &got, &def.generics, &mut env);
+                    unify(want, &got, &def.generics, self.types, &mut env);
                 }
                 // And a literal *holding* a closure cannot be peeked either,
                 // for the same reason and one level down: `f(Map { inner: c,
@@ -6968,7 +7121,7 @@ impl Fn<'_> {
                     };
                     let bound = self.bind_existing(slot, got.clone());
                     *arg = ast::Expr::Path(bound, span);
-                    unify(want, &got, &def.generics, &mut env);
+                    unify(want, &got, &def.generics, self.types, &mut env);
                 }
                 // And a method call, for the same reason two levels up:
                 // `sum(it.map(f).filter(p))` cannot be told the type of its
@@ -6982,7 +7135,7 @@ impl Fn<'_> {
                     };
                     let bound = self.bind_existing(slot, got.clone());
                     *arg = ast::Expr::Path(bound, span);
-                    unify(want, &got, &def.generics, &mut env);
+                    unify(want, &got, &def.generics, self.types, &mut env);
                 }
                 _ => {}
             }
@@ -7145,7 +7298,7 @@ impl Fn<'_> {
             let mut env: HashMap<String, Ty> = HashMap::new();
             env.insert(rule.self_param.clone(), ty.clone());
             for (written, got) in rule.trait_args.iter().zip(args) {
-                unify(written, got, &rule.generics, &mut env);
+                unify(written, got, &rule.generics, self.types, &mut env);
             }
             if rule.generics.iter().any(|p| !env.contains_key(p.name())) {
                 continue;
@@ -7786,8 +7939,15 @@ impl Fn<'_> {
                 // What is there is read as a `T`, which is the whole of
                 // what this chapter does not define: a position nothing has
                 // written is not one (Ch. 5 §2.7).
+                //
+                // An aggregate is **copied** out rather than answered with
+                // its address: `read` *moves* the `T`, so what the caller
+                // gets must survive the position being written again — as
+                // `remove` writes it, one line after reading it.
                 if elem.is_aggregate() {
-                    return Ok((at, elem));
+                    let slot = self.temp_slot(&elem);
+                    self.copy_typed(Operand::Value(slot.clone()), at, &elem, span)?;
+                    return Ok((Operand::Value(slot), elem));
                 }
                 Ok((self.load_from(at, &elem), elem))
             }
@@ -9026,7 +9186,7 @@ impl Fn<'_> {
                     continue;
                 }
                 if let Some(got) = self.peek_ty(e)? {
-                    unify(fty, &got, &params, &mut env);
+                    unify(fty, &got, &params, self.types, &mut env);
                 }
             }
         }
@@ -9747,18 +9907,44 @@ impl Fn<'_> {
         let (Ty::Ref(have, m), Ty::Ref(want, wm)) = (from, to) else {
             return Ok(None);
         };
-        let (Ty::VecOf(elem), Ty::Slice(wanted)) = (&**have, &**want) else {
+        let (Ty::Struct(name), Ty::Slice(wanted)) = (&**have, &**want) else {
             return Ok(None);
         };
-        if elem != wanted || (*wm && !*m) {
+        // The library's `Vec`, by the name its instantiation was made from
+        // — the *only* thing the compiler still knows about it, and the one
+        // §2.6 asks it to know (Ch. 5 §2.6).
+        let held = self.types.instantiations.borrow().get(name).cloned();
+        let Some((base, args)) = held else {
+            return Ok(None);
+        };
+        let [elem] = &args[..] else {
+            return Ok(None);
+        };
+        if base != "Vec" || elem != &**wanted || (*wm && !*m) {
             return Ok(None);
         }
-        let fat = Ty::Ref(Box::new(Ty::Slice(elem.clone())), *wm);
+        // Its allocation and its length, which are a field of a field and a
+        // field: the pair is *built*, and the capacity is left behind, which
+        // is the whole of the conversion.
+        let fields = self.types.fields(&Ty::Struct(name.clone()));
+        let (mut room_at, mut len_at) = (None, None);
+        for (n, _, off) in &fields {
+            match n.as_str() {
+                "held" => room_at = Some(*off),
+                "n" => len_at = Some(*off),
+                _ => {}
+            }
+        }
+        let (Some(room_at), Some(len_at)) = (room_at, len_at) else {
+            return Ok(None);
+        };
+        let fat = Ty::Ref(Box::new(Ty::Slice(Box::new(elem.clone()))), *wm);
         let slot = self.temp_slot(&fat);
-        let p = self.load_ptr(v.clone());
+        let from = self.offset(v.clone(), room_at);
+        let p = self.load_ptr(from);
         self.store_ptr(Operand::Value(slot.clone()), p);
-        let len_at = self.offset(v, 3);
-        let len = self.load_from(len_at, &Ty::TAddr);
+        let from = self.offset(v, len_at);
+        let len = self.load_from(from, &Ty::TAddr);
         self.store_at(&slot, 3, &Ty::TAddr, len, span)?;
         Ok(Some((Operand::Value(slot), fat)))
     }
@@ -9831,7 +10017,7 @@ impl Fn<'_> {
             let mut env: HashMap<String, Ty> = HashMap::new();
             env.insert(rule.self_param.clone(), recv_ty.clone());
             if let (Some(written), Some(want)) = (&def.ret, expected) {
-                unify(written, want, &def.generics, &mut env);
+                unify(written, want, &def.generics, self.types, &mut env);
             }
             // Every parameter has to come out bound, or the rule says
             // nothing about this call.
@@ -10175,7 +10361,7 @@ impl Fn<'_> {
         // same coercion asked at the receiver instead of at an argument.
         if !self.sigs.borrow().contains_key(&key)
             && self.generic_def(&key).is_none()
-            && matches!(&base, Ty::VecOf(e) if **e == Ty::Char)
+            && self.types.vec_element(&base) == Some(Ty::Char)
         {
             let as_text = self.method_key("str", name, span)?;
             if self.sigs.borrow().contains_key(&as_text) {
@@ -10230,8 +10416,18 @@ impl Fn<'_> {
                     (Operand::Value(slot), self_ty.clone())
                 }
                 // An aggregate is already an address, which is what a
-                // reference to it is.
-                Ty::Ref(..) => (v, self_ty.clone()),
+                // reference to it is — but a reference *to what it is*, not
+                // to what the method wants. A `Vec<char>` reaching `str`'s
+                // `same` is two words of the three it has, and saying the
+                // address is already a `&str` hands the method a capacity
+                // where a length goes (G9.86).
+                Ty::Ref(_, m) => {
+                    let mine = Ty::Ref(Box::new(base.clone()), *m);
+                    match self.coerce_vec(v.clone(), &mine, &self_ty, span)? {
+                        Some(fat) => fat,
+                        None => (v, self_ty.clone()),
+                    }
+                }
                 _ => (v, ty),
             };
             // A generic method is instantiated from the *written* arguments,
@@ -10349,10 +10545,11 @@ impl Fn<'_> {
                     // which is what makes `&v[i]` and `v[i] = x` mean here
                     // what they mean for an array.
                     other => {
-                        if let Some(out) = self.indexed_by_method(base, index, other, *l)? {
+                        let held = other.clone();
+                        if let Some(out) = self.indexed_by_method(addr, index, &held, *l)? {
                             return Ok(out);
                         }
-                        return err(*l, format!("{other} cannot be indexed"));
+                        return err(*l, format!("{held} cannot be indexed"));
                     }
                 };
                 let (base_addr, len_value) = match len {
@@ -10401,7 +10598,7 @@ impl Fn<'_> {
     /// happens here for free and cannot drift.
     fn indexed_by_method(
         &mut self,
-        base: &ast::Expr,
+        addr: Operand,
         index: &ast::Expr,
         ty: &Ty,
         span: Span,
@@ -10422,14 +10619,15 @@ impl Fn<'_> {
                 return Ok(None);
             }
         }
-        let call = ast::Expr::Method(
-            Box::new(base.clone()),
-            which.to_string(),
-            span,
-            vec![index.clone()],
-            span,
-        );
-        let (v, got) = self.expr(&call, None)?;
+        // The receiver is the address the caller already has, not the
+        // expression it came from: `a[i][j]` would otherwise lower `a[i]`
+        // twice — calling `index_mut` twice and borrowing `a` twice, which
+        // is a program refusing itself (G9.86).
+        let receiver = (addr, Ty::Ref(Box::new(ty.clone()), which == "index_mut"));
+        let held = std::mem::replace(&mut self.reserving, true);
+        let out = self.call_key(&key, vec![receiver], std::slice::from_ref(index), span);
+        self.reserving = held;
+        let (v, got) = out?;
         let (Ty::Ref(target, _) | Ty::Boxed(target)) = got else {
             return err(
                 span,
@@ -10787,81 +10985,6 @@ impl Fn<'_> {
             if self.globals.contains_key(&key) {
                 return self.expr(&ast::Expr::Path(key, span), None);
             }
-        }
-
-        // `Vec::new()` — three words, all zero: no allocation, no elements,
-        // no room. An empty `Vec` allocates nothing, which is why the
-        // pointer's zero is a value it takes rather than a niche it offers
-        // (Ch. 5 §2.6).
-        // `Vec::with_capacity(n)` — an empty `Vec` with room for `n`, which
-        // is `new` and then `reserve` and is spelled once because that is
-        // what a program means by it (Ch. 5 §2.6).
-        if path.segments.len() == 2
-            && (head == "Vec" || head == "String" || head.starts_with("Vec."))
-            && path.segments[1] == "with_capacity"
-        {
-            let [(_, arg)] = fields else {
-                return err(span, "`with_capacity` takes one argument");
-            };
-            let elem = match expected {
-                Some(Ty::VecOf(e)) => (**e).clone(),
-                _ if head == "String" => Ty::Char,
-                _ => {
-                    return err(
-                        span,
-                        "cannot tell what `Vec::with_capacity` holds; write the type of \
-                         this value (Ch. 4 §2.3)",
-                    );
-                }
-            };
-            let ty = Ty::VecOf(Box::new(elem.clone()));
-            let slot = self.temp_slot(&ty);
-            for off in [0, 3, 6] {
-                self.store_at(
-                    &slot,
-                    off,
-                    &Ty::TAddr,
-                    Operand::Const(Type::Int(27), Bt::ZERO),
-                    span,
-                )?;
-            }
-            let (n, _) = self.expr(arg, Some(&Ty::TAddr))?;
-            self.vec_reserve(Operand::Value(slot.clone()), &elem, n, span)?;
-            return Ok((Operand::Value(slot), ty));
-        }
-
-        if path.segments.len() == 2
-            && (head == "Vec" || head == "String" || head.starts_with("Vec."))
-            && path.segments[1] == "new"
-        {
-            if !fields.is_empty() {
-                return err(span, "`Vec::new` takes no arguments");
-            }
-            // `String::new` needs no annotation: `String` *is* `Vec<char>`,
-            // so the element type is in the name.
-            let elem = match expected.cloned() {
-                Some(Ty::VecOf(elem)) => elem,
-                _ if head == "String" => Box::new(Ty::Char),
-                _ => {
-                    return err(
-                        span,
-                        "cannot tell what `Vec::new` holds; write the type of this value \
-                         (Ch. 4 §2.3)",
-                    );
-                }
-            };
-            let ty = Ty::VecOf(elem);
-            let slot = self.temp_slot(&ty);
-            for off in [0, 3, 6] {
-                self.store_at(
-                    &slot,
-                    off,
-                    &Ty::TAddr,
-                    Operand::Const(Type::Int(27), Bt::ZERO),
-                    span,
-                )?;
-            }
-            return Ok((Operand::Value(slot), ty));
         }
 
         // `Box::new(v)` and `Box::try_new(v)` — the language item's two
@@ -11692,7 +11815,7 @@ impl Fn<'_> {
         // not behind a reference — so the bindings receive what it held.
         self.sub_pattern(addr, &ty, &arm.patterns[0], None, borrowed, span)?;
         self.dest = dest;
-        let out = self.expr(&arm.body, expected);
+        let out = self.arm_value(&arm.body, expected);
         self.dest = None;
         let out = out?;
         self.drop_scope(depth, span)?;
@@ -12310,8 +12433,9 @@ impl Fn<'_> {
         dest: &Option<String>,
     ) -> R<()> {
         self.dest.clone_from(dest);
-        let (v, ty) = self.expr(&arm.body, expected)?;
+        let out = self.arm_value(&arm.body, expected);
         self.dest = None;
+        let (v, ty) = out?;
         if ty != Ty::Never && ty != Ty::Unit {
             if result.is_none() {
                 let slot = match dest {
