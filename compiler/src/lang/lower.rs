@@ -179,6 +179,7 @@ impl Ty {
             | Ty::Unit
             | Ty::Never
             | Ty::VecOf(_)
+            | Ty::RawOf(_)
             | Ty::Slice(_) => false,
             _ => true,
         }

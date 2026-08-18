@@ -4828,3 +4828,57 @@ fn a_program_builds_an_indexable_type_on_raw() {
     }";
     assert_eq!(run(src).0, 17);
 }
+
+#[test]
+fn a_growable_array_is_writable_in_trust() {
+    // Ch. 5 §2.6 on top of §2.7 and Ch. 2 §3.1, with nothing of it in the
+    // compiler: growth doubling from four, indexing that is a place, and an
+    // old allocation freed without dropping the elements moved out of it.
+    //
+    // This is `Vec` — named otherwise only because the prelude's still
+    // exists — and it is what makes the collections library code.
+    let src = "struct Grow<T> { held: Raw<T>, n: taddr }
+    impl<T> Grow<T> {
+        fn new() -> Grow<T> { Grow { held: Raw::new(), n: 0 } }
+        fn len(&self) -> taddr { self.n }
+        fn capacity(&self) -> taddr { self.held.room() }
+        fn index(&self, i: taddr) -> &T { self.held.at(i) }
+        fn index_mut(&mut self, i: taddr) -> &mut T { self.held.at_mut(i) }
+        fn regrow(&mut self, want: taddr) {
+            let mut fresh: Raw<T> = Raw::alloc(want);
+            let mut i: taddr = 0;
+            while i < self.n {
+                fresh.write(i, self.held.read(i));
+                i += 1;
+            }
+            self.held = fresh;
+        }
+        fn push(&mut self, value: T) {
+            if self.n == self.held.room() {
+                let mut want: taddr = 4;
+                if self.held.room() > 0 { want = self.held.room() * 2; }
+                self.regrow(want);
+            }
+            self.held.write(self.n, value);
+            self.n += 1;
+        }
+        fn pop(&mut self) -> Option<T> {
+            if self.n == 0 { return Option::None; }
+            self.n -= 1;
+            Option::Some(self.held.read(self.n))
+        }
+    }
+    fn main() -> t27 {
+        let mut v: Grow<t27> = Grow::new();
+        let mut i: taddr = 0;
+        while i < 10 { v.push(i as t27); i += 1; }
+        v[3] += 100;
+        let mut total = 0;
+        let mut k: taddr = 0;
+        while k < v.len() { total += v[k]; k += 1; }
+        total + (v.capacity() as t27)
+    }";
+    // 0..9 sums to 45, plus the 100 written through the index, plus a
+    // capacity of 16 — four doubled twice, which is §2.6's policy in Trust.
+    assert_eq!(run(src).0, 161);
+}

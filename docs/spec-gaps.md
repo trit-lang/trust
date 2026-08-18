@@ -2621,6 +2621,29 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.81 — `Vec` is writable in Trust, and one word said it was not.**
+Growth doubling from four, indexing that is a place, `pop` moving an element
+out, and an old allocation freed without dropping the elements moved out of
+it — all of Ch. 5 §2.6's *decisions*, in Trust, on `Raw<T>` and nothing else
+the compiler provides. `compiler/tests/frontend.rs` holds the whole thing as
+one program.
+
+What stood in the way was one word in one list. `is_scalar` — "whether a
+value of this type is held in a register or in memory" — did not name
+`Raw`, so `self.held = fresh` read the *first word* of the source as if it
+were an address and then dereferenced it. The store looked right and every
+read after it was of whatever the allocator's pointer pointed at.
+
+That is the fourth list `Raw` had to be added to, after the three in G9.76,
+and it is the same lesson a fourth time: a type that is a member of a class
+has to be named in every list that names the class, and nothing checks that
+a list is complete. Four lists, four separate discoveries, each by a program
+that did something the previous one had not.
+
+What is left is mechanical and large: the prelude's `Vec` and `String`
+become this, and the dozen intrinsics and `Ty::VecOf`'s thirty sites come
+out of the compiler.
+
 **G9.80 — `Raw<T>` needed four position operations, not two, and writing
 `Vec` is what said so.** §2.7 as written gave `read` and `write`. Starting
 to write `Vec` on top of it found that `index` cannot be written with
