@@ -6010,11 +6010,21 @@ impl Fn<'_> {
             // A borrow is the address of a place — which every local already
             // has, since every local lives in a slot.
             E::Borrow(place, mutable, span) => {
-                if let Some(path) = self.path_of(place) {
-                    self.check_access(&path, Access::Borrow(*mutable), *span)?;
-                    self.add_loan(path, *mutable, *span);
+                // The place is computed *before* the loan is recorded, and
+                // the order matters where computing it is itself a borrow:
+                // `&mut v[i]` is `&mut *v.index_mut(i)`, whose call borrows
+                // `v` — and a loan on `v[…]` taken first would be a loan the
+                // call then conflicts with. What is borrowed is what the
+                // place turned out to be, so it is recorded once that is
+                // known (Ch. 2 §3.1, Ch. 3 §2.2).
+                let held = self.path_of(place);
+                if let Some(path) = &held {
+                    self.check_access(path, Access::Borrow(*mutable), *span)?;
                 }
                 let (addr, ty) = self.place(place, *span)?;
+                if let Some(path) = held {
+                    self.add_loan(path, *mutable, *span);
+                }
                 // An array reference coerces to a slice reference, which is a
                 // pointer and a length (Ch. 3 §5.3).
                 if let Ty::Array(elem, n) = &ty {
