@@ -2711,6 +2711,32 @@ trait for that type, provided bodies included, the same way a call does. A
 `reachable` pass that only follows calls would prune away the function the
 table points at.
 
+Two things found while starting it, both of which make it smaller than it
+looks:
+
+*The tables need no new state.* They can be emitted by scanning the finished
+functions for `@vt.` and taking them in first-appearance order — which is
+the order the coercions were lowered in, because functions are emitted in
+source order. And if `callees` counts `addr @…` as a use, `reachable`
+follows `main` → `@vt.Sq.Area` → `@Sq.twice` on its own, which is the
+queueing rule above falling out rather than being written. The globals then
+move to the front of the module, which is where TIR prints them.
+
+*The trait's method order needs no new table either.* `definitions` already
+walks the items and already answers "what are this type's fields, in
+order" — so a trait can contribute **two** synthetic defs and nothing else
+has to change: `dyn.<Trait>`, two fields wide (`&t27` and `taddr`), which is
+the fat pointer's storage and what `copy_in` needs; and `vtable.<Trait>`,
+one field per method with the *method names* as field names, which is what
+turns `x.twice()` into the offset `9 + 3 × 1`. `field_at` already answers
+the second question, for structs, by name.
+
+So the whole of it is: two defs in `definitions`, one branch in the
+parameter loop, one in `value`'s `Borrow` arm for the coercion, one in its
+`Method` arm for the indirect call, and a scan in `module`. No change to
+`Cx`, no change to `Emit`, and G9.91 already put `&x` and `&T` parameters
+underneath it.
+
 **G9.89 — `Raw::try_alloc`, and the turbofish that never worked.**
 
 §2.7's fallible half is written. It is `Box::try_new`'s shape one layer out
