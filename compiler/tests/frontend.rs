@@ -4699,3 +4699,64 @@ fn an_editor_is_told_what_a_pattern_binds() {
     assert_eq!(types.at(at("b } = p")), Some("t9"), "the second");
     assert_eq!(types.at(at("x in 0..3")), Some("t27"), "the loop's binding");
 }
+
+// ------------------------------------------------ Chapter 5 §2.7: `Raw<T>`
+
+#[test]
+fn raw_holds_what_is_written_into_it() {
+    // §2.7: room for n, written and read back by position. The whole point
+    // of the item is that this much is all the compiler provides, and the
+    // collections are written on top of it.
+    let src = "fn main() -> t27 {
+        let mut r: Raw<t27> = Raw::alloc(4);
+        r.write(0, 7);
+        r.write(3, 5);
+        r.read(0) + r.read(3) + (r.room() as t27)
+    }";
+    assert_eq!(run(src).0, 16);
+}
+
+#[test]
+fn a_position_is_checked_against_the_room() {
+    // §2.7: bounds-checked, because there is no reason for this to be the
+    // one index that is not (Ch. 2 §3).
+    let src = "fn main() -> t27 {
+        let mut r: Raw<t27> = Raw::alloc(2);
+        r.write(2, 1);
+        0
+    }";
+    let module = tir_of(src);
+    let target = tir::TargetDesc::tritium();
+    let module = tir::canonicalize_module(&module);
+    let legalized = tir::legalize_module(&module, &target).expect("legalizes");
+    let mut asm = trustc::codegen::compile(&legalized, "main").expect("compiles");
+    asm.push_str(include_str!("../../examples/trisc/runtime.t27"));
+    let image = tritium::assemble(&asm).expect("assembles");
+    let mut vm = tritium::Vm::with_default_memory();
+    vm.load_image(&image);
+    assert!(
+        !matches!(vm.run(50_000_000), tritium::Stop::Halted(_)),
+        "writing past the room should trap"
+    );
+}
+
+#[test]
+fn raw_new_allocates_nothing() {
+    let src = "fn main() -> t27 {
+        let r: Raw<t27> = Raw::new();
+        r.room() as t27
+    }";
+    assert_eq!(run(src).0, 0);
+}
+
+#[test]
+fn a_position_may_hold_an_aggregate() {
+    let src = "struct P { a: t27, b: t27 }
+    fn main() -> t27 {
+        let mut q: Raw<P> = Raw::alloc(2);
+        q.write(1, P { a: 10, b: 20 });
+        let held = q.read(1);
+        held.a + held.b
+    }";
+    assert_eq!(run(src).0, 30);
+}

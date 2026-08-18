@@ -197,7 +197,12 @@ impl Ty {
             // A fat reference is two words and travels like an aggregate:
             // by address, and copied field by field (Ch. 3 §5.2).
             Ty::Ref(t, _) => t.is_unsized(),
-            Ty::Array(..) | Ty::Tuple(_) | Ty::Struct(_) | Ty::Enum(_) | Ty::VecOf(_) => true,
+            Ty::Array(..)
+            | Ty::Tuple(_)
+            | Ty::Struct(_)
+            | Ty::Enum(_)
+            | Ty::VecOf(_)
+            | Ty::RawOf(_) => true,
             _ => false,
         }
     }
@@ -621,7 +626,7 @@ impl Types {
             // always has something to do when it dies — even for a `T` that
             // does not, because the allocation is itself a resource
             // (Ch. 5 §2.3). A `Vec` owns its allocation the same way.
-            Ty::Boxed(_) | Ty::VecOf(_) => true,
+            Ty::Boxed(_) | Ty::VecOf(_) | Ty::RawOf(_) => true,
             _ => false,
         }
     }
@@ -1841,6 +1846,7 @@ fn nominal_for_builtin(ty: &Ty) -> String {
     match ty {
         Ty::Ref(inner, _) | Ty::Boxed(inner) => nominal_for_builtin(inner),
         Ty::VecOf(_) => "Vec".to_string(),
+        Ty::RawOf(_) => "Raw".to_string(),
         Ty::Slice(_) => "[]".to_string(),
         other => format!("{other}"),
     }
@@ -1859,6 +1865,18 @@ fn peel(ty: &Ty) -> &Ty {
 }
 
 /// The element type of a `Vec`, however the receiver is held.
+/// What a `Raw`'s positions hold, or a diagnostic naming the method that
+/// wanted to know.
+fn raw_elem(ty: &Ty, method: &str, span: Span) -> R<Ty> {
+    match peel(ty) {
+        Ty::RawOf(t) => Ok((**t).clone()),
+        other => err(
+            span,
+            format!("`{method}` is a `Raw`'s, and this is `{other}`"),
+        ),
+    }
+}
+
 fn vec_elem(ty: &Ty, method: &str, span: Span) -> R<Ty> {
     match peel(ty) {
         Ty::VecOf(e) => Ok((**e).clone()),
@@ -1980,6 +1998,9 @@ fn nominal_name(ty: &Ty) -> Option<String> {
         // A `Vec` is nominal under the name its instantiation was registered
         // with, so an impl written for `Vec<A>` can be found for it.
         Ty::VecOf(t) => mangle("Vec", std::slice::from_ref(&**t)),
+        // And a `Raw` under its own, so that `room`, `read` and `write` are
+        // found where every other builtin method is found (Ch. 5 §2.7).
+        Ty::RawOf(t) => mangle("Raw", std::slice::from_ref(&**t)),
         _ => return None,
     })
 }
@@ -5139,6 +5160,23 @@ impl Fn<'_> {
             return Ok(());
         }
 
+        // A `Raw` frees its room and drops **nothing**: it does not know
+        // which positions hold a `T`, and whatever does knows to drop them
+        // first (Ch. 5 §2.7). That is the whole difference between it and a
+        // `Vec`, and it is why `Vec` can be written on top of it.
+        if let Ty::RawOf(elem) = ty {
+            let l = self.types.layout(elem);
+            let room = {
+                let at = self.offset(addr.clone(), 3);
+                self.load_from(at, &Ty::TAddr)
+            };
+            let bytes =
+                self.apply_binary("*", room, konst_addr(l.size as i128), &Ty::TAddr, span)?;
+            let p = self.load_ptr(addr);
+            self.free_if_any(p, bytes, l.align as i128);
+            return Ok(());
+        }
+
         // A `Box` is dropped by dropping the `T` and *then* freeing, in that
         // order: the destructor needs the storage it is about to give back
         // (Ch. 5 §2.3).
@@ -7359,7 +7397,7 @@ impl Fn<'_> {
         // receiver is a *place*: reading it would move it, and `v.push(x)` in
         // a loop would then move the same `v` twice (Ch. 3 §1.2).
         let (v, ty) = match self.type_of_place(recv)? {
-            Some(Ty::VecOf(_)) => self.place(recv, span)?,
+            Some(Ty::VecOf(_)) | Some(Ty::RawOf(_)) => self.place(recv, span)?,
             _ => self.expr(recv, None)?,
         };
         let one_arg = |this: &mut Self, want: &Ty| -> R<Operand> {
@@ -7622,6 +7660,45 @@ impl Fn<'_> {
                 }
                 let at = self.offset(v, 6);
                 Ok((self.load_from(at, &Ty::TAddr), Ty::TAddr))
+            }
+
+            // Ch. 5 §2.7: room's own three. `room` is the second word;
+            // `read` and `write` are an index check and an address.
+            "room" if matches!(peel(&ty), Ty::RawOf(_)) => {
+                if !args.is_empty() {
+                    return err(span, "`room` takes no arguments");
+                }
+                let at = self.offset(v, 3);
+                Ok((self.load_from(at, &Ty::TAddr), Ty::TAddr))
+            }
+            "read" if matches!(peel(&ty), Ty::RawOf(_)) => {
+                let elem = raw_elem(&ty, "read", span)?;
+                let i = one_arg(self, &Ty::TAddr)?;
+                let at = self.raw_position(v, &elem, i, span)?;
+                // What is there is read as a `T`, which is the whole of
+                // what this chapter does not define: a position nothing has
+                // written is not one (Ch. 5 §2.7).
+                if elem.is_aggregate() {
+                    return Ok((at, elem));
+                }
+                Ok((self.load_from(at, &elem), elem))
+            }
+            "write" if matches!(peel(&ty), Ty::RawOf(_)) => {
+                let elem = raw_elem(&ty, "write", span)?;
+                let [i, x] = args else {
+                    return err(span, "`write` takes a position and a value");
+                };
+                let (i, it) = self.expr(i, Some(&Ty::TAddr))?;
+                self.check(&it, &Ty::TAddr, span, "`write`'s position")?;
+                let (x, xt) = self.expr(x, Some(&elem))?;
+                self.check(&xt, &elem, span, "`write`'s value")?;
+                let at = self.raw_position(v, &elem, i, span)?;
+                if elem.is_aggregate() {
+                    self.copy_typed(at, x, &elem, span)?;
+                } else {
+                    self.store_at_operand(at, &elem, x, span)?;
+                }
+                Ok((unit(), Ty::Unit))
             }
 
             // `v.is_empty()` — `len() == 0`, said once.
@@ -8313,6 +8390,21 @@ impl Fn<'_> {
     }
 
     /// The address of element `i` of the `Vec` at `at`.
+    /// The address of a `Raw`'s `i`-th position, checked against its room.
+    ///
+    /// Checked because there is no reason for this to be the one index that
+    /// is not (Ch. 2 §3, Ch. 5 §2.7) — the room is right there, in the word
+    /// beside the address.
+    fn raw_position(&mut self, at: Operand, elem: &Ty, i: Operand, span: Span) -> R<Operand> {
+        let room = self.offset(at.clone(), 3);
+        let room = self.load_from(room, &Ty::TAddr);
+        self.bounds_check(i.clone(), room, false, span)?;
+        let size = self.types.layout(elem).size as i128;
+        // `at` is the `Raw` itself, whose first word is the allocation —
+        // which is what `vec_elem_addr` reads out of a `Vec`'s.
+        self.vec_elem_addr(at, i, size, span)
+    }
+
     fn vec_elem_addr(&mut self, at: Operand, i: Operand, size: i128, span: Span) -> R<Operand> {
         let base = self.load_ptr(at);
         let off = self.apply_binary("*", i, konst_addr(size), &Ty::TAddr, span)?;
@@ -8494,6 +8586,72 @@ impl Fn<'_> {
     /// (Ch. 5 §2.1). That is the whole of why `Box` is a language item: every
     /// other part of it — owning, moving, dropping, dereferencing — is what
     /// Ch. 3 already does to any value.
+    /// `Raw::new()` — no room, and so no allocation: two zero words.
+    fn raw_new(&mut self, elem: &Ty) -> R<(Operand, Ty)> {
+        let ty = Ty::RawOf(Box::new(elem.clone()));
+        let slot = self.temp_slot(&ty);
+        let zero = Operand::Const(Type::Int(27), Bt::ZERO);
+        self.store_at(&slot, 0, &Ty::TAddr, zero.clone(), Span::NONE)?;
+        self.store_at(&slot, 3, &Ty::TAddr, zero, Span::NONE)?;
+        Ok((Operand::Value(slot), ty))
+    }
+
+    /// `Raw::alloc(n)` — room for `n`, and a trap if the target cannot give
+    /// it, which is `Box::new`'s decision for `Box::new`'s reason (§2.5).
+    fn raw_alloc(&mut self, elem: &Ty, n: Operand, span: Span) -> R<(Operand, Ty)> {
+        let ty = Ty::RawOf(Box::new(elem.clone()));
+        let l = self.types.layout(elem);
+        let size = Operand::Const(Type::Int(27), Bt::from_i128(l.size as i128));
+        let align = Operand::Const(Type::Int(27), Bt::from_i128(l.align as i128));
+        self.needs_heap.set(true);
+
+        let bytes = self.emit(
+            "a",
+            Type::Int(27),
+            InstKind::Flavored {
+                op: FlavoredOp::Mul,
+                flavor: Flavor::Trap,
+                ty: Type::Int(27),
+                a: n.clone(),
+                b: size,
+            },
+        );
+        let p = self.emit(
+            "raw",
+            Type::Ptr,
+            InstKind::Call {
+                callee: Callee::Direct(ALLOC.to_string()),
+                args: vec![bytes, align],
+                ret: Some(Type::Ptr),
+            },
+        );
+        // 0 is not the address of anything (ISA §2.2), so it is what "could
+        // not" looks like — read as an integer to test it, exactly as
+        // `Box::new` does.
+        let cell = self.temp_slot(&Ty::TAddr);
+        self.store_ptr(Operand::Value(cell.clone()), p.clone());
+        let held = self.load_slot(&cell, &Ty::TAddr);
+        let got = self.emit(
+            "c",
+            Type::Int(1),
+            InstKind::Cmp {
+                ty: Type::Int(27),
+                a: held.clone(),
+                b: Operand::Const(Type::Int(27), Bt::ZERO),
+            },
+        );
+        let (ok, bad) = (self.fresh("raw.ok"), self.fresh("raw.no"));
+        self.br3(got, &bad, &bad, &ok);
+        self.start(bad);
+        self.finish(Terminator::Trap(FaultCode::Trap));
+        self.start(ok);
+
+        let slot = self.temp_slot(&ty);
+        self.store_at(&slot, 0, &Ty::TAddr, held, span)?;
+        self.store_at(&slot, 3, &Ty::TAddr, n, span)?;
+        Ok((Operand::Value(slot), ty))
+    }
+
     fn box_new(&mut self, arg: &ast::Expr, fallible: bool, span: Span) -> R<(Operand, Ty)> {
         let (v, inner) = self.expr(arg, None)?;
         check_sized(&inner, span, "a `Box`'s contents")?;
@@ -10254,6 +10412,18 @@ impl Fn<'_> {
             // arm a `Vec` fell through to the scalar case and one word was
             // copied where three were meant; a `Vec` returned from a function
             // arrived as the *address* of the buffer it was written into.
+            // A `Raw` is two of a `Vec`'s three words and travels the same
+            // way, for the same reason.
+            Ty::RawOf(_) => {
+                let p = self.load_ptr(src.clone());
+                self.store_ptr(dst.clone(), p);
+                let from = self.offset(src.clone(), 3);
+                let to = self.offset(dst.clone(), 3);
+                let n = self.load_from(from, &Ty::TAddr);
+                self.store_scalar(to, &Ty::TAddr, n);
+                Ok(())
+            }
+
             Ty::VecOf(_) => {
                 let p = self.load_ptr(src.clone());
                 self.store_ptr(dst.clone(), p);
@@ -10511,6 +10681,48 @@ impl Fn<'_> {
             };
             let fallible = path.segments[1] == "try_new";
             return self.box_new(arg, fallible, span);
+        }
+
+        // `Raw::new()` and `Raw::alloc(n)` — room, and none (Ch. 5 §2.7).
+        // Which `T` is what the context says, because nothing in the call
+        // says it: `let r: Raw<t27> = Raw::alloc(4)` is the ordinary way,
+        // and `Raw::<t27>::alloc(4)` is the other one.
+        if path.segments.len() == 2
+            && head == "Raw"
+            && matches!(path.segments[1].as_str(), "new" | "alloc" | "try_alloc")
+        {
+            // §2.7 gives `Raw` the two constructors `Box` has, and this one
+            // is the fallible half. It is not written yet, and saying so is
+            // better than the message a name nobody knows would get.
+            if path.segments[1] == "try_alloc" {
+                return err(
+                    span,
+                    "`Raw::try_alloc` is not implemented yet; `Raw::alloc` traps instead \
+                     (Ch. 5 §2.7)",
+                );
+            }
+            let elem = match (path.targs.first(), expected) {
+                (Some(t), _) => self.resolve(t)?,
+                (None, Some(Ty::RawOf(t))) => (**t).clone(),
+                (None, _) => {
+                    return err(
+                        span,
+                        "which `Raw` this is cannot be told from here; write it, as                          `let r: Raw<t27> = …` (Ch. 5 §2.7)",
+                    );
+                }
+            };
+            if path.segments[1] == "new" {
+                if !fields.is_empty() {
+                    return err(span, "`Raw::new` takes no arguments");
+                }
+                return self.raw_new(&elem);
+            }
+            let [(_, arg)] = fields else {
+                return err(span, "`Raw::alloc` takes one argument");
+            };
+            let (n, nt) = self.expr(arg, Some(&Ty::TAddr))?;
+            self.check(&nt, &Ty::TAddr, span, "`Raw::alloc`'s count")?;
+            return self.raw_alloc(&elem, n, span);
         }
 
         // `char::try_from(x)` — the one conversion into `char`, and the one

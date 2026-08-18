@@ -2621,6 +2621,32 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.76 — `Raw<T>` works, and one of its five operations does not.**
+Ch. 5 §2.7 is implemented: `Raw::new`, `Raw::alloc`, `room`, `read` and
+`write`, with a drop that frees the room and drops nothing. A position may
+hold an aggregate, a position is checked against the room, and a `Raw` with
+no room allocates nothing.
+
+`Raw::try_alloc` is **not** written. It says so — "`Raw::try_alloc` is not
+implemented yet; `Raw::alloc` traps instead" — rather than failing as an
+unknown name, because a message that names the chapter is worth more than
+one that says `Raw` is not an enum. `Vec` does not need it: §2.6 says
+`push` grows or traps, and a fallible `Vec` is a different type nobody has
+asked for.
+
+Three things had to be told that a `Raw` is an aggregate before any of it
+worked, and each was a *different* list to be on: `is_aggregate`, so a
+`let` copies its two words instead of storing an address; `copy_typed`, so
+the copy is the address and the count and not a scalar; and the receiver
+rule, so `r.write(…)` takes a place rather than moving the `Raw` out. The
+first of those is the one that bit — the `let` stored the temporary's
+*address* into the binding, and every read after it was of whatever was at
+offset 3 of a pointer.
+
+That is the same lesson as G9.61, in a language with an enum instead of two
+functions: a type that is a member of a class has to be added to every list
+that names the class, and nothing checks that a list is complete.
+
 **G9.75 — `Raw<T>`, and what a language item is allowed to be.** G9.73
 decided that `Vec` and `String` become library code and left the language
 question open. The chapters had already answered half of it: Ch. 5 §2.1 says
