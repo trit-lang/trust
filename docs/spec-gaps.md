@@ -2621,6 +2621,34 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.82 — a generic type cannot have a destructor, and `Vec` needs one.**
+Writing the prelude's `Vec` found the last prerequisite by hitting it:
+
+```
+struct Held<T> { v: T }
+impl<T> Drop for Held<T> { fn drop(self) { } }
+```
+```
+`Held` cannot have a destructor: it is not declared in this file
+```
+
+The check asks whether `types.structs` holds the impl's self type, and that
+table holds **instantiations** — `Held.t27` — not the family. So no generic
+type in this language has ever had a destructor, and nobody noticed because
+the two things that needed one, `Box` and `Vec`, were the compiler's.
+
+A library `Vec` cannot do without: it must drop its elements before its room
+goes, and §2.6 says so. So the order gained a step, and it is the last one:
+a `Drop` written on a family is one destructor per instantiation, named the
+way every other monomorphized method is (Ch. 4 §2.5), and the drop glue asks
+for the instantiation's rather than the family's.
+
+The Trust `Vec` itself is written and is in this note's predecessor as a
+test; what it waits on is this. Recorded rather than half-done: switching
+the language item off is one edit, and it turns 596 passing tests red until
+everything above is finished, so it is the kind of change that starts from a
+clean tree and not from the end of a long day.
+
 **G9.81 — `Vec` is writable in Trust, and one word said it was not.**
 Growth doubling from four, indexing that is a place, `pop` moving an element
 out, and an old allocation freed without dropping the elements moved out of

@@ -122,7 +122,15 @@ Closures are done, captures and all. What is left is `dyn Trait` and its
 vtables (Ch. 4 §3), and Ch. 5's `Vec` and `String` — and those two are a
 different kind of thing.
 
-**`Vec` is the compiler's code, not the language's.** Its methods are
+**`Vec` is being moved into the library**, and the road is now paved end to
+end: `Raw<T>` exists (Ch. 5 §2.7), `v[i]` resolves to a method (Ch. 2 §3.1),
+and a growable array with §2.6's growth policy, its shift directions and its
+bounds rule is written in Trust and tested. One prerequisite is left — a
+generic type cannot have a destructor (G9.82) — and then the switch is one
+edit and a long afternoon of deleting.
+
+The reason it matters, restated because it is the whole of why any of this
+was done: Its methods are
 intrinsics: `trustc` expands `push` into hand-written TIR, and no chapter
 says what that TIR is. A second implementation cannot derive it, only copy
 it, which is exactly §3.4's warning. The decision is to **move them into the
