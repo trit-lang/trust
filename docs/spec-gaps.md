@@ -2621,6 +2621,39 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.75 — `Raw<T>`, and what a language item is allowed to be.** G9.73
+decided that `Vec` and `String` become library code and left the language
+question open. The chapters had already answered half of it: Ch. 5 §2.1 says
+an allocator cannot be written in this language because TIR §5 has no
+integer-to-pointer conversion, *deliberately*, and Ch. 3 §6 reserves raw
+pointers to an `unsafe` chapter that does not exist. And §2.6 gave a second
+reason nobody had counted: **the room beyond a `Vec`'s length is memory that
+is not yet a `T`**, which is the harder one, because a pointer is a
+representation and "not yet a `T`" is a claim about what may be read.
+
+Three ways were on the table: write the reserved `unsafe` chapter; pin the
+lowering of `Vec` in the specification itself; or name the *smallest* thing
+that makes the rest ordinary.
+
+**Chosen: the smallest thing.** `Raw<T>` (Ch. 5 §2.7) is an address and a
+count, five operations, no destructor for its contents, and reads and writes
+that are bounds-checked like every other index. It is a language item and so
+is not derivable from the chapters — but it is five operations whose lowering
+is a sentence each, where `Vec` was a dozen methods with a growth policy and
+two shifting loops inside them.
+
+What that buys is worth stating precisely, because it is the point. Every
+*decision* in §2.6 — doubling, the first allocation of four, `reserve` not
+doubling, `insert` shifting downwards, the bounds rule being the length and
+not the capacity — becomes Trust source that both implementations compile.
+The undecidable surface shrinks from a data structure to a primitive, and a
+primitive is the kind of thing a specification can define completely.
+
+The one hole is named rather than hidden: reading a position nothing has
+written is not defined by the chapter. `Vec` never asks, because it reads
+below its length and its length counts writes. That is the whole of the
+unsoundness bought, and it is written down in the chapter rather than here.
+
 **G9.74 — a trait object is read and measured, and a sixth thing printed
 as debug output.** `&dyn Area` parses on both sides now and lays out the
 same: two words, because a reference to something whose type is not known

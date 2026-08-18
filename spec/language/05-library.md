@@ -402,9 +402,13 @@ struct Vec<T>;      // pointer, length, capacity — three words
 struct String;      // Vec<char>, with the methods of §1.3
 ```
 
-`Vec<T>` is a growable array, and a **language item** for `Box`'s reason and
-one more: the room beyond the length is memory that is *not yet a `T`*, and
-this language has no way to say that.
+`Vec<T>` is a growable array. It **was** a language item for `Box`'s reason
+and one more — the room beyond the length is memory that is *not yet a `T`*,
+and this language had no way to say that — and §2.7 now says exactly that
+much, so `Vec` and `String` are **library code**: Trust source, compiled like
+any other, resting on one item instead of being one. What follows is
+therefore a description of what the library must do rather than of what the
+compiler must generate.
 
 | | |
 |---|---|
@@ -455,6 +459,69 @@ rules of its own: `String::new`, `with_capacity` and `push(char)` are `Vec`'s,
 string applies to one the moment it does. `push_str(&str)` is the one method
 that is a `String`'s alone: a loop around `push`, written in the library as
 `impl Vec<char>` — an impl for one instantiation (Ch. 4 §2.1).
+
+---
+
+### 2.7 `Raw<T>` — room that is not yet a `T`
+
+§2.6 gives two reasons `Vec` cannot be written in this language: it needs an
+address, and **the room beyond the length is memory that is not yet a `T`**.
+The second is the harder one, and it is the only thing standing between the
+collections and the library.
+
+Draft 0.1 names exactly that much and no more.
+
+```
+struct Raw<T>;    // language item — an address and a count, two words
+
+impl<T> Raw<T> {
+    fn new() -> Raw<T>;                     // no room; no allocation
+    fn alloc(n: taddr) -> Raw<T>;           // room for n; traps if it cannot
+    fn try_alloc(n: taddr) -> Option<Raw<T>>;
+    fn room(&self) -> taddr;                // how many positions there are
+    fn read(&self, i: taddr) -> T;          // the i-th, as a T
+    fn write(&mut self, i: taddr, value: T);
+}
+```
+
+A `Raw<T>` **owns room** and knows nothing about what is in it. It is:
+
+- **Two words** — the address and the count — because a position is checked
+  against the count and a checked index needs the count to be there. That is
+  the same shape as a slice (Ch. 2 §4), and for the same reason.
+- **Not `Copy`**, for `Box`'s reason: it owns an allocation.
+- **Dropped** by freeing the room and **dropping nothing**, because it does
+  not know which positions hold a `T`. Whatever does know must drop them
+  first — which is exactly what `Vec`'s own destructor is for.
+- **Bounds-checked**: `read` and `write` trap on `i >= room()`, by Ch. 2 §3's
+  rule for an index, because there is no reason for this to be the one place
+  that does not check.
+
+`alloc` asks the target's allocator for `n` times the size of a `T`, aligned
+as a `T` is, and traps on 0 exactly as `Box::new` does (§2.5).
+
+**What this chapter does not define** is the one thing left: `read` at a
+position nothing has written. It is not a fault and not an error — the trits
+are whatever the allocator left there — and it is not a `T` either, so what a
+program does with it is outside this chapter. A caller that reads only what
+it wrote never asks the question, and `Vec` is written that way: it reads
+below its length and its length counts writes.
+
+That is the whole of the unsoundness, and it is worth saying plainly what has
+been bought with it. `Raw<T>` is a **language item** and so is not derivable
+from these chapters — but it is five operations whose lowering is a
+sentence each, where `Vec` was a dozen methods with a growth policy and two
+shifting loops inside them. Everything in §2.6 that is a *decision* — the
+doubling, the first allocation of four, `reserve` not doubling, `insert`
+shifting downwards, the bounds rule being the length and not the capacity —
+is Trust source in the library now, written once and compiled by whoever is
+compiling. A second implementation has to agree about `Raw`, and can derive
+the rest.
+
+`Box<T>` is `Raw<T>` with a count of one and a destructor that drops what is
+there — and is kept as its own item because §2.3's guarantees about
+`Option<Box<T>>` and the fat pointer of §2.4 are about `Box` and not about
+room.
 
 ---
 
