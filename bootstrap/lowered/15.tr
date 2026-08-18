@@ -1,0 +1,39 @@
+// A reference that is not `self` (Ch. 3 §2).
+//
+// `&self` was the only one either implementation had lowered, and it is the
+// one case where the type is *not* in the parameter list: an impl says what
+// `self` points at. Every other reference says so itself, and the name `&P`
+// is what carries it — TIR spells every address `ptr`, so the referent
+// survives nowhere else, and a dereference is the only thing that needs it.
+//
+// `&x` itself emits nothing at all. A slot **is** an address (TIR §3), so
+// what the borrow adds is not an instruction but a name for what is there.
+
+struct P { a: t27, b: t27 }
+
+struct Pair { l: P, r: P }
+
+fn get(p: &P) -> t27 { p.a }
+
+fn both(p: &P) -> t27 { p.a + p.b }
+
+// A reference passed onwards is the same address again, and the second
+// function's parameter is the first's slot.
+fn through(p: &P) -> t27 { get(p) + 1 }
+
+// Two references at once, so that neither can be the receiver.
+fn wider(x: &P, y: &P) -> t27 { x.a + y.b }
+
+impl P {
+    fn sum(&self) -> t27 { self.a + self.b }
+}
+
+// A method on something reached by reference: the receiver is what the slot
+// holds, and here the slot holds an address that is already the object.
+fn asked(p: &P) -> t27 { p.sum() }
+
+fn main() -> t27 {
+    let one = P { a: 1, b: 2 };
+    let two = P { a: 3, b: 4 };
+    get(&one) + both(&two) + through(&one) + wider(&one, &two) + asked(&two)
+}

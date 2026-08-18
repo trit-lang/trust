@@ -2621,6 +2621,35 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.91 — `&self` was the only reference `bootstrap/` had ever lowered.**
+
+Starting on G9.90's trait objects found something one layer under them: the
+second implementation could not lower `get(&x)`. Not the trait object — the
+**reference**. A parameter written `&P` resolved to `?` like every
+non-scalar, went down the aggregate path, and was refused; and `&x` had no
+arm in `value` at all, because nothing in the corpus had ever written one.
+
+`&self` worked, and it worked for a reason that hid this: it is the one
+reference in the language whose type is **not in the parameter list**. An
+impl says what `self` points at, so the lowering read it from the impl and
+never needed a name for the referent. Every other reference says so itself,
+and the name `&P` is what carries it — TIR spells every address `ptr`, so
+the referent survives nowhere else, and a dereference is the only thing that
+needs it.
+
+Three small things, and `bootstrap/lowered/15.tr` is the program that asks
+for them: a `&T` parameter is `%p: ptr` outside and a slot holding an
+address in; reading through a named reference loads the address first and
+takes the type from the *name* rather than from the impl; and `&x` emits
+**nothing at all**, because a slot is already an address (TIR §3) and what
+the borrow adds is a name rather than an instruction.
+
+The corpus is the point again. `&self` was exercised from the first method
+and `&x` was exercised by nothing, so one was right and the other did not
+exist — and the file that would have caught it is the one being written
+*after* the feature it checks. Which is the wrong order, and is why G9.90
+was designed before it was built: the program to compare on comes first.
+
 **G9.90 — what `bootstrap/` still owes: `dyn Trait`.**
 
 `trustc` lowers trait objects fully — vtable globals, the fat-pointer
