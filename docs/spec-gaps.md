@@ -2621,6 +2621,40 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.93 — a binding took over storage that was not its to take.**
+
+`stmt::Let` renamed the value's storage into the binding's name whenever the
+value was an aggregate. That is right for exactly one case, and the comment
+beside it said which: a literal is built in a temporary, nothing else names
+it, and `let p = P { … }` adopting it is the whole of what makes the binding
+cost nothing (Ch. 3 §1.1).
+
+It is wrong for every other case, and nothing had asked. `let q = p`,
+`let q = *r`, and a parameter bound onwards all renamed **somebody else's**
+storage, which leaves the older name pointing at a slot the function no
+longer declares. With a destructor in the type it emitted
+`call @drop.A(%b.slot.2)` for a `%b.slot.2` that was not there —
+`trustc check` on that module says `%b.slot.2 is not defined in this
+function`, so this was not a disagreement about a choice, it was TIR that
+does not verify, from a lowering that reported success.
+
+The test is the **name**. Every aggregate this builds with nowhere to put it
+goes into a `%tmp.slot.N`, so "is this a temporary" is answerable from the
+text and from nothing else. Anything else — a local, a parameter, a field,
+what a reference points at — is copied field by field, which is what
+`trustc` emits.
+
+A **move out of a named place** is still refused. It has to record that the
+place no longer owns what it held, and the flag that would say so is made
+with `fresh` and kept under no name, so nothing here can find it again. A
+type with a destructor is therefore refused there rather than dropped twice,
+which turns the ill-formed module above into no module.
+
+`bootstrap/lowered/06.tr` and `15.tr` are the files that now ask: `let q = p`
+from a local and from a parameter, and `let q = *p` through a reference.
+Three lines of corpus, for a bug that had been under every version of this
+lowering since aggregates were added.
+
 **G9.92 — a method a trait gave a type is emitted where the impl is.**
 
 `bootstrap/lower.tr` emitted every `impl` and then every method a trait had

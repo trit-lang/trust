@@ -32,8 +32,15 @@ impl P {
 // holds, and here the slot holds an address that is already the object.
 fn asked(p: &P) -> t27 { p.sum() }
 
+// A dereference into a binding is a **copy**. What is at the other end is
+// somebody else's storage whatever the name in front of it says, so `q` is
+// storage of its own and the fields are moved across one at a time
+// (Ch. 3 §1.1).
+fn copied(p: &P) -> t27 { let q = *p; q.a + q.b }
+
 fn main() -> t27 {
     let one = P { a: 1, b: 2 };
     let two = P { a: 3, b: 4 };
     get(&one) + both(&two) + through(&one) + wider(&one, &two) + asked(&two)
+        + copied(&one)
 }

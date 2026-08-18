@@ -4,6 +4,13 @@ struct Wide { a: t9, b: taddr, c: bool }
 fn make(a: t27) -> P { P { x: a, y: 1 } }
 fn made(a: t27) -> P { let p = P { x: a + 1, y: 2 }; p }
 fn used(a: t27, b: t9) -> t27 { let p = P { x: a + 1, y: b }; p.x }
+// A binding whose value is *another binding* is a copy and not a rename.
+// The temporary a literal is built in is nobody else's, so `let p = P { … }`
+// takes it over and costs nothing; a local and a parameter are somebody
+// else's, and taking those over leaves the name they had pointing at
+// storage that is gone (Ch. 3 §1.1).
+fn again(a: t27) -> t27 { let p = P { x: a, y: 1 }; let q = p; q.x }
+fn handed(p: P) -> t27 { let q = p; q.x }
 fn wide(a: t9, b: taddr) -> Wide { Wide { a: a, b: b, c: true } }
 fn twice(a: t27) -> t27 {
     let p = P { x: a, y: 1 };

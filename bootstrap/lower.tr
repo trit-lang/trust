@@ -1731,6 +1731,28 @@ fn holds_name(names: &Vec<String>, name: &str) -> bool {
     false
 }
 
+/// Whether a value's storage is a **temporary**: storage made for this value
+/// and named by nothing else.
+///
+/// It is what tells a binding whether it may take that storage over. Every
+/// aggregate this builds with nowhere to put it goes in a `%tmp.slot.N`, so
+/// the name is the whole of the answer — and a local, a parameter, a field
+/// or what a reference points at is not one.
+fn is_temporary(text: &str) -> bool {
+    let head = "%tmp.slot.";
+    if text.len() <= head.len() {
+        return false;
+    }
+    let mut i: taddr = 0;
+    while i < head.len() {
+        if text[i] != head[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 /// Give a name a different one, wherever it was written.
 ///
 /// The only name a lowering ever changes its mind about: an aggregate is
@@ -2034,6 +2056,24 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
             let which = def_at(&e.defs, &val.ty);
             if which >= 0 {
                 let owns = holds_name(&e.drops, &val.ty);
+                // Somebody else's storage is **copied** out of: `let q = p`
+                // leaves `p` naming what it named, so `q` is storage of its
+                // own and the fields cross one at a time (Ch. 3 §1.1).
+                // Renaming it would leave the older name pointing at a slot
+                // that no longer exists.
+                if !is_temporary(&val.text) {
+                    // A move out of a *named* place has to record that the
+                    // place no longer owns what it held, and nothing here
+                    // can say so — so a type with a destructor is refused
+                    // rather than dropped twice (Ch. 3 §1.4).
+                    if owns {
+                        e.stuck = true;
+                        return;
+                    }
+                    let slot = slot_for(e, name, &val.ty);
+                    copy_between(e, &val.text, &slot, &val.ty);
+                    return;
+                }
                 // The temporary *is* the binding's storage: it was made for
                 // this value and nothing else names it, so it is renamed
                 // rather than copied out of.
