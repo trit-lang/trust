@@ -1230,7 +1230,7 @@ pub fn lower_noting(
             // A function without a body is a declaration, and lowers to TIR's
             // own declaration form — one mechanism, spelled twice.
             None => module.decls.push(signature),
-            Some(body) => match function(f, signature, body, &key, HashMap::new(), &world) {
+            Some(body) => match function(f, signature, body, &key, HashMap::new(), 0, &world) {
                 Ok(func) => module.funcs.push(func),
                 Err(e) => errs.push(e),
             },
@@ -1248,7 +1248,7 @@ pub fn lower_noting(
             let key = f.name.clone();
             let signature = signature_of(&f, &key, &sigs);
             let body = f.body.clone().expect("a closure has a body");
-            match function(&f, signature, &body, &key, HashMap::new(), &world) {
+            match function(&f, signature, &body, &key, HashMap::new(), 0, &world) {
                 Ok(func) => module.funcs.push(func),
                 Err(e) => errs.push(e),
             }
@@ -1266,11 +1266,10 @@ pub fn lower_noting(
         };
         let body = def.body.clone().expect("a generic function has a body");
         let signature = signature_of(&def, &job.key, &sigs);
-        match function(&def, signature, &body, &job.key, job.env, &world) {
+        match function(&def, signature, &body, &job.key, job.env, job.depth, &world) {
             Ok(func) => module.funcs.push(func),
             Err(e) => errs.push(e),
         }
-        let _ = job.depth;
     }
 
     // Vtables are globals like any other, and are emitted once every
@@ -3477,20 +3476,19 @@ struct Job {
     depth: u32,
 }
 
-/// How much outstanding instantiation §2.7's termination check allows.
+/// How deep §2.7's termination check lets instantiation go.
 ///
-/// A *proxy* for what the section asks, and worth saying so: the section is
-/// about **depth** — a generic that instantiates itself at a larger type —
-/// and this counts the queue. The two agree on a runaway, which grows the
-/// queue without bound, and disagree on a large program, which has many
-/// instantiations outstanding and none of them deep.
+/// **Depth**, which is what the section is about: a generic function that
+/// instantiates itself at a larger type makes a chain, and a chain that does
+/// not terminate is one that gets longer. How many are *outstanding* is a
+/// different number and not a bound on anything — `bootstrap/` has hundreds
+/// at once and nothing recursive at all, which is what made counting the
+/// queue useless the moment `Vec` became library code (G9.85, G9.88).
 ///
-/// 64 was enough while `Vec` was the compiler's. It is not now that `Vec`
-/// is library code with nine methods, each one function per element type:
-/// `bootstrap/` has hundreds outstanding and nothing recursive at all. The
-/// right check is the depth of the chain, and `Job` already carries the
-/// field for it (G9.85).
-const INSTANTIATION_LIMIT: u32 = 4096;
+/// 64 is generous for the thing being caught. A chain 64 long is a program
+/// nobody wrote on purpose: each link is a *different* type argument built
+/// from the last, so 64 of them is a type with 64 layers of nesting.
+const INSTANTIATION_LIMIT: u32 = 64;
 
 /// The name an instantiation is known by.
 ///
@@ -4189,6 +4187,10 @@ struct Fn<'a> {
     /// reachable. Draft 0.1 stored names and resolved them at scope exit, so
     /// a shadowed binding leaked and its shadower was dropped twice.
     owned: Vec<Owned>,
+    /// How many instantiations deep the body being lowered is, so that a
+    /// generic that instantiates itself at a larger type is refused rather
+    /// than diverging (Ch. 4 §2.7). Zero for a function the file wrote.
+    depth: u32,
     /// How many borrows this function has taken, ever. Names each one.
     loan_seq: u32,
     /// Live borrows, and the statement each dies after (Ch. 3 §4.2).
@@ -4341,6 +4343,7 @@ fn function(
     body: &ast::Block,
     key: &str,
     env: HashMap<String, Ty>,
+    depth: u32,
     w: &World,
 ) -> R<Function> {
     let World {
@@ -4395,6 +4398,7 @@ fn function(
         loops: Vec::new(),
         arm_reaches: true,
         owned: Vec::new(),
+        depth,
         loan_seq: 0,
         loans: Vec::new(),
         stmt: 0,
@@ -7063,12 +7067,12 @@ impl Fn<'_> {
         if self.sigs.borrow().contains_key(&key) {
             return Ok(key);
         }
-        if self.pending.borrow().len() as u32 > INSTANTIATION_LIMIT {
+        if self.depth >= INSTANTIATION_LIMIT {
             return err(
                 span,
                 format!(
-                    "instantiating `{name}` does not terminate: more than \
-                     {INSTANTIATION_LIMIT} instantiations are outstanding (Ch. 4 §2.7)"
+                    "instantiating `{name}` does not terminate: it is \
+                     {INSTANTIATION_LIMIT} instantiations deep (Ch. 4 §2.7)"
                 ),
             );
         }
@@ -7097,7 +7101,9 @@ impl Fn<'_> {
             key: key.clone(),
             from: name.to_string(),
             env,
-            depth: 0,
+            // One deeper than the body that asked for it. A chain is what
+            // §2.7 bounds, and this is the link.
+            depth: self.depth + 1,
         });
         Ok(key)
     }
@@ -8133,6 +8139,20 @@ impl Fn<'_> {
     /// other part of it — owning, moving, dropping, dereferencing — is what
     /// Ch. 3 already does to any value.
     /// `Raw::new()` — no room, and so no allocation: two zero words.
+    /// What an `Option<T>` holds, or nothing for a type that is not one.
+    ///
+    /// By the instantiation it was made from, which is the only thing that
+    /// says: `Option.Raw.t27` is a struct name like every other by the time
+    /// this is asked (Ch. 4 §2.7).
+    fn option_payload(&self, ty: &Ty) -> Option<Ty> {
+        let name = nominal_name(ty)?;
+        let held = self.types.instantiations.borrow().get(&name).cloned()?;
+        let ("Option", [inner]) = (held.0.as_str(), &held.1[..]) else {
+            return None;
+        };
+        Some(inner.clone())
+    }
+
     fn raw_new(&mut self, elem: &Ty) -> R<(Operand, Ty)> {
         let ty = Ty::RawOf(Box::new(elem.clone()));
         let slot = self.temp_slot(&ty);
@@ -8142,9 +8162,16 @@ impl Fn<'_> {
         Ok((Operand::Value(slot), ty))
     }
 
-    /// `Raw::alloc(n)` — room for `n`, and a trap if the target cannot give
-    /// it, which is `Box::new`'s decision for `Box::new`'s reason (§2.5).
-    fn raw_alloc(&mut self, elem: &Ty, n: Operand, span: Span) -> R<(Operand, Ty)> {
+    /// `Raw::alloc(n)` and `Raw::try_alloc(n)` — room for `n`, and either a
+    /// trap or a `None` when the target cannot give it. Which one is
+    /// `Box::new`'s decision for `Box::new`'s reason (§2.5): a failure the
+    /// program did not say what to do about stops the program, and
+    /// `try_alloc` is where it says.
+    ///
+    /// `n` times the size of a `T` still **traps** on overflow in both, and
+    /// that is not the allocator failing: `try_alloc` answers "was there
+    /// room", and a count whose size in trytes is not a number has not asked.
+    fn raw_alloc(&mut self, elem: &Ty, n: Operand, fallible: bool, span: Span) -> R<(Operand, Ty)> {
         let ty = Ty::RawOf(Box::new(elem.clone()));
         let l = self.types.layout(elem);
         let size = Operand::Const(Type::Int(27), Bt::from_i128(l.size as i128));
@@ -8186,16 +8213,63 @@ impl Fn<'_> {
                 b: Operand::Const(Type::Int(27), Bt::ZERO),
             },
         );
-        let (ok, bad) = (self.fresh("raw.ok"), self.fresh("raw.no"));
-        self.br3(got, &bad, &bad, &ok);
-        self.start(bad);
-        self.finish(Terminator::Trap(FaultCode::Trap));
-        self.start(ok);
-
+        let (ok, bad, join) = (
+            self.fresh("raw.ok"),
+            self.fresh("raw.no"),
+            self.fresh("raw.join"),
+        );
+        // The room itself, and where it is going. A `Raw` is its two words
+        // wherever it ends up, so wrapping it in an `Option` is storing it
+        // where the payload goes.
         let slot = self.temp_slot(&ty);
+        let out = if fallible {
+            let opt = self
+                .types
+                .instantiate("Option", std::slice::from_ref(&ty), span)?;
+            Some((self.temp_slot(&opt), opt))
+        } else {
+            None
+        };
+        self.br3(got, &bad, &bad, &ok);
+
+        self.start(ok);
         self.store_at(&slot, 0, &Ty::TAddr, held, span)?;
         self.store_at(&slot, 3, &Ty::TAddr, n, span)?;
-        Ok((Operand::Value(slot), ty))
+        match &out {
+            Some((into, opt)) => {
+                let ename = nominal_name(opt).expect("an instantiation is nominal");
+                let some = self
+                    .types
+                    .variant(&ename, "Some")
+                    .ok_or_else(|| one_err(span, "`Option` has no `Some`".into()))?;
+                let into = into.clone();
+                let room = Operand::Value(slot.clone());
+                self.build_variant_into(&into, &ename, some, &[("0".into(), room)], span)?;
+                self.jump(&join);
+            }
+            None => self.jump(&join),
+        }
+
+        self.start(bad);
+        match &out {
+            Some((into, opt)) => {
+                let ename = nominal_name(opt).expect("an instantiation is nominal");
+                let none = self
+                    .types
+                    .variant(&ename, "None")
+                    .ok_or_else(|| one_err(span, "`Option` has no `None`".into()))?;
+                let into = into.clone();
+                self.build_variant_into(&into, &ename, none, &[], span)?;
+                self.jump(&join);
+            }
+            None => self.finish(Terminator::Trap(FaultCode::Trap)),
+        }
+
+        self.start(join);
+        match out {
+            Some((into, opt)) => Ok((Operand::Value(into), opt)),
+            None => Ok((Operand::Value(slot), ty)),
+        }
     }
 
     fn box_new(&mut self, arg: &ast::Expr, fallible: bool, span: Span) -> R<(Operand, Ty)> {
@@ -8394,6 +8468,15 @@ impl Fn<'_> {
             && let Some(name) = nominal_name(bound)
         {
             return Ok(name);
+        }
+        // A language item is not a declaration and has no instantiation to
+        // make: `Raw::<t27>::alloc` and `Box::<t27>::new` are handled where
+        // the item is, and the head they need is the item's own name
+        // (Ch. 5 §§2.3, 2.7). Without this the written argument sends them
+        // through the generic-type path, which answers that `Raw` is not a
+        // type in scope — which it is not, and is not what was asked.
+        if matches!(head.as_str(), "Raw" | "Box") {
+            return Ok(head);
         }
         // `Option::<t27>::None` — the arguments are written, so nothing has
         // to be inferred (Ch. 4 §2.3).
@@ -10257,23 +10340,23 @@ impl Fn<'_> {
             && head == "Raw"
             && matches!(path.segments[1].as_str(), "new" | "alloc" | "try_alloc")
         {
-            // §2.7 gives `Raw` the two constructors `Box` has, and this one
-            // is the fallible half. It is not written yet, and saying so is
-            // better than the message a name nobody knows would get.
-            if path.segments[1] == "try_alloc" {
-                return err(
-                    span,
-                    "`Raw::try_alloc` is not implemented yet; `Raw::alloc` traps instead \
-                     (Ch. 5 §2.7)",
-                );
-            }
-            let elem = match (path.targs.first(), expected) {
+            // Which `T` this is: written, or said by the type the context
+            // expects — and for the fallible half that context is an
+            // `Option<Raw<T>>`, which is the same answer one layer in.
+            let fallible = path.segments[1] == "try_alloc";
+            let inner = match expected {
+                Some(w) if fallible => self.option_payload(w),
+                Some(w) => Some(w.clone()),
+                None => None,
+            };
+            let elem = match (path.targs.first(), inner) {
                 (Some(t), _) => self.resolve(t)?,
-                (None, Some(Ty::RawOf(t))) => (**t).clone(),
+                (None, Some(Ty::RawOf(t))) => *t,
                 (None, _) => {
                     return err(
                         span,
-                        "which `Raw` this is cannot be told from here; write it, as                          `let r: Raw<t27> = …` (Ch. 5 §2.7)",
+                        "which `Raw` this is cannot be told from here; write it, as \
+                         `let r: Raw<t27> = …` (Ch. 5 §2.7)",
                     );
                 }
             };
@@ -10284,11 +10367,14 @@ impl Fn<'_> {
                 return self.raw_new(&elem);
             }
             let [(_, arg)] = fields else {
-                return err(span, "`Raw::alloc` takes one argument");
+                return err(
+                    span,
+                    format!("`Raw::{}` takes one argument", path.segments[1]),
+                );
             };
             let (n, nt) = self.expr(arg, Some(&Ty::TAddr))?;
-            self.check(&nt, &Ty::TAddr, span, "`Raw::alloc`'s count")?;
-            return self.raw_alloc(&elem, n, span);
+            self.check(&nt, &Ty::TAddr, span, "the count")?;
+            return self.raw_alloc(&elem, n, fallible, span);
         }
 
         // `char::try_from(x)` — the one conversion into `char`, and the one

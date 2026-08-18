@@ -523,7 +523,13 @@ A `Raw<T>` **owns room** and knows nothing about what is in it. It is:
   that does not check.
 
 `alloc` asks the target's allocator for `n` times the size of a `T`, aligned
-as a `T` is, and traps on 0 exactly as `Box::new` does (§2.5).
+as a `T` is, and traps on 0 exactly as `Box::new` does (§2.5). `try_alloc`
+asks the same question and answers `None` where `alloc` traps — including for
+0, which is the allocator's answer and not a second rule.
+
+`n` times the size of a `T` **traps on overflow in both**. That is not the
+allocator failing: `try_alloc` answers *was there room*, and a count whose
+size in trytes is not a number has not asked.
 
 **What this chapter does not define** is the one thing left: `read` at a
 position nothing has written. It is not a fault and not an error — the trits

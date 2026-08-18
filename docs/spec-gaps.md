@@ -2621,6 +2621,54 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.89 — `Raw::try_alloc`, and the turbofish that never worked.**
+
+§2.7's fallible half is written. It is `Box::try_new`'s shape one layer out
+— an `Option<Raw<T>>` — and which `T` it is comes from the context *inside*
+the `Option`, because that is where the answer is when the binding says
+`let r: Option<Raw<t27>> = …`.
+
+Two decisions worth writing down. `n` times the size of a `T` still
+**traps** on overflow in both halves: `try_alloc` answers "was there room",
+and a count whose size in trytes is not a number has not asked the question.
+And `try_alloc(0)` is `None` rather than a trap, which falls out of asking
+the allocator and testing the answer — the same 0-is-not-an-address test
+`Box::new` makes.
+
+Writing the second test found something older. The comment beside `Raw`
+said `Raw::<t27>::alloc(4)` was "the other way" to say which `T`, and it
+had never worked: a path with written arguments goes through the
+generic-*type* path first, which instantiates the head — and `Raw` is a
+language item with no declaration to instantiate, so it answered that `Raw`
+is not a type in scope. Which it is not, and is not what was asked. Both
+items keep their own head now.
+
+The comment had been there since `Raw` was written, describing a thing
+nobody had run. That is the recurring lesson in its smallest form: **a
+comment is not a test**, and this one was wrong for as long as it existed
+because nothing ever asked it.
+
+**G9.88 — the instantiation limit counts depth now, and 64 is generous.**
+
+§2.7 is about a generic function that instantiates itself at a *larger*
+type: `go<T>` calling `go<W<T>>` makes a chain, and a chain that does not
+terminate is one that gets longer. The check counted the **queue** instead
+— how many instantiations were outstanding at once — and the two agree only
+on a runaway. They disagreed the moment `Vec` became library code: hundreds
+outstanding, nothing recursive, and a limit of 64 refusing a program that
+terminates. It was raised to 4096 to get past that, which is the shape of a
+number that is measuring the wrong thing.
+
+`Job` had carried a `depth` field since it was written, unset and unread.
+It is set now — one deeper than the body that asked — and the limit is 64
+again, because 64 is generous for the thing being caught: each link is a
+*different* type argument built from the last, so a chain of 64 is a type
+with 64 layers of nesting.
+
+Two tests, and the second is the one the old check would have failed:
+breadth is not depth. Eight instantiations of `id` at eight types is a chain
+of length one, eight times over.
+
 **G9.87 — deleting the old `Vec` found the one place an alias does not
 reach.**
 

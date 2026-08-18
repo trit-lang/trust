@@ -4924,3 +4924,88 @@ fn a_generic_collection_drops_its_elements() {
     }";
     assert_eq!(run(src).1, "123");
 }
+
+#[test]
+fn a_generic_that_grows_its_own_argument_is_refused() {
+    // Ch. 4 §2.7's termination check, and the shape it is about: `go<T>`
+    // calls `go<W<T>>`, so every instantiation asks for a *larger* one and
+    // the chain never closes. What bounds it is the **depth** of that chain
+    // — how many are outstanding at once is a different number, and a large
+    // program has hundreds of those with nothing recursive at all (G9.88).
+    let e = error(
+        "struct W<T> { v: T } \
+         fn go<T>(x: T) -> t27 { go(W { v: x }) } \
+         fn main() -> t27 { go(1) }",
+    );
+    assert!(e.contains("does not terminate"), "{e}");
+    assert!(e.contains("deep"), "{e}");
+}
+
+#[test]
+fn a_wide_program_instantiates_as_much_as_it_likes() {
+    // The other half of the same claim, and the one the queue count got
+    // wrong: breadth is not depth. Nine instantiations of one function at
+    // nine types is a chain of length one, nine times over — and a limit
+    // that counted what was outstanding would refuse a program that
+    // terminates (G9.88).
+    let m = tir_of(
+        "fn id<T>(x: T) -> T { x } \
+         struct P<T> { v: T } \
+         fn main() -> t27 { \
+             let a = id(1); \
+             let b = id(2 as t9); \
+             let c = id(3 as taddr); \
+             let d = id('x'); \
+             let e = id(true); \
+             let f = id(P { v: 1 }); \
+             let g = id(P { v: 'y' }); \
+             let h = id(P { v: P { v: 1 } }); \
+             a + (b as t27) + (c as t27) + f.v + h.v.v \
+         }",
+    );
+    let made = m
+        .funcs
+        .iter()
+        .filter(|f| f.sig.name.starts_with("id."))
+        .count();
+    assert_eq!(made, 8, "one function per type argument");
+}
+
+#[test]
+fn room_can_be_asked_for_without_trapping() {
+    // Ch. 5 §2.7's fallible half. `alloc` traps because a failure the
+    // program did not say what to do about stops the program; `try_alloc`
+    // is where it says, and what it says is an `Option<Raw<T>>` — the same
+    // shape `Box::try_new` answers with (§2.5).
+    //
+    // Which `T` this is comes from the context one layer in: the binding
+    // says `Option<Raw<t27>>`, and the payload of that is the answer.
+    let (status, _) = run("fn used(given: Raw<t27>) -> t27 { \
+             let mut room = given; \
+             room.write(0, 7); \
+             room.write(1, 9); \
+             room.read(0) + room.read(1) + (room.room() as t27) \
+         } \
+         fn main() -> t27 { \
+             let r: Option<Raw<t27>> = Raw::try_alloc(4); \
+             match r { \
+                 Option::Some(room) => used(room), \
+                 Option::None => 0, \
+             } \
+         }");
+    assert_eq!(status, 20);
+}
+
+#[test]
+fn room_asked_for_by_name_needs_no_context() {
+    // The other way to say which `T`: written into the call, which is what
+    // `Raw::<t27>::try_alloc(…)` is for and the only way when there is no
+    // binding to read it off (Ch. 5 §2.7).
+    let (status, _) = run("fn main() -> t27 { \
+             match Raw::<t27>::try_alloc(2) { \
+                 Option::Some(room) => room.room() as t27, \
+                 Option::None => 0, \
+             } \
+         }");
+    assert_eq!(status, 2);
+}
