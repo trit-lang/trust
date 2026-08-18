@@ -2621,6 +2621,34 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.77 — what stands between `Raw<T>` and a library `Vec`: one operator.**
+With §2.7 implemented, the move can be planned exactly. Two of the three
+things it needs turned out to be there already.
+
+*The representation is not in the way.* `Vec { held: Raw<T>, len: taddr }`
+is `[address, room, length]` where the language item is
+`[address, length, capacity]`, and §2.6's `&Vec<T>` → `&[T]` reads like a
+reinterpretation of the first two words. It is not one: `coerce_vec` already
+**builds** a fresh two-word pair, so what changes is which offsets it reads
+and nothing else. The chapter's "the capacity is left behind, and that is the
+whole of the conversion" stays true.
+
+*Associated functions on a generic type are not in the way either.*
+`impl<T> W<T> { fn new() -> W<T> }` called as `let w: W<t27> = W::new()`
+already compiles and runs, which is exactly the shape `Vec::new` needs.
+
+*What **is** in the way is `v[i]`.* Indexing is written into the compiler for
+the types the language knows, and `W cannot be indexed` is what a program's
+own type gets. Every `Vec` in `bootstrap/` is indexed, so a `Vec` that is
+library code and cannot be indexed is not a `Vec`.
+
+That is a language question and not an implementation one, so it is recorded
+rather than guessed: either indexing becomes a **trait** the library
+implements — which is the general answer and brings operator overloading with
+it, a thing draft 0.1 has deliberately not got — or `[]` stays the
+compiler's and is taught to resolve to a *method* on the type it is written
+on, which is the narrow answer and is what `Raw<T>` was.
+
 **G9.76 — `Raw<T>` works, and one of its five operations does not.**
 Ch. 5 §2.7 is implemented: `Raw::new`, `Raw::alloc`, `room`, `read` and
 `write`, with a drop that frees the room and drops nothing. A position may
