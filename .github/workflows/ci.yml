@@ -1,0 +1,66 @@
+# What has to hold before a change is in.
+#
+# The four jobs are the four kinds of claim this repository makes, and they
+# are separate so that a failure says which kind broke:
+#
+#   * it builds, and its tests pass — the ordinary one;
+#   * it is a *function* of its input, byte for byte, twice over — which is
+#     the premise of Diverse Double-Compiling (docs/ddc.md §3.1);
+#   * a second implementation, written in Trust, gives the same answer to
+#     every question — the differential invariant (scripts/bootstrap.sh);
+#   * every section the documents cite exists (scripts/citations.sh).
+#
+# The middle two are slow and are the point. They run on every push, because
+# a check that only runs when someone remembers is a check nobody runs.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  build:
+    name: build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --all-targets
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo fmt --all --check
+
+  reproducible:
+    name: the same bytes twice
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/reproducible.sh
+
+  bootstrap:
+    name: the two implementations agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/bootstrap.sh
+
+  citations:
+    name: every section cited exists
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/citations.sh

@@ -4102,6 +4102,10 @@ struct Fn<'a> {
     /// Ch. 3 §1.4 means by the body running before the fields.
     destructor_of: Option<String>,
     counter: u32,
+    /// How many closures this function has already made, which is what
+    /// names the next one. Not `counter`: a second implementation can count
+    /// closures in the source and cannot count this one's SSA values.
+    closures_made: u32,
     /// Whether the scrutinee being matched was reached through a `&mut`,
     /// which decides what a binding through it is a place *of* (G9.50).
     match_mut: bool,
@@ -4276,6 +4280,7 @@ fn function(
         ),
         destructor_of,
         counter: 0,
+        closures_made: 0,
         match_mut: false,
         done: false,
     };
@@ -9078,13 +9083,21 @@ impl Fn<'_> {
             // result is a type parameter says nothing either, so it lands
             // here too.
             (None, Some((_, None)) | None) => {
+                // The parameters are named so the body can be read, and
+                // *only* named: `declare` would emit storage for them in
+                // the function that holds the closure, where nothing would
+                // ever read it. A dead slot is not free — it is in the
+                // text, and the text is what a second implementation has
+                // to reproduce (docs/ddc.md §3.1).
                 let saved = self.scopes.len();
+                let slots = self.slots.len();
                 self.scopes.push(HashMap::new());
                 for ((n, _), t) in params.iter().zip(&param_tys) {
                     self.declare(n, t.clone(), false);
                 }
                 let guess = self.peek_ty(body)?;
                 self.scopes.truncate(saved);
+                self.slots.truncate(slots);
                 match guess {
                     Some(t) => t,
                     None => {
@@ -9105,11 +9118,17 @@ impl Fn<'_> {
             .map(|((n, _), t)| ast::Named::new(n.clone(), ast::Ty::Name(t.to_string(), span)))
             .collect();
 
-        self.counter += 1;
         // A dot, not a `#`: this name reaches TIR and the assembler, and
         // both accept a dot in an identifier while Trust accepts neither in
         // one of its own, so it cannot collide with anything a program wrote.
-        let name = format!("{}.closure{}", self.name, self.counter);
+        //
+        // The number is **which closure of this function** it is, and not
+        // where the value counter had got to. The counter is an artifact of
+        // how this implementation numbers values; a second implementation
+        // can count closures from the source and cannot count those
+        // (docs/ddc.md §3.4).
+        self.closures_made += 1;
+        let name = format!("{}.closure{}", self.name, self.closures_made);
 
         // The capture struct: one reference per capture, in the order found.
         let fields: Vec<(String, Ty)> = captures

@@ -2592,6 +2592,29 @@ to run.** Every measurement in this log has been about the second number.
 Nobody had looked at the first because the three-command shape hid it behind
 two file writes.
 
+**G9.67 — a closure's type was named after a counter nobody else can
+count.** `format!("{}.closure{}", self.name, self.counter)` — and
+`self.counter` is how many SSA values the *enclosing* function had made by
+that point. The name reaches TIR (`@main.closure3.call`), so it is part of
+what a second implementation has to reproduce, and it is derived from
+something no second implementation has: this one's value numbering.
+
+It is `main.closure1`, `main.closure2` now — **which closure of this
+function it is** — which a compiler can count from the source and nothing
+else. The same question G9.58 asked about the order instantiations come out
+in, with the same answer: the observable has to be a function of the
+program, or the comparison is a comparison of implementations.
+
+Found beside it: the enclosing function emitted a **dead slot** for each
+closure whose result type had to be guessed. Reading the body to guess it
+declares the closure's parameters, and declaring a local emits its storage —
+in the function that holds the closure, where nothing ever reads it. A dead
+slot is not free: it is in the text, and the text is what §3.1 is about.
+
+Neither is a language decision and both were in `trustc`, which is worth
+saying plainly: two of the last three rounds found more in the parent than
+in the child. A second implementation is a test of the first.
+
 **G9.66 — a method called on a reference receiver was given the slot and
 not what it held.** `self.area()` inside a trait's default body — the first
 program either implementation had where a method is called on a receiver
