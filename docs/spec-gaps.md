@@ -2621,6 +2621,30 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.87 — deleting the old `Vec` found the one place an alias does not
+reach.**
+
+`Ty::VecOf` and the eight intrinsics under it are gone — about 480 lines of
+compiler that a hundred lines of library now say. Two tests went with them
+and both said the same thing: `String::new()`.
+
+`String` is an alias for `Vec<char>`, and an alias is expanded before
+anything else runs, so that nothing below the frontend has ever heard of the
+name. The pass expanded every **written type** and stopped there — and
+`String::new()` writes a type without writing it as one. It kept working
+only because the compiler had a rule for the head `"String"` while `Vec` was
+a language item, and deleting the language item deleted the rule.
+
+So the walk over a file's types now offers a second hook: every path in
+expression position, head first. `String::new()` becomes `Vec::<char>::new`
+— a head and the arguments the call would otherwise have had to infer. An
+alias is a name for a type **wherever a type is named**, and a path head is
+one of the places a type is named without looking like one.
+
+Worth saying plainly, because it is the same shape as G9.86's fourth: both
+were rules that were true only because the compiler knew something, and both
+came due the moment it stopped knowing it.
+
 **G9.86 — what the library's `Vec` needed, and it was four things, and
 none of them was the rule I thought.**
 

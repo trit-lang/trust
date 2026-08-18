@@ -78,12 +78,6 @@ pub enum Ty {
     /// nothing — whatever knows which positions hold a `T` drops those
     /// first, which is what `Vec`'s own destructor is for.
     RawOf(Box<Ty>),
-    /// `Vec<T>` — a growable array (Ch. 5 §2.6). Three words: the
-    /// allocation, the number of elements in it, and how many it has room
-    /// for. A language item for the same reason `Box` is, and one more: the
-    /// room beyond the length is memory that is *not yet a `T`*, and this
-    /// language has no way to say that.
-    VecOf(Box<Ty>),
     /// `[T]` — dynamically sized, and never the type of a place.
     Slice(Box<Ty>),
     /// `dyn Trait` — dynamically sized, and never the type of a place
@@ -105,7 +99,6 @@ impl std::fmt::Display for Ty {
             Ty::Char => f.write_str("char"),
             Ty::Boxed(t) => write!(f, "Box<{t}>"),
             Ty::RawOf(t) => write!(f, "Raw<{t}>"),
-            Ty::VecOf(t) => write!(f, "Vec<{t}>"),
             Ty::Unit => f.write_str("()"),
             Ty::Dyn(t) => write!(f, "dyn {t}"),
             Ty::Array(t, n) => write!(f, "[{t}; {n}]"),
@@ -148,7 +141,6 @@ impl Ty {
             | Ty::Enum(_)
             | Ty::Ref(..)
             | Ty::RawOf(_)
-            | Ty::VecOf(_)
             | Ty::Slice(_) => Type::Ptr,
         }
     }
@@ -178,7 +170,6 @@ impl Ty {
             | Ty::Enum(_)
             | Ty::Unit
             | Ty::Never
-            | Ty::VecOf(_)
             | Ty::RawOf(_)
             | Ty::Slice(_) => false,
             _ => true,
@@ -198,12 +189,7 @@ impl Ty {
             // A fat reference is two words and travels like an aggregate:
             // by address, and copied field by field (Ch. 3 §5.2).
             Ty::Ref(t, _) => t.is_unsized(),
-            Ty::Array(..)
-            | Ty::Tuple(_)
-            | Ty::Struct(_)
-            | Ty::Enum(_)
-            | Ty::VecOf(_)
-            | Ty::RawOf(_) => true,
+            Ty::Array(..) | Ty::Tuple(_) | Ty::Struct(_) | Ty::Enum(_) | Ty::RawOf(_) => true,
             _ => false,
         }
     }
@@ -232,11 +218,6 @@ impl Ty {
             // words, and the pointer is not a `Box` for the same reason
             // (Ch. 5 §2.7): a `Raw` with no room has no allocation.
             Ty::RawOf(_) => layout::Ty::Tuple(vec![
-                layout::Ty::Int(layout::IntTy::TAddr),
-                layout::Ty::Int(layout::IntTy::TAddr),
-            ]),
-            Ty::VecOf(_) => layout::Ty::Tuple(vec![
-                layout::Ty::Int(layout::IntTy::TAddr),
                 layout::Ty::Int(layout::IntTy::TAddr),
                 layout::Ty::Int(layout::IntTy::TAddr),
             ]),
@@ -646,8 +627,8 @@ impl Types {
             // A `Box` owns what it points at, so it is never `Copy` and it
             // always has something to do when it dies — even for a `T` that
             // does not, because the allocation is itself a resource
-            // (Ch. 5 §2.3). A `Vec` owns its allocation the same way.
-            Ty::Boxed(_) | Ty::VecOf(_) | Ty::RawOf(_) => true,
+            // (Ch. 5 §2.3).
+            Ty::Boxed(_) | Ty::RawOf(_) => true,
             _ => false,
         }
     }
@@ -1907,7 +1888,6 @@ fn is_builtin_method(ty: &Ty, name: &str) -> bool {
 fn nominal_for_builtin(ty: &Ty) -> String {
     match ty {
         Ty::Ref(inner, _) | Ty::Boxed(inner) => nominal_for_builtin(inner),
-        Ty::VecOf(_) => "Vec".to_string(),
         Ty::RawOf(_) => "Raw".to_string(),
         Ty::Slice(_) => "[]".to_string(),
         other => format!("{other}"),
@@ -1936,13 +1916,6 @@ fn raw_elem(ty: &Ty, method: &str, span: Span) -> R<Ty> {
             span,
             format!("`{method}` is a `Raw`'s, and this is `{other}`"),
         ),
-    }
-}
-
-fn vec_elem(ty: &Ty, method: &str, span: Span) -> R<Ty> {
-    match peel(ty) {
-        Ty::VecOf(e) => Ok((**e).clone()),
-        _ => err(span, format!("`{method}` applies to a `Vec`, not {ty}")),
     }
 }
 
@@ -2057,9 +2030,6 @@ fn nominal_name(ty: &Ty) -> Option<String> {
         // `str` is the name `[char]` goes by, and the name its methods are
         // keyed under (Ch. 5 §1.3).
         Ty::Slice(t) if **t == Ty::Char => "str".into(),
-        // A `Vec` is nominal under the name its instantiation was registered
-        // with, so an impl written for `Vec<A>` can be found for it.
-        Ty::VecOf(t) => mangle("Vec", std::slice::from_ref(&**t)),
         // And a `Raw` under its own, so that `room`, `read` and `write` are
         // found where every other builtin method is found (Ch. 5 §2.7).
         Ty::RawOf(t) => mangle("Raw", std::slice::from_ref(&**t)),
@@ -3996,20 +3966,6 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
             // dynamically sized for the same reason every slice is
             // (Ch. 5 §1.3).
             "str" => Ok(Ty::Slice(Box::new(Ty::Char))),
-            // And `String` is `Vec<char>`, which is what Ch. 5 §2.6 says it
-            // is — so `&String` becomes `&str` by the coercion above and
-            // needs no rule of its own.
-            "String" => {
-                // Registering the instantiation is what makes `Vec`'s impls
-                // findable for it: `String` is not a second type, it is this
-                // one under a shorter name (Ch. 5 §2.6).
-                types
-                    .instantiations
-                    .borrow_mut()
-                    .entry(mangle("Vec", &[Ty::Char]))
-                    .or_insert_with(|| ("Vec".to_string(), vec![Ty::Char]));
-                Ok(Ty::VecOf(Box::new(Ty::Char)))
-            }
             // Ch. 1 §8 claims these so no user identifier can take them.
             "t3" | "t81" | "f27" => err(
                 *span,
@@ -4030,22 +3986,7 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
                 Ok(Ty::Struct(other.to_string()))
             }
             other if types.enums.borrow().contains_key(other) => Ok(Ty::Enum(other.to_string())),
-            // A `Vec`'s instantiation answers to a mangled name like every
-            // other, but has no declaration behind it to have made a struct
-            // — `Vec` is a language item. `impl Vec<char>` writes `Self` as
-            // this name, so it has to resolve back (Ch. 5 §2.6).
-            other => {
-                if let Some(("Vec", args)) = types
-                    .instantiations
-                    .borrow()
-                    .get(other)
-                    .map(|(b, a)| (b.as_str(), a.clone()))
-                    && let [inner] = &args[..]
-                {
-                    return Ok(Ty::VecOf(Box::new(inner.clone())));
-                }
-                err(*span, format!("`{other}` is not a type in scope"))
-            }
+            other => err(*span, format!("`{other}` is not a type in scope")),
         },
         ast::Ty::Array(elem, count, span) => {
             let elem = resolve_ty_env(elem, types, env)?;
@@ -5265,70 +5206,6 @@ impl Fn<'_> {
         if !self.types.needs_drop(ty) {
             return Ok(());
         }
-        // A `Vec` drops each element it holds and then frees the allocation
-        // — the elements first, for the reason a `Box` gives.
-        if let Ty::VecOf(elem) = ty {
-            let elem = (**elem).clone();
-            let l = self.types.layout(&elem);
-            let len = {
-                let at = self.offset(addr.clone(), 3);
-                self.load_from(at, &Ty::TAddr)
-            };
-            if self.types.needs_drop(&elem) {
-                let base = self.load_ptr(addr.clone());
-                let i = self.temp_slot(&Ty::TAddr);
-                self.store_at(&i, 0, &Ty::TAddr, konst_addr(0), span)?;
-                let (head, body, out) = (
-                    self.fresh("vdrop.head"),
-                    self.fresh("vdrop.body"),
-                    self.fresh("vdrop.done"),
-                );
-                self.jump(&head);
-                self.start(head.clone());
-                let at = self.load_slot(&i, &Ty::TAddr);
-                let c = self.emit(
-                    "c",
-                    Type::Int(1),
-                    InstKind::Cmp {
-                        ty: Type::Int(27),
-                        a: at.clone(),
-                        b: len.clone(),
-                    },
-                );
-                self.br3(c, &body, &out, &out);
-                self.start(body);
-                let off = self.apply_binary(
-                    "*",
-                    at.clone(),
-                    konst_addr(l.size as i128),
-                    &Ty::TAddr,
-                    span,
-                )?;
-                let e = self.emit(
-                    "e",
-                    Type::Ptr,
-                    InstKind::Offset {
-                        p: base.clone(),
-                        d: off,
-                    },
-                );
-                self.drop_at(e, &elem, span, depth + 1)?;
-                let next = self.apply_binary("+", at, konst_addr(1), &Ty::TAddr, span)?;
-                self.store_at(&i, 0, &Ty::TAddr, next, span)?;
-                self.jump(&head);
-                self.start(out);
-            }
-            let cap = {
-                let at = self.offset(addr.clone(), 6);
-                self.load_from(at, &Ty::TAddr)
-            };
-            let bytes =
-                self.apply_binary("*", cap, konst_addr(l.size as i128), &Ty::TAddr, span)?;
-            let p = self.load_ptr(addr);
-            self.free_if_any(p, bytes, l.align as i128);
-            return Ok(());
-        }
-
         // A `Raw` frees its room and drops **nothing**: it does not know
         // which positions hold a `T`, and whatever does knows to drop them
         // first (Ch. 5 §2.7). That is the whole difference between it and a
@@ -6729,13 +6606,6 @@ impl Fn<'_> {
                 };
                 match through_refs(bt) {
                     Ty::Array(elem, _) => Some(*elem),
-                    // A `Vec`'s element is a place like an array's. `place`
-                    // has always known that and this did not, so a method
-                    // call on `v[i]` took the *non*-place path — which binds
-                    // the receiver by name and then reads it again, and the
-                    // name it bound was an SSA value rather than a slot. The
-                    // result was a second `load` from a `t27` (G9.31).
-                    Ty::VecOf(elem) => Some(*elem),
                     Ty::Ref(inner, _) => match *inner {
                         Ty::Slice(elem) => Some(*elem),
                         _ => None,
@@ -7649,7 +7519,7 @@ impl Fn<'_> {
         // receiver is a *place*: reading it would move it, and `v.push(x)` in
         // a loop would then move the same `v` twice (Ch. 3 §1.2).
         let (v, ty) = match self.type_of_place(recv)? {
-            Some(Ty::VecOf(_)) | Some(Ty::RawOf(_)) => self.place(recv, span)?,
+            Some(Ty::RawOf(_)) => self.place(recv, span)?,
             _ => self.expr(recv, None)?,
         };
         let one_arg = |this: &mut Self, want: &Ty| -> R<Operand> {
@@ -7844,76 +7714,6 @@ impl Fn<'_> {
                 Ok((Operand::Value(slot), result))
             }
 
-            // `v.push(x)` — Ch. 5 §2.6. Growth **doubles** from four, and
-            // the factor is specified rather than left open because a program
-            // that pushes n elements is entitled to know it did O(n) work in
-            // total, and the amortized argument is a property of the factor.
-            "push" => {
-                let elem = vec_elem(&ty, "push", span)?;
-                let x = one_arg(self, &elem)?;
-                self.vec_push(v, &elem, x, span)?;
-                Ok((unit(), Ty::Unit))
-            }
-
-            // `v.pop()` — Ch. 5 §2.6.
-            "pop" => {
-                let elem = vec_elem(&ty, "pop", span)?;
-                if !args.is_empty() {
-                    return err(span, "`pop` takes no arguments");
-                }
-                self.vec_pop(v, &elem, span)
-            }
-
-            // `v.clear()` — the elements go, the allocation stays.
-            "clear" if matches!(peel(&ty), Ty::VecOf(_)) => {
-                let elem = vec_elem(&ty, "clear", span)?;
-                if !args.is_empty() {
-                    return err(span, "`clear` takes no arguments");
-                }
-                self.vec_clear(v, &elem, span)?;
-                Ok((unit(), Ty::Unit))
-            }
-
-            // `v.reserve(n)` — room for `n` more.
-            // `v.insert(i, x)` and `v.remove(i)` — Ch. 5 §2.6.
-            "insert" if matches!(peel(&ty), Ty::VecOf(_)) => {
-                let elem = vec_elem(&ty, "insert", span)?;
-                let [at, x] = args else {
-                    return err(span, "`insert` takes an index and a value");
-                };
-                let (at, _) = self.expr(at, Some(&Ty::TAddr))?;
-                let (x, xt) = self.expr(x, Some(&elem))?;
-                self.check(&xt, &elem, span, "`insert`'s value")?;
-                self.vec_insert(v, &elem, at, x, span)?;
-                Ok((unit(), Ty::Unit))
-            }
-
-            "remove" if matches!(peel(&ty), Ty::VecOf(_)) => {
-                let elem = vec_elem(&ty, "remove", span)?;
-                let [at] = args else {
-                    return err(span, "`remove` takes an index");
-                };
-                let (at, _) = self.expr(at, Some(&Ty::TAddr))?;
-                self.vec_remove(v, &elem, at, span)
-            }
-
-            "reserve" => {
-                let elem = vec_elem(&ty, "reserve", span)?;
-                let n = one_arg(self, &Ty::TAddr)?;
-                self.vec_reserve(v, &elem, n, span)?;
-                Ok((unit(), Ty::Unit))
-            }
-
-            // `v.capacity()` — the third word, and the only method that can
-            // see the room beyond the length.
-            "capacity" if matches!(peel(&ty), Ty::VecOf(_)) => {
-                if !args.is_empty() {
-                    return err(span, "`capacity` takes no arguments");
-                }
-                let at = self.offset(v, 6);
-                Ok((self.load_from(at, &Ty::TAddr), Ty::TAddr))
-            }
-
             // Ch. 5 §2.7: room's own three. `room` is the second word;
             // `read` and `write` are an index check and an address.
             "room" if matches!(peel(&ty), Ty::RawOf(_)) => {
@@ -7969,37 +7769,6 @@ impl Fn<'_> {
                 Ok((unit(), Ty::Unit))
             }
 
-            // `v.is_empty()` — `len() == 0`, said once.
-            "is_empty" if matches!(peel(&ty), Ty::VecOf(_)) => {
-                if !args.is_empty() {
-                    return err(span, "`is_empty` takes no arguments");
-                }
-                let at = self.offset(v, 3);
-                let len = self.load_from(at, &Ty::TAddr);
-                let c = self.emit(
-                    "c",
-                    Type::Int(1),
-                    InstKind::Cmp {
-                        ty: Type::Int(27),
-                        a: len,
-                        b: konst_addr(0),
-                    },
-                );
-                let k = |x: i128| Operand::Const(Type::Int(1), Bt::from_i128(x));
-                let b = self.emit(
-                    "b",
-                    Type::Int(1),
-                    InstKind::Select3 {
-                        t: c,
-                        ty: Type::Int(1),
-                        neg: k(0),
-                        zero: k(1),
-                        pos: k(0),
-                    },
-                );
-                Ok((b, Ty::Bool))
-            }
-
             // Ch. 3 §5.4: a slice's length is the second word of its fat
             // reference; an array's is in its type.
             "len" => {
@@ -8009,15 +7778,6 @@ impl Fn<'_> {
                 match &ty {
                     Ty::Array(_, n) => {
                         Ok((Operand::Const(Type::Int(27), Bt::from_i128(*n)), Ty::TAddr))
-                    }
-                    // A `Vec`'s length is its second word (Ch. 5 §2.6).
-                    Ty::VecOf(_) => {
-                        let at = self.offset(v, 3);
-                        Ok((self.load_from(at, &Ty::TAddr), Ty::TAddr))
-                    }
-                    Ty::Ref(inner, _) if matches!(**inner, Ty::VecOf(_)) => {
-                        let at = self.offset(v, 3);
-                        Ok((self.load_from(at, &Ty::TAddr), Ty::TAddr))
                     }
                     Ty::Ref(inner, _) if matches!(**inner, Ty::Slice(_)) => {
                         let at = self.offset(v, 3);
@@ -8249,87 +8009,6 @@ impl Fn<'_> {
         }
     }
 
-    /// `v.push(x)` — grow if the room has run out, then store and count.
-    ///
-    /// Growth **doubles**, from a first allocation of four. The factor is
-    /// specified rather than left to the implementation because a program
-    /// that pushes *n* elements is entitled to know it did O(*n*) work in
-    /// total, and the amortized argument is a property of the factor
-    /// (Ch. 5 §2.6). Relaxing it later costs nothing; tightening it would
-    /// break something, so the reversible direction is the one taken.
-    ///
-    /// There is no `realloc`: growth allocates, copies and frees, which is
-    /// what Ch. 5 §7 reserves the third target function for.
-    fn vec_push(&mut self, at: Operand, elem: &Ty, x: Operand, span: Span) -> R<()> {
-        let l = self.types.layout(elem);
-        let (size, align) = (l.size as i128, l.align as i128);
-        self.needs_heap.set(true);
-
-        let ptr_at = at.clone();
-        let len_at = self.offset(at.clone(), 3);
-        let cap_at = self.offset(at.clone(), 6);
-        let len = self.load_from(len_at.clone(), &Ty::TAddr);
-        let cap = self.load_from(cap_at.clone(), &Ty::TAddr);
-
-        let (grow, ready) = (self.fresh("vec.grow"), self.fresh("vec.ready"));
-        let c = self.emit(
-            "c",
-            Type::Int(1),
-            InstKind::Cmp {
-                ty: Type::Int(27),
-                a: len.clone(),
-                b: cap.clone(),
-            },
-        );
-        // `len < cap` means there is room; anything else means there is not.
-        self.br3(c, &ready, &grow, &grow);
-
-        self.start(grow);
-        // Four, or twice what there was.
-        let doubled = self.apply_binary("*", cap.clone(), konst_addr(2), &Ty::TAddr, span)?;
-        let want = self.emit(
-            "n",
-            Type::Int(27),
-            InstKind::Plain {
-                op: PlainOp::TMax,
-                ty: Type::Int(27),
-                a: doubled,
-                b: konst_addr(4),
-            },
-        );
-        self.vec_realloc(
-            ptr_at.clone(),
-            cap_at,
-            size,
-            align,
-            len.clone(),
-            cap,
-            want,
-            span,
-        )?;
-        self.jump(&ready);
-
-        self.start(ready);
-        let base = self.load_ptr(ptr_at);
-        let off = self.apply_binary("*", len.clone(), konst_addr(size), &Ty::TAddr, span)?;
-        let slot = self.emit("e", Type::Ptr, InstKind::Offset { p: base, d: off });
-        if elem.is_aggregate() {
-            self.copy_typed(slot, x, elem, span)?;
-        } else {
-            self.push(Inst {
-                results: Vec::new(),
-                kind: InstKind::Store {
-                    ty: elem.tir(),
-                    v: x,
-                    p: slot,
-                },
-            });
-        }
-        let next = self.apply_binary("+", len, konst_addr(1), &Ty::TAddr, span)?;
-        self.store_at_operand(len_at, &Ty::TAddr, next, span)?;
-        Ok(())
-    }
-
     /// Move a `Vec`'s elements into an allocation of `want` elements and
     /// give the old one back.
     ///
@@ -8338,270 +8017,6 @@ impl Fn<'_> {
     /// trytes. A move *is* a copy of the storage, and nothing here owns
     /// anything twice (Ch. 3 §1.2).
     #[allow(clippy::too_many_arguments)]
-    fn vec_realloc(
-        &mut self,
-        ptr_at: Operand,
-        cap_at: Operand,
-        size: i128,
-        align: i128,
-        len: Operand,
-        cap: Operand,
-        want: Operand,
-        span: Span,
-    ) -> R<()> {
-        let bytes = self.apply_binary("*", want.clone(), konst_addr(size), &Ty::TAddr, span)?;
-        let fresh = self.emit(
-            "p",
-            Type::Ptr,
-            InstKind::Call {
-                callee: Callee::Direct(ALLOC.to_string()),
-                args: vec![bytes, konst_addr(align)],
-                ret: Some(Type::Ptr),
-            },
-        );
-        // The pointer word is read and written *as a pointer*, whatever the
-        // layout calls it: TIR has no int-to-pointer cast, so an address that
-        // is going to be offset has to have been a `ptr` all along (TIR §5).
-        let old = self.load_ptr(ptr_at.clone());
-        let copied = self.apply_binary("*", len, konst_addr(size), &Ty::TAddr, span)?;
-        self.copy_n_trytes(fresh.clone(), old.clone(), copied, span)?;
-        let oldcap = self.apply_binary("*", cap, konst_addr(size), &Ty::TAddr, span)?;
-        self.free_if_any(old, oldcap, align);
-        self.store_ptr(ptr_at, fresh);
-        self.store_at_operand(cap_at, &Ty::TAddr, want, span)?;
-        Ok(())
-    }
-
-    /// `v.reserve(n)` — make room for `n` more elements than there are.
-    ///
-    /// Exactly `len + n`, not the doubling `push` uses: a program that says
-    /// how much it wants has said something `push`'s guess cannot improve on.
-    fn vec_reserve(&mut self, at: Operand, elem: &Ty, n: Operand, span: Span) -> R<()> {
-        let l = self.types.layout(elem);
-        let (size, align) = (l.size as i128, l.align as i128);
-        self.needs_heap.set(true);
-
-        let len_at = self.offset(at.clone(), 3);
-        let cap_at = self.offset(at.clone(), 6);
-        let len = self.load_from(len_at, &Ty::TAddr);
-        let cap = self.load_from(cap_at.clone(), &Ty::TAddr);
-        let want = self.apply_binary("+", len.clone(), n, &Ty::TAddr, span)?;
-
-        let (grow, ready) = (self.fresh("res.grow"), self.fresh("res.ready"));
-        let c = self.emit(
-            "c",
-            Type::Int(1),
-            InstKind::Cmp {
-                ty: Type::Int(27),
-                a: want.clone(),
-                b: cap.clone(),
-            },
-        );
-        // `want > cap` is the only case that allocates; asking for room that
-        // is already there is not an error, it is nothing.
-        self.br3(c, &ready, &ready, &grow);
-        self.start(grow);
-        self.vec_realloc(at, cap_at, size, align, len, cap, want, span)?;
-        self.jump(&ready);
-        self.start(ready);
-        Ok(())
-    }
-
-    /// Drop the elements in `[from, to)` of a `Vec`'s allocation.
-    fn vec_drop_range(
-        &mut self,
-        base: Operand,
-        from: Operand,
-        to: Operand,
-        elem: &Ty,
-        span: Span,
-        depth: u32,
-    ) -> R<()> {
-        if !self.types.needs_drop(elem) {
-            return Ok(());
-        }
-        let size = self.types.layout(elem).size as i128;
-        let i = self.temp_slot(&Ty::TAddr);
-        self.store_at(&i, 0, &Ty::TAddr, from, span)?;
-        let (head, body, out) = (
-            self.fresh("vdrop.head"),
-            self.fresh("vdrop.body"),
-            self.fresh("vdrop.done"),
-        );
-        self.jump(&head);
-        self.start(head.clone());
-        let at = self.load_slot(&i, &Ty::TAddr);
-        let c = self.emit(
-            "c",
-            Type::Int(1),
-            InstKind::Cmp {
-                ty: Type::Int(27),
-                a: at.clone(),
-                b: to,
-            },
-        );
-        self.br3(c, &body, &out, &out);
-        self.start(body);
-        let off = self.apply_binary("*", at.clone(), konst_addr(size), &Ty::TAddr, span)?;
-        let e = self.emit("e", Type::Ptr, InstKind::Offset { p: base, d: off });
-        self.drop_at(e, elem, span, depth + 1)?;
-        let next = self.apply_binary("+", at, konst_addr(1), &Ty::TAddr, span)?;
-        self.store_at(&i, 0, &Ty::TAddr, next, span)?;
-        self.jump(&head);
-        self.start(out);
-        Ok(())
-    }
-
-    /// Copy `n` trytes from `src` to `dst` **downwards**, so that the two may
-    /// overlap with `dst` above `src`.
-    ///
-    /// `copy_n_trytes` walks up and would overwrite what it has yet to read.
-    /// Which direction is safe is a property of which way the block moves,
-    /// and `Vec::insert` moves one up.
-    fn copy_n_trytes_back(&mut self, dst: Operand, src: Operand, n: Operand, span: Span) -> R<()> {
-        let i = self.temp_slot(&Ty::TAddr);
-        self.store_at(&i, 0, &Ty::TAddr, n, span)?;
-        let (head, body, done) = (
-            self.fresh("cpb.head"),
-            self.fresh("cpb.body"),
-            self.fresh("cpb.done"),
-        );
-        self.jump(&head);
-        self.start(head.clone());
-        let at = self.load_slot(&i, &Ty::TAddr);
-        let c = self.emit(
-            "c",
-            Type::Int(1),
-            InstKind::Cmp {
-                ty: Type::Int(27),
-                a: at.clone(),
-                b: konst_addr(0),
-            },
-        );
-        self.br3(c, &done, &done, &body);
-        self.start(body);
-        let at = self.apply_binary("-", at, konst_addr(1), &Ty::TAddr, span)?;
-        self.store_at(&i, 0, &Ty::TAddr, at.clone(), span)?;
-        let from = self.emit(
-            "e",
-            Type::Ptr,
-            InstKind::Offset {
-                p: src,
-                d: at.clone(),
-            },
-        );
-        let to = self.emit("e", Type::Ptr, InstKind::Offset { p: dst, d: at });
-        let v = self.load_from(from, &Ty::T9);
-        self.push(Inst {
-            results: Vec::new(),
-            kind: InstKind::Store {
-                ty: Type::Int(9),
-                v,
-                p: to,
-            },
-        });
-        self.jump(&head);
-        self.start(done);
-        Ok(())
-    }
-
-    /// The element count times the element size, as trytes.
-    fn elems_in_trytes(&mut self, n: Operand, size: i128, span: Span) -> R<Operand> {
-        self.apply_binary("*", n, konst_addr(size), &Ty::TAddr, span)
-    }
-
-    /// `v.insert(i, x)` and `v.remove(i)` — Ch. 5 §2.6.
-    ///
-    /// Both move a run of elements by one place, which is a copy of storage
-    /// and therefore a move of every element in it (Ch. 3 §1.2). The shift is
-    /// tryte-wise, so an element holding a reference loses its provenance in
-    /// the interpreter for the reason an enum's payload does — G6.7.
-    fn vec_insert(&mut self, at: Operand, elem: &Ty, i: Operand, x: Operand, span: Span) -> R<()> {
-        let size = self.types.layout(elem).size as i128;
-        let len_at = self.offset(at.clone(), 3);
-        let len = self.load_from(len_at.clone(), &Ty::TAddr);
-        // `i == len` is `push`, and is the one index past the end that is
-        // not an error.
-        self.bounds_check(i.clone(), len.clone(), true, span)?;
-
-        // Make room, which may move the allocation — so the base is read
-        // after, not before.
-        self.vec_reserve(at.clone(), elem, konst_addr(1), span)?;
-        let len = self.load_from(len_at.clone(), &Ty::TAddr);
-        let base = self.load_ptr(at.clone());
-        let moved = self.apply_binary("-", len.clone(), i.clone(), &Ty::TAddr, span)?;
-        let bytes = self.elems_in_trytes(moved, size, span)?;
-        let from_off = self.elems_in_trytes(i.clone(), size, span)?;
-        let src = self.emit(
-            "e",
-            Type::Ptr,
-            InstKind::Offset {
-                p: base.clone(),
-                d: from_off,
-            },
-        );
-        let to_off = self.apply_binary("+", i.clone(), konst_addr(1), &Ty::TAddr, span)?;
-        let to_off = self.elems_in_trytes(to_off, size, span)?;
-        let dst = self.emit("e", Type::Ptr, InstKind::Offset { p: base, d: to_off });
-        self.copy_n_trytes_back(dst, src, bytes, span)?;
-
-        let slot = self.vec_elem_addr(at.clone(), i, size, span)?;
-        if elem.is_aggregate() {
-            self.copy_typed(slot, x, elem, span)?;
-        } else {
-            self.push(Inst {
-                results: Vec::new(),
-                kind: InstKind::Store {
-                    ty: elem.tir(),
-                    v: x,
-                    p: slot,
-                },
-            });
-        }
-        let next = self.apply_binary("+", len, konst_addr(1), &Ty::TAddr, span)?;
-        self.store_at_operand(len_at, &Ty::TAddr, next, span)
-    }
-
-    fn vec_remove(&mut self, at: Operand, elem: &Ty, i: Operand, span: Span) -> R<(Operand, Ty)> {
-        let size = self.types.layout(elem).size as i128;
-        let len_at = self.offset(at.clone(), 3);
-        let len = self.load_from(len_at.clone(), &Ty::TAddr);
-        self.bounds_check(i.clone(), len.clone(), false, span)?;
-
-        // The element leaves the `Vec`, so it is read before the shift and
-        // is not dropped by it.
-        let e = self.vec_elem_addr(at.clone(), i.clone(), size, span)?;
-        let out = if elem.is_aggregate() {
-            let tmp = self.temp_slot(elem);
-            self.copy_typed(Operand::Value(tmp.clone()), e, elem, span)?;
-            Operand::Value(tmp)
-        } else {
-            self.load_from(e, elem)
-        };
-
-        let base = self.load_ptr(at.clone());
-        let after = self.apply_binary("-", len.clone(), i.clone(), &Ty::TAddr, span)?;
-        let after = self.apply_binary("-", after, konst_addr(1), &Ty::TAddr, span)?;
-        let bytes = self.elems_in_trytes(after, size, span)?;
-        let from_off = self.apply_binary("+", i.clone(), konst_addr(1), &Ty::TAddr, span)?;
-        let from_off = self.elems_in_trytes(from_off, size, span)?;
-        let src = self.emit(
-            "e",
-            Type::Ptr,
-            InstKind::Offset {
-                p: base.clone(),
-                d: from_off,
-            },
-        );
-        let to_off = self.elems_in_trytes(i, size, span)?;
-        let dst = self.emit("e", Type::Ptr, InstKind::Offset { p: base, d: to_off });
-        self.copy_n_trytes(dst, src, bytes, span)?;
-
-        let next = self.apply_binary("-", len, konst_addr(1), &Ty::TAddr, span)?;
-        self.store_at_operand(len_at, &Ty::TAddr, next, span)?;
-        Ok((out, elem.clone()))
-    }
-
     /// Trap unless `0 <= i < limit`, or `<=` when the end is allowed.
     fn bounds_check(&mut self, i: Operand, limit: Operand, inclusive: bool, _line: Span) -> R<()> {
         let (bad, lo, ok) = (
@@ -8643,20 +8058,6 @@ impl Fn<'_> {
         Ok(())
     }
 
-    /// `v.clear()` — drop every element and set the length to zero.
-    ///
-    /// The allocation stays, which is the whole difference between this and
-    /// dropping the `Vec`: a cleared `Vec` has kept its room.
-    fn vec_clear(&mut self, at: Operand, elem: &Ty, span: Span) -> R<()> {
-        let len_at = self.offset(at.clone(), 3);
-        if self.types.needs_drop(elem) {
-            let len = self.load_from(len_at.clone(), &Ty::TAddr);
-            let base = self.load_ptr(at);
-            self.vec_drop_range(base, konst_addr(0), len, elem, span, 0)?;
-        }
-        self.store_at_operand(len_at, &Ty::TAddr, konst_addr(0), span)
-    }
-
     /// The address of element `i` of the `Vec` at `at`.
     /// The address of a `Raw`'s `i`-th position, checked against its room.
     ///
@@ -8679,65 +8080,6 @@ impl Fn<'_> {
         Ok(self.emit("e", Type::Ptr, InstKind::Offset { p: base, d: off }))
     }
 
-    /// `v.pop()` — `Option<T>`, and `None` exactly when the `Vec` is empty.
-    ///
-    /// The element is *moved out*: the length comes down first, so what is
-    /// returned is no longer inside the `Vec` and will not be dropped twice.
-    fn vec_pop(&mut self, at: Operand, elem: &Ty, span: Span) -> R<(Operand, Ty)> {
-        let size = self.types.layout(elem).size as i128;
-        let opt = self
-            .types
-            .instantiate("Option", std::slice::from_ref(elem), span)?;
-        let ename = nominal_name(&opt).expect("an instantiation is nominal");
-        let (some, none) = (
-            self.types
-                .variant(&ename, "Some")
-                .ok_or_else(|| one_err(span, "`Option` has no `Some`".into()))?,
-            self.types
-                .variant(&ename, "None")
-                .ok_or_else(|| one_err(span, "`Option` has no `None`".into()))?,
-        );
-        let slot = self.temp_slot(&opt);
-        let len_at = self.offset(at.clone(), 3);
-        let len = self.load_from(len_at.clone(), &Ty::TAddr);
-        let (full, empty, join) = (
-            self.fresh("pop.some"),
-            self.fresh("pop.none"),
-            self.fresh("pop.join"),
-        );
-        let c = self.emit(
-            "c",
-            Type::Int(1),
-            InstKind::Cmp {
-                ty: Type::Int(27),
-                a: len.clone(),
-                b: konst_addr(0),
-            },
-        );
-        self.br3(c, &empty, &empty, &full);
-
-        self.start(full);
-        let last = self.apply_binary("-", len, konst_addr(1), &Ty::TAddr, span)?;
-        self.store_at_operand(len_at, &Ty::TAddr, last.clone(), span)?;
-        let e = self.vec_elem_addr(at, last, size, span)?;
-        let v = if elem.is_aggregate() {
-            let tmp = self.temp_slot(elem);
-            self.copy_typed(Operand::Value(tmp.clone()), e, elem, span)?;
-            Operand::Value(tmp)
-        } else {
-            self.load_from(e, elem)
-        };
-        self.build_variant_into(&slot, &ename, some, &[("0".to_string(), v)], span)?;
-        self.jump(&join);
-
-        self.start(empty);
-        self.build_variant_into(&slot, &ename, none, &[], span)?;
-        self.jump(&join);
-
-        self.start(join);
-        Ok((Operand::Value(slot), opt))
-    }
-
     /// Store a scalar at an address that is already an operand.
     fn store_at_operand(&mut self, at: Operand, ty: &Ty, v: Operand, _line: Span) -> R<()> {
         self.push(Inst {
@@ -8748,70 +8090,6 @@ impl Fn<'_> {
                 p: at,
             },
         });
-        Ok(())
-    }
-
-    /// Copy a *runtime* number of trytes from `src` to `dst`, in a loop.
-    ///
-    /// The other `copy_trytes` unrolls a size known at compile time; a
-    /// `Vec`'s growth does not know one.
-    fn copy_n_trytes(&mut self, dst: Operand, src: Operand, n: Operand, span: Span) -> R<()> {
-        let i = self.temp_slot(&Ty::TAddr);
-        self.store_at(
-            &i,
-            0,
-            &Ty::TAddr,
-            Operand::Const(Type::Int(27), Bt::ZERO),
-            span,
-        )?;
-        let (head, body, done) = (
-            self.fresh("cp.head"),
-            self.fresh("cp.body"),
-            self.fresh("cp.done"),
-        );
-        self.jump(&head);
-        self.start(head.clone());
-        let at = self.load_slot(&i, &Ty::TAddr);
-        let c = self.emit(
-            "c",
-            Type::Int(1),
-            InstKind::Cmp {
-                ty: Type::Int(27),
-                a: at.clone(),
-                b: n.clone(),
-            },
-        );
-        self.br3(c, &body, &done, &done);
-        self.start(body);
-        let from = self.emit(
-            "s",
-            Type::Ptr,
-            InstKind::Offset {
-                p: src.clone(),
-                d: at.clone(),
-            },
-        );
-        let to = self.emit(
-            "d",
-            Type::Ptr,
-            InstKind::Offset {
-                p: dst.clone(),
-                d: at.clone(),
-            },
-        );
-        let v = self.load_from(from, &Ty::T9);
-        self.push(Inst {
-            results: Vec::new(),
-            kind: InstKind::Store {
-                ty: Type::Int(9),
-                v,
-                p: to,
-            },
-        });
-        let next = self.apply_binary("+", at, konst_addr(1), &Ty::TAddr, span)?;
-        self.store_at(&i, 0, &Ty::TAddr, next, span)?;
-        self.jump(&head);
-        self.start(done);
         Ok(())
     }
 
@@ -9127,19 +8405,6 @@ impl Fn<'_> {
                 .collect::<R<_>>()?;
             let ty = self.types.instantiate(&head, &args, span)?;
             return Ok(nominal_name(&ty).expect("an instantiation is nominal"));
-        }
-        // `Vec` is a language item and has no declaration to read fields
-        // from, so its instantiation comes from the type the context expects
-        // — which is the only thing that could say what it holds.
-        if head == "Vec" || head == "String" {
-            if let Some(want) = expected
-                && matches!(want, Ty::VecOf(_))
-            {
-                return Ok(nominal_name(want).expect("a `Vec` is nominal"));
-            }
-            if head == "String" {
-                return Ok(mangle("Vec", &[Ty::Char]));
-            }
         }
         let generic = self.types.generic_structs.get(&head).map(|s| {
             (
@@ -10528,16 +9793,6 @@ impl Fn<'_> {
                         };
                         ((**elem).clone(), Length::Dynamic)
                     }
-                    // A `Vec` is a pointer and a length like a fat reference,
-                    // with a capacity after them that indexing never sees
-                    // (Ch. 5 §2.6).
-                    Ty::VecOf(elem) => ((**elem).clone(), Length::Dynamic),
-                    Ty::Ref(inner, _) if matches!(**inner, Ty::VecOf(_)) => {
-                        let Ty::VecOf(elem) = &**inner else {
-                            unreachable!()
-                        };
-                        ((**elem).clone(), Length::Dynamic)
-                    }
                     // A type the language does not know is indexed by the
                     // method it wrote down (Ch. 2 §3.1). `v[i]` is
                     // `*v.index_mut(i)` where it is written and
@@ -10819,18 +10074,6 @@ impl Fn<'_> {
                 let to = self.offset(dst.clone(), 3);
                 let n = self.load_from(from, &Ty::TAddr);
                 self.store_scalar(to, &Ty::TAddr, n);
-                Ok(())
-            }
-
-            Ty::VecOf(_) => {
-                let p = self.load_ptr(src.clone());
-                self.store_ptr(dst.clone(), p);
-                for off in [3, 6] {
-                    let from = self.offset(src.clone(), off);
-                    let to = self.offset(dst.clone(), off);
-                    let n = self.load_from(from, &Ty::TAddr);
-                    self.store_scalar(to, &Ty::TAddr, n);
-                }
                 Ok(())
             }
 

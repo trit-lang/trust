@@ -1417,17 +1417,38 @@ fn expand_aliases(file: &mut ast::File) -> Result<(), Vec<SyntaxError>> {
         return Err(errs);
     }
 
-    ast::for_each_ty(file, &mut |t| {
-        // Only a bare name is an alias: an alias takes no parameters, so
-        // `String<T>` names nothing and is left for the type checker to
-        // refuse by name.
-        let ast::Ty::Name(n, at) = t else { return };
-        if let Some(to) = settled.get(n) {
-            // The alias's span, not its definition's: a reader who wrote
-            // `String` is asking about where they wrote it.
-            *t = to.clone().spanning(*at);
-        }
-    });
+    ast::for_each_ty_and_path(
+        file,
+        &mut |t| {
+            // Only a bare name is an alias: an alias takes no parameters, so
+            // `String<T>` names nothing and is left for the type checker to
+            // refuse by name.
+            let ast::Ty::Name(n, at) = t else { return };
+            if let Some(to) = settled.get(n) {
+                // The alias's span, not its definition's: a reader who wrote
+                // `String` is asking about where they wrote it.
+                *t = to.clone().spanning(*at);
+            }
+        },
+        // The head of `String::new()` names a type too, and is not written
+        // as one — so it is expanded here rather than above. What it becomes
+        // is a head and its arguments: `Vec`, and `char` written where the
+        // call would have written them itself (G9.87).
+        &mut |path| {
+            let Some(head) = path.segments.first() else {
+                return;
+            };
+            let Some(to) = settled.get(head) else { return };
+            match to {
+                ast::Ty::Name(n, _) => path.segments[0] = n.clone(),
+                ast::Ty::App(n, args, _) if path.targs.is_empty() => {
+                    path.segments[0] = n.clone();
+                    path.targs = args.clone();
+                }
+                _ => {}
+            }
+        },
+    );
     file.items.retain(|i| !matches!(i, ast::Item::Alias(_)));
     Ok(())
 }

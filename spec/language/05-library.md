@@ -398,8 +398,8 @@ halts, and has no handler.
 ### 2.6 `Vec<T>` and `String`
 
 ```
-struct Vec<T>;      // pointer, length, capacity — three words
-struct String;      // Vec<char>, with the methods of §1.3
+struct Vec<T> { held: Raw<T>, n: taddr }   // three words
+type String = Vec<char>;                   // and the methods of §1.3
 ```
 
 `Vec<T>` is a growable array. It **was** a language item for `Box`'s reason
@@ -448,16 +448,21 @@ improve on, so it gets `len + n` exactly.
 There is no `realloc` (§7), so growing is three steps — allocate, copy, free —
 and the copy is a copy of storage, which is what a move is (Ch. 3 §1.2).
 
-`&Vec<T>` **coerces to `&[T]`**: the allocation and the length, which are a
-`Vec`'s first two words and a slice's only two. The capacity is left behind,
+`&Vec<T>` **coerces to `&[T]`**: the allocation and the length, which are two
+of a `Vec`'s three words and a slice's only two. The capacity is left behind,
 and that is the whole of the conversion — a slice may read what is there and a
 `Vec` may grow, and only one of those needs to know how much room is left.
+This is the one thing about `Vec` the compiler still knows, and it knows it by
+the field names above: it is a conversion between representations and there is
+nothing in the language to write one with.
 This and `&Concrete` to `&dyn Trait` (Ch. 4 §3.2) are the only implicit
 conversions in the language, and both convert a *representation* rather than a
 value.
 
-`String` **is** `Vec<char>` — not a wrapper around one — so it needs almost no
-rules of its own: `String::new`, `with_capacity` and `push(char)` are `Vec`'s,
+`String` **is** `Vec<char>` — an alias (Ch. 0 §3.6), not a wrapper — so it
+needs almost no rules of its own: `String::new`, `with_capacity` and
+`push(char)` are `Vec`'s, and are reached by expanding the alias in the path
+that names them,
 `&String` becomes `&str` by the coercion above, and every method §1.3 gives a
 string applies to one the moment it does. `push_str(&str)` is the one method
 that is a `String`'s alone: a loop around `push`, written in the library as
@@ -467,9 +472,9 @@ that is a `String`'s alone: a loop around `push`, written in the library as
 
 ### 2.7 `Raw<T>` — room that is not yet a `T`
 
-§2.6 gives two reasons `Vec` cannot be written in this language: it needs an
+§2.6 gave two reasons `Vec` could not be written in this language: it needs an
 address, and **the room beyond the length is memory that is not yet a `T`**.
-The second is the harder one, and it is the only thing standing between the
+The second was the harder one, and it was the only thing standing between the
 collections and the library.
 
 Draft 0.1 names exactly that much and no more.
