@@ -291,6 +291,17 @@ struct Loan {
     /// The statement after which this loan is dead. A borrow lives to its
     /// last use, not to the end of its scope (Ch. 3 §4.2).
     dies: u32,
+    /// A **reserved** borrow: taken for a call whose arguments have not been
+    /// evaluated yet, so the place may still be *read* — `v.push(v[i])` is
+    /// two operations in an order, and the read is the earlier one.
+    ///
+    /// It conflicts with everything that would change the place, which is
+    /// what makes it a borrow at all; it does not conflict with reading,
+    /// which is what makes the call writable at all. Rust calls this a
+    /// two-phase borrow and the reason is the same: a method takes its
+    /// receiver exclusively, and a program that writes `v.push(v.len())`
+    /// has said nothing wrong.
+    reserved: bool,
     span: Span,
 }
 
@@ -4193,6 +4204,9 @@ struct Fn<'a> {
     /// what tells `v[i] = x`'s `index_mut` from `v[i]`'s `index`
     /// (Ch. 2 §3.1).
     writing: bool,
+    /// Whether the borrow being lowered is a method's of its receiver, which
+    /// is reserved until the call begins rather than taken at once.
+    reserving: bool,
 }
 
 /// Whether two sets of field names hold the same names.
@@ -4368,6 +4382,7 @@ fn function(
         match_mut: false,
         done: false,
         writing: false,
+        reserving: false,
     };
 
     // Parameters arrive as SSA values and are spilled into slots at once, so
@@ -4982,6 +4997,10 @@ impl Fn<'_> {
                 "shared"
             };
             let complaint = match access {
+                // A reserved borrow has not begun: what it is for is the
+                // call whose arguments are still being evaluated, and those
+                // may read what the call is about to be given.
+                Access::Read | Access::Borrow(false) if loan.reserved => None,
                 // While an exclusive reference is live, the place may not be
                 // read or written except through it.
                 Access::Read if loan.mutable => Some("read"),
@@ -5011,10 +5030,15 @@ impl Fn<'_> {
     /// which the caller patches once the binding is known.
     fn add_loan(&mut self, path: PlacePath, mutable: bool, span: Span) {
         let dies = self.stmt;
+        // One-shot: the reservation is the *receiver's*, and the receiver is
+        // the first borrow a call lowers. An argument that is itself a
+        // borrow is an ordinary one and takes an ordinary loan.
+        let reserved = std::mem::replace(&mut self.reserving, false);
         self.loans.push(Loan {
             place: path,
             mutable,
             dies,
+            reserved,
             span,
         });
     }
@@ -10246,11 +10270,22 @@ impl Fn<'_> {
         };
         let mut full = vec![receiver];
         full.extend(args.iter().cloned());
-        if generic.is_some() {
-            let (k, full) = self.instantiate_fn(&key, &[], &full, expected, span)?;
-            return self.call_key(&k, Vec::new(), &full, span);
-        }
-        self.call_key(&key, Vec::new(), &full, span)
+        // The receiver's borrow is **reserved**: it is taken here, before
+        // the arguments are evaluated, and an argument may read what the
+        // call is about to be handed. `v.push(v.len())` says nothing wrong
+        // and the order it is evaluated in is what makes that so.
+        let held = std::mem::replace(&mut self.reserving, true);
+        let out = if generic.is_some() {
+            self.instantiate_fn(&key, &[], &full, expected, span)
+                .and_then(|(k, full)| {
+                    self.reserving = held;
+                    self.call_key(&k, Vec::new(), &full, span)
+                })
+        } else {
+            self.call_key(&key, Vec::new(), &full, span)
+        };
+        self.reserving = held;
+        out
     }
 
     /// The address of a place, and its type (Ch. 3 §1.3). A place is a local,
