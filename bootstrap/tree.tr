@@ -14,7 +14,7 @@ mod parse;
 // be decoded from them (Ch. 5 §1.1).
 fn main() -> t27 {
     let src = input::read_all();
-    let mut p = parse::Parser { src: src, at: 0, no_struct: false };
+    let mut p = parse::Parser { src: src, at: 0, no_struct: false, counter: 0 };
     match parse::expr(&mut p) {
         Result::Ok(e) => {
             let mut out: String = Vec::new();

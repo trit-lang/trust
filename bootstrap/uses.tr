@@ -48,7 +48,7 @@ fn main() -> t27 {
 
 /// One module, parsed, with what it defines added to the world.
 fn read(m: &bundle::Module, w: &mut resolve::World, here: &str) -> Vec<ast::Item> {
-    let mut p = parse::Parser { src: m.text.to_string(), at: 0, no_struct: false };
+    let mut p = parse::Parser { src: m.text.to_string(), at: 0, no_struct: false, counter: 0 };
     match parse::file(&mut p) {
         Result::Ok(items) => {
             let mut k: taddr = 0;

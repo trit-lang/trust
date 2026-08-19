@@ -95,7 +95,7 @@ fn main() -> t27 {
     // `agree` on the first line asks the second question; anything else
     // asks the first. The driver has no arguments to give.
     let agreeing = starts_with_agree(&src);
-    let mut p = parse::Parser { src: src, at: 0, no_struct: false };
+    let mut p = parse::Parser { src: src, at: 0, no_struct: false, counter: 0 };
     match parse::file(&mut p) {
         Result::Ok(items) => {
             let mut w = World {
@@ -326,7 +326,7 @@ fn walk_block(w: &mut World, what: &str, b: &ast::Block) {
             }
             // What a pattern binds is the pattern's, and nothing records
             // those yet — on either side.
-            ast::Stmt::LetPattern(pat, value) => {
+            ast::Stmt::LetPattern(held, pat, value) => {
                 let t = type_of(w, value);
             }
             ast::Stmt::Do(e) => walk_expr(w, what, e),

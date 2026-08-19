@@ -1,0 +1,12 @@
+// A product of one, which is a product and not the thing in it: `(T,)` is
+// distinct from `T` (Ch. 2 §2), and the trailing comma is the only thing
+// that says so. It is the one place in this grammar where a comma carries
+// meaning rather than punctuation.
+fn one_of_each(a: (t27,), b: (t27, t9), c: (t27, t9,)) -> (t9,) {
+    let x = (1,);
+    let y = (1, 2);
+    let z = (1, 2,);
+    let _ = x;
+    let (p, q) = y;
+    z
+}

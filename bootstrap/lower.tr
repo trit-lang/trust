@@ -4687,7 +4687,7 @@ fn free_in_block(b: &ast::Block, bound: &mut Vec<String>, out: &mut Vec<String>)
                 free_names(v, bound, out);
                 bound.push(name.to_string());
             }
-            ast::Stmt::LetPattern(p, v) => {
+            ast::Stmt::LetPattern(name, p, v) => {
                 free_names(v, bound, out);
                 bind_names(p, bound);
             }
@@ -5025,10 +5025,14 @@ fn through_block(
                 bound.push(name.to_string());
                 stmts.push(ast::Stmt::Let(mutable, name.to_string(), ty, held));
             }
-            ast::Stmt::LetPattern(p, v) => {
-                let held = through_self(v, captured, bound);
+            ast::Stmt::LetPattern(name, p, v) => {
+                let made = through_self(v, captured, bound);
                 bind_names(p, bound);
-                stmts.push(ast::Stmt::LetPattern(copy_pattern_here(p), held));
+                stmts.push(ast::Stmt::LetPattern(
+                    name.to_string(),
+                    copy_pattern_here(p),
+                    made,
+                ));
             }
             ast::Stmt::Do(v) => stmts.push(ast::Stmt::Do(through_self(v, captured, bound))),
         }

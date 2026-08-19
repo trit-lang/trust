@@ -20,6 +20,11 @@ pub struct Parser {
     /// condition of an `if` or a `while` (§2.8). The ambiguity is real and
     /// the flag is how both parsers resolve it.
     pub no_struct: bool,
+    /// How many names the parser has invented for this file, which is what
+    /// numbers the next one. `let _` and `let (a, b) = …` both need one and
+    /// they share the count, because they are the same mechanism: a binding
+    /// nobody wrote, under a name nobody can write (§5.2).
+    pub counter: taddr,
 }
 
 /// The next token, without consuming it.
@@ -873,7 +878,11 @@ fn let_stmt(p: &mut Parser) -> Result<ast::Stmt, lex::Error> {
         expect_op(p, "=")?;
         let e = expr(p)?;
         expect_op(p, ";")?;
-        return Result::Ok(ast::Stmt::LetPattern(pat, e));
+        p.counter = p.counter + 1;
+        let mut held: String = Vec::new();
+        held.push_str("#pat");
+        ast::push_int(&mut held, p.counter as t27);
+        return Result::Ok(ast::Stmt::LetPattern(held, pat, e));
     }
     // `let _ = e;` binds nothing and is how a value is discarded (§5.2).
     // The wildcard is punctuation, not a name, so it is read here.
@@ -883,9 +892,17 @@ fn let_stmt(p: &mut Parser) -> Result<ast::Stmt, lex::Error> {
         Tok::Op(o) => o.same("_"),
         _ => false,
     };
+    // `let _ = e;` — §5.2's grammar says a *pattern*, and `_` is the one
+    // that binds nothing (§4). It is given a name no program can write, so
+    // the value is dropped where any other binding would be: at the end of
+    // the scope, and not at the end of the statement.
     let name = if wild {
         p.at = at1;
-        "_".to_string()
+        p.counter = p.counter + 1;
+        let mut held: String = Vec::new();
+        held.push_str("#wild");
+        ast::push_int(&mut held, p.counter as t27);
+        held
     } else {
         ident(p)?
     };
@@ -1316,6 +1333,17 @@ fn type_name(p: &mut Parser) -> Result<ast::Ty, lex::Error> {
                         break;
                     }
                     p.at = at3;
+                    // A trailing comma ends the list — and in a product of
+                    // one it is the only thing that says it *is* one:
+                    // `(T,)` is distinct from `T` (Ch. 2 §2).
+                    let t4 = peek(p)?;
+                    let closes = match t4.tok {
+                        Tok::Op(o4) => o4.same(")"),
+                        _ => false,
+                    };
+                    if closes {
+                        break;
+                    }
                 }
                 expect_op(p, ")")?;
                 return Result::Ok(ast::Ty::Tuple(args));

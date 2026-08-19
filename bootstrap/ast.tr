@@ -130,7 +130,12 @@ pub enum Stmt {
     /// is the thing `let n = 1;` leaves for inference (§5.2).
     Let(bool, String, Option<Ty>, Expr),
     /// `let P { a, b } = expr;` — what it binds is the pattern's (§4).
-    LetPattern(Pattern, Expr),
+    ///
+    /// The name is the compiler's and names nothing anybody wrote: the whole
+    /// value is bound to it and the pattern is read out of *that*, so the
+    /// parts need no case of their own below here. `#` is not an identifier
+    /// character, so it cannot collide with a program (Ch. 0 §5.2).
+    LetPattern(String, Pattern, Expr),
     /// An expression evaluated for its effect.
     Do(Expr),
 }
@@ -791,9 +796,30 @@ pub fn show_block(b: &Block, out: &mut String) {
     out.push_str(")");
 }
 
+/// Whether a name is one the parser invented for a `let _` (Ch. 0 §5.2).
+///
+/// It is this compiler's business and not the tree's, so it prints as the
+/// `_` that was written.
+pub fn invented(name: &str) -> bool {
+    let head = "#wild";
+    if name.len() <= head.len() {
+        return false;
+    }
+    let mut i: taddr = 0;
+    while i < head.len() {
+        if name[i] != head[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 pub fn show_stmt(s: &Stmt, out: &mut String) {
     match s {
-        Stmt::LetPattern(pat, e) => {
+        // A `let` with a pattern binds what the *pattern* binds; the name
+        // is the compiler's and names nothing a reader wrote.
+        Stmt::LetPattern(held, pat, e) => {
             out.push_str("(let-pat ");
             show_pattern(pat, out);
             out.push_str(" ");
@@ -806,7 +832,13 @@ pub fn show_stmt(s: &Stmt, out: &mut String) {
             } else {
                 out.push_str("(let ");
             }
-            out.push_str(name);
+            // `let _` is given an invented name (§5.2), which is this
+            // compiler's business and not the tree's.
+            if invented(name) {
+                out.push_str("_");
+            } else {
+                out.push_str(name);
+            }
             match ty {
                 Option::Some(t) => {
                     out.push_str(":");
@@ -1260,7 +1292,9 @@ fn copy_stmt(s: &Stmt) -> Stmt {
             }
             Stmt::Let(mutable, name.to_string(), ty, copy_expr(v))
         }
-        Stmt::LetPattern(p, v) => Stmt::LetPattern(copy_pattern(p), copy_expr(v)),
+        Stmt::LetPattern(n, p, v) => {
+            Stmt::LetPattern(n.to_string(), copy_pattern(p), copy_expr(v))
+        }
         Stmt::Do(v) => Stmt::Do(copy_expr(v)),
     }
 }

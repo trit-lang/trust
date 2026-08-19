@@ -2621,6 +2621,32 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.108 — `(T,)` was refused, and `let _` bound a name a program could
+write.**
+
+Two parser findings, and the corpus for tuples found both before a line of
+tuple lowering was written.
+
+*`(T,)`.* Ch. 2 §2 says it in four words — `(T,)` is distinct from `T` — and
+the trailing comma is the only thing that says so, which makes it the one
+place in this grammar where a comma carries meaning rather than punctuation.
+The second implementation's type parser consumed the comma and then asked for
+another type, so it refused a product of one outright.
+
+*`let _`.* §5.2's grammar says a *pattern* there, and `_` is the one that
+binds nothing — but it is a **binding** all the same, so the value is dropped
+at the end of the scope and not at the end of the statement. Both
+implementations knew that; only one of them gave it a name no program could
+write. The second called the local `_`, which is a name a program *can* write
+and which two `let _`s in one function would both claim.
+
+So the parser counts the names it invents, and `#wild1`, `#wild2` and
+`#pat3` come off one counter because they are one mechanism: a binding
+nobody wrote, under a name nobody can write. The tree prints an invented
+wildcard as the `_` that was written — it is the compiler's business and not
+the tree's — which is why two parsers had agreed about every file in this
+repository while disagreeing about this.
+
 **G9.106 — an array is storage a definition nobody wrote.**
 
 `[T; N]` is N elements of one type at `i × size_of::<T>()` (Ch. 2 §3), which

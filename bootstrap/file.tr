@@ -7,7 +7,7 @@ mod parse;
 
 fn main() -> t27 {
     let src = input::read_all();
-    let mut p = parse::Parser { src: src, at: 0, no_struct: false };
+    let mut p = parse::Parser { src: src, at: 0, no_struct: false, counter: 0 };
     match parse::file(&mut p) {
         Result::Ok(items) => {
             let mut i: taddr = 0;

@@ -14,3 +14,16 @@ fn widths(a: taddr, b: bool, c: char, d: trit) -> taddr {
 fn t() -> bool { true }
 fn n() -> trit { 0t }
 fn nested(a: t27) -> t27 { (a + 1) * (a - 2) }
+
+// `let _ = e;` binds nothing a program can name, and it is a **binding**
+// all the same: the value is dropped where any other one would be, at the
+// end of the scope rather than at the end of the statement. So it is given
+// a name no program can write — `#` is not an identifier character — and
+// the parser counts them, which is what puts a number on each (§5.2).
+fn discarded(a: t27) -> t27 {
+    let _ = a + 1;
+    let _ = a + 2;
+    let kept = a + 3;
+    let _ = kept;
+    kept
+}

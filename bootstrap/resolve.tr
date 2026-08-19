@@ -408,12 +408,12 @@ fn rw_block(w: &World, a: &mut At, b: ast::Block) -> ast::Block {
                 a.locals.push(name.to_string());
                 stmts.push(ast::Stmt::Let(mutable, name, t, v));
             }
-            ast::Stmt::LetPattern(pat, value) => {
+            ast::Stmt::LetPattern(held, pat, value) => {
                 // Same order as a `let` with a name: the value is written
                 // before anything the pattern binds is in scope.
                 let v = rw_expr(w, a, value);
                 let p = rw_pattern(w, a, pat);
-                stmts.push(ast::Stmt::LetPattern(p, v));
+                stmts.push(ast::Stmt::LetPattern(held.to_string(), p, v));
             }
             ast::Stmt::Do(e) => stmts.push(ast::Stmt::Do(rw_expr(w, a, e))),
         }
