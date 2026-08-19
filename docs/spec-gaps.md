@@ -2621,6 +2621,35 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.114 — an enum whose discriminant costs no space.**
+
+One variant carries a payload, the rest carry nothing, and the payload has
+representations it could never take — a `char` is at most U+10FFFF, a `bool`
+uses two of a tryte's 19 683 patterns, a reference is never null. So the
+discriminant is *those values*, written where the payload would have been,
+and the enum is exactly as big as the payload (Ch. 2 §6). The layout engine
+had said so since Ch. 2 was built; the lowering had refused it on both
+sides, in as many words — "on the side that builds one as it already is on
+the side that reads one".
+
+*Building.* The fieldless variants write a value the payload could not have
+had, at the payload's own offset, taken from **above** the valid range first
+and in declaration order — so `Option<char>`'s `None` is 1114112 and a second
+fieldless variant would be 1114113. The variant that carries the payload
+writes no discriminant at all.
+
+*Reading.* The discriminant is the payload's own scalar, read at that offset
+and at that scalar's width — a tryte for a `bool`'s niche and a word for a
+`char`'s, which is not the width the payload is read at. Every fieldless arm
+is tested against its value, and the carrying arm comes **last whatever order
+it was written in**, because "none of the above" is the only thing that
+identifies it.
+
+The layout answers with the spot that is *left*, since that is what an
+enclosing type may still use; what was *taken* is `carrier_spot` and
+`niche_value`, which reuse `consume`'s arithmetic so that the two cannot
+drift — one says which values are gone and the other says what they mean.
+
 **G9.113 — a tuple is lowered, and it is an array's order and not a
 struct's.**
 

@@ -165,6 +165,59 @@ pub fn spot_count(s: &Spot) -> taddr {
     cap - valid
 }
 
+/// The spot a niche-encoded enum takes its discriminants out of: the
+/// payload's own, before any were taken (§6).
+///
+/// `of` answers with what is **left**, because that is what an enclosing
+/// type may still use. What was *taken* is worked out from this, and a
+/// lowering needs it twice over — to know how wide the discriminant is read,
+/// and to know which value says which variant.
+pub fn carrier_spot(defs: &Vec<Def>, at: taddr, depth: taddr) -> Result<Spot, String> {
+    let variants = defs[at].counts.len();
+    let mut carrier: taddr = 0 - 1;
+    let mut start: taddr = 0;
+    let mut from: taddr = 0;
+    let mut v: taddr = 0;
+    while v < variants {
+        if defs[at].counts[v] > 0 {
+            carrier = v;
+            start = from;
+        }
+        from = from + defs[at].counts[v];
+        v += 1;
+    }
+    if carrier < 0 {
+        return Result::Err("no variant carries a payload".to_string());
+    }
+    let mut parts: Vec<Layout> = Vec::new();
+    let mut k: taddr = 0;
+    while k < defs[at].counts[carrier] {
+        parts.push(of(defs, &defs[at].fields[start + k], depth + 1)?);
+        k += 1;
+    }
+    let p = product(&parts, defs[at].linear);
+    match p.spot {
+        Option::Some(x) => Result::Ok(x),
+        Option::None => Result::Err("the payload has no spare values".to_string()),
+    }
+}
+
+/// The `k`th value a niche-encoded enum takes out of that spot.
+///
+/// From above the valid range first and then from below it, which is the
+/// order `consume` widens in — the two have to agree, because one says
+/// which values are gone and the other says what they mean.
+pub fn niche_value(s: &Spot, k: taddr) -> t27 {
+    let max = (capacity(s.trits) - 1) / 2;
+    let above = max - (s.hi as taddr);
+    let nothing: taddr = 0;
+    let room = if above < 0 { nothing } else { above };
+    if k < room {
+        return s.hi + ((k + 1) as t27);
+    }
+    s.lo - ((k - room + 1) as t27)
+}
+
 /// The spot left after an enum has taken `used` of its invalid values.
 ///
 /// Taken from above the valid range first and then from below it, which is

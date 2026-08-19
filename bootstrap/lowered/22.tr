@@ -1,0 +1,80 @@
+// An enum whose discriminant costs no space at all (Ch. 2 §6).
+//
+// One variant carries a payload, the rest carry nothing, and the payload has
+// representations it could never take — a `char` is at most U+10FFFF, a
+// `bool` uses two of a tryte's 19 683 patterns, a reference is never null.
+// So the discriminant is *those* values, written where the payload would
+// have been, and the enum is exactly as big as the payload.
+//
+// Which makes both halves different from a tag's.
+//
+// *Building one.* The fieldless variants write a value the payload could not
+// have had, at the payload's own offset. The one that **carries** the
+// payload writes no discriminant at all: it is what is left when every other
+// value has been ruled out.
+//
+// *Reading one.* The discriminant is the payload's own scalar, read at that
+// offset and at that scalar's width — a tryte for a `bool`'s niche and a
+// word for a `char`'s. Every fieldless arm is tested against its value, and
+// the carrying arm is tested **last whatever order it was written in**,
+// because "none of the above" is the only thing that identifies it.
+//
+// The values are taken from *above* the payload's valid range first: a
+// `char` stops at 1114111, so `None` is 1114112 and a second fieldless
+// variant is 1114113. What is not taken is still spare for whatever encloses
+// the enum, which is what makes nesting inside a niche free.
+
+enum Maybe { None, Held(char) }
+
+// Two fieldless variants, so that the second value is the first plus one and
+// the order they were declared in is what numbers them.
+enum Three { A, B, Held(char) }
+
+// A niche in one tryte rather than a word, where the payload is read at a
+// different width from the discriminant: `t1` and `t9`.
+enum Flag { Off, On(bool) }
+
+fn some(c: char) -> Maybe { Maybe::Held(c) }
+
+fn none() -> Maybe { Maybe::None }
+
+fn first() -> Three { Three::A }
+
+fn second() -> Three { Three::B }
+
+fn carried(c: char) -> Three { Three::Held(c) }
+
+fn off() -> Flag { Flag::Off }
+
+fn on(b: bool) -> Flag { Flag::On(b) }
+
+// The carrying arm written **first**, and emitted last all the same.
+fn read(m: Maybe) -> t27 {
+    match m {
+        Maybe::Held(c) => c as t27,
+        Maybe::None => 0,
+    }
+}
+
+// Three arms, and the two fieldless ones tested in the order they are
+// written here.
+fn three(t: Three) -> t27 {
+    match t {
+        Three::A => 1,
+        Three::B => 2,
+        Three::Held(c) => c as t27,
+    }
+}
+
+fn flag(f: Flag) -> t27 {
+    match f {
+        Flag::Off => 0,
+        Flag::On(b) => 1,
+    }
+}
+
+fn main() -> t27 {
+    let a: char = 'a';
+    read(some(a)) + read(none()) + three(first()) + three(second())
+        + three(carried(a)) + flag(off()) + flag(on(true))
+}

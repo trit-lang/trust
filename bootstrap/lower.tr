@@ -1798,6 +1798,12 @@ fn match_expr(
                     return unknown_value();
                 }
             };
+            // Which variant it is, and where that is said. A tag of its
+            // own is at the front; a niche is the **payload's own scalar**,
+            // read where that scalar is and at its width (§6).
+            let mut carrier: taddr = 0 - 1;
+            let mut spot = layout::Spot { offset: 0, trits: 0, lo: 0, hi: 0 };
+            let mut from = base.to_string();
             let tag = match &l.tag {
                 layout::Tag::Direct(width, at) => {
                     if width == 1 {
@@ -1806,11 +1812,27 @@ fn match_expr(
                         "t27".to_string()
                     }
                 }
+                layout::Tag::Niche(held, at, used) => {
+                    carrier = held;
+                    spot = match layout::carrier_spot(&e.defs, which, 0) {
+                        Result::Ok(x) => x,
+                        Result::Err(why) => {
+                            e.stuck = true;
+                            return unknown_value();
+                        }
+                    };
+                    from = offset_of(e, &base, at);
+                    niche_tir(&spot)
+                }
                 _ => {
                     e.stuck = true;
                     return unknown_value();
                 }
             };
+            if tag.same("?") {
+                e.stuck = true;
+                return unknown_value();
+            }
             let d = fresh(e, "d");
             let mut read: String = Vec::new();
             read.push_str("    ");
@@ -1818,46 +1840,81 @@ fn match_expr(
             read.push_str(" = load ");
             read.push_str(&tag);
             read.push_str(" ");
-            read.push_str(&base);
+            read.push_str(&from);
             e.insts.push(read);
             let join = label(e, "match.join");
 
-            let mut held: String = Vec::new();
-            let mut ty: String = Vec::new();
-            let mut a: taddr = 0;
-            while a < arms.len() {
-                let arm_at = label(e, "arm");
-                let next_at = label(e, "arm.next");
-                let index = arm_variant(e, which, &arms[a]);
+            // The arm that carries a niche's payload is not *tested*: it is
+            // what is left when every other value has been ruled out, so it
+            // comes last whatever order it was written in.
+            let mut order: Vec<taddr> = Vec::new();
+            let mut untagged: taddr = 0 - 1;
+            let mut q: taddr = 0;
+            while q < arms.len() {
+                let index = arm_variant(e, which, &arms[q]);
                 if index < 0 {
                     e.stuck = true;
                     return unknown_value();
                 }
-                let c = fresh(e, "c");
-                let mut test: String = Vec::new();
-                test.push_str("    ");
-                test.push_str(&c);
-                test.push_str(" = cmp ");
-                test.push_str(&tag);
-                test.push_str(" ");
-                test.push_str(&d);
-                test.push_str(", const ");
-                test.push_str(&tag);
-                test.push_str(" ");
-                push_int(&mut test, l.discriminants[index]);
-                e.insts.push(test);
-                let mut br: String = Vec::new();
-                br.push_str("    br3 ");
-                br.push_str(&c);
-                br.push_str(", ");
-                br.push_str(&next_at);
-                br.push_str(", ");
-                br.push_str(&arm_at);
-                br.push_str(", ");
-                br.push_str(&next_at);
-                e.insts.push(br);
+                if index == carrier {
+                    untagged = q;
+                } else {
+                    order.push(q);
+                }
+                q += 1;
+            }
+            if carrier >= 0 {
+                if untagged < 0 {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+                order.push(untagged);
+            }
 
-                start(e, &arm_at);
+            let mut held: String = Vec::new();
+            let mut ty: String = Vec::new();
+            let mut n: taddr = 0;
+            while n < order.len() {
+                let a = order[n];
+                let index = arm_variant(e, which, &arms[a]);
+                // The one that is not tested has no labels of its own: its
+                // body is what the last test fell through to.
+                let tested = index != carrier;
+                let mut next_at: String = Vec::new();
+                if tested {
+                    let arm_at = label(e, "arm");
+                    next_at = label(e, "arm.next");
+                    let c = fresh(e, "c");
+                    let mut test: String = Vec::new();
+                    test.push_str("    ");
+                    test.push_str(&c);
+                    test.push_str(" = cmp ");
+                    test.push_str(&tag);
+                    test.push_str(" ");
+                    test.push_str(&d);
+                    test.push_str(", const ");
+                    test.push_str(&tag);
+                    test.push_str(" ");
+                    let written = if carrier < 0 {
+                        l.discriminants[index]
+                    } else {
+                        let k = fieldless_at(&e.defs[which], index);
+                        layout::niche_value(&spot, k)
+                    };
+                    push_int(&mut test, written);
+                    e.insts.push(test);
+                    let mut br: String = Vec::new();
+                    br.push_str("    br3 ");
+                    br.push_str(&c);
+                    br.push_str(", ");
+                    br.push_str(&next_at);
+                    br.push_str(", ");
+                    br.push_str(&arm_at);
+                    br.push_str(", ");
+                    br.push_str(&next_at);
+                    e.insts.push(br);
+                    start(e, &arm_at);
+                }
                 let mark = e.locals.len();
                 bind_payload(e, which, index, &base, &l, &arms[a]);
                 if e.stuck {
@@ -1881,13 +1938,19 @@ fn match_expr(
                 }
                 jump(e, &join);
                 forget(e, mark);
-                start(e, &next_at);
-                a += 1;
+                if tested {
+                    start(e, &next_at);
+                }
+                n += 1;
             }
             // Exhaustiveness was checked, so control cannot arrive here in a
-            // well-typed program — but TIR wants a terminator.
-            e.insts.push("    trap F_TRAP".to_string());
-            e.done = true;
+            // well-typed program — but TIR wants a terminator. A niche has
+            // no such block: the variant nothing ruled out is the last arm
+            // and it has already left.
+            if carrier < 0 {
+                e.insts.push("    trap F_TRAP".to_string());
+                e.done = true;
+            }
 
             start(e, &join);
             if dest.len() > 0 {
@@ -2207,11 +2270,52 @@ fn fill_variant(
         store_into(e, &ty, &v.text, &at);
         i += 1;
     }
-    // Which variant it is. A niche-encoded enum says so by writing a value
-    // the payload could not have had (§6), and working out which value that
-    // is is not something this does yet — so it is refused, on the side
-    // that builds one as it already is on the side that reads one.
+    // Which variant it is.
+    store_tag(e, dest, which, index);
+}
+
+/// Write down which variant an enum's storage holds (§5).
+///
+/// A tag of its own is a value at an offset; a **niche** is a value the
+/// payload could not have had, written where the payload would have been —
+/// and the variant that *carries* the payload writes nothing at all, being
+/// what is left when every other value has been ruled out (§6).
+fn store_tag(e: &mut Emit, dest: &str, which: taddr, index: taddr) {
+    let owner = e.defs[which].name.to_string();
+    let self_ty = ast::Ty::Name(one_name(&owner));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return;
+        }
+    };
     match &l.tag {
+        layout::Tag::Niche(carrier, at, used) => {
+            if index != carrier {
+                let s = match layout::carrier_spot(&e.defs, which, 0) {
+                    Result::Ok(x) => x,
+                    Result::Err(why) => {
+                        e.stuck = true;
+                        return;
+                    }
+                };
+                let ty = niche_tir(&s);
+                if ty.same("?") {
+                    e.stuck = true;
+                    return;
+                }
+                let k = fieldless_at(&e.defs[which], index);
+                let held = layout::niche_value(&s, k);
+                let mut written: String = Vec::new();
+                written.push_str("const ");
+                written.push_str(&ty);
+                written.push_str(" ");
+                push_int(&mut written, held);
+                let spot = offset_of(e, dest, at);
+                store_into(e, &ty, &written, &spot);
+            }
+        }
         layout::Tag::Direct(width, at) => {
             let ty = if width == 1 {
                 "t9".to_string()
@@ -4805,6 +4909,31 @@ fn type_path(path: &str) -> String {
         k += 1;
     }
     out
+}
+
+/// How wide the scalar a niche is taken out of is, as TIR spells it.
+fn niche_tir(s: &layout::Spot) -> String {
+    if s.trits == 9 {
+        return "t9".to_string();
+    }
+    if s.trits == 27 {
+        return "t27".to_string();
+    }
+    "?".to_string()
+}
+
+/// Which of the *fieldless* variants this one is, counting in declaration
+/// order — which is the order a niche's values are taken in (§6).
+fn fieldless_at(d: &layout::Def, index: taddr) -> taddr {
+    let mut k: taddr = 0;
+    let mut i: taddr = 0;
+    while i < index {
+        if d.counts[i] == 0 {
+            k += 1;
+        }
+        i += 1;
+    }
+    k
 }
 
 /// Which variant of a definition is called this, or −1.
