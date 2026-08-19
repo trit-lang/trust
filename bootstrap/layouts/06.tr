@@ -1,0 +1,72 @@
+// An array, which is the one composite whose layout no `repr` may choose
+// (Ch. 2 §3).
+//
+// `[T; N]` is N elements of `T`, each at `i × size_of::<T>()`, with the
+// array's alignment its element's and its size N times it. There is no
+// padding *between* elements and none at the end, because an element's size
+// is already a multiple of its alignment — so the arithmetic indexing does
+// is the definition and not a consequence of it. Which is why this is fixed
+// even under `repr(lang)`, where a struct's fields may be put anywhere.
+//
+// Nothing here reads an element. Where an array *sits* is a fact about the
+// type and needs no inference, which is what makes it the part both
+// implementations can answer before either can lower `&[T]`.
+
+struct P { a: t27, b: t9 }
+
+// An element narrower than a word: alignment 1, and a size that is not a
+// multiple of three.
+struct Bytes { xs: [t9; 5] }
+
+// A word each.
+struct Words { xs: [t27; 3] }
+
+// An element that is itself laid out, and whose size already carries its
+// own padding — six, not four, so the array is twelve.
+struct Rows { xs: [P; 2] }
+
+// **No** elements, which is a size of nothing and an alignment all the
+// same: an alignment is a fact about the element type, and there is one
+// whether or not any element exists.
+struct Empty { xs: [t27; 0] }
+
+// An array beside a scalar, so that what the two implementations agree
+// about is the *offsets* and not only the size — a field may be put
+// anywhere under `repr(lang)`, and the answer here is that the array goes
+// first.
+struct Mixed { a: t9, xs: [t27; 2] }
+
+// An array of arrays. The inner one is a type like any other, which is the
+// whole of what this asks.
+struct Grid { xs: [[t9; 2]; 3] }
+
+// And the part that is not arithmetic: an array's spare values are its
+// **first element's**, at that element's offset — so an array of something
+// with a niche has one and an array of something without has none. Every
+// one of these is an enum, because a tag is where a niche is visible
+// (Ch. 2 §5).
+
+// `bool` leaves 19 681 of a tryte's patterns unused, so `None` is one of
+// them and no tag is stored.
+enum MaybeFlags { Some([bool; 2]), None }
+
+// One element is still an array, and still lends its niche.
+enum MaybeOne { Some([bool; 1]), None }
+
+// `trit` the same, through three elements.
+enum MaybeTrits { Some([trit; 3]), None }
+
+// `t9` uses every pattern of its tryte, so an array of them has nothing
+// spare and the tag is stored.
+enum MaybeBytes { Some([t9; 2]), None }
+
+// No elements is no first element, so there is no niche to take even
+// though `t27` would have had one.
+enum MaybeNone { Some([t27; 0]), None }
+
+// A reference is never null, which is a niche the array passes on.
+struct Held { p: &t27 }
+
+enum MaybeHeld { Some([Held; 2]), None }
+
+fn main() -> t27 { 0 }

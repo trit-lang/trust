@@ -96,6 +96,62 @@ pub fn capacity(trits: taddr) -> taddr {
     n
 }
 
+/// `base ^ n`, saturating at MANY, for the same reason `capacity` does.
+pub fn raised(base: taddr, n: taddr) -> taddr {
+    if base >= MANY {
+        return MANY;
+    }
+    if base == 0 {
+        let one: taddr = 1;
+        let zero: taddr = 0;
+        if n == 0 {
+            return one;
+        }
+        return zero;
+    }
+    // One raised to anything is one, and saying so is what keeps the loop
+    // below bounded: for any other base it passes MANY inside forty steps,
+    // and for this one it would run once per element.
+    if base == 1 {
+        let one: taddr = 1;
+        return one;
+    }
+    let mut out: taddr = 1;
+    let mut i: taddr = 0;
+    while i < n {
+        if out > MANY / base {
+            return MANY;
+        }
+        out = out * base;
+        i += 1;
+    }
+    out
+}
+
+/// The length an array was written with, or −1 for one this cannot read.
+///
+/// The parser writes an integer literal back out in decimal and leaves an
+/// identifier as it was, so a length that is not digits is a `const` — and
+/// what a name stands for is a *value*, which is not a thing a layout can
+/// look up (Ch. 4 §2.4). It is refused rather than guessed at.
+fn written_length(text: &str) -> taddr {
+    let missing: taddr = 0 - 1;
+    if text.len() == 0 || text.len() > 12 {
+        return missing;
+    }
+    let mut v: taddr = 0;
+    let mut i: taddr = 0;
+    while i < text.len() {
+        let c = text[i];
+        if c < '0' || c > '9' {
+            return missing;
+        }
+        v = v * 10 + (((c as t27) - ('0' as t27)) as taddr);
+        i += 1;
+    }
+    v
+}
+
 /// How many invalid values a spot has.
 pub fn spot_count(s: &Spot) -> taddr {
     let cap = capacity(s.trits);
@@ -210,7 +266,58 @@ pub fn of(defs: &Vec<Def>, t: &Ty, depth: taddr) -> Result<Layout, String> {
             Result::Err("a closure type is not laid out here".to_string())
         }
         Ty::Tuple(args) => Result::Err("a tuple is not laid out here".to_string()),
-        Ty::Array(held, len) => Result::Err("an array is not laid out here".to_string()),
+        // `[T; N]` is the one composite whose layout no `repr` may choose
+        // (§3): N elements at `i × size_of::<T>()`, with no padding between
+        // them and none at the end, because an element's size is already a
+        // multiple of its alignment. The arithmetic indexing does *is* the
+        // layout, which is why nothing is free to reorder it.
+        Ty::Array(held, len) => {
+            let n = written_length(len);
+            if n < 0 {
+                return Result::Err(
+                    "an array's length is not written as a number".to_string(),
+                );
+            }
+            let e = match of(defs, &*held, depth + 1) {
+                Result::Ok(x) => x,
+                Result::Err(why) => return Result::Err(why),
+            };
+            // An array too big to measure is refused rather than measured
+            // wrongly: every count below overflows a word long before an
+            // array this large is a thing a program has.
+            if e.size > 0 && n > MANY / e.size {
+                return Result::Err("an array too large to lay out".to_string());
+            }
+            let size = e.size * n;
+            // How much of the whole run is not a value: every element has
+            // to be one, so what is valid is the element's count raised to
+            // N — saturating, since both numbers pass a word almost at once.
+            let each = capacity(e.size * TRITS) - e.niches;
+            let valid = raised(each, n);
+            let whole = capacity(size * TRITS);
+            let none: taddr = 0;
+            let spare = if valid >= whole { none } else { whole - valid };
+            let mut l = e;
+            l.size = size;
+            // An element's offset is `i × size_of::<T>()` and this says so
+            // by arithmetic rather than by a list: `offsets` is where a
+            // *field* is, and an array has elements. A million of them
+            // written down one at a time would say nothing the
+            // multiplication does not.
+            l.offsets = Vec::new();
+            l.niches = spare;
+            l.tag = Tag::None;
+            l.discriminants = Vec::new();
+            l.variant_offsets = Vec::new();
+            // An element's spare values are the array's, at that element's
+            // offset — and the first element's offset is the array's own,
+            // so the spot travels unchanged. No elements is no first
+            // element, and nothing to take.
+            if n == 0 {
+                l.spot = Option::None;
+            }
+            Result::Ok(l)
+        }
         Ty::Dyn(name) => Result::Err("a trait object has no size of its own".to_string()),
         Ty::Slice(inner) => Result::Err("a slice has no size of its own".to_string()),
         Ty::App(segments, args) => {

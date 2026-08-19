@@ -2621,6 +2621,42 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.97 — an array had no layout in the second implementation.**
+
+`layout.tr` answered `an array is not laid out here` for every `[T; N]`, so
+a struct with an array field had no size, no offsets and no answer — while
+the Rust engine has laid one out since Ch. 2 was built. `bootstrap/layouts/`
+held five files and not one array, which is why nothing had said so; the
+sixth is arrays and nothing else, and it was written before the arm was.
+
+The rule is Ch. 2 §3's and it is the one composite layout a `repr` may not
+choose: N elements at `i × size_of::<T>()`, alignment the element's, size N
+times it, no padding between elements and none at the end — because an
+element's size is already a multiple of its alignment. Indexing arithmetic
+*is* the layout rather than a consequence of it, which is what makes it
+fixed even under `repr(lang)`.
+
+The part that is not arithmetic is the niches. An array's spare values are
+its **first element's**, at that element's offset, and the count is the
+element's valid count raised to N — so `[bool; 2]` lends `Option` a niche
+and `[t9; 2]` does not, and `[t27; 0]` does not either, having no first
+element. Both counts leave a word almost at once, so `raised` saturates at
+`MANY` exactly as `capacity` does, and every decision made against either is
+against a variant count (G9.49).
+
+*Still refused:* a length written as a `const` name. The parser keeps the
+identifier as it was written, and what a name stands for is a **value** —
+Ch. 4 §2.4, and not a thing a layout engine can look up. `trust layout` in
+Rust resolves it (G8.2), so the two disagree about `[t27; N]` until the
+second implementation has constants at all. An array too large to measure is
+refused rather than measured wrongly, where Rust saturates; no program has
+one.
+
+This is the first stone of `&[T]`, which is `&str` again with an element
+type: the parameter is already free — `fat_name` answers for both fat
+references — but a slice needs an array to point into, and an array needs a
+size.
+
 **G9.96 — the second kind of fat reference: `&str`, and the first new state
 since the lowering started.**
 
