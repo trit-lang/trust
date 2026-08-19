@@ -2621,6 +2621,98 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.113 — a tuple is lowered, and it is an array's order and not a
+struct's.**
+
+`(A, B)` is a product with no name, so it is given one: `tuple.<A>.<B>`, a
+definition of two fields called `0` and `1`, made where the type is first
+named. Then `t.0` is a field read like any other, a tuple parameter is
+copied in like any other aggregate, and a tuple answer is written into the
+storage the caller gave — none of which needed a line of its own.
+
+Two things did.
+
+*The order.* A tuple literal lowers **every element before its storage is
+made**, which is an array's order (G9.106) and not a struct's — a struct
+takes the slot first and goes field by field. Both are visible in the
+numbering and `lowered/21.tr` puts all three in one function so that neither
+can drift. And the fields are permuted by alignment, because a tuple is
+`repr(lang)` and there is no other kind (Ch. 2 §2), so element 0 of
+`(t9, t27)` is at offset three.
+
+*Taking one apart.* `let (a, b) = e;` is `let #patN = e;` and then one `let`
+per element reading a field of it (G9.108). The whole is bound first, under
+a name nobody can write, so nothing below the parser learns a new shape and
+the ownership rules need no case of their own: moving out of `#patN.0`
+leaves `#patN.1` usable, which Ch. 3 §1.3 already says. A struct pattern
+binds by field name and a nested pattern binds through another pattern;
+both are refused rather than read positionally.
+
+*And one thing a signature has to be able to say.* A tuple has no name for a
+caller to look up, so an argument written `(1, 2)` can only take its element
+types from the parameter's type — which means `definitions` walks every
+signature in the file and puts those shapes there before any call is
+lowered. A body's own tuples are still made where they are named.
+
+**G9.112 — a call in tail position answered into a temporary.**
+
+`fn f() -> P { g() }` copied. A call answers into storage the caller
+provides (TIR §3), and in tail position that storage is **`%sret` itself** —
+what the callee wrote is already where this function's answer goes, so there
+is nothing to copy. The other implementation writes `call @g(%sret)`; this
+one made a slot, called into it, and moved six trytes.
+
+Not a wrong answer and not a refusal: *different text*, which is the one
+outcome the whole comparison exists to catch. It survived because no corpus
+file had a function answering with an aggregate whose last expression is a
+call — twenty files of lowering, and every aggregate answer was built where
+it stood.
+
+A **method** in tail position is the same fact and is refused rather than
+copied: the receiver is worked out inside `value`, which has no destination
+to be told about, and the honest answer to "I would write different text
+here" is to write none.
+
+**G9.111 — the arm of a statement `if` has no value either.**
+
+`statements` refused a block with a tail, on the grounds that an `if` in
+statement position has no value to read out of one. True of the `if`; not
+true of the *tail*, which may be a `while` or a call that answers with
+nothing — a statement, like everything else in a statement's arm. It is
+lowered as one now, which is G9.104 one level in.
+
+Found by lowering the prelude's `print`, whose `else` arm ends in a `while`.
+
+**G9.110 — a receiver taken by value, and an element that is a place.**
+
+Two facts about receivers, and one about *when*.
+
+*By value.* `impl char { fn utf8_len(self) }` takes its receiver in a
+register and not as an address: a receiver is a parameter whose type the
+impl says rather than the parameter list (Ch. 3 §2.2), and a scalar said by
+value is a value. The second implementation had only ever seen `&self`, so
+every method of `char` was refused — which is most of Ch. 5 §1.5.
+
+*An element is a place.* `s[i].to_utf8()` reads a character out of the text
+and hands it over, so the bounds tests give an address and the receiver is
+loaded out of it. A *field* is not a place that way — a scalar field is read
+where it is and there is nothing to go on to — and the difference is worth
+the two arms it costs.
+
+*And when.* A call whose answer is an aggregate takes the storage for it
+**before** the receiver is evaluated, so what the receiver *is* has to be
+answerable before it is lowered. `guess_ty` learned to answer for an element
+and a field without emitting anything, and the receiver waits until the
+storage has been taken. Getting this backwards is one number in one name,
+which is exactly the kind of thing only a character-for-character comparison
+finds.
+
+*What it bought.* `print`, `print_char`, `char::to_utf8` and `char::utf8_len`
+— the whole of Ch. 5 §1.5 — lower now, character for character, out of the
+prelude's own Trust. `bootstrap/main.tr` went from 24 entries to 30, and the
+one thing still missing is `print_int`, which wants `char::try_from`: a
+compiler builtin of four comparisons and four branches (Ch. 5 §1.2).
+
 **G9.109 — a tuple had no layout in the second implementation.**
 
 The same hole arrays had (G9.97), one type over: `layout.tr` answered `a

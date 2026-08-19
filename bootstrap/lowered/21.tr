@@ -1,0 +1,147 @@
+// A tuple, and the three things a tuple made this compiler learn (Ch. 2 §2).
+//
+// `(A, B)` is a product with no name, so it is given one — `tuple.<A>.<B>`,
+// a definition of two fields called `0` and `1` — and then `t.0` is a field
+// read like any other and a tuple parameter is copied in like any other
+// aggregate. What is *not* like a struct is the order: it is `repr(lang)`
+// and there is no other kind, so the fields are permuted by alignment and
+// element 0 of `(t9, t27)` is at offset **three**.
+//
+// The literal lowers every element before its storage is made, which is an
+// array's order and not a struct's — and `both` below puts all three in one
+// function so nothing can drift.
+//
+// *Taking one apart.* `let (a, b) = e;` is `let #patN = e;` and then one
+// `let` per element reading a field of it. The whole is bound first, under a
+// name nobody can write, so nothing below the parser learns a new shape and
+// the ownership rules need no case of their own: moving out of `#patN.0`
+// leaves `#patN.1` usable, which Ch. 3 §1.3 already says.
+//
+// *A receiver by value.* `impl char { fn f(self) }` takes its receiver in a
+// register and not as an address — a receiver is a parameter whose type the
+// impl says (Ch. 3 §2.2), and a scalar said by value is a value. Which makes
+// the caller load it, and makes *where* it loads it matter: a call whose
+// answer is an aggregate takes the storage for that first, so the receiver
+// is evaluated after it.
+//
+// *An element is a place.* `s[i].u()` reads a character out of the text and
+// hands it over, so the bounds tests give an address and the receiver is
+// loaded out of it. A field is not a place that way — a scalar field is read
+// where it is and there is nothing to go on to — and the difference is worth
+// the two arms it costs.
+
+struct P { a: t27, b: t9 }
+
+fn side() -> t27 { 1 }
+
+fn other() -> t9 { 2 }
+
+// Constant elements, so the numbering is all that says they came first.
+fn plain() -> t27 {
+    let t = (10, 20);
+    t.0 + t.1
+}
+
+// Elements that are calls: both of them, and then the storage.
+fn evaluated() -> t27 {
+    let t = (side(), other());
+    t.0 + (t.1 as t27)
+}
+
+// The two orders in one function. A struct takes its storage first and goes
+// field by field; a tuple evaluates every element and takes it after.
+fn both() -> t27 {
+    let p = P { a: side(), b: other() };
+    let t = (side(), other());
+    p.a + t.0
+}
+
+// Written out, so the element types are the type's and not the literals'.
+// The permutation is visible here: the `t9` was written first and is at
+// offset three.
+fn permuted() -> t27 {
+    let t: (t9, t27) = (1, 2);
+    t.1
+}
+
+// A product of one, which is a product and not the thing in it.
+fn single() -> t27 {
+    let t = (7,);
+    t.0
+}
+
+// Nested, and reached through two field reads.
+fn inner() -> t27 {
+    let t = ((1, 2), 3);
+    t.0.1 + t.1
+}
+
+// A tuple holding an aggregate, which is copied into place rather than
+// stored — and a tuple holding an array, which is the same thing.
+fn holds() -> t27 {
+    let t = (P { a: 4, b: 5 }, 6);
+    let g = ([1, 2, 3], 7);
+    t.0.a + g.1
+}
+
+// Taken apart. The value is a named local here, so the whole is **copied**
+// into the hidden binding before the parts are read out of it.
+fn apart() -> t27 {
+    let t = (8, 9);
+    let (a, b) = t;
+    a + b
+}
+
+// And here it is a temporary, so the hidden binding takes it over instead —
+// which is the same rule every `let` follows (G9.93).
+fn straight() -> t27 {
+    let (a, b) = (11, 12);
+    a + b
+}
+
+// A tuple parameter arrives as a pointer and is copied in field by field,
+// and a tuple answer is written into the storage the caller gave.
+fn taken(t: (t27, t9)) -> t27 { t.0 }
+
+fn gives() -> (t27, t9) { (13, 14) }
+
+impl char {
+    // A receiver **by value**: `%self: t27` and not `%self: ptr`.
+    fn wide(self) -> taddr {
+        let c = self as t27;
+        if c < 128 {
+            1
+        } else {
+            2
+        }
+    }
+
+    // The same, answering with an aggregate — so the caller takes the
+    // storage before it evaluates the receiver.
+    fn units(self) -> ([t9; 2], taddr) {
+        let mut out: [t9; 2] = [0; 2];
+        let c = self as t27;
+        out[0] = c as t9;
+        (out, self.wide())
+    }
+}
+
+// A character read out of text, handed over by value: the index gives an
+// address and the receiver is loaded out of it.
+fn through(s: &str, i: taddr) -> taddr {
+    let (units, n) = s[i].units();
+    n + (units[0] as taddr)
+}
+
+// And a call in **tail** position whose answer is an aggregate: it answers
+// into the storage this function was given, because that is already where
+// the answer goes (TIR §3).
+fn relayed() -> (t27, t9) { gives() }
+
+fn main() -> t27 {
+    let c: char = 'A';
+    let (u, n) = gives();
+    plain() + evaluated() + both() + permuted() + single() + inner()
+        + holds() + apart() + straight() + taken((15, 16)) + u
+        + (n as t27) + (c.wide() as t27) + (through("hi", 0) as t27)
+}

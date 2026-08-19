@@ -402,6 +402,69 @@ pub fn array_name(elem: &str, n: taddr) -> String {
     out
 }
 
+/// The name a tuple type has here: `tuple.<A>.<B>`.
+///
+/// A tuple is a product with no name (Ch. 2 §2), so it is given one — the
+/// same `.`-joining a monomorphization uses, and read back the same way,
+/// which is to say never: what is in it is read off the definition.
+pub fn tuple_name(elems: &Vec<String>) -> String {
+    mangled("tuple", elems)
+}
+
+/// The name a written tuple type has, worked out from the writing alone.
+///
+/// Which is all a *signature* can do: `nominal` needs an emitter and a
+/// signature is read before there is one. An element whose type is not
+/// written as a plain name leaves nothing to say, and the answer is then
+/// nothing at all rather than a name that is not the type's.
+pub fn written_tuple(t: &ast::Ty) -> String {
+    match t {
+        ast::Ty::Tuple(args) => {
+            let mut elems: Vec<String> = Vec::new();
+            let mut i: taddr = 0;
+            while i < args.len() {
+                let each = written_element(&args[i]);
+                if each.len() == 0 {
+                    return "".to_string();
+                }
+                elems.push(each);
+                i += 1;
+            }
+            if elems.len() == 0 {
+                return "".to_string();
+            }
+            tuple_name(&elems)
+        }
+        _ => "".to_string(),
+    }
+}
+
+/// What one element of a written tuple is called: a tuple's own name where
+/// it is one, and the written head where it is not.
+pub fn written_element(t: &ast::Ty) -> String {
+    let held = written_tuple(t);
+    if held.len() > 0 {
+        return held;
+    }
+    name_head(t)
+}
+
+/// Whether a name is a tuple's.
+pub fn is_tuple(name: &str) -> bool {
+    let head = "tuple.";
+    if name.len() <= head.len() {
+        return false;
+    }
+    let mut i: taddr = 0;
+    while i < head.len() {
+        if name[i] != head[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 /// Whether a name is an array's. Only the head is asked: what is *in* the
 /// name is read off the definition, which is where it will still be right.
 pub fn is_array(name: &str) -> bool {
@@ -471,6 +534,13 @@ pub fn param_name(t: &ast::Ty) -> String {
         let held = dyn_name(&object);
         out.push_str(&held);
         return out;
+    }
+    // A tuple has no name to look up, so an argument written `(1, 2)` takes
+    // its element types from the parameter — which means the parameter has
+    // to be able to say. `definitions` has put the shape there already.
+    let tuple = written_tuple(t);
+    if tuple.len() > 0 {
+        return tuple;
     }
     tir_ty(t)
 }
@@ -858,6 +928,30 @@ pub fn function(
         // `&self` is a reference and stays one: what a method is given is an
         // address, and reading through it is a load and then the field's own
         // (Ch. 3 §2.2). An aggregate *value* is copied in; an address is not.
+        // A receiver taken **by value** on a scalar is a value: it arrives
+        // in a register like any other parameter, and what a caller hands
+        // over is the value and not where it is (Ch. 3 §2.2). On an
+        // aggregate it is still a pointer to the caller's copy, which the
+        // branch further down already reads under the owner's name.
+        if name.same("self") && !is_reference(&f.params[i].ty) {
+            let mine = e.self_ty.to_string();
+            let held = scalar_named(&mine);
+            if !held.same("?") {
+                header.push_str("%self: ");
+                let shown = tir_of(&mine);
+                header.push_str(&shown);
+                let slot = slot_for(&mut e, "self", &mine);
+                let mut store: String = Vec::new();
+                store.push_str("    store ");
+                let wide = tir_of(&mine);
+                store.push_str(&wide);
+                store.push_str(" %self, ");
+                store.push_str(&slot);
+                e.insts.push(store);
+                i += 1;
+                continue;
+            }
+        }
         if name.same("self") && is_reference(&f.params[i].ty) {
             // What a reference to the impl's own type *is*. On `impl str`
             // it is two words and not one, exactly as a written `&str`
@@ -1402,6 +1496,88 @@ fn index_value(e: &mut Emit, base: &ast::Expr, at: &ast::Expr) -> Value {
     Value { text: v, ty: held.ty }
 }
 
+/// `(a, b)` — the elements, and then storage holding them (Ch. 2 §2).
+///
+/// Every element is lowered before the storage is made, as an array's are
+/// and for the same reason: a tuple is written as a run of values, and each
+/// one is a value before any of them is anywhere. What differs is where they
+/// go — the fields are permuted by alignment, so element 0 is not always at
+/// offset 0, and the *stores* are still in written order.
+fn tuple_value(e: &mut Emit, items: &Vec<ast::Expr>, want: &str) -> Value {
+    if items.len() == 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    // What the written type says each element is, where it says anything.
+    // Copied out first: lowering an element may make a definition of its
+    // own, and an index into `defs` does not survive that.
+    let mut written: Vec<String> = Vec::new();
+    let at = def_at(&e.defs, want);
+    if at >= 0 && is_tuple(want) && e.defs[at].fields.len() == items.len() {
+        let mut k: taddr = 0;
+        while k < items.len() {
+            written.push(name_head(&e.defs[at].fields[k]));
+            k += 1;
+        }
+    }
+    let mut elems: Vec<String> = Vec::new();
+    let mut texts: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < items.len() {
+        let mut hint: String = Vec::new();
+        if written.len() > i {
+            hint = written[i].to_string();
+        }
+        let v = value(e, &items[i], &hint);
+        if e.stuck {
+            return unknown_value();
+        }
+        texts.push(v.text);
+        let mine = if hint.len() > 0 {
+            hint
+        } else {
+            v.ty.to_string()
+        };
+        elems.push(mine);
+        i += 1;
+    }
+    let named = tuple_def(e, &elems);
+    if named.len() == 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let self_ty = ast::Ty::Name(one_name(&named));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return unknown_value();
+        }
+    };
+    let held = fresh(e, "tmp.slot");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&held);
+    line.push_str(" = slot tryte[");
+    push_int(&mut line, l.size as t27);
+    line.push_str("]");
+    e.slots.push(line);
+    let mut i: taddr = 0;
+    while i < items.len() {
+        let there = offset_of(e, &held, l.offsets[i]);
+        if def_at(&e.defs, &elems[i]) >= 0 {
+            copy_between(e, &texts[i], &there, &elems[i]);
+        } else {
+            store_into(e, &elems[i], &texts[i], &there);
+        }
+        if e.stuck {
+            return unknown_value();
+        }
+        i += 1;
+    }
+    Value { text: held, ty: named }
+}
+
 /// `[a, b, c]` — a run of values, and then storage holding them (Ch. 2 §3).
 ///
 /// Every element is lowered *before* the storage is made, which is what
@@ -1868,6 +2044,32 @@ fn aggregate_tail(e: &mut Emit, x: &ast::Expr, dest: &str, owner: &str) {
         ast::Expr::Match(scrutinee, arms) => {
             match_expr(e, scrutinee, arms, "", dest, owner);
         }
+        // A call answers into storage the caller provides (TIR §3), and in
+        // tail position that storage is `%sret` itself: what the callee
+        // wrote is already where this function's answer goes, so there is
+        // nothing to copy.
+        ast::Expr::Call(callee, args) => {
+            let held = local_at(e, callee);
+            let fam = family_at(e, callee);
+            let big = returned_aggregate(e, callee);
+            // A closure, a family, and anything answering with something
+            // other than what this function does are all other questions,
+            // and are refused rather than copied through a temporary that
+            // the other implementation does not make.
+            if held >= 0 || fam >= 0 || !big.same(owner) {
+                e.stuck = true;
+                return;
+            }
+            let v = aggregate_call(e, callee, &big, dest, "", args);
+            let _ = v;
+        }
+        // A *method* in tail position is the same fact and is refused: the
+        // receiver is worked out inside `value`, which has no destination
+        // to be told about, and copying through a temporary would be text
+        // the other implementation does not write.
+        ast::Expr::Method(recv, name, args) => {
+            e.stuck = true;
+        }
         _ => {
             let v = value(e, x, owner);
             if e.stuck {
@@ -2216,8 +2418,8 @@ fn if_statement(
 /// The statements of a block and nothing else.
 ///
 /// What an `if` in statement position has in its arms, where `branch_block`
-/// wants a value. A tail here is an `if` being read for a value in a place
-/// that has none, and is refused rather than evaluated and dropped.
+/// wants a value. A tail here has no value either — the arm is a statement
+/// and so is everything in it — so it is lowered as one.
 fn statements(e: &mut Emit, b: &ast::Block, ret: &str) {
     let mut i: taddr = 0;
     while i < b.stmts.len() {
@@ -2226,7 +2428,11 @@ fn statements(e: &mut Emit, b: &ast::Block, ret: &str) {
     }
     match &b.tail {
         Option::Some(x) => {
-            e.stuck = true;
+            // An arm of a statement `if` has no value either, so its last
+            // expression is a statement as well — a `while`, or a call
+            // that answers with nothing (§5.1).
+            let held = ast::Stmt::Do(ast::copy_expr(x));
+            stmt(e, &held, ret);
         }
         Option::None => {}
     }
@@ -2801,6 +3007,58 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
             line.push_str(", ");
             line.push_str(&slot);
             e.insts.push(line);
+        }
+        // `let (a, b) = e;` is `let #patN = e;` and then one `let` per
+        // element reading a field of it (§5.2). The whole is bound first,
+        // under a name nobody can write, so nothing below the parser learns
+        // a new shape and the ownership rules need no case of their own —
+        // moving out of `#patN.0` leaves `#patN.1` usable, which Ch. 3 §1.3
+        // already says.
+        ast::Stmt::LetPattern(name, pat, v) => {
+            let whole = ast::Stmt::Let(
+                false,
+                name.to_string(),
+                Option::None,
+                ast::copy_expr(v),
+            );
+            stmt(e, &whole, ret);
+            if e.stuck {
+                return;
+            }
+            // Only a tuple of plain names. A struct pattern binds by field
+            // name and a nested one binds through another pattern; both are
+            // taken apart by machinery this does not have, and are refused
+            // rather than read positionally.
+            match pat {
+                ast::Pattern::Tuple(parts) => {
+                    let mut i: taddr = 0;
+                    while i < parts.len() {
+                        let each = match &parts[i] {
+                            ast::Pattern::Bind(n) => n.to_string(),
+                            _ => "".to_string(),
+                        };
+                        if each.len() == 0 {
+                            e.stuck = true;
+                            return;
+                        }
+                        let mut which: String = Vec::new();
+                        push_int(&mut which, i as t27);
+                        let base = ast::Expr::Name(name.to_string());
+                        let field = ast::Expr::Field(Box::new(base), which);
+                        let made =
+                            ast::Stmt::Let(false, each, Option::None, field);
+                        stmt(e, &made, ret);
+                        if e.stuck {
+                            return;
+                        }
+                        i += 1;
+                    }
+                }
+                _ => {
+                    e.stuck = true;
+                    return;
+                }
+            }
         }
         ast::Stmt::Do(x) => {
             match x {
@@ -3394,6 +3652,8 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
         // `s[i]` — where the elements are, how many there are, and two
         // three-way tests before any arithmetic (Ch. 3 §3.2).
         ast::Expr::Index(base, at) => index_value(e, base, at),
+        // `(a, b)` (Ch. 2 §2).
+        ast::Expr::Tuple(items) => tuple_value(e, items, want),
         // `[a, b, c]` and `[v; n]` (Ch. 2 §3).
         ast::Expr::Array(items) => array_value(e, items, want),
         ast::Expr::Repeat(v, count) => repeat_value(e, v, count, want),
@@ -3484,19 +3744,25 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             // step on the way to the object rather than the object itself
             // — and `place` has already done any reading-through, so only
             // the plain name below still has one to do (G9.94).
-            let found = if at < 0 {
-                place(e, recv)
+            //
+            // What it *is* is answered before it is lowered, because a call
+            // whose answer is an aggregate takes the storage for it first
+            // and that decides the numbers (TIR §3). A name costs nothing
+            // to read, so only the other kind waits.
+            let mut owner = if at < 0 {
+                guess_ty(e, recv)
             } else {
-                Value {
-                    text: e.locals[at].slot.to_string(),
-                    ty: e.locals[at].ty.to_string(),
-                }
+                e.locals[at].ty.to_string()
             };
-            if e.stuck {
+            if owner.len() == 0 {
+                e.stuck = true;
                 return unknown_value();
             }
-            let mut owner = found.ty;
-            let mut slot = found.text;
+            let mut slot = if at < 0 {
+                "".to_string()
+            } else {
+                e.locals[at].slot.to_string()
+            };
             // A receiver that is itself a reference holds the *address* of
             // the object, so what a method is given is what the slot holds
             // and not the slot: `self.area()` inside a `&self` method reads
@@ -3523,6 +3789,10 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             // says which function (Ch. 4 §3.3).
             let named = dyn_trait(&owner);
             if named.len() > 0 {
+                slot = receiver_at(e, at, recv, &slot, "");
+                if e.stuck {
+                    return unknown_value();
+                }
                 return dyn_call(e, &owner, &named, &slot, name, args);
             }
             // The other fat reference answers one of its methods out of
@@ -3533,6 +3803,10 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             let text = str_name();
             if owner.same(&text) {
                 if name.same("len") && args.len() == 0 {
+                    slot = receiver_at(e, at, recv, &slot, "");
+                    if e.stuck {
+                        return unknown_value();
+                    }
                     return str_len(e, &slot);
                 }
                 owner = "str".to_string();
@@ -3541,6 +3815,19 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             full.push_str(&owner);
             full.push_str(".");
             full.push_str(name);
+            // What the method was written to take. A receiver is `ptr`
+            // where it is a reference and the type itself where it is by
+            // value, and a scalar taken by value is *loaded* — what is
+            // handed over is the value and not where it is (Ch. 3 §2.2).
+            // Where the answer is an aggregate the load waits: the storage
+            // is what the function is for and is taken first (TIR §3).
+            let receiver = param_type(e, &full, 0);
+            let scalar = scalar_named(&receiver);
+            let by_value = if scalar.same("?") {
+                "".to_string()
+            } else {
+                receiver.to_string()
+            };
             // A generic method is a family like any other; what tells it
             // from a free one is that its receiver is already an argument.
             // Where the receiver is an *instantiation*, the family is the
@@ -3565,11 +3852,26 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             under.push_str(name);
             let fam = family_at(e, &under);
             if fam >= 0 {
+                slot = receiver_at(e, at, recv, &slot, &by_value);
+                if e.stuck {
+                    return unknown_value();
+                }
                 return generic_call(e, fam, &under, &slot, &given, args);
             }
+            // The storage a call answers into, taken before the receiver is
+            // evaluated: `%sret` is what the function is *for* (TIR §3).
             let big = returned_aggregate(e, &full);
+            let into = if big.len() > 0 {
+                slot_for(e, "tmp", &big)
+            } else {
+                "".to_string()
+            };
+            slot = receiver_at(e, at, recv, &slot, &by_value);
+            if e.stuck {
+                return unknown_value();
+            }
             if big.len() > 0 {
-                return aggregate_call(e, &full, &big, &slot, args);
+                return aggregate_call(e, &full, &big, &into, &slot, args);
             }
             let mut texts: Vec<String> = Vec::new();
             let mut i: taddr = 0;
@@ -3655,7 +3957,8 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             // is what decides the numbers (TIR §3).
             let big = returned_aggregate(e, callee);
             if big.len() > 0 {
-                return aggregate_call(e, callee, &big, "", args);
+                let into = slot_for(e, "tmp", &big);
+                return aggregate_call(e, callee, &big, &into, "", args);
             }
             let mut texts: Vec<String> = Vec::new();
             let mut i: taddr = 0;
@@ -3787,19 +4090,12 @@ fn place(e: &mut Emit, x: &ast::Expr) -> Value {
         // exactly what building the two words does. `"one".len()` is the
         // whole of what needs this.
         ast::Expr::Str(text) => text_value(e, text),
-        // `g[i][0]` — an element is a place, and one that is itself an
-        // aggregate is a place this can go on from.
-        ast::Expr::Index(base, at) => {
-            let held = index_place(e, base, at);
-            if e.stuck {
-                return unknown_value();
-            }
-            if def_at(&e.defs, &held.ty) < 0 {
-                e.stuck = true;
-                return unknown_value();
-            }
-            held
-        }
+        // `g[i][0]`, and `s[i].to_utf8()` — an **element** is a place
+        // whatever it holds. A field is not: a scalar field is read where
+        // it is and there is nothing to go on to, but an element's address
+        // is what the bounds tests were for, and a receiver taken by value
+        // is loaded out of it by whoever wanted the value.
+        ast::Expr::Index(base, at) => index_place(e, base, at),
         _ => {
             e.stuck = true;
             unknown_value()
@@ -3968,6 +4264,40 @@ pub fn definitions(items: &Vec<ast::Item>) -> Vec<layout::Def> {
         }
         i += 1;
     }
+    // Every tuple any *signature* mentions, as a definition. A tuple has
+    // no name for a caller to look up, so an argument written `(1, 2)`
+    // could only take its element types from the parameter's type — and
+    // reading that needs the shape to be here before the call is lowered.
+    // A body's own tuples are made where they are named, by `nominal`.
+    let mut f: taddr = 0;
+    while f < items.len() {
+        match &items[f].what {
+            ast::What::Function(held) => note_signature(held, &mut out),
+            ast::What::Impl(gs, tr, ty, fns) => {
+                let mut k: taddr = 0;
+                while k < fns.len() {
+                    note_signature(&fns[k], &mut out);
+                    k += 1;
+                }
+            }
+            ast::What::Trait(n, params, supers, assoc, fns) => {
+                let mut k: taddr = 0;
+                while k < fns.len() {
+                    note_signature(&fns[k], &mut out);
+                    k += 1;
+                }
+            }
+            ast::What::Struct(name, gs, fields) => {
+                let mut k: taddr = 0;
+                while k < fields.len() {
+                    note_tuples(&fields[k].ty, &mut out);
+                    k += 1;
+                }
+            }
+            _ => {}
+        }
+        f += 1;
+    }
     // And one nobody wrote that is not per anything: what a `&str` is, which
     // is the address of the characters and how many of them there are
     // (Ch. 2 §4). It is a definition for the same reason the two below are —
@@ -4038,6 +4368,56 @@ pub fn definitions(items: &Vec<ast::Item>) -> Vec<layout::Def> {
         t += 1;
     }
     out
+}
+
+/// Every tuple a function's signature mentions, as a definition.
+fn note_signature(f: &ast::Fn, out: &mut Vec<layout::Def>) {
+    let mut i: taddr = 0;
+    while i < f.params.len() {
+        note_tuples(&f.params[i].ty, out);
+        i += 1;
+    }
+    note_tuples(&f.ret, out);
+}
+
+/// Every tuple written inside this type, as a definition, innermost first.
+fn note_tuples(t: &ast::Ty, out: &mut Vec<layout::Def>) {
+    match t {
+        ast::Ty::Tuple(args) => {
+            let mut i: taddr = 0;
+            while i < args.len() {
+                note_tuples(&args[i], out);
+                i += 1;
+            }
+            let full = written_tuple(t);
+            if full.len() == 0 || def_at(out, &full) >= 0 {
+                return;
+            }
+            let mut fields: Vec<ast::Ty> = Vec::new();
+            let mut names: Vec<String> = Vec::new();
+            let mut k: taddr = 0;
+            while k < args.len() {
+                let each = written_element(&args[k]);
+                fields.push(ast::Ty::Name(one_name(&each)));
+                let mut which: String = Vec::new();
+                push_int(&mut which, k as t27);
+                names.push(which);
+                k += 1;
+            }
+            out.push(layout::Def {
+                name: full,
+                is_enum: false,
+                linear: false,
+                fields: fields,
+                field_names: names,
+                counts: Vec::new(),
+                discriminants: Vec::new(),
+            });
+        }
+        ast::Ty::Ref(held, m) => note_tuples(&*held, out),
+        ast::Ty::Array(held, len) => note_tuples(&*held, out),
+        _ => {}
+    }
 }
 
 /// Every struct and enum of the file, with the parameters each was written
@@ -4464,6 +4844,43 @@ fn guess_ty(e: &mut Emit, x: &ast::Expr) -> String {
         ast::Expr::Trit(v) => "trit".to_string(),
         ast::Expr::Char(v) => "char".to_string(),
         ast::Expr::Group(inner) => guess_ty(e, inner),
+        // A literal has no place until it is given one, and what it *is* is
+        // known without giving it one.
+        ast::Expr::Str(text) => str_name(),
+        // An element and a field, worked out **without emitting anything**:
+        // a call whose answer is an aggregate takes the storage for it
+        // before the receiver is evaluated, so what the receiver *is* has
+        // to be answerable before it is lowered (TIR §3).
+        ast::Expr::Index(base, at) => {
+            let held = guess_ty(e, base);
+            let owner = pointee(e, &held);
+            let text = str_name();
+            if owner.same(&text) {
+                return "char".to_string();
+            }
+            let which = def_at(&e.defs, &owner);
+            if which < 0 || !is_array(&owner) {
+                return "".to_string();
+            }
+            name_head(&e.defs[which].fields[0])
+        }
+        ast::Expr::Field(base, field) => {
+            let held = guess_ty(e, base);
+            let owner = pointee(e, &held);
+            let which = def_at(&e.defs, &owner);
+            if which < 0 {
+                return "".to_string();
+            }
+            let index = field_at(e, which, field);
+            if index < 0 {
+                return "".to_string();
+            }
+            let named = ref_name(&e.defs[which].fields[index]);
+            if named.len() > 0 {
+                return named;
+            }
+            name_head(&e.defs[which].fields[index])
+        }
         ast::Expr::Cast(a, t) => tir_ty_at(&e.tyvars, &e.key, t),
         // Arithmetic answers with what it was given and a comparison with a
         // `bool`, which is Ch. 1 §5 either way.
@@ -5201,6 +5618,21 @@ fn nominal(e: &mut Emit, t: &ast::Ty) -> String {
             }
             instantiate(e, &head, &key)
         }
+        // `(A, B)` is a definition of two fields under the names `0` and
+        // `1`, made where the type is first named.
+        ast::Ty::Tuple(args) => {
+            let mut elems: Vec<String> = Vec::new();
+            let mut i: taddr = 0;
+            while i < args.len() {
+                let each = nominal(e, &args[i]);
+                if each.len() == 0 {
+                    return "".to_string();
+                }
+                elems.push(each);
+                i += 1;
+            }
+            tuple_def(e, &elems)
+        }
         // `[T; N]` is a definition of N fields, made where it is first
         // named. A length written as a `const` is a *value* and not a thing
         // this can look up (Ch. 4 §2.4), so it is refused.
@@ -5246,6 +5678,45 @@ fn array_def(e: &mut Emit, elem: &str, n: taddr) -> String {
         name: full.to_string(),
         is_enum: false,
         linear: true,
+        fields: fields,
+        field_names: names,
+        counts: Vec::new(),
+        discriminants: Vec::new(),
+    });
+    full
+}
+
+/// The definition a tuple type has, made if it is not there already.
+///
+/// Not `linear`: a tuple is `repr(lang)` and there is no other kind (Ch. 2
+/// §2), so its fields are permuted by alignment like any other product's —
+/// and `.0` is a field name here, which is what makes positional access the
+/// same code as any other field read.
+fn tuple_def(e: &mut Emit, elems: &Vec<String>) -> String {
+    if elems.len() == 0 {
+        return "".to_string();
+    }
+    let full = tuple_name(elems);
+    if def_at(&e.defs, &full) >= 0 {
+        return full;
+    }
+    let mut fields: Vec<ast::Ty> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < elems.len() {
+        if elems[i].len() == 0 {
+            return "".to_string();
+        }
+        fields.push(ast::Ty::Name(one_name(&elems[i])));
+        let mut each: String = Vec::new();
+        push_int(&mut each, i as t27);
+        names.push(each);
+        i += 1;
+    }
+    e.defs.push(layout::Def {
+        name: full.to_string(),
+        is_enum: false,
+        linear: false,
         fields: fields,
         field_names: names,
         counts: Vec::new(),
@@ -5379,11 +5850,20 @@ fn subst_ty(
         ast::Ty::Array(held, len) => {
             ast::Ty::Array(Box::new(subst_ty(e, tyvars, key, held)), len.to_string())
         }
+        ast::Ty::Tuple(args) => {
+            let mut out: Vec<ast::Ty> = Vec::new();
+            let mut i: taddr = 0;
+            while i < args.len() {
+                out.push(subst_ty(e, tyvars, key, &args[i]));
+                i += 1;
+            }
+            ast::Ty::Tuple(out)
+        }
         ast::Ty::Unit => ast::Ty::Unit,
         ast::Ty::SelfTy => ast::Ty::SelfTy,
-        // Nothing inside a closure type or a tuple names a type parameter
-        // that this reads: they are copied as they were written, and
-        // refused where they are used.
+        // Nothing inside a closure type names a type parameter that this
+        // reads: it is copied as it was written, and refused where it is
+        // used.
         _ => ast::copy_ty(t),
     }
 }
@@ -5439,7 +5919,15 @@ pub fn parameters(items: &Vec<ast::Item>) -> Vec<Sig> {
                             all.push(',');
                         }
                         let each = if fns[k].params[j].name.same("self") {
-                            "ptr".to_string()
+                            // A receiver is `ptr` where it is a reference,
+                            // and the type it is *of* where the method
+                            // takes it by value — which on a scalar is the
+                            // difference between an address and a value.
+                            if is_reference(&fns[k].params[j].ty) {
+                                "ptr".to_string()
+                            } else {
+                                owner.to_string()
+                            }
                         } else {
                             param_name(&fns[k].params[j].ty)
                         };
@@ -5668,6 +6156,65 @@ fn call_type(e: &mut Emit, name: &str) -> String {
     }
     e.stuck = true;
     "?".to_string()
+}
+
+/// What a name that reaches through a reference is *of*.
+///
+/// The referent where the name says so — `&P` says `P` — the impl's own
+/// type where the name is a bare `ptr`, and itself where it is neither. It
+/// is what `place` walks, and what anything working out a type without
+/// emitting has to agree with.
+fn pointee(e: &Emit, owner: &str) -> String {
+    let points_at = referent_name(owner);
+    if points_at.len() > 0 {
+        return points_at;
+    }
+    if owner.same("ptr") {
+        return e.self_ty.to_string();
+    }
+    owner.to_string()
+}
+
+/// The receiver a call is given, lowered where it was waiting.
+///
+/// A name was read when the type was; anything else is a place and is
+/// walked now, after the storage an aggregate answer needs has been taken.
+/// A receiver the method takes **by value** is then loaded out of wherever
+/// it turned out to be (Ch. 3 §2.2).
+fn receiver_at(
+    e: &mut Emit,
+    at: taddr,
+    recv: &ast::Expr,
+    held: &str,
+    by_value: &str,
+) -> String {
+    let mut out = held.to_string();
+    if at < 0 {
+        let found = place(e, recv);
+        if e.stuck {
+            return out;
+        }
+        out = found.text;
+    }
+    if by_value.len() > 0 {
+        return loaded(e, by_value, &out);
+    }
+    out
+}
+
+/// The value at an address, loaded, and the name it was given.
+fn loaded(e: &mut Emit, ty: &str, from: &str) -> String {
+    let held = fresh(e, "v");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&held);
+    line.push_str(" = load ");
+    let shown = tir_of(ty);
+    line.push_str(&shown);
+    line.push_str(" ");
+    line.push_str(from);
+    e.insts.push(line);
+    held
 }
 
 fn unknown_value() -> Value {
@@ -6071,7 +6618,8 @@ fn closure_call(e: &mut Emit, at: taddr, args: &Vec<ast::Expr>) -> Value {
     }
     let big = returned_aggregate(e, &full);
     if big.len() > 0 {
-        return aggregate_call(e, &full, &big, &slot, args);
+        let into = slot_for(e, "tmp", &big);
+        return aggregate_call(e, &full, &big, &into, &slot, args);
     }
     let mut texts: Vec<String> = Vec::new();
     let mut i: taddr = 0;
@@ -6116,11 +6664,11 @@ fn aggregate_call(
     e: &mut Emit,
     callee: &str,
     owner: &str,
+    held: &str,
     recv: &str,
     args: &Vec<ast::Expr>,
 ) -> Value {
     let skip: taddr = if recv.len() > 0 { 1 } else { 0 };
-    let held = slot_for(e, "tmp", owner);
     let mut texts: Vec<String> = Vec::new();
     let mut i: taddr = 0;
     while i < args.len() {
@@ -6138,7 +6686,7 @@ fn aggregate_call(
     line.push_str("(");
     // The storage first and the receiver after it: `%sret` is what the
     // function is for, and the receiver is its first ordinary argument.
-    line.push_str(&held);
+    line.push_str(held);
     if recv.len() > 0 {
         line.push_str(", ");
         line.push_str(recv);
@@ -6151,7 +6699,7 @@ fn aggregate_call(
     }
     line.push_str(")");
     e.insts.push(line);
-    Value { text: held, ty: owner.to_string() }
+    Value { text: held.to_string(), ty: owner.to_string() }
 }
 
 /// Ask for an instantiation, unless it has been asked for already. The list
