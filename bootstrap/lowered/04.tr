@@ -21,3 +21,57 @@ fn both(a: t27) -> t27 {
     }
     n
 }
+
+// Three shapes this file had never had, and every one of them is in the
+// first loop over text anybody writes (G9.98–G9.101).
+
+// An `if` that is a **statement**: no value, so no slot to join in and
+// nothing to load afterwards. The blocks are the same three all the same,
+// and an arm that has already left does not jump to the join as well.
+fn guard(a: t27) -> t27 {
+    if a < 0 {
+        return 0;
+    }
+    a + 1
+}
+
+// The same with an `else`, and one with neither arm leaving — so that what
+// is compared is the `br` at the end of each and not only the `ret`.
+fn either(a: t27) -> t27 {
+    let mut n = a;
+    if n > 0 {
+        n = n + 1;
+    } else {
+        n = n - 1;
+    }
+    if n > 100 {
+        n = 100;
+    }
+    n
+}
+
+// `n += 1` is `n = n + 1`: the same load, the same arithmetic, the same
+// store, which is why it is lowered by being written that way.
+fn stepped(a: t27) -> t27 {
+    let mut n = a;
+    n += 1;
+    n -= 2;
+    n *= 3;
+    let mut i = 0;
+    while i < 4 {
+        n += i;
+        i += 1;
+    }
+    n
+}
+
+// Two literals compared. A comparison answers `bool` whatever it compares,
+// so what is around it says nothing about how wide its operands are — and
+// `1 != 2` inside a condition had been comparing two *trits*, which is not
+// a width either literal fits (Ch. 0 §5.2).
+fn literals() -> t27 {
+    if 1 != 2 {
+        return 5;
+    }
+    if 7 > 3 { 1 } else { 0 }
+}

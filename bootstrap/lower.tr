@@ -1788,6 +1788,110 @@ fn branch_block(e: &mut Emit, b: &ast::Block, want: &str) -> Value {
     }
 }
 
+/// `if c { … } else { … }` where nothing wants its value (§5.3).
+///
+/// The blocks are the same three, in the same order, and what is missing is
+/// the slot: there is nothing to store and nothing to load back. An arm
+/// that has already left does not jump to the join as well, which is the
+/// whole of the difference a `return` inside one makes.
+fn if_statement(
+    e: &mut Emit,
+    c: &ast::Expr,
+    t: &ast::Block,
+    o: &Option<Box<ast::Expr>>,
+    ret: &str,
+) {
+    let cond = value(e, c, "t1");
+    if e.stuck {
+        return;
+    }
+    let then_at = label(e, "then");
+    let else_at = label(e, "else");
+    let join_at = label(e, "join");
+    let mut br: String = Vec::new();
+    br.push_str("    br2 ");
+    br.push_str(&cond.text);
+    br.push_str(", ");
+    br.push_str(&then_at);
+    br.push_str(", ");
+    br.push_str(&else_at);
+    e.insts.push(br);
+
+    start(e, &then_at);
+    statements(e, t, ret);
+    if e.stuck {
+        return;
+    }
+    if !e.done {
+        jump(e, &join_at);
+    }
+
+    start(e, &else_at);
+    match o {
+        Option::Some(x) => {
+            match x {
+                ast::Expr::Nested(b) => statements(e, &*b, ret),
+                // `else if` is a statement of the same shape one deeper.
+                ast::Expr::If(c2, t2, o2) => if_statement(e, c2, t2, o2, ret),
+                _ => {
+                    e.stuck = true;
+                }
+            }
+            if e.stuck {
+                return;
+            }
+        }
+        Option::None => {}
+    }
+    if !e.done {
+        jump(e, &join_at);
+    }
+
+    start(e, &join_at);
+}
+
+/// The statements of a block and nothing else.
+///
+/// What an `if` in statement position has in its arms, where `branch_block`
+/// wants a value. A tail here is an `if` being read for a value in a place
+/// that has none, and is refused rather than evaluated and dropped.
+fn statements(e: &mut Emit, b: &ast::Block, ret: &str) {
+    let mut i: taddr = 0;
+    while i < b.stmts.len() {
+        stmt(e, &b.stmts[i], ret);
+        i += 1;
+    }
+    match &b.tail {
+        Option::Some(x) => {
+            e.stuck = true;
+        }
+        Option::None => {}
+    }
+}
+
+/// The operation `x op= e` performs, or nothing for an operator that is not
+/// one of them.
+///
+/// Everything but the trailing `=`, and then only where that names one of
+/// Ch. 1's operations: `==` and `!=` are spelled the same way from here and
+/// are not assignments at all.
+fn compound(op: &str) -> String {
+    if op.len() < 2 || op[op.len() - 1] != '=' {
+        return "".to_string();
+    }
+    let mut out: String = Vec::new();
+    let mut i: taddr = 0;
+    while i < op.len() - 1 {
+        out.push(op[i]);
+        i += 1;
+    }
+    let held = arith(&out);
+    if held.same("?") {
+        return "".to_string();
+    }
+    out
+}
+
 /// Which variant an arm names, or −1.
 fn arm_variant(e: &Emit, which: taddr, arm: &ast::Arm) -> taddr {
     if arm.patterns.len() != 1 {
@@ -2349,6 +2453,15 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                     e.insts.push(br);
                     start(e, &done);
                 }
+                // `if c { … }` as a statement: the same three blocks a
+                // value's `if` has (§5.3) and no storage to join in, since
+                // a statement has no value to agree about. It is written
+                // here and not in `value` for the reason `while` is — an
+                // arm may `return`, and what this function answers with is
+                // a thing statements are handed and expressions are not.
+                ast::Expr::If(c, t, o) => {
+                    if_statement(e, c, t, o, ret);
+                }
                 // `return e;` as a statement is the whole of what follows.
                 ast::Expr::Return(v) => {
                     match v {
@@ -2537,16 +2650,26 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             if op.same("&&") || op.same("||") {
                 return short_circuit(e, op, a, b);
             }
-            let left = value(e, a, want);
-            let right = value(e, b, &left.ty);
-            if e.stuck {
-                return unknown_value();
-            }
             // A comparison is one `cmp`, which answers a trit, and then a
             // choice of what that trit means (Ch. 1 §4). `<=>` *is* the
             // trit and needs no choosing, which is the whole point of
             // having a three-way comparison at all.
             let arms = choice(op);
+            // And a comparison answers `bool` whatever it compares, so what
+            // is *around* it says nothing about how wide its operands are:
+            // a literal on either side is a word unless the other side says
+            // otherwise (Ch. 0 §5.2). Handing the want down made `1 != 2`
+            // inside an `if` a comparison of two trits.
+            let inner = if arms.len() > 0 || op.same("<=>") {
+                "".to_string()
+            } else {
+                want.to_string()
+            };
+            let left = value(e, a, &inner);
+            let right = value(e, b, &left.ty);
+            if e.stuck {
+                return unknown_value();
+            }
             if arms.len() > 0 || op.same("<=>") {
                 let ty = left.ty.to_string();
                 // `cmp` compares *scalars*. On a type the program defines,
@@ -2893,10 +3016,6 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             match_expr(e, scrutinee, arms, want, &none, "")
         }
         ast::Expr::Assign(op, target, v) => {
-            if !op.same("=") {
-                e.stuck = true;
-                return unknown_value();
-            }
             let name = match target {
                 ast::Expr::Name(n) => n.to_string(),
                 _ => {
@@ -2911,7 +3030,26 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             }
             let ty = e.locals[at].ty.to_string();
             let slot = e.locals[at].slot.to_string();
-            let val = value(e, v, &ty);
+            // `x += e` **is** `x = x + e`, and is lowered by being written
+            // that way: the same load of `x`, the same arithmetic, the same
+            // store back. Two lowerings would be two things to keep in step
+            // over an operator that is defined as the one it is spelled
+            // with (Ch. 0 §5.5).
+            let val = if op.same("=") {
+                value(e, v, &ty)
+            } else {
+                let base = compound(op);
+                if base.len() == 0 {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+                let held = ast::Expr::Binary(
+                    base,
+                    Box::new(ast::copy_expr(target)),
+                    Box::new(ast::copy_expr(v)),
+                );
+                value(e, &held, &ty)
+            };
             if e.stuck {
                 return unknown_value();
             }

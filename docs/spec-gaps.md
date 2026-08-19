@@ -2621,6 +2621,49 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.101 — a comparison was told how wide to be by what surrounded it.**
+
+`if 1 != 2 { … }` lowered to `cmp t1 const t1 1, const t1 2`. The `Binary`
+arm handed its `want` down to both operands, and inside a condition the want
+is `t1` — so two literals that Ch. 0 §5.2 makes words were compared as
+trits, and `const t1 2` is not a value one trit can hold. **Invalid TIR,
+emitted and reported as a success**, which is the worst of the classes this
+project keeps finding: not a refusal, not a wrong number, a module the
+verifier would throw out.
+
+A comparison answers `bool` whatever it compares, so what is around it says
+nothing about how wide its operands are. The want is dropped for the
+comparison operators and `<=>`, and the left operand tells the right — which
+is what was already happening on every path where the left was a name, and
+is why nothing had seen it. `bootstrap/lowered/` had no comparison of two
+literals in it anywhere.
+
+**G9.100 — an `if` in statement position was refused.**
+
+`if c { … }` with no value was not lowered at all: `value`'s `If` arm goes
+to `if_expr`, which asks each arm for a value, and a statement's arms have
+none. So the shape a `return` early in a function is written in — `if x { return false; }` — could not be lowered, which is most of what a guard
+clause is.
+
+It is written in `stmt` beside `while` and not in `value`, for `while`'s
+reason: an arm may `return`, and what this function answers with is a thing
+statements are handed and expressions are not. Passing it down through
+`value` would have made `return 1;` inside an arm a word wherever the
+function answers with a `t9`.
+
+The blocks are the same three as a value's and in the same order; what is
+missing is the slot. And an arm that has already left does not jump to the
+join as well, which is the whole of the difference a `return` makes.
+
+**G9.99 — `x += e` was refused.**
+
+`Assign` took `=` and nothing else, so `i += 1` — every counted loop in this
+compiler's own source — was not lowered. It **is** `i = i + 1`, and it is
+lowered by being written that way rather than by a second path: the same
+load, the same arithmetic, the same store. `bootstrap/lowered/` had a
+`while` in it and the loop counted with `i = i + 1`, which is not how anyone
+writes one.
+
 **G9.97 — an array had no layout in the second implementation.**
 
 `layout.tr` answered `an array is not laid out here` for every `[T; N]`, so
