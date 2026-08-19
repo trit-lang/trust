@@ -1,0 +1,63 @@
+// The heap, at its bottom: `Raw<T>` (Ch. 5 §2.7).
+//
+// `Raw` is the **compiler's** and not the library's, and for one reason: it
+// answers with a *pointer*, and this language has no way to write one. Which
+// is what lets everything above it be ordinary Trust — `Vec`, `Box` and
+// `String` are library code, and a second implementation compiles them
+// rather than reproducing them (docs/ddc.md §3.4).
+//
+// It is two words: where the room is, and how many positions it has. Nothing
+// says what is *in* those positions — a `Raw` does not know what it holds,
+// which is why its destructor frees the room and drops nothing.
+//
+// *`Raw::new()`* is no room at all, which is two zeroes. Which `T` it is of
+// is what the written type says, because nothing in the call does.
+//
+// *`Raw::alloc(n)`* is `n` times the size of a `T` — trapping on overflow,
+// because a count whose size in trytes is not a number has not asked for
+// anything — and then the target's `alloc`. The answer comes back as an
+// address and is compared against zero as a **number**, which is why it goes
+// through storage on the way: TIR has no other way to read one width as
+// another, and a null is the allocator saying no.
+//
+// *The destructor* is written out where the binding dies rather than called:
+// there is no `impl Drop for Raw` to call, because `Raw` is not a type the
+// library wrote. A `Raw` with no allocation frees nothing, which is what the
+// null test is for and what makes `Raw::new()` free.
+//
+// And two declarations, which is what a program that reaches the heap owes
+// its target (Ch. 5 §2.1). Both are written down and whichever nothing calls
+// is dropped, exactly as any other declaration is — `empty` below never
+// allocates, so a program that only called it would owe `free` and not
+// `alloc`.
+
+fn empty() -> taddr {
+    let r: Raw<t27> = Raw::new();
+    r.room()
+}
+
+// A word each, so the size the allocator is asked for is three times the
+// count and the alignment is three.
+fn words(n: taddr) -> taddr {
+    let r: Raw<t27> = Raw::alloc(n);
+    r.room()
+}
+
+// A tryte each, where the size is the count and the alignment is one — so
+// that what is passed to `alloc` is read off the element type and not
+// assumed.
+fn trytes(n: taddr) -> taddr {
+    let r: Raw<t9> = Raw::alloc(n);
+    r.room()
+}
+
+// Two of them alive at once, dropped innermost first.
+fn both(n: taddr) -> taddr {
+    let a: Raw<t9> = Raw::alloc(n);
+    let b: Raw<t27> = Raw::alloc(n);
+    a.room() + b.room()
+}
+
+fn main() -> t27 {
+    (empty() + words(4) + trytes(9) + both(2)) as t27
+}

@@ -2621,6 +2621,49 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.116 — `Raw<T>`, and the two declarations a program owes its target.**
+
+The bottom of the heap, and the one type in Ch. 5 §2 that is the compiler's
+rather than the library's — for one reason, which the chapter gives: it
+answers with a **pointer**, and this language has no way to write one. That
+is what lets everything above it be ordinary Trust, so a second
+implementation *compiles* `Vec`, `Box` and `String` rather than reproducing
+them (docs/ddc.md §3.4).
+
+It is two words — where the room is and how many positions it has — and it
+knows nothing about what is in them, which is why its destructor frees the
+room and drops nothing. Its name here is `raw.<T>` and what `T` was is
+recorded beside it in `instances`, because a mangled name cannot be read
+back (G9.59).
+
+Three things in it are worth writing down.
+
+*A pointer compared against zero goes through storage.* `alloc` answers with
+an address and the null test wants a number; TIR keeps the two apart and has
+no other way to read one width as another, so there is a store and a load
+between them. Both implementations emit exactly that, and it is the sort of
+thing only a character-for-character comparison would ever agree about.
+
+*The destructor is written out and not called.* There is no `impl Drop for
+Raw` to call. A `Raw` with no allocation frees nothing, which is what the
+null test is for and what makes `Raw::new()` free.
+
+*A `load ptr` is a `%p` and every other load is a `%v`.* The prefix says
+what a name is for, and getting it wrong was the one thing that differed on
+the first attempt.
+
+*And the two declarations.* `alloc` and `free` are written down by every
+module and whichever nothing calls is dropped, which is the rule every other
+declaration already follows — the reference sets a `needs_heap` flag and
+prunes, and pruning alone gives the same answer with no flag to keep right.
+
+Which turned up one thing that had been wrong since declarations existed: a
+module with no `main` roots at every function it *defines* (G9.7), and this
+had been rooting at globals and declarations too. A declaration's own header
+names it, so rooting at one keeps every one of them for ever. Nothing had
+noticed because the only declarations were `putchar` and `getchar`, and
+everything that had one called them.
+
 **G9.115 — `char::try_from`, and the arm that does not come back.**
 
 The one conversion *into* `char`, and the one thing in Ch. 5 §1 that cannot

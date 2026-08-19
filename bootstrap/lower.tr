@@ -449,6 +449,36 @@ pub fn written_element(t: &ast::Ty) -> String {
     name_head(t)
 }
 
+/// The name `Raw<T>` has here: `raw.<T>`.
+///
+/// `Raw` is the compiler's and not the library's, because it answers with a
+/// **pointer** and this language has no way to write one (Ch. 5 §2.7). It is
+/// two words — where the room is, and how many positions it has — and it is
+/// what everything that owns a heap allocation is made of.
+pub fn raw_name(elem: &str) -> String {
+    let mut out: String = Vec::new();
+    out.push_str("raw.");
+    out.push_str(elem);
+    out
+}
+
+/// Whether a name is a `Raw`'s. What is *in* it is read off `instances`,
+/// which is what a mangled name cannot be parsed back into.
+pub fn is_raw(name: &str) -> bool {
+    let head = "raw.";
+    if name.len() <= head.len() {
+        return false;
+    }
+    let mut i: taddr = 0;
+    while i < head.len() {
+        if name[i] != head[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 /// Whether a name is a tuple's.
 pub fn is_tuple(name: &str) -> bool {
     let head = "tuple.";
@@ -1328,6 +1358,170 @@ fn str_len(e: &mut Emit, slot: &str) -> Value {
     load.push_str(&src);
     e.insts.push(load);
     Value { text: v, ty: "taddr".to_string() }
+}
+
+/// `Raw::new()` — no room at all, which is two zeroes (Ch. 5 §2.7).
+///
+/// A `Raw` with no room has no allocation, and that is what its destructor
+/// asks about: a null first word is nothing to free.
+fn raw_new(e: &mut Emit, want: &str) -> Value {
+    if !is_raw(want) || def_at(&e.defs, want) < 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let held = slot_for(e, "tmp", want);
+    store_into(e, "taddr", "const t27 0", &held);
+    let where_ = offset_of(e, &held, 3);
+    store_into(e, "taddr", "const t27 0", &where_);
+    Value { text: held, ty: want.to_string() }
+}
+
+/// `Raw::alloc(n)` — room for `n`, or a fault where the target cannot give
+/// it (Ch. 5 §2.7).
+///
+/// `n` times the size of a `T` **traps** on overflow, and that is not the
+/// allocator failing: a count whose size in trytes is not a number has not
+/// asked for anything. The answer comes back as an address and is compared
+/// against zero as a *number*, which is why it goes through storage on the
+/// way — TIR has no other way to read one width as another (§3).
+fn raw_alloc(e: &mut Emit, want: &str, count: &ast::Expr) -> Value {
+    if !is_raw(want) || def_at(&e.defs, want) < 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let elem = raw_element(e, want);
+    if elem.len() == 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let self_ty = ast::Ty::Name(one_name(&elem));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return unknown_value();
+        }
+    };
+    let n = value(e, count, "taddr");
+    if e.stuck {
+        return unknown_value();
+    }
+    let bytes = fresh(e, "a");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&bytes);
+    line.push_str(" = mul.trap t27 ");
+    line.push_str(&n.text);
+    line.push_str(", const t27 ");
+    push_int(&mut line, l.size as t27);
+    e.insts.push(line);
+    let got = fresh(e, "raw");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&got);
+    line.push_str(" = call @alloc(");
+    line.push_str(&bytes);
+    line.push_str(", const t27 ");
+    push_int(&mut line, l.align as t27);
+    line.push_str(") -> ptr");
+    e.insts.push(line);
+    let held = as_number(e, &got);
+    let c = fresh(e, "c");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&c);
+    line.push_str(" = cmp t27 ");
+    line.push_str(&held);
+    line.push_str(", const t27 0");
+    e.insts.push(line);
+    let ok = label(e, "raw.ok");
+    let bad = label(e, "raw.no");
+    let join = label(e, "raw.join");
+    let room = slot_for(e, "tmp", want);
+    three_ways(e, &c, &bad, &bad, &ok);
+
+    start(e, &ok);
+    store_into(e, "taddr", &held, &room);
+    let where_ = offset_of(e, &room, 3);
+    store_into(e, "taddr", &n.text, &where_);
+    jump(e, &join);
+
+    start(e, &bad);
+    e.insts.push("    trap F_TRAP".to_string());
+    e.done = true;
+
+    start(e, &join);
+    Value { text: room, ty: want.to_string() }
+}
+
+/// An address read as a number, which is a store and a load: TIR keeps the
+/// two apart and a comparison against zero wants the number (TIR §3).
+fn as_number(e: &mut Emit, p: &str) -> String {
+    let cell = slot_for(e, "tmp", "taddr");
+    let mut line: String = Vec::new();
+    line.push_str("    store ptr ");
+    line.push_str(p);
+    line.push_str(", ");
+    line.push_str(&cell);
+    e.insts.push(line);
+    loaded(e, "taddr", &cell)
+}
+
+/// What a `Raw` frees when it dies: its room, and **nothing in it** — it
+/// does not know what it holds (Ch. 5 §2.7). A `Raw` with no allocation
+/// frees nothing, which is what the null test is for.
+fn drop_raw(e: &mut Emit, slot: &str, owner: &str) {
+    let elem = raw_element(e, owner);
+    if elem.len() == 0 {
+        e.stuck = true;
+        return;
+    }
+    let self_ty = ast::Ty::Name(one_name(&elem));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return;
+        }
+    };
+    let where_ = offset_of(e, slot, 3);
+    let room = loaded(e, "taddr", &where_);
+    let bytes = fresh(e, "a");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&bytes);
+    line.push_str(" = mul.trap t27 ");
+    line.push_str(&room);
+    line.push_str(", const t27 ");
+    push_int(&mut line, l.size as t27);
+    e.insts.push(line);
+    let at = loaded(e, "ptr", slot);
+    let yes = label(e, "free.yes");
+    let no = label(e, "free.no");
+    let held = as_number(e, &at);
+    let c = fresh(e, "c");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&c);
+    line.push_str(" = cmp t27 ");
+    line.push_str(&held);
+    line.push_str(", const t27 0");
+    e.insts.push(line);
+    three_ways(e, &c, &no, &no, &yes);
+
+    start(e, &yes);
+    let mut line: String = Vec::new();
+    line.push_str("    call @free(");
+    line.push_str(&at);
+    line.push_str(", ");
+    line.push_str(&bytes);
+    line.push_str(", const t27 ");
+    push_int(&mut line, l.align as t27);
+    line.push_str(")");
+    e.insts.push(line);
+    jump(e, &no);
+
+    start(e, &no);
 }
 
 /// `char::try_from(x)`: `Some(x)` where `x` is a Unicode scalar value.
@@ -2798,11 +2992,22 @@ fn drop_all(e: &mut Emit) {
     let mut i = e.owned.len();
     while i > 0 {
         i -= 1;
+        let owner = e.owned[i].ty.to_string();
+        let slot = e.owned[i].slot.to_string();
+        // A `Raw`'s destructor is the compiler's and is written out here
+        // rather than called: there is no `impl Drop for Raw` to call.
+        if is_raw(&owner) {
+            drop_raw(e, &slot, &owner);
+            if e.stuck {
+                return;
+            }
+            continue;
+        }
         let mut line: String = Vec::new();
         line.push_str("    call @drop.");
-        line.push_str(&e.owned[i].ty);
+        line.push_str(&owner);
         line.push_str("(");
-        line.push_str(&e.owned[i].slot);
+        line.push_str(&slot);
         line.push_str(")");
         e.insts.push(line);
     }
@@ -3171,7 +3376,10 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
             }
             let which = def_at(&e.defs, &val.ty);
             if which >= 0 {
-                let owns = holds_name(&e.drops, &val.ty);
+                // A `Raw` owns its room and frees it, and there is no
+                // `impl Drop` anywhere saying so — it is the compiler's
+                // (Ch. 5 §2.7).
+                let owns = holds_name(&e.drops, &val.ty) || is_raw(&val.ty);
                 // Somebody else's storage is **copied** out of: `let q = p`
                 // leaves `p` naming what it named, so `q` is storage of its
                 // own and the fields cross one at a time (Ch. 3 §1.1).
@@ -3843,14 +4051,27 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             Value { text: slot, ty: name }
         }
         ast::Expr::Aggregate(path, fields) => {
+            // `Raw::new()` and `Raw::alloc(n)` — room, and none (Ch. 5
+            // §2.7). Which `T` this is is what the context says, because
+            // nothing in the call does.
+            let called = variant_of(path);
+            let head = type_path(path);
+            if head.same("Raw") {
+                if called.same("new") && fields.len() == 0 {
+                    return raw_new(e, want);
+                }
+                if called.same("alloc") && fields.len() == 1 {
+                    return raw_alloc(e, want, &fields[0].value);
+                }
+                e.stuck = true;
+                return unknown_value();
+            }
             // `char::try_from(x)` — the one conversion *into* `char`, and
             // the one thing in Ch. 5 §1 that cannot be written in this
             // language: every other library function there is ordinary
             // Trust, and this one has to make a `char` out of a word, which
             // is exactly what no `as` does (Ch. 5 §1.2). It is written like
             // a variant and told apart by what the names are.
-            let head = type_path(path);
-            let called = variant_of(path);
             if head.same("char") && called.same("try_from") && fields.len() == 1 {
                 return char_try_from(e, &fields[0].value);
             }
@@ -4040,6 +4261,21 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                     return unknown_value();
                 }
                 return dyn_call(e, &owner, &named, &slot, name, args);
+            }
+            // `r.room()` — how many positions there are, which is the
+            // second of a `Raw`'s two words (Ch. 5 §2.7).
+            if is_raw(&owner) {
+                slot = receiver_at(e, at, recv, &slot, "");
+                if e.stuck {
+                    return unknown_value();
+                }
+                if !name.same("room") || args.len() > 0 {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+                let where_ = offset_of(e, &slot, 3);
+                let got = loaded(e, "taddr", &where_);
+                return Value { text: got, ty: "taddr".to_string() };
             }
             // The other fat reference answers one of its methods out of
             // itself: `s.len()` is the second of the two words and no call
@@ -5911,6 +6147,15 @@ fn nominal(e: &mut Emit, t: &ast::Ty) -> String {
         ast::Ty::SelfTy => e.self_ty.to_string(),
         ast::Ty::App(segments, args) => {
             let head = joined(segments);
+            // `Raw<T>` is the compiler's, so there is no family to look up
+            // (Ch. 5 §2.7).
+            if head.same("Raw") && args.len() == 1 {
+                let inner = nominal(e, &args[0]);
+                if inner.len() == 0 {
+                    return "".to_string();
+                }
+                return raw_def(e, &inner);
+            }
             let mut key: Vec<String> = Vec::new();
             let mut i: taddr = 0;
             while i < args.len() {
@@ -5989,6 +6234,59 @@ fn array_def(e: &mut Emit, elem: &str, n: taddr) -> String {
         discriminants: Vec::new(),
     });
     full
+}
+
+/// The definition `Raw<T>` has, made if it is not there already.
+///
+/// Two words, both counted as addresses: what is at the first is a pointer
+/// where it is read as one and a number where it is compared against zero,
+/// and which of those it is is the *operation*'s business rather than the
+/// type's. What `T` was is recorded beside it, because `raw.t27` cannot be
+/// read back into `Raw` and `t27` any more than `Holder.Pair.t27` can.
+fn raw_def(e: &mut Emit, elem: &str) -> String {
+    let full = raw_name(elem);
+    if def_at(&e.defs, &full) >= 0 {
+        return full;
+    }
+    if elem.len() == 0 {
+        return "".to_string();
+    }
+    let mut fields: Vec<ast::Ty> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    fields.push(ast::Ty::Name(one_name("taddr")));
+    names.push("data".to_string());
+    fields.push(ast::Ty::Name(one_name("taddr")));
+    names.push("room".to_string());
+    e.defs.push(layout::Def {
+        name: full.to_string(),
+        is_enum: false,
+        linear: true,
+        fields: fields,
+        field_names: names,
+        counts: Vec::new(),
+        discriminants: Vec::new(),
+    });
+    let mut key: Vec<String> = Vec::new();
+    key.push(elem.to_string());
+    e.instances.push(Inst {
+        full: full.to_string(),
+        base: "Raw".to_string(),
+        key: key,
+    });
+    full
+}
+
+/// What one `Raw` position holds, by name — read off `instances` and not
+/// off the definition, whose fields are two addresses whatever `T` is.
+fn raw_element(e: &Emit, name: &str) -> String {
+    let at = inst_at(e, name);
+    if at < 0 {
+        return "".to_string();
+    }
+    if e.instances[at].key.len() != 1 {
+        return "".to_string();
+    }
+    e.instances[at].key[0].to_string()
 }
 
 /// The definition a tuple type has, made if it is not there already.
@@ -6508,13 +6806,22 @@ fn receiver_at(
 }
 
 /// The value at an address, loaded, and the name it was given.
+///
+/// An address loaded out of storage is a `%p` and everything else is a
+/// `%v` — the prefix says what a name is for, and TIR's text is what the
+/// two implementations agree about.
 fn loaded(e: &mut Emit, ty: &str, from: &str) -> String {
-    let held = fresh(e, "v");
+    let shown = tir_of(ty);
+    let prefix = if shown.same("ptr") {
+        "p"
+    } else {
+        "v"
+    };
+    let held = fresh(e, prefix);
     let mut line: String = Vec::new();
     line.push_str("    ");
     line.push_str(&held);
     line.push_str(" = load ");
-    let shown = tir_of(ty);
     line.push_str(&shown);
     line.push_str(" ");
     line.push_str(from);
@@ -7329,6 +7636,25 @@ fn declaration(f: &ast::Fn) -> String {
     out
 }
 
+/// The allocator, which every program that reaches the heap owes its target
+/// (Ch. 5 §2.1).
+///
+/// It is TIR rather than Trust because it answers with a **pointer**, and
+/// this language has no way to name one — which is why `Raw` is the
+/// compiler's and not the library's. Both are written down and whichever
+/// nothing calls is dropped, which is the rule every other declaration
+/// already follows (G9.95).
+fn heap_declarations(out: &mut Vec<Made>) {
+    out.push(Made {
+        name: "alloc".to_string(),
+        text: "fn @alloc(%size: t27, %align: t27) -> ptr\n".to_string(),
+    });
+    out.push(Made {
+        name: "free".to_string(),
+        text: "fn @free(%at: ptr, %size: t27, %align: t27)\n".to_string(),
+    });
+}
+
 /// Every declaration the file makes, in the order they were written.
 fn declarations(items: &Vec<ast::Item>) -> Vec<Made> {
     let mut out: Vec<Made> = Vec::new();
@@ -7353,6 +7679,7 @@ fn declarations(items: &Vec<ast::Item>) -> Vec<Made> {
         }
         i += 1;
     }
+    heap_declarations(&mut out);
     out
 }
 
@@ -7604,9 +7931,16 @@ pub fn reachable(made: &Vec<Made>) -> Vec<String> {
     if has_main {
         queue.push("main".to_string());
     } else {
+        // Every function the module *defines*, and only a function: a
+        // global is data and a declaration is a promise about something
+        // this did not compile, and neither is a thing a program is for.
+        // Rooting at a declaration would keep every one of them, since its
+        // own header names it.
         let mut k: taddr = 0;
         while k < made.len() {
-            queue.push(made[k].name.to_string());
+            if is_function(&made[k].text) {
+                queue.push(made[k].name.to_string());
+            }
             k += 1;
         }
     }
@@ -7629,6 +7963,20 @@ pub fn reachable(made: &Vec<Made>) -> Vec<String> {
             Option::None => return live,
         }
     }
+}
+
+/// Whether what was made is a function, as against a global — which is
+/// data — or a declaration, which is a promise about something this did not
+/// compile. A definition's header ends in `{` and nothing else here has one.
+fn is_function(text: &str) -> bool {
+    let mut i: taddr = 0;
+    while i < text.len() {
+        if text[i] == '{' {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Which emitted function is called that, or −1.
