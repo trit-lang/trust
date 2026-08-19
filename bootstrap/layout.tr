@@ -265,7 +265,23 @@ pub fn of(defs: &Vec<Def>, t: &Ty, depth: taddr) -> Result<Layout, String> {
         Ty::ImplFn(kind, args, ret) => {
             Result::Err("a closure type is not laid out here".to_string())
         }
-        Ty::Tuple(args) => Result::Err("a tuple is not laid out here".to_string()),
+        // A tuple is a product with no name, and `repr(lang)` is the only
+        // kind there is (§2): its layout is a struct's with the same fields
+        // — permuted by alignment like any other — and it is **unspecified**
+        // for exactly that reason. Code that needs a fixed order names its
+        // fields, which is to say it writes a struct.
+        Ty::Tuple(args) => {
+            let mut parts: Vec<Layout> = Vec::new();
+            let mut i: taddr = 0;
+            while i < args.len() {
+                match of(defs, &args[i], depth + 1) {
+                    Result::Ok(x) => parts.push(x),
+                    Result::Err(why) => return Result::Err(why),
+                }
+                i += 1;
+            }
+            Result::Ok(product(&parts, false))
+        }
         // `[T; N]` is the one composite whose layout no `repr` may choose
         // (§3): N elements at `i × size_of::<T>()`, with no padding between
         // them and none at the end, because an element's size is already a

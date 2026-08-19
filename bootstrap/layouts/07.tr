@@ -1,0 +1,52 @@
+// A tuple, which is the one product with no name and no `repr` to choose
+// (Ch. 2 §3).
+//
+// Its layout is a `repr(lang)` struct's with the same fields and nothing
+// else: permuted by alignment, and **unspecified** for exactly that reason.
+// Code that needs a fixed order writes a struct, which is why there is no
+// `repr(linear)` tuple to write.
+//
+// Which means the interesting cases are the ones where the permutation is
+// visible — a narrow element before a wide one, so that what is written
+// first is not what is at offset zero — and the niches, since a tuple lends
+// an enclosing enum the same spare values a struct does.
+
+struct P { a: t27, b: t9 }
+
+// A word and then a tryte: nothing moves, and the size is the padding the
+// alignment asks for.
+struct Wide { x: (t27, t9) }
+
+// The same two the other way round. The permutation puts the word first, so
+// what was **written** first is at offset three — which is the whole of what
+// "unspecified" buys and the whole of what it costs.
+struct Narrow { x: (t9, t27) }
+
+// Three of the same, where there is nothing to permute.
+struct Even { x: (t9, t9, t9) }
+
+// One element, which is a tuple and not the element: `(t27,)` is a product
+// of one and `(t27)` would be a parenthesized type.
+struct Single { x: (t27,) }
+
+// An element that is itself laid out, and one that is itself a tuple.
+struct Held { x: (P, t9) }
+
+struct Inner { x: ((t9, t9), t27) }
+
+// And the niches, which is where a layout is visible without being printed.
+
+// `bool` leaves a tryte's patterns spare, so `None` takes one of them — at
+// the **permuted** offset, which is three and not zero.
+enum MaybePair { Some((bool, t27)), None }
+
+// `t9` uses every pattern of its tryte, so a tuple of them lends nothing and
+// the tag is stored.
+enum MaybeBytes { Some((t9, t9)), None }
+
+// A reference is never null, which a tuple passes on like any other field.
+struct Ref { p: &t27 }
+
+enum MaybeRef { Some((Ref, t9)), None }
+
+fn main() -> t27 { 0 }

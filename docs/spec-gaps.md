@@ -2621,6 +2621,22 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.109 — a tuple had no layout in the second implementation.**
+
+The same hole arrays had (G9.97), one type over: `layout.tr` answered `a
+tuple is not laid out here`, and `bootstrap/layouts/` held six files with not
+one tuple in them. The seventh is tuples and nothing else, and it was red
+before the arm existed.
+
+There is nothing to it once it is asked: a tuple is a product with no name,
+`repr(lang)` is the only kind there is (Ch. 2 §2), and its layout is a
+struct's with the same fields — the same `product` the engine already had,
+with `linear` false. Which is why the interesting cases in the corpus are the
+ones where the permutation is *visible*: `(t9, t27)` puts the word first, so
+what was written first is at offset three. That is the whole of what
+"unspecified" buys and the whole of what it costs, and it is why an enum over
+`(bool, t27)` finds its niche at offset three rather than at zero.
+
 **G9.108 — `(T,)` was refused, and `let _` bound a name a program could
 write.**
 
