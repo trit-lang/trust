@@ -2621,6 +2621,48 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.96 — the second kind of fat reference: `&str`, and the first new state
+since the lowering started.**
+
+`str` is text of a length its own type does not say, so a reference to it is
+two words — where the characters are, and how many there are (Ch. 2 §4) —
+which is what `&dyn Trait` already is for the same reason. So most of this
+was `dyn Trait` under another name and cost almost nothing: one synthetic
+`layout::Def` of two fields, and one branch in the parameter loop, which is
+now one branch for *both* kinds because `fat_name` answers the question once.
+`s.len()` is not a call at all — it is where the second word is, and a load.
+
+The definition is called **`fat.str`** and not `str`, because `struct str`
+parses and a program may write it. `dyn.<Trait>` had no such problem: a trait
+named `dyn.Area` cannot be written either way.
+
+*What was new is a place to keep the strings.* Every earlier round left the
+emitter's state alone, because everything a function asked for could be read
+back out of the finished text: `@vt.Sq.Area` says which type and which trait
+in its own name, so `tables` recovers the list by reading it. **`@str.0` says
+nothing about what is in it.** Characters cannot be recovered from a name that
+does not carry them, so this is the first thing the lowering has had to
+*remember*: one list per module, in the order the literals were first seen,
+seeded into each function and handed back by the ones that were emitted —
+beside `jobs` and `closed`, which travel the same way and for the same reason.
+
+Which puts the numbering and the presence of a global on two different
+questions, visibly: a literal in a function nothing calls is still *numbered*,
+because numbering is what lowering did, and the global is still dropped,
+because surviving code is what keeps one (G9.95). `bootstrap/lowered/17.tr`
+has an `@str` whose number has no predecessor, and both implementations write
+it that way.
+
+One character is one word, so `héllo` is five characters and fifteen trytes
+and `len` counts characters, not bytes. The empty string is a global of no
+trytes at all — an address of storage that holds nothing, which is legal
+because the length beside it is zero.
+
+*Still refused, and refused rather than answered wrongly:* a **field** whose
+type is `&str` (the reference lays those two words inside the struct, which
+is a second thing and not this one), any method of `str` but `len`, and
+`&[T]`, which is the same shape again and the reason `fat_name` exists.
+
 **G9.95 — a global is neither a root nor a leaf.**
 
 `keep_reachable` rooted the walk at every global's initializer and then never

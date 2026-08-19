@@ -122,6 +122,12 @@ pub struct Closed {
 pub struct Work {
     pub jobs: Vec<Job>,
     pub closed: Vec<Closed>,
+    /// The string literals the module holds, in the order they were first
+    /// seen, and the characters of each. Unlike everything else a function
+    /// leaves behind, this cannot be recovered from the finished text:
+    /// `@vt.Sq.Area` says which type and which trait in its own name, and
+    /// `@str.0` says nothing at all about what is in it.
+    pub strings: Vec<String>,
 }
 
 /// What a function is lowered against: everything about the file that is not
@@ -228,6 +234,11 @@ pub struct Emit {
     /// it: by the time one finishes, its name is in `defs`, and that is
     /// what every later ask finds first.
     pub making: Vec<String>,
+    /// Every string literal the module has written down so far, the ones
+    /// this function found last. It comes in from the module and goes back
+    /// out to it, because two functions writing the same characters write
+    /// the same global (Ch. 2 §4).
+    pub strings: Vec<String>,
 }
 
 /// A value in TIR: either a name or a constant, as it is written.
@@ -318,6 +329,61 @@ pub fn vtable_name(trait_name: &str) -> String {
     out.push_str("vtable.");
     out.push_str(trait_name);
     out
+}
+
+/// The name the two words a `&str` is have: `fat.str`.
+///
+/// Text whose length its own type does not say is not one word but two —
+/// where the characters are, and how many of them there are (Ch. 2 §4) — and
+/// TIR has no name for a pair. So it needs a definition nobody wrote, of the
+/// same shape and for the same reason `dyn.<Trait>` needs one. The `.` is
+/// what keeps it out of the way: a program may still call a type of its own
+/// `str`, and nothing it can write is spelled like this.
+pub fn str_name() -> String {
+    "fat.str".to_string()
+}
+
+/// The name the global holding the nth string literal has.
+pub fn string_symbol(n: taddr) -> String {
+    let mut out: String = Vec::new();
+    out.push_str("str.");
+    push_int(&mut out, n as t27);
+    out
+}
+
+/// Whether a written type is `str`.
+pub fn is_str(t: &ast::Ty) -> bool {
+    match t {
+        ast::Ty::Name(segments) => {
+            let n = joined(segments);
+            n.same("str")
+        }
+        _ => false,
+    }
+}
+
+/// The definition a *reference* to this written type is, or nothing where a
+/// reference to it is one word and TIR can say so itself.
+///
+/// Both kinds are two words and neither pair is a type TIR names:
+/// `&dyn Trait` carries the table beside the address and `&str` carries the
+/// length. Everything that reads one reads the other the same way, which is
+/// what one name for the question is for.
+pub fn fat_name(t: &ast::Ty) -> String {
+    let object = dyn_referent(t);
+    if object.len() > 0 {
+        return dyn_name(&object);
+    }
+    match t {
+        ast::Ty::Ref(held, m) => {
+            if is_str(&*held) {
+                str_name()
+            } else {
+                "".to_string()
+            }
+        }
+        _ => "".to_string(),
+    }
 }
 
 /// Which trait a `dyn.<Trait>` is of, or nothing for a name that is not one.
@@ -655,6 +721,7 @@ pub fn function(
         closed: cx.closed,
         closures_made: 0,
         owner_name: "".to_string(),
+        strings: ast::copy_names(&work.strings),
     };
     // What a closure found before this was lowered is a type like any
     // other: its storage is a field per capture, holding an address.
@@ -756,16 +823,16 @@ pub fn function(
             i += 1;
             continue;
         }
-        // `&dyn Trait` is not one word but two: the data address and the
-        // table of the type's methods (Ch. 4 §3.1). It arrives as a pointer
-        // to those two words and is copied into storage of its own exactly
-        // as any two-field aggregate is — which is the whole of what the
-        // synthetic `dyn.<Trait>` is a definition for.
+        // A **fat** reference is not one word but two: `&dyn Trait` carries
+        // the table of its type's methods beside the address (Ch. 4 §3.1)
+        // and `&str` carries the length (Ch. 2 §4). Either arrives as a
+        // pointer to those two words and is copied into storage of its own
+        // exactly as any two-field aggregate is — which is the whole of what
+        // the synthetic `dyn.<Trait>` and `fat.str` are definitions for.
         if ty.same("?") {
             let held = subst_ty(&mut e, &tyvars, &key, &written_param);
-            let object = dyn_referent(&held);
-            if object.len() > 0 {
-                let named = dyn_name(&object);
+            let named = fat_name(&held);
+            if named.len() > 0 {
                 let at = def_at(&e.defs, &named);
                 if at < 0 {
                     return false;
@@ -884,6 +951,11 @@ pub fn function(
     while c < e.closed.len() {
         work.closed.push(one_closed(&e.closed[c]));
         c += 1;
+    }
+    let mut t = work.strings.len();
+    while t < e.strings.len() {
+        work.strings.push(e.strings[t].to_string());
+        t += 1;
     }
 
     start(&mut e, "^");
@@ -1010,6 +1082,115 @@ fn copy_in(e: &mut Emit, name: &str, at: taddr) -> bool {
     from.push_str(name);
     let owner = e.defs[at].name.to_string();
     copy_fields(e, &from, &slot, &owner)
+}
+
+/// Which global holds these characters, adding one where none does.
+///
+/// Numbered by when the literal was first *seen*, which is the order the
+/// functions are emitted in — so two implementations that agree about that
+/// order agree about the names, and equality is on the text.
+fn interned(e: &mut Emit, text: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < e.strings.len() {
+        if e.strings[i].same(text) {
+            return i;
+        }
+        i += 1;
+    }
+    let n = e.strings.len() as taddr;
+    e.strings.push(text.to_string());
+    n
+}
+
+/// A string literal: the two words a `&str` is, in a temporary of its own.
+///
+/// The characters go in a global and what is built here is the reference to
+/// it — the address, and the count. Which is `coerce`'s shape with a number
+/// where the table would be, because a fat reference is a fat reference.
+fn text_value(e: &mut Emit, text: &str) -> Value {
+    let named = str_name();
+    let self_ty = ast::Ty::Name(one_name(&named));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return unknown_value();
+        }
+    };
+    let which = interned(e, text);
+    let held = fresh(e, "tmp.slot");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&held);
+    line.push_str(" = slot tryte[");
+    push_int(&mut line, l.size as t27);
+    line.push_str("]");
+    e.slots.push(line);
+    let mut global: String = Vec::new();
+    global.push_str("@");
+    let symbol = string_symbol(which);
+    global.push_str(&symbol);
+    store_into(e, "ptr", &global, &held);
+    let where_ = offset_of(e, &held, l.offsets[1]);
+    let mut count: String = Vec::new();
+    count.push_str("const t27 ");
+    push_int(&mut count, text.len() as t27);
+    store_into(e, "t27", &count, &where_);
+    Value { text: held, ty: named }
+}
+
+/// A method on a `&str`.
+///
+/// There is one, and it is not a call: how many characters there are is the
+/// second word of the reference itself, so `s.len()` is where that word is
+/// and a load from there. Anything else a `str` might answer needs storage
+/// this cannot lay hands on, and is refused.
+fn str_method(e: &mut Emit, slot: &str, name: &str, args: &Vec<ast::Expr>) -> Value {
+    if !name.same("len") || args.len() > 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let named = str_name();
+    let self_ty = ast::Ty::Name(one_name(&named));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return unknown_value();
+        }
+    };
+    let src = offset_of(e, slot, l.offsets[1]);
+    let v = fresh(e, "v");
+    let mut load: String = Vec::new();
+    load.push_str("    ");
+    load.push_str(&v);
+    load.push_str(" = load t27 ");
+    load.push_str(&src);
+    e.insts.push(load);
+    Value { text: v, ty: "taddr".to_string() }
+}
+
+/// The global one string literal is written as: one word per character,
+/// which is three trytes each and the reason `len` counts characters.
+fn one_string(text: &str, n: taddr) -> String {
+    let mut out: String = Vec::new();
+    out.push_str("global @");
+    let symbol = string_symbol(n);
+    out.push_str(&symbol);
+    out.push_str(" : tryte[");
+    push_int(&mut out, 3 * (text.len() as t27));
+    out.push_str("] = [");
+    let mut i: taddr = 0;
+    while i < text.len() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        push_int(&mut out, text[i] as t27);
+        out.push_str(", 0, 0");
+        i += 1;
+    }
+    out.push_str("]\n");
+    out
 }
 
 fn one_name(name: &str) -> Vec<String> {
@@ -1852,6 +2033,7 @@ pub fn destructor(
     f: &ast::Fn,
     owner: &str,
     cx: Cx,
+    work: &mut Work,
     out: &mut String,
 ) -> bool {
     let mut e = Emit {
@@ -1883,6 +2065,7 @@ pub fn destructor(
         closed: Vec::new(),
         closures_made: 0,
         owner_name: "".to_string(),
+        strings: ast::copy_names(&work.strings),
     };
     settle(&mut e);
     let at = def_at(&e.defs, owner);
@@ -1955,6 +2138,15 @@ pub fn destructor(
     e.insts.push("    ret".to_string());
     if e.stuck {
         return false;
+    }
+    // A string a destructor writes down is a string like any other. Being
+    // reached by dropping rather than by calling is what stops it asking
+    // for an *instantiation* above; a literal is not one, and a global it
+    // named and nobody defined would be a module that is not a program.
+    let mut t = work.strings.len();
+    while t < e.strings.len() {
+        work.strings.push(e.strings[t].to_string());
+        t += 1;
     }
 
     start(&mut e, "^");
@@ -2691,6 +2883,9 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             }
             Value { text: held, ty: path.to_string() }
         }
+        // `"abc"` — the characters go in a global and the two words that
+        // reach them go in a temporary here (Ch. 2 §4).
+        ast::Expr::Str(text) => text_value(e, text),
         // `match e { … }` — the discriminant once, then a three-way test per
         // arm, and a slot the arms agree to leave the answer in (§5.4).
         ast::Expr::Match(scrutinee, arms) => {
@@ -2777,6 +2972,12 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             let named = dyn_trait(&owner);
             if named.len() > 0 {
                 return dyn_call(e, &owner, &named, &slot, name, args);
+            }
+            // The other fat reference answers its one method out of itself:
+            // `s.len()` is the second of the two words and no call at all.
+            let text = str_name();
+            if owner.same(&text) {
+                return str_method(e, &slot, name, args);
             }
             let mut full: String = Vec::new();
             full.push_str(&owner);
@@ -2998,6 +3199,10 @@ fn place(e: &mut Emit, x: &ast::Expr) -> Value {
             let src = offset_of(e, &held.text, l.offsets[index]);
             Value { text: src, ty: inner }
         }
+        // A literal has no place until it is given one, and giving it one is
+        // exactly what building the two words does. `"one".len()` is the
+        // whole of what needs this.
+        ast::Expr::Str(text) => text_value(e, text),
         _ => {
             e.stuck = true;
             unknown_value()
@@ -3166,6 +3371,27 @@ pub fn definitions(items: &Vec<ast::Item>) -> Vec<layout::Def> {
         }
         i += 1;
     }
+    // And one nobody wrote that is not per anything: what a `&str` is, which
+    // is the address of the characters and how many of them there are
+    // (Ch. 2 §4). It is a definition for the same reason the two below are —
+    // TIR has no name for a pair — and it is here whether or not the file
+    // mentions text, because nothing about it is read off the program.
+    let mut two: Vec<ast::Ty> = Vec::new();
+    let mut named: Vec<String> = Vec::new();
+    let held = ast::Ty::Name(one_name("char"));
+    two.push(ast::Ty::Ref(Box::new(held), false));
+    named.push("data".to_string());
+    two.push(ast::Ty::Name(one_name("taddr")));
+    named.push("len".to_string());
+    out.push(layout::Def {
+        name: str_name(),
+        is_enum: false,
+        linear: false,
+        fields: two,
+        field_names: named,
+        counts: Vec::new(),
+        discriminants: Vec::new(),
+    });
     // And two nobody wrote, per trait (Ch. 4 §3.1). `dyn.<Trait>` is what a
     // reference to a trait object *is* — the data address and the table's,
     // which is the storage a parameter is copied into and any two fields to
@@ -5334,7 +5560,11 @@ fn pending_at(jobs: &Vec<Job>, done: &Vec<String>) -> taddr {
 /// pruning while `bootstrap/program.tr` did was exactly that.
 pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
     let mut out: Vec<Made> = Vec::new();
-    let mut work = Work { jobs: Vec::new(), closed: Vec::new() };
+    let mut work = Work {
+        jobs: Vec::new(),
+        closed: Vec::new(),
+        strings: Vec::new(),
+    };
     // Ordinary functions first, then the impls, then the instantiations of
     // Ch. 4 §2.5 — a call is what asks for one, so they are known last.
     let mut k: taddr = 0;
@@ -5381,7 +5611,7 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
                     let made = if !plain_impl(gs) {
                         false
                     } else if named.same("Drop") {
-                        destructor(&fns[m], &owner, context(items), &mut text)
+                        destructor(&fns[m], &owner, context(items), &mut work, &mut text)
                     } else {
                         function(
                             &fns[m], context(items), owner.to_string(),
@@ -5476,6 +5706,18 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
     // because functions are emitted in source order. TIR prints globals
     // before functions, so they go to the front (Ch. 4 §3.3).
     let mut all = tables(items, &out);
+    // And then the strings, which is the order TIR prints the two in. A
+    // table is read back out of the finished text because its name says
+    // which type and which trait; a string's does not, so this is the one
+    // thing the emitters had to be asked to remember.
+    let mut z: taddr = 0;
+    while z < work.strings.len() {
+        all.push(Made {
+            name: string_symbol(z),
+            text: one_string(&work.strings[z], z),
+        });
+        z += 1;
+    }
     let mut t: taddr = 0;
     while t < out.len() {
         all.push(Made {

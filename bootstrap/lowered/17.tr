@@ -1,0 +1,66 @@
+// The second kind of fat reference: `&str` (Ch. 2 §4).
+//
+// `str` is text of a length its type does not say, so a reference to it is
+// two words — where the characters are, and how many there are — exactly as
+// a reference to a trait object is two words for the same reason
+// (`lowered/16.tr`). Which means most of this is `dyn Trait` with the second
+// word holding a number instead of a table:
+//
+// *The parameter.* `&str` is `%s: ptr` in the signature and `slot tryte[6]`
+// inside, copied in field by field as any two-field aggregate is.
+//
+// *The length.* `s.len()` is not a call at all. How many characters there
+// are is the second word of the reference, so what is emitted is an offset
+// and a load — the same instructions a field read is.
+//
+// And one that is new, and is the reason this needed state where `dyn` did
+// not. A table could be read back out of the finished text, because
+// `@vt.Sq.Area` says which type and which trait in its own name. **A string
+// cannot.** `@str.0` does not carry its characters, so what the globals are
+// has to be *remembered* while the functions are lowered rather than
+// recovered afterwards — one list, in the order the literals were first
+// seen, shared by every function of the module.
+//
+// One character is one word and not one byte, so `héllo` is five characters
+// and fifteen trytes, and `len` counts characters.
+
+fn size(s: &str) -> taddr { s.len() }
+
+// A fat reference passed onwards is the same two words again, and the
+// second function's parameter is the first's slot.
+fn through(s: &str) -> taddr { size(s) + 1 }
+
+// Two at once, so that neither can be mistaken for a receiver.
+fn wider(a: &str, b: &str) -> taddr { a.len() + b.len() }
+
+// A literal with no name: it is built into a temporary and read out of it,
+// which is what having no place and needing one looks like.
+fn direct() -> taddr { "one".len() }
+
+// A binding takes the temporary over rather than copying out of it — the
+// literal was built for this `let` and nothing else names it (G9.93). The
+// slot is numbered *after* the value that fills it is ready, which is why
+// `%s.slot.3` holds what `%p.2` wrote into.
+fn named() -> taddr { let s = "shared"; s.len() }
+
+// A literal nothing reaches. The characters are still numbered, because
+// numbering is what lowering did; the global is still dropped, because
+// surviving code is what keeps one (G9.95). So the module below has an
+// `@str` whose number has no predecessor.
+fn unreached() -> taddr { "gone".len() }
+
+fn main() -> taddr {
+    // The same characters twice is one global, and `named` above asked for
+    // these ones first — so the number is the order the literals were first
+    // *seen* and not the order they are written here.
+    let mine = "shared";
+    size("abc") + through("de") + wider("abc", mine)
+        // Nothing at all, which is a global of no trytes and a length of
+        // zero — the one case where the address is of storage that holds
+        // nothing.
+        + size("")
+        // What the lexer already turned back into characters, and text
+        // above the basic plane, which is one word each like every other.
+        + size("\n\t\\") + size("héllo")
+        + direct() + named() + size(mine)
+}
