@@ -2621,6 +2621,32 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.117 — a `Raw`'s positions, and a field whose type is an application.**
+
+`at`, `at_mut`, `read` and `write` are one question — where the `i`th
+position is — and then a load, a store, or the address itself, which is what
+a reference *is* (Ch. 3 §2.1). The question is **checked**, because there is
+no reason for this to be the one index that is not (Ch. 2 §3, Ch. 5 §2.7):
+the room is right there, in the word beside the address, so at the room or
+above it is a fault and so is below zero. Two tests, two traps, and four
+labels — three of them made before the first comparison and the fourth after
+the second, which is what decides their numbers.
+
+One thing had to move first, and it is the general half of this. `place` and
+`guess_ty` asked `name_head` what a field's type was called, which answers
+for a name and not for an **application** — and `self.held` is a `Raw<T>`.
+They ask `nominal` now, which is the same question one level up: an
+application is a type once it is instantiated (Ch. 4 §2.5), and a field
+written `Raw<T>` or `Pair<t27>` has a name only after that. Every struct goes
+through that path, so the whole corpus was run before and after.
+
+*What is still in the way of `Vec`* is one thing and it is not small:
+**drop glue**. `drop.Holder.t27` is in the reference's output for a
+hand-written `struct Holder<T> { held: Raw<T>, n: taddr }` that has no `Drop`
+impl at all — a type that *holds* something with a destructor gets one
+synthesized, per instantiation. `Vec` needs that, and it needs it before any
+of its methods can be reached.
+
 **G9.116 — `Raw<T>`, and the two declarations a program owes its target.**
 
 The bottom of the heap, and the one type in Ch. 5 §2 that is the compiler's

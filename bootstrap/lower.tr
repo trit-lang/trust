@@ -1360,6 +1360,155 @@ fn str_len(e: &mut Emit, slot: &str) -> Value {
     Value { text: v, ty: "taddr".to_string() }
 }
 
+/// One of a `Raw`'s methods (Ch. 5 §2.7).
+///
+/// `room` is the second of its two words. The other four are one question —
+/// where the `i`th position is — and then a load, a store, or the address
+/// itself.
+fn raw_method(
+    e: &mut Emit,
+    slot: &str,
+    owner: &str,
+    name: &str,
+    args: &Vec<ast::Expr>,
+) -> Value {
+    if name.same("room") {
+        if args.len() > 0 {
+            e.stuck = true;
+            return unknown_value();
+        }
+        let where_ = offset_of(e, slot, 3);
+        let got = loaded(e, "taddr", &where_);
+        return Value { text: got, ty: "taddr".to_string() };
+    }
+    let elem = raw_element(e, owner);
+    if elem.len() == 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    // What one position holds, which is a value only where TIR has a name
+    // for it. An aggregate is copied and not loaded, and this does not do
+    // that yet — so it is refused rather than read as something else.
+    let wide = tir_of(&elem);
+    let scalar = scalar_named(&elem);
+    let reads = name.same("read") || name.same("write");
+    if reads && scalar.same("?") {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let wants: taddr = if name.same("write") {
+        2
+    } else {
+        1
+    };
+    if args.len() != wants {
+        e.stuck = true;
+        return unknown_value();
+    }
+    if !name.same("at") && !name.same("at_mut") && !reads {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let i = value(e, &args[0], "taddr");
+    if e.stuck {
+        return unknown_value();
+    }
+    let at = raw_position(e, slot, &elem, &i.text);
+    if e.stuck {
+        return unknown_value();
+    }
+    if name.same("write") {
+        let v = value(e, &args[1], &elem);
+        if e.stuck {
+            return unknown_value();
+        }
+        store_into(e, &elem, &v.text, &at);
+        return Value { text: "".to_string(), ty: "()".to_string() };
+    }
+    if name.same("read") {
+        let got = loaded(e, &elem, &at);
+        return Value { text: got, ty: elem };
+    }
+    // `at` and `at_mut` answer with the address itself, which is what a
+    // reference *is* (Ch. 3 §2.1).
+    let mut named: String = Vec::new();
+    named.push('&');
+    named.push_str(&elem);
+    Value { text: at, ty: named }
+}
+
+/// Where a `Raw`'s `i`th position is, checked against its room.
+///
+/// Checked because there is no reason for this to be the one index that is
+/// not (Ch. 2 §3, Ch. 5 §2.7) — the room is right there, in the word beside
+/// the address. Two tests and two faults: at the room or above it, and
+/// below zero.
+fn raw_position(e: &mut Emit, slot: &str, elem: &str, i: &str) -> String {
+    let self_ty = ast::Ty::Name(one_name(elem));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return "".to_string();
+        }
+    };
+    let where_ = offset_of(e, slot, 3);
+    let room = loaded(e, "taddr", &where_);
+    let bad = label(e, "ins.fault");
+    let lo = label(e, "ins.lo");
+    let ok = label(e, "ins.ok");
+    let c = fresh(e, "c");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&c);
+    line.push_str(" = cmp t27 ");
+    line.push_str(i);
+    line.push_str(", ");
+    line.push_str(&room);
+    e.insts.push(line);
+    three_ways(e, &c, &lo, &bad, &bad);
+    start(e, &bad);
+    e.insts.push("    trap F_TRAP".to_string());
+    e.done = true;
+    start(e, &lo);
+    let c = fresh(e, "c");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&c);
+    line.push_str(" = cmp t27 ");
+    line.push_str(i);
+    line.push_str(", const t27 0");
+    e.insts.push(line);
+    // The fourth label is made *after* the second comparison, which is what
+    // decides its number.
+    let neg = label(e, "ins.neg");
+    three_ways(e, &c, &neg, &ok, &ok);
+    start(e, &neg);
+    e.insts.push("    trap F_TRAP".to_string());
+    e.done = true;
+    start(e, &ok);
+    let base = loaded(e, "ptr", slot);
+    let off = fresh(e, "a");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&off);
+    line.push_str(" = mul.trap t27 ");
+    line.push_str(i);
+    line.push_str(", const t27 ");
+    push_int(&mut line, l.size as t27);
+    e.insts.push(line);
+    let at = fresh(e, "e");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&at);
+    line.push_str(" = offset ");
+    line.push_str(&base);
+    line.push_str(", ");
+    line.push_str(&off);
+    e.insts.push(line);
+    at
+}
+
 /// `Raw::new()` — no room at all, which is two zeroes (Ch. 5 §2.7).
 ///
 /// A `Raw` with no room has no allocation, and that is what its destructor
@@ -4262,20 +4411,14 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 }
                 return dyn_call(e, &owner, &named, &slot, name, args);
             }
-            // `r.room()` — how many positions there are, which is the
-            // second of a `Raw`'s two words (Ch. 5 §2.7).
+            // A `Raw`'s five methods, which are the compiler's like the
+            // type is (Ch. 5 §2.7).
             if is_raw(&owner) {
                 slot = receiver_at(e, at, recv, &slot, "");
                 if e.stuck {
                     return unknown_value();
                 }
-                if !name.same("room") || args.len() > 0 {
-                    e.stuck = true;
-                    return unknown_value();
-                }
-                let where_ = offset_of(e, &slot, 3);
-                let got = loaded(e, "taddr", &where_);
-                return Value { text: got, ty: "taddr".to_string() };
+                return raw_method(e, &slot, &owner, name, args);
             }
             // The other fat reference answers one of its methods out of
             // itself: `s.len()` is the second of the two words and no call
@@ -4567,8 +4710,12 @@ fn place(e: &mut Emit, x: &ast::Expr) -> Value {
                 }
             };
             // Only an aggregate field is a place this can go on from: a
-            // scalar is a value and a reference is one address more.
-            let inner = name_head(&e.defs[which].fields[index]);
+            // scalar is a value and a reference is one address more. What
+            // the field's type is *called* is `nominal`'s answer and not the
+            // written head's, because a field may be written `Raw<T>` and
+            // an application is a type once it is instantiated (Ch. 4 §2.5).
+            let written = ast::copy_ty(&e.defs[which].fields[index]);
+            let inner = nominal(e, &written);
             if def_at(&e.defs, &inner) < 0 {
                 e.stuck = true;
                 return unknown_value();
@@ -5420,7 +5567,8 @@ fn guess_ty(e: &mut Emit, x: &ast::Expr) -> String {
             if named.len() > 0 {
                 return named;
             }
-            name_head(&e.defs[which].fields[index])
+            let written = ast::copy_ty(&e.defs[which].fields[index]);
+            nominal(e, &written)
         }
         ast::Expr::Cast(a, t) => tir_ty_at(&e.tyvars, &e.key, t),
         // Arithmetic answers with what it was given and a comparison with a

@@ -58,6 +58,43 @@ fn both(n: taddr) -> taddr {
     a.room() + b.room()
 }
 
+// The four that are one question — where the `i`th position is — and then a
+// load, a store, or the address itself. Checked, because there is no reason
+// for this to be the one index that is not (Ch. 2 §3): at the room or above
+// it is a fault, and so is below zero, which is two tests and two traps.
+fn stored(n: taddr) -> t27 {
+    let mut r: Raw<t27> = Raw::alloc(n);
+    r.write(0, 7);
+    r.write(1, 8);
+    r.read(0) + r.read(1)
+}
+
+// A tryte each, so the arithmetic that finds a position is read off the
+// element type here too.
+fn narrow(n: taddr) -> t9 {
+    let mut r: Raw<t9> = Raw::alloc(n);
+    r.write(0, 1);
+    r.read(0)
+}
+
+// `at` answers with the address itself, which is what a reference **is**
+// (Ch. 3 §2.1) — so what comes back is read through and not loaded twice.
+fn pointed(n: taddr) -> t27 {
+    let mut r: Raw<t27> = Raw::alloc(n);
+    r.write(0, 9);
+    let p = r.at(0);
+    *p
+}
+
+// An index that is not written down, so the two tests are against a value
+// and not a constant.
+fn computed(n: taddr, i: taddr) -> t27 {
+    let mut r: Raw<t27> = Raw::alloc(n);
+    r.write(i, 3);
+    r.read(i)
+}
+
 fn main() -> t27 {
     (empty() + words(4) + trytes(9) + both(2)) as t27
+        + stored(2) + (narrow(1) as t27) + pointed(1) + computed(3, 1)
 }
