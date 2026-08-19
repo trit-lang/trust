@@ -75,3 +75,34 @@ fn literals() -> t27 {
     }
     if 7 > 3 { 1 } else { 0 }
 }
+
+// Two more, and both are one line of TIR (G9.103, G9.104).
+
+// `-x` needs no flavor and no fixup: the range is symmetric, so
+// `MIN == -MAX` and there is nothing for a negation to overflow (Ch. 1 §4).
+// A binary machine's compiler has to say more here than this one does.
+fn negated(a: t27) -> t27 {
+    let mut n = a;
+    if n < 0 {
+        n = -n;
+    }
+    -n + -(a - 1)
+}
+
+// A function that answers with **nothing** and whose last expression is a
+// statement all the same. `while` has no value, so it is not the block's
+// answer — it is the last thing the block does, and what says so is the
+// answer the function was written with and not the shape of the tail
+// (§5.1).
+fn counted_down(a: t27) {
+    let mut i = a;
+    while i > 0 {
+        i -= 1;
+    }
+}
+
+// The same with a call that answers with nothing, which is the other shape
+// a unit tail comes in.
+fn passes_on(a: t27) {
+    counted_down(a)
+}

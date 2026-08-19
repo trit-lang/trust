@@ -2646,6 +2646,31 @@ rule includes agreeing about what the rule does not cover.
 `bootstrap/fns/15.tr` had each of the five standing *alone*, which is the
 half that was already agreed.
 
+**G9.104 — a unit function whose last expression is a statement.**
+
+`fn f() { while c { … } }` was refused. The `while` is the block's **tail**
+in the tree — there is no `;` after it — but a function that answers with
+nothing has no value to read out of its tail, and `value` has no `while` arm
+because `while` is a statement. So the tail is lowered as one where the
+function answers with nothing, and what says so is the answer it was written
+with rather than the shape of the tail. The same arm takes a call that
+answers with nothing, which is the other way a unit tail is written.
+
+**G9.103 — `-x` was refused, and one arm was written twice.**
+
+`value`'s `Unary` arm took `!` and nothing else. `-x` is `neg tN %v`, one
+instruction with no flavor and no fixup — the range is symmetric, so
+`MIN == -MAX` and there is nothing for a negation to overflow (Ch. 1 §4).
+That is the radix deciding, and one of the few places this language is
+shorter than a binary one; it is also the first line of `print_int`.
+
+The arm was **there twice**, character for character, the second one
+unreachable. Neither type checker said so: a duplicate match arm is a
+reachability question and §5.4 asks only about exhaustiveness. It is one
+arm now, and the dead one is worth recording because it sat in the largest
+function of the largest Trust program there is and nothing in either
+implementation was looking.
+
 **G9.102 — a function with no body, and a call that answers with nothing.**
 
 Two things, and the second was in the way of the first.

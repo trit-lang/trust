@@ -2450,6 +2450,22 @@ fn block(e: &mut Emit, b: &ast::Block, ret: &str, unit: bool) {
     }
     match &b.tail {
         Option::Some(x) => {
+            // A function that answers with nothing has a tail that is a
+            // **statement**: a `while`, or a call to something that answers
+            // with nothing (§5.1). There is no value to read and none to
+            // write after the `ret`, and the only thing that says so is the
+            // answer this function was written with.
+            if unit {
+                let held = ast::Stmt::Do(ast::copy_expr(x));
+                stmt(e, &held, ret);
+                if e.stuck {
+                    return;
+                }
+                if !e.done {
+                    e.insts.push("    ret".to_string());
+                }
+                return;
+            }
             let v = value(e, x, ret);
             if e.stuck {
                 return;
@@ -2743,29 +2759,30 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             e.insts.push(line);
             Value { text: name, ty: to }
         }
-        // `!b` is `1 - b` at one trit wide, and wrapping because there is
-        // nothing for it to overflow (Ch. 1 §6).
+        // `-x` is one instruction and needs no flavor: the range is
+        // symmetric, so `MIN == -MAX` and there is nothing for a negation
+        // to overflow (Ch. 1 §4). Which is the radix deciding, and one of
+        // the few places this language is shorter than a binary one.
         ast::Expr::Unary(op, a) => {
-            if !op.same("!") {
-                e.stuck = true;
-                return unknown_value();
+            if op.same("-") {
+                let inner = value(e, a, want);
+                if e.stuck {
+                    return unknown_value();
+                }
+                let held = fresh(e, "n");
+                let mut line: String = Vec::new();
+                line.push_str("    ");
+                line.push_str(&held);
+                line.push_str(" = neg ");
+                let shown = tir_of(&inner.ty);
+                line.push_str(&shown);
+                line.push_str(" ");
+                line.push_str(&inner.text);
+                e.insts.push(line);
+                return Value { text: held, ty: inner.ty };
             }
-            let inner = value(e, a, "t1");
-            if e.stuck {
-                return unknown_value();
-            }
-            let name = fresh(e, "n");
-            let mut line: String = Vec::new();
-            line.push_str("    ");
-            line.push_str(&name);
-            line.push_str(" = sub.wrap t1 const t1 1, ");
-            line.push_str(&inner.text);
-            e.insts.push(line);
-            Value { text: name, ty: "bool".to_string() }
-        }
-        // `!b` is `1 - b` at one trit wide, and wrapping because there is
-        // nothing for it to overflow (Ch. 1 §6).
-        ast::Expr::Unary(op, a) => {
+            // `!b` is `1 - b` at one trit wide, and wrapping because there
+            // is nothing for it to overflow (Ch. 1 §6).
             if !op.same("!") {
                 e.stuck = true;
                 return unknown_value();
