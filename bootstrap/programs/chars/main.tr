@@ -1,0 +1,38 @@
+// A program that writes, which is a program that pulls Ch. 5 §1.5 out of the
+// library — and one builtin out of the compiler.
+//
+// `print`, `print_char`, `print_int`, `char::to_utf8` and `char::utf8_len`
+// are the prelude's own Trust and neither implementation wrote them. What
+// they need between them is most of a language: an array local and an index
+// that can fault, a tuple returned through `%sret` and taken apart by a
+// hidden binding, a receiver taken by value, a `while` inside an `if` arm
+// that is itself a statement, and the digit loop's `%` — which is the
+// *symmetric* remainder, so a negative digit borrows from the next place.
+//
+// And one thing that is **not** Trust. `char::try_from(x)` is the single
+// conversion into `char`, and the one thing in Ch. 5 §1 that cannot be
+// written in this language: it has to make a `char` out of a word, which is
+// exactly what no `as` does (Ch. 5 §1.2). It is four comparisons and four
+// branches — not negative, no greater than U+10FFFF, and outside the
+// surrogates, which are reserved for UTF-16 and are not characters.
+//
+// Its answer is an `Option<char>` whose `None` **costs no space at all**: a
+// `char` stops at U+10FFFF, so the value above it is one the payload could
+// never have held, and that is the discriminant (Ch. 2 §6). Building one
+// writes that value; reading one tests against it and takes the variant that
+// carries the payload by elimination. `unwrap` is where both happen, and its
+// `None` arm is a `trap()` — the one call that does not come back.
+
+fn digit(n: t27) -> char {
+    char::try_from(n + 48).unwrap()
+}
+
+fn main() -> t27 {
+    print("n = ");
+    print_int(-407);
+    print_char('\n');
+    print_char('é');
+    print_char(digit(7));
+    println("");
+    0
+}

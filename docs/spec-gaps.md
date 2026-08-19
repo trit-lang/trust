@@ -2621,6 +2621,34 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.115 — `char::try_from`, and the arm that does not come back.**
+
+The one conversion *into* `char`, and the one thing in Ch. 5 §1 that cannot
+be written in this language: every other library function there is ordinary
+Trust, and this one has to make a `char` out of a word, which is exactly what
+no `as` does (Ch. 5 §1.2). So it is a compiler builtin in both
+implementations — four comparisons and four branches, which is what the
+definition has: not negative, no greater than U+10FFFF, and outside the
+surrogates, which are reserved for UTF-16 and are not characters.
+
+It is written like a variant and told apart by what the names are, which is
+how associated functions are written throughout (Ch. 4 §1.4).
+
+Two things came with it. `trap()` — the one call that does not come back
+(Ch. 5 §4) — and the consequence: an arm that has **already left** has
+nothing to store and nowhere to store it, so a `match` skips both the join
+slot and the branch to the join for it. That is `unwrap`'s `None` arm, and
+it is the first arm in this lowering that does not reach the join.
+
+And two shapes that had to become places. An expression answering with an
+aggregate *is* a place — an aggregate has no value, it is its storage
+(TIR §3) — so `char::try_from(n).unwrap()` has somewhere to point at, and
+`guess_ty` answers for one without lowering it.
+
+*Still refused:* a `match` whose scrutinee is not a name. The reference reads
+one out of wherever the expression put it; this asks for a local, and the
+prelude never writes the other kind.
+
 **G9.114 — an enum whose discriminant costs no space.**
 
 One variant carries a payload, the rest carry nothing, and the payload has

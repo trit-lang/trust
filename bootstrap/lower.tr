@@ -1330,6 +1330,130 @@ fn str_len(e: &mut Emit, slot: &str) -> Value {
     Value { text: v, ty: "taddr".to_string() }
 }
 
+/// `char::try_from(x)`: `Some(x)` where `x` is a Unicode scalar value.
+///
+/// Four comparisons and four branches, which is what the definition has:
+/// not negative, no greater than U+10FFFF, and outside the surrogate range
+/// — those are reserved for UTF-16 and are not characters (Ch. 5 §1.2).
+///
+/// The answer is an `Option<char>`, whose `None` costs no space at all: a
+/// `char` stops at U+10FFFF and the value above it is one the payload could
+/// never have had (Ch. 2 §6).
+fn char_try_from(e: &mut Emit, x: &ast::Expr) -> Value {
+    let mut key: Vec<String> = Vec::new();
+    key.push("char".to_string());
+    let named = instantiate(e, "Option", &key);
+    if named.len() == 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let which = def_at(&e.defs, &named);
+    if which < 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let some = named_variant(&e.defs[which], "Some");
+    let none = named_variant(&e.defs[which], "None");
+    if some < 0 || none < 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let v = value(e, x, "t27");
+    if e.stuck {
+        return unknown_value();
+    }
+    let held = slot_for(e, "tmp", &named);
+    let self_ty = ast::Ty::Name(one_name(&named));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(y) => y,
+        Result::Err(why) => {
+            e.stuck = true;
+            return unknown_value();
+        }
+    };
+    let good = label(e, "char.ok");
+    let bad = label(e, "char.no");
+    let join = label(e, "char.join");
+    let hi = label(e, "char.hi");
+    let sur = label(e, "char.sur");
+    let sur2 = label(e, "char.sur2");
+
+    let c = against(e, &v.text, 0);
+    three_ways(e, &c, &bad, &hi, &hi);
+
+    start(e, &hi);
+    let c = against(e, &v.text, 1114111);
+    three_ways(e, &c, &sur, &sur, &bad);
+
+    // Below the surrogates is a character; at or above needs the second
+    // bound.
+    start(e, &sur);
+    let c = against(e, &v.text, 55296);
+    three_ways(e, &c, &good, &sur2, &sur2);
+
+    start(e, &sur2);
+    let c = against(e, &v.text, 57343);
+    three_ways(e, &c, &bad, &bad, &good);
+
+    start(e, &good);
+    let at = offset_of(e, &held, l.variant_offsets[some][0]);
+    store_into(e, "char", &v.text, &at);
+    store_tag(e, &held, which, some);
+    if e.stuck {
+        return unknown_value();
+    }
+    jump(e, &join);
+
+    start(e, &bad);
+    store_tag(e, &held, which, none);
+    if e.stuck {
+        return unknown_value();
+    }
+    jump(e, &join);
+
+    start(e, &join);
+    Value { text: held, ty: named }
+}
+
+/// One of the four comparisons, against a bound written here.
+fn against(e: &mut Emit, v: &str, bound: t27) -> String {
+    let c = fresh(e, "c");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&c);
+    line.push_str(" = cmp t27 ");
+    line.push_str(v);
+    line.push_str(", const t27 ");
+    push_int(&mut line, bound);
+    e.insts.push(line);
+    c
+}
+
+/// A three-way branch on the comparison just made — written `br2` where the
+/// −1 and 0 arms coincide, which is the sugar TIR §3.6 gives that case.
+fn three_ways(e: &mut Emit, c: &str, neg: &str, zero: &str, pos: &str) {
+    let mut line: String = Vec::new();
+    if neg.same(zero) {
+        line.push_str("    br2 ");
+        line.push_str(c);
+        line.push_str(", ");
+        line.push_str(pos);
+        line.push_str(", ");
+        line.push_str(neg);
+    } else {
+        line.push_str("    br3 ");
+        line.push_str(c);
+        line.push_str(", ");
+        line.push_str(neg);
+        line.push_str(", ");
+        line.push_str(zero);
+        line.push_str(", ");
+        line.push_str(pos);
+    }
+    e.insts.push(line);
+    e.done = true;
+}
+
 /// `s[i]` where `s` is text: the first thing this language lowers that can
 /// fail while it *runs* rather than be refused before it does.
 ///
@@ -1927,16 +2051,23 @@ fn match_expr(
                     if e.stuck {
                         return unknown_value();
                     }
-                    if held.len() == 0 {
-                        ty = v.ty.to_string();
-                        held = slot_for(e, "tmp", &ty);
+                    // An arm that has already left has nothing to store and
+                    // nowhere to store it: `trap()` is the arm `unwrap`
+                    // writes for `None` (Ch. 5 §4).
+                    if !e.done {
+                        if held.len() == 0 {
+                            ty = v.ty.to_string();
+                            held = slot_for(e, "tmp", &ty);
+                        }
+                        store_into(e, &ty, &v.text, &held);
                     }
-                    store_into(e, &ty, &v.text, &held);
                 }
                 if e.stuck {
                     return unknown_value();
                 }
-                jump(e, &join);
+                if !e.done {
+                    jump(e, &join);
+                }
                 forget(e, mark);
                 if tested {
                     start(e, &next_at);
@@ -3712,6 +3843,17 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             Value { text: slot, ty: name }
         }
         ast::Expr::Aggregate(path, fields) => {
+            // `char::try_from(x)` — the one conversion *into* `char`, and
+            // the one thing in Ch. 5 §1 that cannot be written in this
+            // language: every other library function there is ordinary
+            // Trust, and this one has to make a `char` out of a word, which
+            // is exactly what no `as` does (Ch. 5 §1.2). It is written like
+            // a variant and told apart by what the names are.
+            let head = type_path(path);
+            let called = variant_of(path);
+            if head.same("char") && called.same("try_from") && fields.len() == 1 {
+                return char_try_from(e, &fields[0].value);
+            }
             let made = aggregate_type(e, path, want, fields);
             if made.len() == 0 {
                 e.stuck = true;
@@ -4041,6 +4183,14 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             closure_call(e, at, args)
         }
         ast::Expr::Call(callee, args) => {
+            // `trap()` — a deliberate fault, and the one call that does not
+            // come back (Ch. 5 §4). Nothing follows it in its block, and it
+            // answers with nothing because there is nothing to answer to.
+            if callee.same("trap") && args.len() == 0 {
+                e.insts.push("    trap F_TRAP".to_string());
+                e.done = true;
+                return Value { text: "".to_string(), ty: "".to_string() };
+            }
             // `g(x)` where `g` is a *local* is a closure call written the
             // way any call is written; only a name that is not a local can
             // be a function a linker resolves (Ch. 4 §4.2).
@@ -4194,6 +4344,20 @@ fn place(e: &mut Emit, x: &ast::Expr) -> Value {
         // exactly what building the two words does. `"one".len()` is the
         // whole of what needs this.
         ast::Expr::Str(text) => text_value(e, text),
+        // And anything that *answers* with an aggregate answers with a
+        // place: an aggregate has no value, it **is** its storage (TIR §3),
+        // so `char::try_from(n).unwrap()` has somewhere to point at.
+        ast::Expr::Aggregate(path, fields) => {
+            let held = value(e, x, "");
+            if e.stuck {
+                return unknown_value();
+            }
+            if def_at(&e.defs, &held.ty) < 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            held
+        }
         // `g[i][0]`, and `s[i].to_utf8()` — an **element** is a place
         // whatever it holds. A field is not: a scalar field is read where
         // it is and there is nothing to go on to, but an element's address
@@ -4976,6 +5140,18 @@ fn guess_ty(e: &mut Emit, x: &ast::Expr) -> String {
         // A literal has no place until it is given one, and what it *is* is
         // known without giving it one.
         ast::Expr::Str(text) => str_name(),
+        ast::Expr::Aggregate(path, fields) => {
+            let head = type_path(path);
+            let called = variant_of(path);
+            if head.same("char") && called.same("try_from") {
+                let mut key: Vec<String> = Vec::new();
+                key.push("char".to_string());
+                return instantiate(e, "Option", &key);
+            }
+            let none: Vec<ast::Field> = Vec::new();
+            let _ = none;
+            aggregate_type(e, path, "", fields)
+        }
         // An element and a field, worked out **without emitting anything**:
         // a call whose answer is an aggregate takes the storage for it
         // before the receiver is evaluated, so what the receiver *is* has
