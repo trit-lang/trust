@@ -471,7 +471,7 @@ fn walk_expr(w: &mut World, what: &str, e: &ast::Expr) {
         ast::Expr::Unary(op, a) => {
             walk_expr(w, what, a);
             // `!` is the logical negation and applies to a `bool`; there is
-            // no bitwise one to share the symbol with (Ch. 1 §2.5). It is a
+            // no bitwise one to share the symbol with (Ch. 1 §2). It is a
             // different refusal from a type that does not match, and the
             // Rust side reports it as one.
             if op.same("!") {

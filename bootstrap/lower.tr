@@ -488,6 +488,25 @@ pub fn scalar_named(n: &str) -> String {
     }
 }
 
+/// What a signature says a function answers with.
+///
+/// TIR's name for it, or `()` where it answers with **nothing** — which TIR
+/// spells by leaving the arrow off the header and off the call. That is not
+/// the same fact as `?`, a type this cannot name, and telling the two apart
+/// is the whole of what lets a call to a `fn f() { … }` be lowered rather
+/// than refused.
+pub fn written_answer(t: &ast::Ty) -> String {
+    match t {
+        ast::Ty::Unit => "()".to_string(),
+        _ => tir_ty(t),
+    }
+}
+
+/// Whether a name is the one for answering with nothing.
+pub fn answers_nothing(name: &str) -> bool {
+    name.same("()")
+}
+
 /// What a name stands for under a key: the type argument written for it
 /// where it is a type parameter, and itself where it is not.
 pub fn subst(tyvars: &Vec<String>, key: &Vec<String>, name: &str) -> String {
@@ -2547,7 +2566,9 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                 }
                 return;
             }
-            if ty.same("?") {
+            // A binding to nothing is not a binding: `let x = f();` where
+            // `f` answers with the unit has no value to store (§5.1).
+            if ty.same("?") || answers_nothing(&ty) {
                 e.stuck = true;
                 return;
             }
@@ -3316,11 +3337,21 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             if e.stuck {
                 return unknown_value();
             }
-            let out = fresh(e, "r");
+            // A method that answers nothing is a call with no result to
+            // name and no arrow to write (TIR §3.7).
+            let none = answers_nothing(&ty);
+            let out = if none {
+                "".to_string()
+            } else {
+                fresh(e, "r")
+            };
             let mut line: String = Vec::new();
             line.push_str("    ");
-            line.push_str(&out);
-            line.push_str(" = call @");
+            if !none {
+                line.push_str(&out);
+                line.push_str(" = ");
+            }
+            line.push_str("call @");
             line.push_str(&full);
             line.push_str("(");
             line.push_str(&slot);
@@ -3330,9 +3361,12 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 line.push_str(&texts[k]);
                 k += 1;
             }
-            line.push_str(") -> ");
-            let shown = tir_of(&ty);
-            line.push_str(&shown);
+            line.push_str(")");
+            if !none {
+                line.push_str(" -> ");
+                let shown = tir_of(&ty);
+                line.push_str(&shown);
+            }
             e.insts.push(line);
             Value { text: out, ty: ty }
         }
@@ -3386,11 +3420,21 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 i += 1;
             }
             let ty = call_type(e, callee);
-            let name = fresh(e, "r");
+            // A function that answers nothing is a call with no result to
+            // name and no arrow to write (TIR §3.7).
+            let none = answers_nothing(&ty);
+            let name = if none {
+                "".to_string()
+            } else {
+                fresh(e, "r")
+            };
             let mut line: String = Vec::new();
             line.push_str("    ");
-            line.push_str(&name);
-            line.push_str(" = call @");
+            if !none {
+                line.push_str(&name);
+                line.push_str(" = ");
+            }
+            line.push_str("call @");
             line.push_str(callee);
             line.push_str("(");
             let mut k: taddr = 0;
@@ -3401,9 +3445,12 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 line.push_str(&texts[k]);
                 k += 1;
             }
-            line.push_str(") -> ");
-            let shown = tir_of(&ty);
-            line.push_str(&shown);
+            line.push_str(")");
+            if !none {
+                line.push_str(" -> ");
+                let shown = tir_of(&ty);
+                line.push_str(&shown);
+            }
             e.insts.push(line);
             Value { text: name, ty: ty }
         }
@@ -5170,7 +5217,7 @@ pub fn signatures(items: &Vec<ast::Item>) -> Vec<Sig> {
                 let ret = if f.generics.len() > 0 {
                     "?".to_string()
                 } else {
-                    tir_ty(&f.ret)
+                    written_answer(&f.ret)
                 };
                 out.push(Sig { name: f.name.to_string(), ret: ret });
             }
@@ -5191,7 +5238,7 @@ pub fn signatures(items: &Vec<ast::Item>) -> Vec<Sig> {
                     let ret = if fns[k].generics.len() > 0 || !plain_impl(gs) {
                         "?".to_string()
                     } else {
-                        tir_ty(&fns[k].ret)
+                        written_answer(&fns[k].ret)
                     };
                     out.push(Sig { name: full, ret: ret });
                     k += 1;
@@ -5213,7 +5260,7 @@ pub fn signatures(items: &Vec<ast::Item>) -> Vec<Sig> {
                     let ret = if tfns[k].generics.len() > 0 {
                         "?".to_string()
                     } else {
-                        tir_ty(&tfns[k].ret)
+                        written_answer(&tfns[k].ret)
                     };
                     out.push(Sig { name: given_name(&given[g]), ret: ret });
                 }
@@ -5239,7 +5286,7 @@ pub fn signatures(items: &Vec<ast::Item>) -> Vec<Sig> {
                     let ret = if fns[k].generics.len() > 0 {
                         "?".to_string()
                     } else {
-                        tir_ty(&fns[k].ret)
+                        written_answer(&fns[k].ret)
                     };
                     out.push(Sig { name: full, ret: ret });
                     k += 1;
@@ -6006,6 +6053,18 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
         });
         z += 1;
     }
+    // And then the declarations, which is where TIR prints them: after
+    // everything the module *defines* that is not code, and before the code
+    // (TIR §1).
+    let decls = declarations(items);
+    let mut d: taddr = 0;
+    while d < decls.len() {
+        all.push(Made {
+            name: decls[d].name.to_string(),
+            text: decls[d].text.to_string(),
+        });
+        d += 1;
+    }
     let mut t: taddr = 0;
     while t < out.len() {
         all.push(Made {
@@ -6046,6 +6105,84 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
         i += 1;
     }
     kept
+}
+
+/// A function with no body, as TIR's declaration form: the header a
+/// definition would print, and then nothing (TIR §1).
+///
+/// It is the whole of how this language reaches something it did not
+/// compile — there is no `extern` and no linkage attribute, because a name
+/// to call and what goes in the registers is all TIR needs to make the
+/// call. What is on the other side is the target's business: a
+/// memory-mapped character port (ISA §2.2), an allocator (Ch. 5 §2.1),
+/// neither of them a thing TIR can name.
+///
+/// A parameter or an answer TIR has no name for is refused rather than
+/// declared as something else, because a declaration is a promise about a
+/// calling convention and a wrong one is not caught anywhere.
+fn declaration(f: &ast::Fn) -> String {
+    if f.generics.len() > 0 {
+        return "".to_string();
+    }
+    let mut out: String = Vec::new();
+    out.push_str("fn @");
+    out.push_str(&f.name);
+    out.push_str("(");
+    let mut i: taddr = 0;
+    while i < f.params.len() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        let ty = tir_ty(&f.params[i].ty);
+        if ty.same("?") {
+            return "".to_string();
+        }
+        out.push_str("%");
+        out.push_str(&f.params[i].name);
+        out.push_str(": ");
+        let shown = tir_of(&ty);
+        out.push_str(&shown);
+        i += 1;
+    }
+    out.push_str(")");
+    let answer = written_answer(&f.ret);
+    if !answers_nothing(&answer) {
+        if answer.same("?") {
+            return "".to_string();
+        }
+        out.push_str(" -> ");
+        let shown = tir_of(&answer);
+        out.push_str(&shown);
+    }
+    out.push_str("\n");
+    out
+}
+
+/// Every declaration the file makes, in the order they were written.
+fn declarations(items: &Vec<ast::Item>) -> Vec<Made> {
+    let mut out: Vec<Made> = Vec::new();
+    let mut i: taddr = 0;
+    while i < items.len() {
+        match &items[i].what {
+            ast::What::Function(f) => {
+                match &f.body {
+                    Option::Some(b) => {}
+                    Option::None => {
+                        let text = declaration(f);
+                        if text.len() > 0 {
+                            out.push(Made {
+                                name: f.name.to_string(),
+                                text: text,
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
 }
 
 /// The tables the module needs, in the order they were first named.

@@ -1,0 +1,46 @@
+// A function with no body is a **declaration** (TIR §1).
+//
+// `fn putchar(c: t9);` is the whole of how this language reaches something
+// it did not compile. There is no `extern` and no linkage attribute: a
+// signature and a semicolon say everything TIR needs, which is the name to
+// call and what to put in the registers. What is on the other side is the
+// target's business — a memory-mapped character port here (ISA §2.2), an
+// allocator elsewhere (Ch. 5 §2.1) — and neither is a thing TIR can name,
+// which is exactly why the declaration form exists.
+//
+// One mechanism spelled twice, so there is nothing to lower but the header:
+// the same signature a definition prints, and then no `{`.
+//
+// Two facts about *where* they go. A module prints its globals, then its
+// declarations, then its functions — so this file has a string in it, to
+// say which side of the line a declaration falls on. And a declaration
+// nothing surviving calls is dropped exactly as a function is: what a
+// program owes its target is what its surviving code needs (G9.95).
+
+fn putchar(c: t9);
+
+fn getchar() -> t9;
+
+// Never called, and so not in the program. A declaration is a promise to
+// the linker and a promise nobody needs is not one worth making.
+fn unreached(x: t27) -> t27;
+
+// A declaration reached through a call and not from `main` directly, so
+// that what keeps it is reachability and not the source.
+fn shout(c: t9) {
+    putchar(c);
+    putchar(33);
+}
+
+fn echo() -> t9 {
+    let c = getchar();
+    putchar(c);
+    c
+}
+
+fn main() -> t27 {
+    shout(65);
+    let n = "hi".len();
+    let c = echo();
+    (c as t27) + (n as t27)
+}

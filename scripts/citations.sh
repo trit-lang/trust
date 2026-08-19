@@ -7,6 +7,10 @@
 # only. A chapter that cites a section of another chapter is exactly where a
 # renumbering goes wrong.
 #
+# `bootstrap/` is read too, and was not for a long time: it is the second
+# implementation and it cites the chapters as densely as the first one does.
+# Adding it found `Ch. 1 §2.5`, a section that has never existed.
+#
 # It cannot tell whether a citation is *apt* — only whether the section it
 # points at exists. That is a low bar, and it is still the bar the drop-glue
 # double-free failed: `drop_at` cited Ch. 3 §1.4, whose item 3 says a field
@@ -27,13 +31,15 @@ doc_for() {
     "Ch. 3") echo spec/language/03-references.md ;;
     "Ch. 4") echo spec/language/04-generics.md ;;
     "Ch. 5") echo spec/language/05-library.md ;;
+    "Ch. 6") echo spec/language/06-modules.md ;;
+    "Ch. 7") echo spec/language/07-macros.md ;;
     *)     echo "" ;;
   esac
 }
 
 out=$(mktemp)
 grep -rhoE '(AM|TIR|ISA|Ch\. [0-9]) §[0-9]+(\.[0-9]+)*' \
-  core/src compiler/src vm/src spec docs README.md 2>/dev/null | sort -u |
+  core/src compiler/src vm/src bootstrap spec docs README.md 2>/dev/null | sort -u |
 while IFS= read -r cite; do
   doc=$(doc_for "${cite% §*}")
   sec="${cite##* §}"
@@ -53,7 +59,7 @@ if [ -s "$out" ]; then
 fi
 rm -f "$out"
 n=$(grep -rhoE '(AM|TIR|ISA|Ch\. [0-9]) §[0-9]+(\.[0-9]+)*' \
-  core/src compiler/src vm/src spec docs README.md 2>/dev/null | sort -u | wc -l)
+  core/src compiler/src vm/src bootstrap spec docs README.md 2>/dev/null | sort -u | wc -l)
 printf 'citations: %d distinct, every section named exists\n' "$n"
 
 # The gap registry, checked the same way and for the same reason.

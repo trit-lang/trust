@@ -2621,6 +2621,37 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.102 — a function with no body, and a call that answers with nothing.**
+
+Two things, and the second was in the way of the first.
+
+*A declaration.* `fn putchar(c: t9);` is the whole of how this language
+reaches something it did not compile — no `extern`, no linkage attribute,
+because a name to call and what goes in the registers is all TIR needs
+(TIR §1). It lowers to the header a definition would print and then no
+`{`. The second implementation had refused every one of them, so `print`,
+`println` and everything under them were out of reach whatever else was
+built. A module prints its globals, then its declarations, then its
+functions — §1's own order — and a declaration nothing surviving calls is dropped exactly as a
+function is (G9.95) — `bootstrap/lowered/19.tr` pins both.
+
+*A call that answers with nothing.* `putchar(c);` is `call @putchar(%v.2)`:
+no result to name, no arrow to write. `signatures` had recorded a unit
+return as `?` — the same mark it uses for *a type this cannot name* — so
+`call_type` set `stuck` and every call to a `fn f() { … }` was refused. The
+two facts are different and are told apart now: `written_answer` says `()`
+where a function answers with nothing, and `?` stays what it always was.
+Nothing in the corpus had ever called a function that answers with nothing,
+in eighteen files.
+
+*What it bought, and what it cost.* `putchar`, `getchar`, `println` and
+`println_int` lower now — 20 entries to 24 for `bootstrap/main.tr`. But the
+module as a whole is **refused**, where before it was a partial answer:
+`println` lowers and calls `print`, `print` is not lowered yet, and a module
+naming a function nothing defines is not a program (docs/ddc.md §4). That is
+the right answer and a worse-looking number, which is worth saying plainly.
+`print` wants an array, a tuple and `char::to_utf8`; they are next.
+
 **G9.101 — a comparison was told how wide to be by what surrounded it.**
 
 `if 1 != 2 { … }` lowered to `cmp t1 const t1 1, const t1 2`. The `Binary`
