@@ -2621,6 +2621,36 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.95 — a global is neither a root nor a leaf.**
+
+`keep_reachable` rooted the walk at every global's initializer and then never
+looked at globals again: `module.funcs.retain(…)` and no
+`module.globals.retain(…)`. So a coercion written inside a function nothing
+calls put a whole trait's methods into the program. One `total(&t)` in an
+unreached function is `@vt.Tri.Area`, and `@vt.Tri.Area` is `Tri.area`,
+`Tri.twice` and `Tri.plus` — four items `main` cannot reach, kept by a fifth
+that is not there.
+
+The spec says nothing about which functions a lowered module contains, and
+this implementation had already answered the same question twice with
+different answers: three lines further down, the *declarations* a program
+owes its target are pruned to "what its **surviving** code calls" (G8.14).
+
+*Decision:* **prune them, by the rule the declarations already use.** A global
+is reached the way a function is — code names globals, globals name code —
+so the walk alternates between the two until neither names anything new, and
+both lists are retained by what it found. It matters twice over now: the next
+thing lowered is `&str`, and a string constant is a global that only the
+function holding the literal ever names.
+
+The other implementation needed no change, which is the interesting half.
+`bootstrap/lower.tr` keeps functions and globals in one list of
+`Made { name, text }` and its `reachable` follows *every* `@name` a text
+mentions, so it had been walking the fixed point all along without anyone
+deciding it should. The disagreement was found by asking what a string global
+would have to do — before writing one — and putting an unreached coercion in
+`bootstrap/lowered/16.tr`, which the file had never had.
+
 **G9.94 — a field of a field.**
 
 `b.p.x` was refused. `value`'s `Field` arm read its base with one `match`

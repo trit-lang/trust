@@ -361,34 +361,51 @@ fn successors_mut(t: &mut Terminator) -> Vec<&mut String> {
 /// Drop functions nothing calls any more, which is most of what inlining
 /// leaves behind (`main` and anything a global's initializer names stay).
 pub fn drop_uncalled(m: &mut Module, roots: &[&str]) {
-    let mut live: HashSet<String> = roots.iter().map(|r| (*r).to_string()).collect();
+    let mut live: HashSet<String> = HashSet::new();
+    let mut queue: Vec<String> = roots.iter().map(|r| (*r).to_string()).collect();
     // A vtable names its methods by *address*, and nothing calls them
     // directly — dispatch through an object is what the table is for
-    // (Ch. 4 §3.1). A global's initializer is therefore a root.
-    for g in &m.globals {
-        for item in g.init.iter().flatten() {
-            if let super::ir::InitItem::Addr(name) = item {
-                live.insert(name.clone());
+    // (Ch. 4 §3.1). So a live global keeps the functions it names alive —
+    // and a global is live only where surviving code writes its address,
+    // which is why this alternates between the two rather than rooting at
+    // every global (G9.95).
+    while let Some(name) = queue.pop() {
+        if !live.insert(name.clone()) {
+            continue;
+        }
+        if let Some(f) = m.funcs.iter().find(|f| f.sig.name == name) {
+            for b in &f.blocks {
+                for inst in &b.insts {
+                    if let InstKind::Call {
+                        callee: Callee::Direct(c),
+                        ..
+                    } = &inst.kind
+                    {
+                        queue.push(c.clone());
+                    }
+                    super::canon::visit_operands(&inst.kind, &mut |o| {
+                        if let super::ir::Operand::Global(g) = o {
+                            queue.push(g.clone());
+                        }
+                    });
+                }
+                super::canon::visit_terminator(&b.term, &mut |o| {
+                    if let super::ir::Operand::Global(g) = o {
+                        queue.push(g.clone());
+                    }
+                });
             }
         }
-    }
-    let mut queue: Vec<String> = live.iter().cloned().collect();
-    while let Some(name) = queue.pop() {
-        let Some(f) = m.funcs.iter().find(|f| f.sig.name == name) else {
-            continue;
-        };
-        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-            if let InstKind::Call {
-                callee: Callee::Direct(c),
-                ..
-            } = &inst.kind
-                && live.insert(c.clone())
-            {
-                queue.push(c.clone());
+        if let Some(g) = m.globals.iter().find(|g| g.name == name) {
+            for item in g.init.iter().flatten() {
+                if let super::ir::InitItem::Addr(name) = item {
+                    queue.push(name.clone());
+                }
             }
         }
     }
     m.funcs.retain(|f| live.contains(&f.sig.name));
+    m.globals.retain(|g| live.contains(&g.name));
     let called: HashSet<String> = m
         .funcs
         .iter()

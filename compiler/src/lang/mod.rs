@@ -1565,7 +1565,7 @@ fn from_prelude(name: &str, prelude: &std::collections::HashSet<String>) -> bool
     false
 }
 
-/// Drop the functions nothing can call.
+/// Drop what nothing can reach — functions and globals both.
 ///
 /// Every program carries the prelude, and the prelude is where Chapter 5's
 /// library lives; without this, a program that never mentions text would still
@@ -1576,20 +1576,20 @@ fn from_prelude(name: &str, prelude: &std::collections::HashSet<String>) -> bool
 /// nothing else says which of them matter. Prelude functions are never roots,
 /// which is the whole point.
 ///
-/// One root is easy to forget: a function whose *address* appears in a global.
-/// A vtable slot is an address, so a method reached only through `dyn Trait`
-/// is reached only that way (Ch. 4 §3.3).
+/// **A global is neither a root nor a leaf.** A vtable names its methods by
+/// *address* and nothing calls them — dispatch through an object is what the
+/// table is for (Ch. 4 §3.3) — so a live table keeps its methods alive; and a
+/// table is live only where surviving code writes its address, which a
+/// coercion in a function nothing calls does not. So the walk alternates:
+/// code names globals, globals name code, until neither names anything new.
+/// Rooting at every global instead kept a whole trait's methods for the sake
+/// of one coercion in a function that is not in the program (G9.95), which is
+/// the opposite of what the same pass already says one line further down
+/// about declarations: what a program owes is what its *surviving* code needs.
 fn keep_reachable(module: &mut crate::tir::Module, prelude: &std::collections::HashSet<String>) {
     use crate::tir::{Callee, InitItem, InstKind};
 
     let mut queue: Vec<String> = Vec::new();
-    for g in &module.globals {
-        for item in g.init.iter().flatten() {
-            if let InitItem::Addr(name) = item {
-                queue.push(name.clone());
-            }
-        }
-    }
     if module.funcs.iter().any(|f| f.sig.name == "main") {
         queue.push("main".to_string());
     } else {
@@ -1607,22 +1607,39 @@ fn keep_reachable(module: &mut crate::tir::Module, prelude: &std::collections::H
         if !live.insert(name.clone()) {
             continue;
         }
-        let Some(f) = module.funcs.iter().find(|f| f.sig.name == name) else {
-            continue;
-        };
-        for b in &f.blocks {
-            for inst in &b.insts {
-                if let InstKind::Call {
-                    callee: Callee::Direct(callee),
-                    ..
-                } = &inst.kind
-                {
-                    queue.push(callee.clone());
+        if let Some(f) = module.funcs.iter().find(|f| f.sig.name == name) {
+            for b in &f.blocks {
+                for inst in &b.insts {
+                    if let InstKind::Call {
+                        callee: Callee::Direct(callee),
+                        ..
+                    } = &inst.kind
+                    {
+                        queue.push(callee.clone());
+                    }
+                    crate::tir::canon::visit_operands(&inst.kind, &mut |o| {
+                        if let crate::tir::Operand::Global(g) = o {
+                            queue.push(g.clone());
+                        }
+                    });
+                }
+                crate::tir::canon::visit_terminator(&b.term, &mut |o| {
+                    if let crate::tir::Operand::Global(g) = o {
+                        queue.push(g.clone());
+                    }
+                });
+            }
+        }
+        if let Some(g) = module.globals.iter().find(|g| g.name == name) {
+            for item in g.init.iter().flatten() {
+                if let InitItem::Addr(name) = item {
+                    queue.push(name.clone());
                 }
             }
         }
     }
     module.funcs.retain(|f| live.contains(&f.sig.name));
+    module.globals.retain(|g| live.contains(&g.name));
 
     // Declarations too. `needs_heap` is set while a body is lowered, and a
     // prelude body that uses the heap sets it whether or not anything calls

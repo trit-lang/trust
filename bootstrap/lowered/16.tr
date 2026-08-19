@@ -60,6 +60,23 @@ fn total(x: &dyn Area) -> t27 { x.area() + x.twice() + x.plus(side(2)) }
 // second function's parameter is the first's slot.
 fn through(x: &dyn Area) -> t27 { total(x) + 1 }
 
+struct Tri { b: t27, h: t27 }
+
+impl Area for Tri {
+    fn area(&self) -> t27 { self.b * self.h }
+}
+
+// And the other side of it: a table is a use, but a use inside a function
+// nothing calls is not one the program makes. `unreached` is not in the
+// module, so `@vt.Tri.Area` is not either — and `Tri.area`, which nothing
+// but that table ever names, goes with it. A global is neither a root nor a
+// leaf: code names globals and globals name code, and what survives is what
+// `main` reaches through both (G9.95).
+fn unreached() -> t27 {
+    let t = Tri { b: 3, h: 4 };
+    total(&t)
+}
+
 fn main() -> t27 {
     let a = Sq { s: 3 };
     let b = Re { w: 2, h: 5 };
