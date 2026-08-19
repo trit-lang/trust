@@ -94,7 +94,31 @@ fn computed(n: taddr, i: taddr) -> t27 {
     r.read(i)
 }
 
+// A type that *holds* one owns a destructor for the same reason it holds
+// one (Ch. 3 §1.2) — and nobody wrote this one. It is generated: the same
+// prologue a written `impl Drop` gets, and then the fields' destructors, in
+// declaration order. `Held` has no `impl Drop` anywhere.
+struct Held { room: Raw<t27>, n: taddr }
+
+fn made() -> Held {
+    Held { room: Raw::alloc(2), n: 0 }
+}
+
+fn holds() -> taddr {
+    let h = made();
+    h.n + h.room.room()
+}
+
+// One that holds a type that holds one, so the glue calls glue.
+struct Twice { inner: Held, k: taddr }
+
+fn nested() -> taddr {
+    let t = Twice { inner: made(), k: 1 };
+    t.k
+}
+
 fn main() -> t27 {
     (empty() + words(4) + trytes(9) + both(2)) as t27
         + stored(2) + (narrow(1) as t27) + pointed(1) + computed(3, 1)
+        + (holds() as t27) + (nested() as t27)
 }

@@ -2621,6 +2621,43 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.118 — a destructor nobody wrote.**
+
+A type that *holds* something with a destructor has one of its own
+(Ch. 3 §1.2), and nobody writes it. `struct Held { room: Raw<t27>, n: taddr }`
+has no `impl Drop` anywhere and gets a `drop.Held` all the same: the same
+prologue a written one gets — the caller's storage copied into its own, and
+the flag — and then the fields' destructors in declaration order.
+
+It is found the way the tables are (G9.90): a drop asks for one by writing
+`@drop.<Type>`, so the finished functions are the record of which were asked
+for, and a name nothing defines is one nobody wrote. And it is drained as a
+**stack**, which is the same question G9.58 asked about instantiations: glue
+that asks for glue is emitted before whatever was waiting behind it, and the
+order is text.
+
+Two things had to move first, and both are the same shape one level down.
+
+*`Raw<T>` had no layout.* `layout.tr` refused every application but `Box`,
+so a struct with a `Raw` field had no size — and `Raw<T>` is two words
+whatever `T` is, with **neither of them spare**: the address may be null,
+which is exactly what a `Raw` with no allocation is, so nothing enclosing it
+may take a discriminant out of it.
+
+*Six places asked `name_head` what a field's type was called.* That answers
+for a name and not for an application, and `held: Raw<T>` is one. They ask
+`nominal` now — the same question one level up, since an application is a
+type once it is instantiated (Ch. 4 §2.5). `fill`, `fill_variant`,
+`copy_fields`, `place`, `value` and `guess_ty` all went through it, which is
+every path a struct has, so the whole corpus was run before and after.
+
+*Still refused:* glue for an **instantiation**. `drop.Vec.char` is a
+`drop.Vec` read under a key, and the key is known where the drop is written
+and nowhere else — `Vec.char` cannot be read back into `Vec` and `char` any
+more than any other mangled name can (G9.59). It wants what `jobs` already
+is: the request recorded where it is made. That is the last thing between
+here and `Vec`.
+
 **G9.117 — a `Raw`'s positions, and a field whose type is an application.**
 
 `at`, `at_mut`, `read` and `write` are one question — where the `i`th

@@ -394,6 +394,16 @@ pub fn of(defs: &Vec<Def>, t: &Ty, depth: taddr) -> Result<Layout, String> {
             if head.same("Box") {
                 return Result::Ok(ranged(3, 1, MANY as t27));
             }
+            // `Raw<T>` is where the room is and how many positions it has —
+            // two words, whatever `T` is (Ch. 5 §2.7). Neither of them is
+            // spare: the address **may** be null, and a `Raw` with no
+            // allocation is exactly that, so nothing enclosing it may take
+            // a discriminant out of it.
+            if head.same("Raw") {
+                let mut l = scalar(6, 0);
+                l.align = 3;
+                return Result::Ok(l);
+            }
             Result::Err("a generic type is not laid out here".to_string())
         }
         Ty::Name(segments) => {

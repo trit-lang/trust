@@ -2651,7 +2651,8 @@ fn fill(
         }
         // A field that is itself an aggregate has no value to store: it
         // is built where it can be and copied into place field by field.
-        let held = name_head(&e.defs[which].fields[index]);
+        let written = ast::copy_ty(&e.defs[which].fields[index]);
+        let held = nominal(e, &written);
         if def_at(&e.defs, &held) >= 0 {
             let v = value(e, &fields[i].value, &held);
             if e.stuck {
@@ -2716,7 +2717,8 @@ fn fill_variant(
     let start = variant_start(&e.defs[which], index);
     let mut i: taddr = 0;
     while i < fields.len() {
-        let held = name_head(&e.defs[which].fields[start + i]);
+        let written = ast::copy_ty(&e.defs[which].fields[start + i]);
+        let held = nominal(e, &written);
         let inner = def_at(&e.defs, &held);
         if inner >= 0 {
             let v = value(e, &fields[i].value, &held);
@@ -2877,7 +2879,8 @@ fn copy_fields(e: &mut Emit, from: &str, to: &str, owner: &str) -> bool {
     }
     let mut i: taddr = 0;
     while i < l.offsets.len() {
-        let held = name_head(&e.defs[which].fields[i]);
+        let written = ast::copy_ty(&e.defs[which].fields[i]);
+        let held = nominal(e, &written);
         let inner = def_at(&e.defs, &held);
         let src = offset_of(e, from, l.offsets[i]);
         let dst = offset_of(e, to, l.offsets[i]);
@@ -3362,26 +3365,12 @@ pub fn destructor(
         slot: slot.to_string(),
         ty: owner.to_string(),
     });
-    let mut i: taddr = 0;
-    while i < l.offsets.len() {
-        let ty = field_tir(&e.defs[at].fields[i]);
-        if ty.same("?") {
-            return false;
-        }
-        let src = offset_of(&mut e, "%self", l.offsets[i]);
-        let dst = offset_of(&mut e, &slot, l.offsets[i]);
-        let v = fresh(&mut e, "v");
-        let mut load: String = Vec::new();
-        load.push_str("    ");
-        load.push_str(&v);
-        load.push_str(" = load ");
-        let shown = tir_of(&ty);
-        load.push_str(&shown);
-        load.push_str(" ");
-        load.push_str(&src);
-        e.insts.push(load);
-        store_into(&mut e, &ty, &v, &dst);
-        i += 1;
+    // What a destructor is given is the caller's storage, and what it
+    // holds is its own — field by field, and *through* a field that is
+    // itself an aggregate, because a `Raw` inside a struct is two words and
+    // not one thing to load (Ch. 3 §1.1).
+    if !copy_fields(&mut e, "%self", &slot, owner) {
+        return false;
     }
 
     let body = match &f.body {
@@ -3527,8 +3516,11 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
             if which >= 0 {
                 // A `Raw` owns its room and frees it, and there is no
                 // `impl Drop` anywhere saying so — it is the compiler's
-                // (Ch. 5 §2.7).
-                let owns = holds_name(&e.drops, &val.ty) || is_raw(&val.ty);
+                // (Ch. 5 §2.7). And a type that *holds* one owns a drop for
+                // the same reason it holds one (Ch. 3 §1.2).
+                let owns = is_raw(&val.ty)
+                    || holds_name(&e.drops, &val.ty)
+                    || owns_drop(&e.defs, &e.drops, &val.ty, 0);
                 // Somebody else's storage is **copied** out of: `let q = p`
                 // leaves `p` naming what it named, so `q` is storage of its
                 // own and the fields cross one at a time (Ch. 3 §1.1).
@@ -4014,7 +4006,8 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             let src = offset_of(e, &slot, l.offsets[index]);
             // A field that is itself an aggregate has no value to load: it
             // **is** the storage at that offset (TIR §3).
-            let inner = name_head(&e.defs[which].fields[index]);
+            let written = ast::copy_ty(&e.defs[which].fields[index]);
+            let inner = nominal(e, &written);
             if def_at(&e.defs, &inner) >= 0 {
                 return Value { text: src, ty: inner };
             }
@@ -6401,7 +6394,12 @@ fn raw_def(e: &mut Emit, elem: &str) -> String {
     }
     let mut fields: Vec<ast::Ty> = Vec::new();
     let mut names: Vec<String> = Vec::new();
-    fields.push(ast::Ty::Name(one_name("taddr")));
+    // The first word is an **address** — that is what it is copied as, and
+    // what `free` is given. The two constructors write a *number* into it
+    // all the same, because a null is the one value a program can put there
+    // and TIR has no way to write one as a pointer (TIR §3).
+    let held = ast::Ty::Name(one_name("t27"));
+    fields.push(ast::Ty::Ref(Box::new(held), false));
     names.push("data".to_string());
     fields.push(ast::Ty::Name(one_name("taddr")));
     names.push("room".to_string());
@@ -7660,6 +7658,18 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
         z += 1;
     }
 
+    // The destructors nobody wrote, which are asked for the same silent way
+    // a table is: by a name in the finished text (Ch. 3 §1.2).
+    let extra = glue(items, &out);
+    let mut g: taddr = 0;
+    while g < extra.len() {
+        out.push(Made {
+            name: extra[g].name.to_string(),
+            text: extra[g].text.to_string(),
+        });
+        g += 1;
+    }
+
     // The tables the coercions asked for. Nothing recorded them while they
     // were lowered: a coercion writes `@vt.<Type>.<Trait>` and *that* is
     // the record, so they are read back out of the finished text in the
@@ -7828,6 +7838,229 @@ fn declarations(items: &Vec<ast::Item>) -> Vec<Made> {
         i += 1;
     }
     heap_declarations(&mut out);
+    out
+}
+
+/// A destructor nobody wrote: the fields' destructors, one after another.
+///
+/// A type that *holds* something with a destructor has one of its own
+/// (Ch. 3 §1.2), and it is the same function a written `impl Drop` becomes —
+/// the same prologue, and then nothing but the dropping. Written out here
+/// rather than in the source, because there is no source.
+fn drop_glue(items: &Vec<ast::Item>, owner: &str, out: &mut String) -> bool {
+    let cx = context(items);
+    let mut e = Emit {
+        slots: Vec::new(),
+        insts: Vec::new(),
+        locals: Vec::new(),
+        next: 1,
+        stuck: false,
+        sigs: cx.sigs,
+        done: false,
+        params: cx.params,
+        label: "^entry:".to_string(),
+        blocks: Vec::new(),
+        defs: cx.defs,
+        drops: cx.drops,
+        owned: Vec::new(),
+        self_ty: owner.to_string(),
+        families: Vec::new(),
+        jobs: Vec::new(),
+        tyvars: Vec::new(),
+        key: Vec::new(),
+        tyfams: cx.tyfams,
+        rets: cx.rets,
+        instances: Vec::new(),
+        making: Vec::new(),
+        closed: Vec::new(),
+        closures_made: 0,
+        owner_name: "".to_string(),
+        strings: Vec::new(),
+    };
+    settle(&mut e);
+    let at = def_at(&e.defs, owner);
+    if at < 0 || e.defs[at].is_enum {
+        return false;
+    }
+    let self_ty = ast::Ty::Name(one_name(owner));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => return false,
+    };
+    let mut slot: String = Vec::new();
+    slot.push_str("%self.slot.");
+    push_int(&mut slot, e.next);
+    e.next = e.next + 1;
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&slot);
+    line.push_str(" = slot tryte[");
+    push_int(&mut line, l.size as t27);
+    line.push_str("]");
+    e.slots.push(line);
+    let flag = fresh(&mut e, "self.owns");
+    let mut held: String = Vec::new();
+    held.push_str("    ");
+    held.push_str(&flag);
+    held.push_str(" = slot tryte[1]");
+    e.slots.push(held);
+    store_into(&mut e, "t1", "const t1 1", &flag);
+    if !copy_fields(&mut e, "%self", &slot, owner) {
+        return false;
+    }
+    // Every field that owns one, in declaration order — which is the order
+    // a program has already seen its parts in (Ch. 3 §1.4).
+    let drops = ast::copy_names(&e.drops);
+    let mut i: taddr = 0;
+    while i < l.offsets.len() {
+        let written = ast::copy_ty(&e.defs[at].fields[i]);
+        let inner = nominal(&mut e, &written);
+        if inner.len() == 0 {
+            i += 1;
+            continue;
+        }
+        if !owns_drop(&e.defs, &drops, &inner, 0) {
+            i += 1;
+            continue;
+        }
+        let where_ = offset_of(&mut e, &slot, l.offsets[i]);
+        if is_raw(&inner) {
+            drop_raw(&mut e, &where_, &inner);
+            if e.stuck {
+                return false;
+            }
+        } else {
+            let mut line: String = Vec::new();
+            line.push_str("    call @drop.");
+            line.push_str(&inner);
+            line.push_str("(");
+            line.push_str(&where_);
+            line.push_str(")");
+            e.insts.push(line);
+        }
+        i += 1;
+    }
+    e.insts.push("    ret".to_string());
+    if e.stuck {
+        return false;
+    }
+    start(&mut e, "^");
+    out.push_str("fn @drop.");
+    out.push_str(owner);
+    out.push_str("(%self: ptr) {\n");
+    let mut n: taddr = 0;
+    while n < e.blocks.len() {
+        out.push_str(&e.blocks[n].label);
+        out.push_str("\n");
+        if n == 0 {
+            let mut j: taddr = 0;
+            while j < e.slots.len() {
+                out.push_str(&e.slots[j]);
+                out.push_str("\n");
+                j += 1;
+            }
+        }
+        let mut m: taddr = 0;
+        while m < e.blocks[n].insts.len() {
+            out.push_str(&e.blocks[n].insts[m]);
+            out.push_str("\n");
+            m += 1;
+        }
+        n += 1;
+    }
+    out.push_str("}\n");
+    true
+}
+
+/// The destructors nothing wrote.
+///
+/// Found the way the tables are: a drop asks for one by writing
+/// `@drop.<Type>`, so the finished functions are the record of which were
+/// asked for, and a name nothing defines is one nobody wrote.
+///
+/// Drained as a **stack**, which is the order the other implementation
+/// gives back and the same question G9.58 asked about instantiations: a
+/// body that asks for glue of its own is emitted before whatever was
+/// waiting behind it, and the order is visible in the text.
+fn glue(items: &Vec<ast::Item>, made: &Vec<Made>) -> Vec<Made> {
+    let mut want: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < made.len() {
+        let used = callees(&made[i].text);
+        let mut k: taddr = 0;
+        while k < used.len() {
+            let owner = dropped(&used[k]);
+            if owner.len() > 0 && made_at(made, &used[k]) < 0
+                && !holds_name(&want, &used[k])
+            {
+                want.push(used[k].to_string());
+            }
+            k += 1;
+        }
+        i += 1;
+    }
+    let mut out: Vec<Made> = Vec::new();
+    let mut done: Vec<String> = Vec::new();
+    loop {
+        let at = last_wanted(&want, &done);
+        if at < 0 {
+            return out;
+        }
+        let name = want[at].to_string();
+        done.push(name.to_string());
+        let owner = dropped(&name);
+        let mut text: String = Vec::new();
+        if drop_glue(items, &owner, &mut text) {
+            // What the glue in turn asked for: a field with a destructor of
+            // its own is a `@drop.<Type>` this has just written down.
+            let used = callees(&text);
+            let mut k: taddr = 0;
+            while k < used.len() {
+                let held = dropped(&used[k]);
+                if held.len() > 0 && made_at(made, &used[k]) < 0
+                    && !holds_name(&want, &used[k])
+                {
+                    want.push(used[k].to_string());
+                }
+                k += 1;
+            }
+            out.push(Made { name: name, text: text });
+        }
+    }
+}
+
+/// Which glue to make next: the one asked for most recently that has not
+/// been made yet.
+fn last_wanted(want: &Vec<String>, done: &Vec<String>) -> taddr {
+    let mut i = want.len();
+    while i > 0 {
+        i -= 1;
+        if !holds_name(done, &want[i]) {
+            return i as taddr;
+        }
+    }
+    0 - 1
+}
+
+/// Which type a `drop.<Type>` is of, or nothing for a name that is not one.
+fn dropped(name: &str) -> String {
+    let head = "drop.";
+    if name.len() <= head.len() {
+        return "".to_string();
+    }
+    let mut i: taddr = 0;
+    while i < head.len() {
+        if name[i] != head[i] {
+            return "".to_string();
+        }
+        i += 1;
+    }
+    let mut out: String = Vec::new();
+    let mut k = head.len();
+    while k < name.len() {
+        out.push(name[k]);
+        k += 1;
+    }
     out
 }
 
@@ -8036,6 +8269,11 @@ fn owns_drop(
         return true;
     }
     if holds_name(drops, name) {
+        return true;
+    }
+    // A `Raw` owns its room and frees it, and nothing wrote an `impl Drop`
+    // saying so — it is the compiler's (Ch. 5 §2.7).
+    if is_raw(name) {
         return true;
     }
     let at = def_at(defs, name);
