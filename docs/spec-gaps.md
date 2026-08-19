@@ -2621,6 +2621,46 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.119 — a family that answers with an aggregate, or with nothing.**
+
+`generic_call` refused every answer TIR has no name for, which is two of the
+three things a call can do with one. A `Vec<T>::new()` answers with storage
+the caller provides and a `push` answers with nothing at all, and neither is
+a register — so `Vec` could not have one method lowered.
+
+Four things fell out of that, and every one of them was found by bisecting
+`Vec::new(); v.push(1)` down to the smallest program that still disagreed.
+
+*What a family answers with was read by `name_head`*, which answers for a
+name and not for an application — so `fn new() -> Vec<T>` recorded its
+answer as **nothing at all**, and `subst` then said the same. It is
+`written_head` now, with `()` where the answer is the unit: three answers,
+because there are three things a call does with one.
+
+*A static method of a family has no receiver to read its key off.* `Vec::new()`
+passes nothing and answers with `Vec<T>`, so the key can only come from what
+the binding was written as — `let v: Vec<t27> = Vec::new()` is Ch. 4 §2.3
+inferring from the binding, and here it is the only direction there is.
+Where the arguments are what say, the answer cannot be *sized* until they
+are lowered, and that is refused rather than ordered wrongly.
+
+*`Type::f(args)` is an associated function*, written like a variant and told
+apart by what the names are (Ch. 4 §1.4). It **is** a call, so it is written
+as one and lowered by the arm that already knows how.
+
+*And `p.a = 5`.* Assigning to a field was refused outright — only a name and
+an element were places an assignment could reach. The place is computed
+**once**, which is what `p.b += 1` needs: walking to a field is
+instructions, and a compound assignment may not walk there twice.
+
+*What is left, and it is one thing.* `self.held = fresh` — assigning an
+**aggregate** to a field. The reference computes the place, clears the
+source's drop flag, drops what was there, and copies the new value in; this
+has no way to name a local's flag, because `e.owned` records the storage and
+not the flag beside it. `Vec::regrow` is the only function in the prelude
+that does it, and everything else `Vec` needs now lowers: `new`, `len`,
+`push`, `grown` and the glue `drop.Vec.t27`.
+
 **G9.118 — a destructor nobody wrote.**
 
 A type that *holds* something with a destructor has one of its own

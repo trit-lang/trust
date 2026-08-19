@@ -128,6 +128,11 @@ pub struct Work {
     /// `@vt.Sq.Area` says which type and which trait in its own name, and
     /// `@str.0` says nothing at all about what is in it.
     pub strings: Vec<String>,
+    /// The destructors the module has written down, with what each was made
+    /// from. `drop.Vec.char` cannot be read back into `Vec` and `char`, and
+    /// the only place the key is known is where the drop is *written* — so
+    /// it is recorded there, as a job is (Ch. 4 §2.5).
+    pub glue: Vec<Inst>,
 }
 
 /// What a function is lowered against: everything about the file that is not
@@ -239,6 +244,10 @@ pub struct Emit {
     /// out to it, because two functions writing the same characters write
     /// the same global (Ch. 2 §4).
     pub strings: Vec<String>,
+    /// Every destructor named so far, with what it was made from. It
+    /// travels the way `strings` does and for the same reason: a name that
+    /// cannot be read back has to be remembered where it was written.
+    pub glue: Vec<Inst>,
 }
 
 /// A value in TIR: either a name or a constant, as it is written.
@@ -874,6 +883,7 @@ pub fn function(
         closures_made: 0,
         owner_name: "".to_string(),
         strings: ast::copy_names(&work.strings),
+        glue: copy_insts(&work.glue),
     };
     // What a closure found before this was lowered is a type like any
     // other: its storage is a field per capture, holding an address.
@@ -1153,6 +1163,11 @@ pub fn function(
         work.strings.push(e.strings[t].to_string());
         t += 1;
     }
+    let mut d = work.glue.len();
+    while d < e.glue.len() {
+        work.glue.push(one_inst(&e.glue[d]));
+        d += 1;
+    }
 
     start(&mut e, "^");
     out.push_str(&header);
@@ -1409,20 +1424,26 @@ fn raw_method(
         e.stuck = true;
         return unknown_value();
     }
+    // Both arguments before the room is read: what a call is given is
+    // evaluated where it is written, and the checking comes after (§5.5).
     let i = value(e, &args[0], "taddr");
     if e.stuck {
         return unknown_value();
+    }
+    let mut written: String = Vec::new();
+    if name.same("write") {
+        let v = value(e, &args[1], &elem);
+        if e.stuck {
+            return unknown_value();
+        }
+        written = v.text;
     }
     let at = raw_position(e, slot, &elem, &i.text);
     if e.stuck {
         return unknown_value();
     }
     if name.same("write") {
-        let v = value(e, &args[1], &elem);
-        if e.stuck {
-            return unknown_value();
-        }
-        store_into(e, &elem, &v.text, &at);
+        store_into(e, &elem, &written, &at);
         return Value { text: "".to_string(), ty: "()".to_string() };
     }
     if name.same("read") {
@@ -1937,6 +1958,45 @@ fn index_place(e: &mut Emit, base: &ast::Expr, at: &ast::Expr) -> Value {
     line.push_str(&scaled);
     e.insts.push(line);
     Value { text: there, ty: elem }
+}
+
+/// Where a field **is**, whatever it holds.
+///
+/// `place` stops at a scalar, because a scalar field is read where it is
+/// and there is nothing to go on to. An assignment needs the address all
+/// the same, and needs it *once*.
+fn field_place(e: &mut Emit, base: &ast::Expr, name: &str) -> Value {
+    let held = place(e, base);
+    if e.stuck {
+        return unknown_value();
+    }
+    let which = def_at(&e.defs, &held.ty);
+    if which < 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let index = field_at(e, which, name);
+    if index < 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let self_ty = ast::Ty::Name(one_name(&held.ty));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return unknown_value();
+        }
+    };
+    // Only a scalar: an aggregate field is assigned by copying, which is a
+    // different thing and is refused rather than stored as one word.
+    let ty = field_tir(&e.defs[which].fields[index]);
+    if ty.same("?") || ty.same("ptr") {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let at = offset_of(e, &held.text, l.offsets[index]);
+    Value { text: at, ty: ty }
 }
 
 /// `s[i]` as a **value**: where it is, and then what is there.
@@ -3146,23 +3206,116 @@ fn drop_all(e: &mut Emit) {
         i -= 1;
         let owner = e.owned[i].ty.to_string();
         let slot = e.owned[i].slot.to_string();
-        // A `Raw`'s destructor is the compiler's and is written out here
-        // rather than called: there is no `impl Drop for Raw` to call.
-        if is_raw(&owner) {
-            drop_raw(e, &slot, &owner);
-            if e.stuck {
-                return;
-            }
+        drop_one(e, &slot, &owner);
+        if e.stuck {
+            return;
+        }
+    }
+}
+
+/// Drop what is at an address, whatever kind of destructor it has.
+///
+/// A `Raw`'s is the compiler's and is written out here rather than called:
+/// there is no `impl Drop for Raw` to call. Everything else is a call, and
+/// **writing the call is what asks for the function** — recorded here with
+/// what the name was made from, because the name alone cannot say.
+fn drop_one(e: &mut Emit, slot: &str, owner: &str) {
+    if is_raw(owner) {
+        drop_raw(e, slot, owner);
+        return;
+    }
+    note_drop(e, owner);
+    let mut line: String = Vec::new();
+    line.push_str("    call @drop.");
+    line.push_str(owner);
+    line.push_str("(");
+    line.push_str(slot);
+    line.push_str(")");
+    e.insts.push(line);
+}
+
+/// Record that a destructor was asked for, and what its type was made from.
+fn note_drop(e: &mut Emit, owner: &str) {
+    let mut i: taddr = 0;
+    while i < e.glue.len() {
+        if e.glue[i].full.same(owner) {
+            return;
+        }
+        i += 1;
+    }
+    let at = inst_at(e, owner);
+    let mut base = owner.to_string();
+    let mut key: Vec<String> = Vec::new();
+    if at >= 0 {
+        base = e.instances[at].base.to_string();
+        key = ast::copy_names(&e.instances[at].key);
+    }
+    e.glue.push(Inst {
+        full: owner.to_string(),
+        base: base,
+        key: key,
+    });
+}
+
+/// The fields of a type, dropped in declaration order — which is the order
+/// a program has already seen its parts in (Ch. 3 §1.4).
+///
+/// It runs at the end of *every* destructor, written or not: `drop.T` is
+/// the complete glue for a `T`, so a written body runs and then what it
+/// held goes with it (Ch. 3 §1.2).
+fn drop_fields(e: &mut Emit, slot: &str, owner: &str) {
+    let which = def_at(&e.defs, owner);
+    if which < 0 || e.defs[which].is_enum {
+        return;
+    }
+    let self_ty = ast::Ty::Name(one_name(owner));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return;
+        }
+    };
+    let drops = ast::copy_names(&e.drops);
+    let mut i: taddr = 0;
+    while i < l.offsets.len() {
+        let written = ast::copy_ty(&e.defs[which].fields[i]);
+        let inner = nominal(e, &written);
+        if inner.len() == 0 {
+            i += 1;
             continue;
         }
-        let mut line: String = Vec::new();
-        line.push_str("    call @drop.");
-        line.push_str(&owner);
-        line.push_str("(");
-        line.push_str(&slot);
-        line.push_str(")");
-        e.insts.push(line);
+        if !owns_drop(&e.defs, &drops, &inner, 0) {
+            i += 1;
+            continue;
+        }
+        let where_ = offset_of(e, slot, l.offsets[i]);
+        drop_one(e, &where_, &inner);
+        if e.stuck {
+            return;
+        }
+        i += 1;
     }
+}
+
+/// One `Inst`, copied.
+fn one_inst(from: &Inst) -> Inst {
+    Inst {
+        full: from.full.to_string(),
+        base: from.base.to_string(),
+        key: ast::copy_names(&from.key),
+    }
+}
+
+/// The instantiations, copied.
+fn copy_insts(from: &Vec<Inst>) -> Vec<Inst> {
+    let mut out: Vec<Inst> = Vec::new();
+    let mut i: taddr = 0;
+    while i < from.len() {
+        out.push(one_inst(&from[i]));
+        i += 1;
+    }
+    out
 }
 
 /// Whether a list holds this exact name.
@@ -3331,6 +3484,7 @@ pub fn destructor(
         closures_made: 0,
         owner_name: "".to_string(),
         strings: ast::copy_names(&work.strings),
+        glue: copy_insts(&work.glue),
     };
     settle(&mut e);
     let at = def_at(&e.defs, owner);
@@ -3386,6 +3540,9 @@ pub fn destructor(
         Option::Some(x) => return false,
         Option::None => {}
     }
+    // A written destructor's body runs and *then* what it held goes with
+    // it: `drop.T` is the complete glue for a `T` (Ch. 3 §1.2).
+    drop_fields(&mut e, &slot, owner);
     e.insts.push("    ret".to_string());
     if e.stuck {
         return false;
@@ -3398,6 +3555,11 @@ pub fn destructor(
     while t < e.strings.len() {
         work.strings.push(e.strings[t].to_string());
         t += 1;
+    }
+    let mut d = work.glue.len();
+    while d < e.glue.len() {
+        work.glue.push(one_inst(&e.glue[d]));
+        d += 1;
     }
 
     start(&mut e, "^");
@@ -4217,6 +4379,40 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             if head.same("char") && called.same("try_from") && fields.len() == 1 {
                 return char_try_from(e, &fields[0].value);
             }
+            // `Type::f(args)` — an associated function, which is written
+            // like a variant and told apart by what the names are
+            // (Ch. 4 §1.4). It *is* a call, so it is written as one and
+            // lowered by the arm that already knows how.
+            if head.len() > 0 && called.len() > 0 {
+                let mut full: String = Vec::new();
+                full.push_str(&head);
+                full.push_str(".");
+                full.push_str(&called);
+                let fam = family_at(e, &full);
+                if fam >= 0 || named_sig(&e.sigs, &full) >= 0 {
+                    let mut args: Vec<ast::Expr> = Vec::new();
+                    let mut k: taddr = 0;
+                    while k < fields.len() {
+                        args.push(ast::copy_expr(&fields[k].value));
+                        k += 1;
+                    }
+                    if fam < 0 {
+                        let made = ast::Expr::Call(full, args);
+                        return value(e, &made, want);
+                    }
+                    // A static method of a *family* has no receiver to read
+                    // its key off, so the key comes from what the binding
+                    // was written as: `let v: Vec<t27> = Vec::new()` is the
+                    // ordinary way to say which member this is, and the
+                    // only way where nothing is passed in (Ch. 4 §2.3).
+                    let held = inst_at(e, want);
+                    let mut given: Vec<String> = Vec::new();
+                    if held >= 0 {
+                        given = ast::copy_names(&e.instances[held].key);
+                    }
+                    return generic_call(e, fam, &full, "", &given, &args);
+                }
+            }
             let made = aggregate_type(e, path, want, fields);
             if made.len() == 0 {
                 e.stuck = true;
@@ -4295,6 +4491,55 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                     } else {
                         store_into(e, &held.ty, &val.text, &held.text);
                     }
+                    return Value { text: "".to_string(), ty: "".to_string() };
+                }
+                _ => {}
+            }
+            match target {
+                // `p.a = 5` and `p.b += 1` — the place **once**, and then
+                // the value into it. Walking to a field is instructions, so
+                // a compound assignment may not walk there twice (§5.5).
+                ast::Expr::Field(base, held) => {
+                    let at = field_place(e, base, held);
+                    if e.stuck {
+                        return unknown_value();
+                    }
+                    let ty = at.ty.to_string();
+                    let val = if op.same("=") {
+                        let got = value(e, v, &ty);
+                        got.text
+                    } else {
+                        let base_op = compound(op);
+                        if base_op.len() == 0 {
+                            e.stuck = true;
+                            return unknown_value();
+                        }
+                        let was = loaded(e, &ty, &at.text);
+                        let got = value(e, v, &ty);
+                        if e.stuck {
+                            return unknown_value();
+                        }
+                        let held = fresh(e, "a");
+                        let mut line: String = Vec::new();
+                        line.push_str("    ");
+                        line.push_str(&held);
+                        line.push_str(" = ");
+                        let how = arith(&base_op);
+                        line.push_str(&how);
+                        line.push_str(" ");
+                        let shown = tir_of(&ty);
+                        line.push_str(&shown);
+                        line.push_str(" ");
+                        line.push_str(&was);
+                        line.push_str(", ");
+                        line.push_str(&got.text);
+                        e.insts.push(line);
+                        held
+                    };
+                    if e.stuck {
+                        return unknown_value();
+                    }
+                    store_into(e, &ty, &val, &at.text);
                     return Value { text: "".to_string(), ty: "".to_string() };
                 }
                 _ => {}
@@ -6588,7 +6833,13 @@ fn subst_ty(
                 inner.push(name);
                 i += 1;
             }
-            let full = instantiate(e, &head, &inner);
+            // `Raw<T>` is the compiler's and has no family to look up
+            // (Ch. 5 §2.7), so it is made the way `nominal` makes it.
+            let full = if head.same("Raw") && inner.len() == 1 {
+                raw_def(e, &inner[0])
+            } else {
+                instantiate(e, &head, &inner)
+            };
             if full.len() == 0 {
                 return ast::copy_ty(t);
             }
@@ -6999,6 +7250,17 @@ pub fn context(items: &Vec<ast::Item>) -> Cx {
 /// arguments and nothing else, and a family whose members are told apart by
 /// a *value* would need a key that could say so. Leaving it out means every
 /// call to one is refused, which is the honest answer until it can be said.
+/// The head of what a family answers with: `()` where it answers with
+/// nothing, a family's own name for `P<T>`, and the name for everything
+/// else. Three answers because there are three things a call does with
+/// them — nothing, a register, or storage the caller provides (TIR §3).
+fn family_answer(t: &ast::Ty) -> String {
+    match t {
+        ast::Ty::Unit => "()".to_string(),
+        _ => written_head(t),
+    }
+}
+
 pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
     let mut out: Vec<Family> = Vec::new();
     let mut i: taddr = 0;
@@ -7011,7 +7273,12 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                         tyvars: all_tyvars(f),
                         from_self: 0,
                         params: written_params(f),
-                        ret: name_head(&f.ret),
+                        // The *head* of what it answers with, which is a
+                        // name for a scalar and a family's name for
+                        // `P<T>` — an application is a type once it is
+                        // instantiated, and until then this is all there
+                        // is to say (Ch. 4 §2.5).
+                        ret: family_answer(&f.ret),
                     });
                 }
             }
@@ -7047,7 +7314,7 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                                 tyvars: tyvars,
                                 from_self: outer.len() as taddr,
                                 params: written_params(&fns[k]),
-                                ret: name_head(&fns[k].ret),
+                                ret: family_answer(&fns[k].ret),
                             });
                         }
                         k += 1;
@@ -7272,6 +7539,24 @@ fn generic_call(
         e.stuck = true;
         return unknown_value();
     }
+    // Where the receiver decided every type parameter, the key is known
+    // before any argument is lowered — and a family that answers with an
+    // **aggregate** needs it that early, because the storage it answers
+    // into is taken first (TIR §3). Where the arguments are what say, the
+    // answer cannot be sized until they are lowered, and that is refused.
+    let mut into: String = Vec::new();
+    let mut answer: String = Vec::new();
+    if given.len() == front.len() {
+        let head = subst(&front, given, &e.families[fam].ret);
+        if scalar_named(&head).same("?") && !answers_nothing(&head) {
+            answer = instantiate(e, &head, given);
+            if answer.len() == 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            into = slot_for(e, "tmp", &answer);
+        }
+    }
     let mut texts: Vec<String> = Vec::new();
     let mut kinds: Vec<String> = Vec::new();
     let mut i: taddr = 0;
@@ -7329,34 +7614,57 @@ fn generic_call(
         t += 1;
     }
     let ret = subst(&e.families[fam].tyvars, &key, &e.families[fam].ret);
-    if scalar_named(&ret).same("?") {
+    let none = answers_nothing(&ret);
+    if answer.len() == 0 && !none && scalar_named(&ret).same("?") {
         e.stuck = true;
         return unknown_value();
     }
     let full = mangled(callee, &key);
     queue(e, callee, &key);
-    let name = fresh(e, "r");
+    let mut name: String = Vec::new();
     let mut line: String = Vec::new();
     line.push_str("    ");
-    line.push_str(&name);
-    line.push_str(" = call @");
+    if answer.len() == 0 && !none {
+        name = fresh(e, "r");
+        line.push_str(&name);
+        line.push_str(" = ");
+    }
+    line.push_str("call @");
     line.push_str(&full);
     line.push_str("(");
+    // The storage first and the receiver after it: `%sret` is what the
+    // function is for, and the receiver is its first ordinary argument.
+    let mut first = true;
+    if answer.len() > 0 {
+        line.push_str(&into);
+        first = false;
+    }
     if recv.len() > 0 {
+        if !first {
+            line.push_str(", ");
+        }
         line.push_str(recv);
+        first = false;
     }
     let mut k: taddr = 0;
     while k < texts.len() {
-        if k > 0 || recv.len() > 0 {
+        if !first {
             line.push_str(", ");
         }
+        first = false;
         line.push_str(&texts[k]);
         k += 1;
     }
-    line.push_str(") -> ");
-    let shown = tir_of(&ret);
-    line.push_str(&shown);
+    line.push_str(")");
+    if answer.len() == 0 && !none {
+        line.push_str(" -> ");
+        let shown = tir_of(&ret);
+        line.push_str(&shown);
+    }
     e.insts.push(line);
+    if answer.len() > 0 {
+        return Value { text: into, ty: answer };
+    }
     Value { text: name, ty: ret }
 }
 
@@ -7523,6 +7831,7 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
         jobs: Vec::new(),
         closed: Vec::new(),
         strings: Vec::new(),
+        glue: Vec::new(),
     };
     // Ordinary functions first, then the impls, then the instantiations of
     // Ch. 4 §2.5 — a call is what asks for one, so they are known last.
@@ -7648,6 +7957,19 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
         }
     }
 
+    // The destructors, before the instantiations: a drop is written at the
+    // *end* of a scope, so it is the most recent thing asked for, and a
+    // stack gives back the most recent first (G9.58).
+    let held = glue(items, &out, &mut work);
+    let mut h: taddr = 0;
+    while h < held.len() {
+        out.push(Made {
+            name: held[h].name.to_string(),
+            text: held[h].text.to_string(),
+        });
+        h += 1;
+    }
+
     let extra = instantiations(items, &mut work);
     let mut z: taddr = 0;
     while z < extra.len() {
@@ -7658,9 +7980,10 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
         z += 1;
     }
 
-    // The destructors nobody wrote, which are asked for the same silent way
-    // a table is: by a name in the finished text (Ch. 3 §1.2).
-    let extra = glue(items, &out);
+    // The destructors nobody wrote, and the ones written on a *family* —
+    // both are asked for where a drop is written down, because that is the
+    // only place the key is known (Ch. 4 §2.5).
+    let extra = glue(items, &out, &mut work);
     let mut g: taddr = 0;
     while g < extra.len() {
         out.push(Made {
@@ -7847,7 +8170,14 @@ fn declarations(items: &Vec<ast::Item>) -> Vec<Made> {
 /// (Ch. 3 §1.2), and it is the same function a written `impl Drop` becomes —
 /// the same prologue, and then nothing but the dropping. Written out here
 /// rather than in the source, because there is no source.
-fn drop_glue(items: &Vec<ast::Item>, owner: &str, out: &mut String) -> bool {
+fn drop_glue(
+    items: &Vec<ast::Item>,
+    owner: &str,
+    base: &str,
+    key: &Vec<String>,
+    work: &mut Work,
+    out: &mut String,
+) -> bool {
     let cx = context(items);
     let mut e = Emit {
         slots: Vec::new(),
@@ -7876,8 +8206,17 @@ fn drop_glue(items: &Vec<ast::Item>, owner: &str, out: &mut String) -> bool {
         closures_made: 0,
         owner_name: "".to_string(),
         strings: Vec::new(),
+        glue: copy_insts(&work.glue),
     };
     settle(&mut e);
+    // A destructor for one member of a family is that family's type read
+    // under a key, which is what makes `Vec.char` exist at all (Ch. 4 §2.5).
+    if key.len() > 0 {
+        let held = instantiate(&mut e, base, key);
+        if held.len() == 0 || !held.same(owner) {
+            return false;
+        }
+    }
     let at = def_at(&e.defs, owner);
     if at < 0 || e.defs[at].is_enum {
         return false;
@@ -7908,41 +8247,15 @@ fn drop_glue(items: &Vec<ast::Item>, owner: &str, out: &mut String) -> bool {
     if !copy_fields(&mut e, "%self", &slot, owner) {
         return false;
     }
-    // Every field that owns one, in declaration order — which is the order
-    // a program has already seen its parts in (Ch. 3 §1.4).
-    let drops = ast::copy_names(&e.drops);
-    let mut i: taddr = 0;
-    while i < l.offsets.len() {
-        let written = ast::copy_ty(&e.defs[at].fields[i]);
-        let inner = nominal(&mut e, &written);
-        if inner.len() == 0 {
-            i += 1;
-            continue;
-        }
-        if !owns_drop(&e.defs, &drops, &inner, 0) {
-            i += 1;
-            continue;
-        }
-        let where_ = offset_of(&mut e, &slot, l.offsets[i]);
-        if is_raw(&inner) {
-            drop_raw(&mut e, &where_, &inner);
-            if e.stuck {
-                return false;
-            }
-        } else {
-            let mut line: String = Vec::new();
-            line.push_str("    call @drop.");
-            line.push_str(&inner);
-            line.push_str("(");
-            line.push_str(&where_);
-            line.push_str(")");
-            e.insts.push(line);
-        }
-        i += 1;
-    }
+    drop_fields(&mut e, &slot, owner);
     e.insts.push("    ret".to_string());
     if e.stuck {
         return false;
+    }
+    let mut d = work.glue.len();
+    while d < e.glue.len() {
+        work.glue.push(one_inst(&e.glue[d]));
+        d += 1;
     }
     start(&mut e, "^");
     out.push_str("fn @drop.");
@@ -7972,72 +8285,60 @@ fn drop_glue(items: &Vec<ast::Item>, owner: &str, out: &mut String) -> bool {
     true
 }
 
-/// The destructors nothing wrote.
+/// The destructors this module has to make: the ones nobody wrote, and the
+/// ones written on a **family**, which are one function per instantiation
+/// like any other member (Ch. 4 §2.5).
 ///
-/// Found the way the tables are: a drop asks for one by writing
-/// `@drop.<Type>`, so the finished functions are the record of which were
-/// asked for, and a name nothing defines is one nobody wrote.
+/// Both are asked for where a drop is *written down* — `drop.Vec.char`
+/// cannot be read back into `Vec` and `char` — so the queue is what the
+/// emitters recorded, and it grows as they are made: a destructor that
+/// drops a field asks for that field's.
 ///
 /// Drained as a **stack**, which is the order the other implementation
-/// gives back and the same question G9.58 asked about instantiations: a
-/// body that asks for glue of its own is emitted before whatever was
-/// waiting behind it, and the order is visible in the text.
-fn glue(items: &Vec<ast::Item>, made: &Vec<Made>) -> Vec<Made> {
-    let mut want: Vec<String> = Vec::new();
-    let mut i: taddr = 0;
-    while i < made.len() {
-        let used = callees(&made[i].text);
-        let mut k: taddr = 0;
-        while k < used.len() {
-            let owner = dropped(&used[k]);
-            if owner.len() > 0 && made_at(made, &used[k]) < 0
-                && !holds_name(&want, &used[k])
-            {
-                want.push(used[k].to_string());
-            }
-            k += 1;
-        }
-        i += 1;
-    }
+/// gives back and the same question G9.58 asked about instantiations.
+fn glue(items: &Vec<ast::Item>, made: &Vec<Made>, work: &mut Work) -> Vec<Made> {
     let mut out: Vec<Made> = Vec::new();
     let mut done: Vec<String> = Vec::new();
     loop {
-        let at = last_wanted(&want, &done);
+        let at = last_wanted(&work.glue, &done, made, &out);
         if at < 0 {
             return out;
         }
-        let name = want[at].to_string();
-        done.push(name.to_string());
-        let owner = dropped(&name);
+        let full = work.glue[at].full.to_string();
+        let base = work.glue[at].base.to_string();
+        let key = ast::copy_names(&work.glue[at].key);
+        done.push(full.to_string());
         let mut text: String = Vec::new();
-        if drop_glue(items, &owner, &mut text) {
-            // What the glue in turn asked for: a field with a destructor of
-            // its own is a `@drop.<Type>` this has just written down.
-            let used = callees(&text);
-            let mut k: taddr = 0;
-            while k < used.len() {
-                let held = dropped(&used[k]);
-                if held.len() > 0 && made_at(made, &used[k]) < 0
-                    && !holds_name(&want, &used[k])
-                {
-                    want.push(used[k].to_string());
-                }
-                k += 1;
-            }
-            out.push(Made { name: name, text: text });
+        if drop_glue(items, &full, &base, &key, work, &mut text) {
+            let mut named: String = Vec::new();
+            named.push_str("drop.");
+            named.push_str(&full);
+            out.push(Made { name: named, text: text });
         }
     }
 }
 
-/// Which glue to make next: the one asked for most recently that has not
-/// been made yet.
-fn last_wanted(want: &Vec<String>, done: &Vec<String>) -> taddr {
+/// Which destructor to make next: the one asked for most recently that is
+/// not made yet — and nothing that some `impl Drop` already wrote.
+fn last_wanted(
+    want: &Vec<Inst>,
+    done: &Vec<String>,
+    made: &Vec<Made>,
+    out: &Vec<Made>,
+) -> taddr {
     let mut i = want.len();
     while i > 0 {
         i -= 1;
-        if !holds_name(done, &want[i]) {
-            return i as taddr;
+        if holds_name(done, &want[i].full) {
+            continue;
         }
+        let mut named: String = Vec::new();
+        named.push_str("drop.");
+        named.push_str(&want[i].full);
+        if made_at(made, &named) >= 0 || made_at(out, &named) >= 0 {
+            continue;
+        }
+        return i as taddr;
     }
     0 - 1
 }

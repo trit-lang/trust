@@ -117,8 +117,45 @@ fn nested() -> taddr {
     t.k
 }
 
+// And the same over a **family**, which is where the glue has to be made
+// under a key: `drop.Room.t27` is `drop.Room` read at `t27`, and the key is
+// known where the drop is written and nowhere else (Ch. 4 §2.5).
+struct Room<T> { held: Raw<T>, n: taddr }
+
+impl<T> Room<T> {
+    // A static method of a family has no receiver to read its key off, so
+    // it comes from what the binding was written as — and it answers with
+    // an aggregate, which is storage the caller provides (TIR §3).
+    fn new() -> Room<T> { Room { held: Raw::new(), n: 0 } }
+
+    fn keep(n: taddr) -> Room<T> { Room { held: Raw::alloc(n), n: 0 } }
+
+    fn len(&self) -> taddr { self.n }
+
+    // Answering with **nothing**, which is a third thing a call does with
+    // its answer and was refused until now.
+    fn bump(&mut self) { self.n += 1; }
+
+    fn put(&mut self, at: taddr, value: T) { self.held.write(at, value); }
+
+    fn get(&self, at: taddr) -> T { self.held.read(at) }
+}
+
+fn kept() -> taddr {
+    let mut r: Room<t27> = Room::keep(4);
+    r.put(0, 5);
+    r.bump();
+    r.len() + (r.get(0) as taddr)
+}
+
+fn spare() -> taddr {
+    let r: Room<t9> = Room::new();
+    r.len()
+}
+
 fn main() -> t27 {
     (empty() + words(4) + trytes(9) + both(2)) as t27
         + stored(2) + (narrow(1) as t27) + pointed(1) + computed(3, 1)
         + (holds() as t27) + (nested() as t27)
+        + (kept() as t27) + (spare() as t27)
 }
