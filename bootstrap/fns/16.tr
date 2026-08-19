@@ -1,0 +1,20 @@
+// A block-shaped expression in statement position ends its statement
+// (§5.1): what follows begins a new one, however much it looks like an
+// operator continuing the old.
+//
+// `15.tr` has each of these standing alone, which is the half that was
+// already agreed. This is the half that was not: every line below reads as
+// *two* statements, and reading it as one is the parse both implementations
+// gave until now.
+fn ended() {
+    if a { n = 1; }
+    -n;
+    while b { n = 2; }
+    (n) * 2;
+    match c { X => 1 }
+    &n;
+    loop { break; }
+    *p;
+    { n = 3; }
+    -n
+}

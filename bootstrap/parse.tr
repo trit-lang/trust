@@ -230,6 +230,18 @@ pub fn block_shaped(e: &Expr) -> bool {
     }
 }
 
+/// Whether a block-shaped expression begins here (§5.1).
+pub fn at_block_start(p: &Parser) -> Result<bool, lex::Error> {
+    let ahead = peek(p)?;
+    match ahead.tok {
+        Tok::Kw(k) => {
+            Result::Ok(k.same("if") || k.same("match") || k.same("loop") || k.same("while"))
+        }
+        Tok::Op(o) => Result::Ok(o.same("{")),
+        _ => Result::Ok(false),
+    }
+}
+
 /// A literal, a name, a call, a parenthesized expression, or one of §5's
 /// constructs written with braces.
 pub fn primary(p: &mut Parser) -> Result<Expr, lex::Error> {
@@ -759,7 +771,23 @@ pub fn block(p: &mut Parser) -> Result<ast::Block, lex::Error> {
         if is_let {
             stmts.push(let_stmt(p)?);
         } else {
-            let e = expr(p)?;
+            // In statement position a block-shaped expression is parsed
+            // **alone**: it ends where its closing brace does, and an
+            // operator after it begins the next statement rather than
+            // continuing it (§5.1). Without this, `if c { … } -n` reads as
+            // a subtraction from the `if`'s value, and the diagnostic is
+            // that `()` has no `-` — true, and no help at all.
+            //
+            // `for` is not one of them, here or in the other parser: §5.1
+            // lists `if`, `match`, `loop`, `while` and a bare block, and a
+            // second implementation agreeing about a rule includes agreeing
+            // about what it does not cover.
+            let opens = at_block_start(p)?;
+            let e = if opens {
+                primary(p)?
+            } else {
+                expr(p)?
+            };
             let t3 = peek(p)?;
             let at3 = t3.at;
             let ends = match t3.tok {

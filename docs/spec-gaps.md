@@ -2621,6 +2621,31 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.105 — a block-shaped expression in statement position did not end its
+statement.**
+
+§5.1 says it plainly, and says why: `if`, `match`, `loop`, `while` and a bare
+block may stand as statements without a `;`, and where one does it **ends at
+its closing brace** — an operator after it begins a new statement rather than
+continuing the old. The second implementation's parser called `expr` there,
+so `if a { n = 1; } -n` read as a *subtraction from the `if`'s value*, and
+`{ n = 3; } -n` did too.
+
+This is the oldest and most-compared part of either implementation: two
+lexers, two parsers, every file of `bootstrap/` through both, the whole
+prelude through both. It survived all of it because no program anywhere in
+the repository put an operator after a block-shaped statement — the shape
+appears the moment a function is written with a guard clause and a negation,
+which is what `print_int` is.
+
+`for` is not one of them, here or in the other parser: §5.1 lists five forms
+and `for` is not among them, and a second implementation agreeing about a
+rule includes agreeing about what the rule does not cover.
+
+`bootstrap/fns/16.tr` is ten statements that read as five without the rule.
+`bootstrap/fns/15.tr` had each of the five standing *alone*, which is the
+half that was already agreed.
+
 **G9.102 — a function with no body, and a call that answers with nothing.**
 
 Two things, and the second was in the way of the first.
