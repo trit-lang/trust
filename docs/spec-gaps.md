@@ -2664,6 +2664,48 @@ load, the same arithmetic, the same store. `bootstrap/lowered/` had a
 `while` in it and the loop counted with `i = i + 1`, which is not how anyone
 writes one.
 
+**G9.98 — reading text: `impl str`, and an index that can fail.**
+
+Three things, and the third is the first thing this lowering emits that can
+fail while it *runs* rather than be refused before it does.
+
+*The receiver.* `impl str` is the case `&self` had never met. A receiver is
+a parameter whose type the impl says rather than the list (Ch. 3 §2.2), and
+where that type has no size of its own what a method is given is two words
+and not one address — so `self` is copied in as an aggregate exactly as a
+written `&str` parameter is. The branch asks `fat_name` about a reference to
+the impl's own type, which is the same question the parameter loop asks and
+will be the same answer for `impl [T]`.
+
+*The methods.* `len` is the second word and no call at all (G9.96);
+everything else `str` has is an ordinary function written on `impl str` and
+named after it, given the two words that the slot already holds. What had
+been "one method, and the rest refused" is now "one method, and the rest are
+calls".
+
+*The index.* `s[i]` is the address, the length, the index, and then two
+tests before any arithmetic — each one `cmp` and all three of its answers at
+once, because a bound has two ends and a three-way branch takes one of them
+per instruction (Ch. 3 §3.2). Below zero faults and so does at the length or
+above it. Nothing folds a constant index: `s[0]` is checked exactly as
+`s[i]` is, because what a lowering writes is what the program said.
+
+*What it bought.* `bootstrap/programs/text/main.tr` is the first program in
+this repository whose interesting functions **neither implementation wrote**:
+`same`, `starts_with` and `contains` are the prelude's own Trust, and the two
+now lower them character for character. Asked of `bootstrap/main.tr`, the
+second implementation went from 9 functions to 20 — `lex.is_keyword`,
+`lex.is_reserved`, `lex.well_formed`, `lex.number`, `lex.ternary`,
+`lex.hept`, `lex.trit_literal` and `lex.trit_value` all lower now, and every
+instruction of all twenty is the first implementation's.
+
+The four functions that differ do so **only in their `@str.N` names**, and
+for a reason worth writing down rather than fixing: bootstrap still refuses
+`main`, a module with no `main` roots at every function it has (G9.7), and
+a module holding a different set of functions numbers its literals
+differently. The numbering is a fact about what was lowered, which is
+G9.96's observation arriving from the other side.
+
 **G9.97 — an array had no layout in the second implementation.**
 
 `layout.tr` answered `an array is not laid out here` for every `[T; N]`, so

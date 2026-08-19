@@ -1,0 +1,69 @@
+// Reading text: an index, and a method written on `str` itself (Ch. 3 §3).
+//
+// `lowered/17.tr` built the two words a `&str` is and read the second one.
+// This reads the *first*, which is where the characters are — and reading
+// one of them is the first thing in this language that can fail at runtime
+// rather than be refused at compile time.
+//
+// *The index.* `s[i]` is the address, the length, the index, and then two
+// three-way tests before any arithmetic: below zero is a fault and so is at
+// the length or above it, because `cmp` answers in three directions and a
+// bound has two ends (Ch. 3 §3.2). Only then is the offset computed, one
+// element being one word. Nothing folds a constant index — the check is
+// emitted for `s[0]` exactly as it is for `s[i]`, because what a lowering
+// says is what the program says and folding is a later pass's business.
+//
+// *The receiver.* `impl str` is the case `&self` had never met: what a
+// method is given is the two words and not one address, so `self` is copied
+// in as an aggregate exactly as a written `&str` parameter is. A receiver is
+// a parameter whose type the impl says rather than the parameter list
+// (Ch. 3 §2.2), and here what it says is unsized.
+//
+// The body below is the prelude's `same`, written out, because that is the
+// program this compiler's own source is waiting on: 186 of `bootstrap/`'s
+// 363 functions take text, and almost every one of them compares it.
+
+fn at(s: &str, i: taddr) -> char { s[i] }
+
+// A constant index, which is checked all the same.
+fn first(s: &str) -> char { s[0] }
+
+// The index is an expression and not a name, so what is tested is whatever
+// it turned out to be.
+fn nudged(s: &str, i: taddr) -> char { s[i + 1] }
+
+impl str {
+    // `self.len()` inside a method of `str`: the receiver is two words and
+    // the length is the second of them, which is no call at all.
+    fn last(&self) -> char { self[self.len() - 1] }
+
+    // Character for character, which is `while`, `if`, an early `return`
+    // and two indexes — and the reason all of this is one commit.
+    fn matches(&self, other: &str) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        let mut i: taddr = 0;
+        while i < self.len() {
+            if self[i] != other[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+}
+
+// A method of `str` called on a `&str` that is a parameter, so the receiver
+// is a slot somebody else filled.
+fn agrees(a: &str, b: &str) -> bool { a.matches(b) }
+
+fn main() -> t27 {
+    let s = "abc";
+    // A literal as the receiver, which has to be built before it can be
+    // read — and the same characters twice is still one global.
+    let n = if "abc".matches(s) { 1 } else { 0 };
+    let m = if agrees(s, "ab") { 10 } else { 20 };
+    n + m + (at(s, 1) as t27) + (first("de") as t27) + (nudged(s, 0) as t27)
+        + (s.last() as t27)
+}

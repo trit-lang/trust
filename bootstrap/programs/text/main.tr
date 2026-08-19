@@ -1,0 +1,31 @@
+// A program that reads **text**, which means a program that pulls Ch. 5's
+// `str` methods out of the library and lowers them (Ch. 6 §3.3).
+//
+// Every other program in this directory is written here and compared here.
+// This one is mostly not: `same`, `starts_with` and `contains` are the
+// prelude's, written in Trust, and what is compared is the two
+// implementations lowering *the library's own source* — the largest Trust
+// nobody in this repository wrote twice.
+//
+// What each of them needs is what the last two commits built: a `&self`
+// that is two words because `impl str` is unsized, `self.len()` read out of
+// the second of them, `self[i]` with its two bounds tests, and the `while`,
+// the early `return` and the `i += 1` that a loop over characters is made
+// of. Getting one of those wrong is a diagnostic; getting it wrong quietly
+// is what a second implementation exists to prevent.
+
+fn is_word(s: &str) -> bool { s.same("word") }
+
+// Reached through a call rather than written in `main`, so that what the
+// program contains is decided by reachability and not by the source order.
+fn heads(s: &str, p: &str) -> bool { s.starts_with(p) }
+
+fn main() -> t27 {
+    let s = "word";
+    let n = if is_word(s) { 1 } else { 0 };
+    let m = if heads(s, "wo") { 10 } else { 20 };
+    let k = if s.contains("or") { 100 } else { 200 };
+    // And the two that are not calls at all: the length is the second word
+    // of the reference, and an index is three instructions and two tests.
+    n + m + k + (s.len() as t27) + (s[0] as t27)
+}

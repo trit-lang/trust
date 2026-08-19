@@ -807,6 +807,26 @@ pub fn function(
         // address, and reading through it is a load and then the field's own
         // (Ch. 3 §2.2). An aggregate *value* is copied in; an address is not.
         if name.same("self") && is_reference(&f.params[i].ty) {
+            // What a reference to the impl's own type *is*. On `impl str`
+            // it is two words and not one, exactly as a written `&str`
+            // parameter is — a receiver is a parameter whose type the impl
+            // says rather than the list (Ch. 3 §2.2), and here what it says
+            // has no size of its own.
+            let mine = ast::Ty::Ref(Box::new(ast::Ty::Name(one_name(&owner))), false);
+            let wide = fat_name(&mine);
+            if wide.len() > 0 {
+                let at = def_at(&e.defs, &wide);
+                if at < 0 {
+                    return false;
+                }
+                header.push_str("%self: ptr");
+                let copied = copy_in(&mut e, "self", at);
+                if !copied {
+                    return false;
+                }
+                i += 1;
+                continue;
+            }
             // What `self` points at, where the function was not written on
             // an `impl` and so has no owner to say: a closure's `call` is
             // the one of those (Ch. 4 §4.1).
@@ -1139,17 +1159,11 @@ fn text_value(e: &mut Emit, text: &str) -> Value {
     Value { text: held, ty: named }
 }
 
-/// A method on a `&str`.
-///
-/// There is one, and it is not a call: how many characters there are is the
-/// second word of the reference itself, so `s.len()` is where that word is
-/// and a load from there. Anything else a `str` might answer needs storage
-/// this cannot lay hands on, and is refused.
-fn str_method(e: &mut Emit, slot: &str, name: &str, args: &Vec<ast::Expr>) -> Value {
-    if !name.same("len") || args.len() > 0 {
-        e.stuck = true;
-        return unknown_value();
-    }
+/// `s.len()`, which is not a call: how many characters there are is the
+/// second word of the reference itself, so this is where that word is and a
+/// load from there. Every *other* method of `str` is an ordinary function
+/// written on `impl str`.
+fn str_len(e: &mut Emit, slot: &str) -> Value {
     let named = str_name();
     let self_ty = ast::Ty::Name(one_name(&named));
     let l = match layout::of(&e.defs, &self_ty, 0) {
@@ -1168,6 +1182,133 @@ fn str_method(e: &mut Emit, slot: &str, name: &str, args: &Vec<ast::Expr>) -> Va
     load.push_str(&src);
     e.insts.push(load);
     Value { text: v, ty: "taddr".to_string() }
+}
+
+/// `s[i]` where `s` is text: the first thing this language lowers that can
+/// fail while it *runs* rather than be refused before it does.
+///
+/// The address and the length are read first and the index after them,
+/// because that is the order the expression is written in. Then two tests,
+/// each of them one `cmp` and all three of its answers at once: below zero
+/// is a fault, and so is at the length or above it — a bound has two ends
+/// and a three-way branch takes one of them per instruction (Ch. 3 §3.2).
+/// Only then is the offset computed, one element being one word.
+///
+/// Nothing here folds a constant index. `s[0]` is checked exactly as `s[i]`
+/// is, because what a lowering writes is what the program said and what is
+/// provable about it is a later pass's business.
+fn index_str(e: &mut Emit, base: &ast::Expr, at: &ast::Expr) -> Value {
+    let held = place(e, base);
+    if e.stuck {
+        return unknown_value();
+    }
+    let named = str_name();
+    // Only text, so far. An array and a `Vec` are indexed by the same three
+    // instructions over a different second word, and neither is lowered.
+    if !held.ty.same(&named) {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let self_ty = ast::Ty::Name(one_name(&named));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return unknown_value();
+        }
+    };
+    let data = fresh(e, "p");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&data);
+    line.push_str(" = load ptr ");
+    line.push_str(&held.text);
+    e.insts.push(line);
+    let ending = offset_of(e, &held.text, l.offsets[1]);
+    let count = fresh(e, "v");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&count);
+    line.push_str(" = load t27 ");
+    line.push_str(&ending);
+    e.insts.push(line);
+    let idx = value(e, at, "taddr");
+    if e.stuck {
+        return unknown_value();
+    }
+    let low = fresh(e, "c");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&low);
+    line.push_str(" = cmp t27 ");
+    line.push_str(&idx.text);
+    line.push_str(", const t27 0");
+    e.insts.push(line);
+    let lo = label(e, "idx.lo");
+    let bad = label(e, "idx.fault");
+    let mut line: String = Vec::new();
+    line.push_str("    br3 ");
+    line.push_str(&low);
+    line.push_str(", ");
+    line.push_str(&bad);
+    line.push_str(", ");
+    line.push_str(&lo);
+    line.push_str(", ");
+    line.push_str(&lo);
+    e.insts.push(line);
+    start(e, &bad);
+    e.insts.push("    trap F_TRAP".to_string());
+    start(e, &lo);
+    let high = fresh(e, "c");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&high);
+    line.push_str(" = cmp t27 ");
+    line.push_str(&idx.text);
+    line.push_str(", ");
+    line.push_str(&count);
+    e.insts.push(line);
+    let ok = label(e, "idx.ok");
+    let mut line: String = Vec::new();
+    line.push_str("    br3 ");
+    line.push_str(&high);
+    line.push_str(", ");
+    line.push_str(&ok);
+    line.push_str(", ");
+    line.push_str(&bad);
+    line.push_str(", ");
+    line.push_str(&bad);
+    e.insts.push(line);
+    start(e, &ok);
+    let step = fresh(e, "a");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&step);
+    line.push_str(" = mul.trap t27 ");
+    line.push_str(&idx.text);
+    line.push_str(", const t27 ");
+    let wide = tir_of("char");
+    push_int(&mut line, trytes(&wide));
+    e.insts.push(line);
+    let there = fresh(e, "p");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&there);
+    line.push_str(" = offset ");
+    line.push_str(&data);
+    line.push_str(", ");
+    line.push_str(&step);
+    e.insts.push(line);
+    let v = fresh(e, "v");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&v);
+    line.push_str(" = load ");
+    line.push_str(&wide);
+    line.push_str(" ");
+    line.push_str(&there);
+    e.insts.push(line);
+    Value { text: v, ty: "char".to_string() }
 }
 
 /// The global one string literal is written as: one word per character,
@@ -3009,6 +3150,9 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
         // `"abc"` — the characters go in a global and the two words that
         // reach them go in a temporary here (Ch. 2 §4).
         ast::Expr::Str(text) => text_value(e, text),
+        // `s[i]` — where the characters are, how many there are, and two
+        // three-way tests before any arithmetic (Ch. 3 §3.2).
+        ast::Expr::Index(base, at) => index_str(e, base, at),
         // `match e { … }` — the discriminant once, then a three-way test per
         // arm, and a slot the arms agree to leave the answer in (§5.4).
         ast::Expr::Match(scrutinee, arms) => {
@@ -3111,11 +3255,17 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             if named.len() > 0 {
                 return dyn_call(e, &owner, &named, &slot, name, args);
             }
-            // The other fat reference answers its one method out of itself:
-            // `s.len()` is the second of the two words and no call at all.
+            // The other fat reference answers one of its methods out of
+            // itself: `s.len()` is the second of the two words and no call
+            // at all. Everything else `str` has is a function written on
+            // `impl str` and named after it, and what it is given is the
+            // two words — which is what the slot already holds.
             let text = str_name();
             if owner.same(&text) {
-                return str_method(e, &slot, name, args);
+                if name.same("len") && args.len() == 0 {
+                    return str_len(e, &slot);
+                }
+                owner = "str".to_string();
             }
             let mut full: String = Vec::new();
             full.push_str(&owner);

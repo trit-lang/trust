@@ -290,7 +290,8 @@ q=0
 for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
             bootstrap/programs/methods/main.tr \
             bootstrap/programs/generic/main.tr \
-            bootstrap/programs/library/main.tr; do
+            bootstrap/programs/library/main.tr \
+            bootstrap/programs/text/main.tr; do
     # The one that uses the library is handed the library, which is what
     # `--prelude` is for (Ch. 6 §3.3) — and asking for it where there is
     # none costs nothing, since a prelude nothing names is pruned away.
