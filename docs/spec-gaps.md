@@ -2621,6 +2621,44 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.106 — an array is storage a definition nobody wrote.**
+
+`[T; N]` is N elements of one type at `i × size_of::<T>()` (Ch. 2 §3), which
+is a definition with N fields — so it is given one, under the name
+`array.<T>.<N>` and made where the type is first named, exactly as an
+instantiation is (G9.59). Everything that fills, copies, lays out and passes
+an aggregate then works on it with no case of its own: a parameter is copied
+in field by field, a nested array is an aggregate element and is copied
+rather than stored, and `sized` gives the slot its width. The definition is
+`repr(linear)`, because an array's order is the one no `repr` may choose and
+the arithmetic indexing does *is* the layout.
+
+Three things the corpus had to be written to pin, and all three came out of
+reading `trustc`'s answer rather than out of thinking:
+
+*A literal lowers every element before its storage is made.* `[a, b, c]`
+evaluates all of them and *then* takes the slot; a struct literal takes the
+slot first and goes field by field, evaluating and storing. Both orders are
+visible in the numbering, and `lowered/20.tr` has the two side by side in
+one function so that nothing can drift.
+
+*`[v; n]` evaluates `v` once* and stores it n times. That is a fact about
+the language and not an optimization: the value is written once, so it
+happens once.
+
+*The index is `&str`'s three instructions over a different second word.* How
+many elements there are is in the **type** here rather than beside the
+address, so it is a constant and nothing at all is loaded before the index —
+where text loads two words first. The two bounds tests are the same two
+(G9.98), and assigning into an element is the place, tests and all, and then
+the value into it: the place first and the value after, which is the order it
+is written in.
+
+*Still refused:* an array **field** reached through a place — `r.xs[i]` —
+because `place`'s `Field` arm asks `name_head` for the inner type and an
+array's is not a name. It wants `nominal`, which is a change to a path every
+struct goes through, and no program here needs it yet.
+
 **G9.105 — a block-shaped expression in statement position did not end its
 statement.**
 

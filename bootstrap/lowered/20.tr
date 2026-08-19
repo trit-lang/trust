@@ -1,0 +1,99 @@
+// An array, which is storage a definition nobody wrote (Ch. 2 §3).
+//
+// `[T; N]` is N elements of one type at `i × size_of::<T>()`, so it is given
+// a `layout::Def` of N fields under the name `array.<T>.<N>` — and then
+// everything that fills, copies, lays out and passes an aggregate works on
+// it with no case of its own. A parameter is copied in field by field; a
+// nested array is an aggregate element and is copied rather than stored; the
+// storage is `repr(linear)` because an array's order is the one no `repr`
+// may choose.
+//
+// *The literal.* `[a, b, c]` lowers every element **before** the storage is
+// made, which is the order that decides the numbers. A struct literal is the
+// other way round — field by field, evaluate and store — and the two orders
+// are both visible in the text below, which is why `both` is here.
+//
+// *The repeat.* `[v; n]` evaluates `v` **once** and stores it n times. That
+// is a fact about the language and not an optimization: the value is written
+// once, so it happens once.
+//
+// *The index.* The same three instructions `lowered/18.tr` gave `&str`, over
+// a different second word: how many elements there are is in the **type**
+// here rather than beside the address, so it is a constant and nothing is
+// loaded before the index at all. The two bounds tests are the same two.
+//
+// *Assigning into one.* `d[i] = x` is the place, tests and all, and then the
+// value into it — the place first and the value after, which is the order it
+// is written in.
+
+fn side() -> t27 { 1 }
+
+fn other() -> t27 { 2 }
+
+// Constant elements, so that the slot's number is all that says the elements
+// came first.
+fn constants(i: taddr) -> t27 {
+    let a = [10, 20, 30];
+    a[i]
+}
+
+// Elements that are calls, where the order shows: both calls, then the slot.
+fn evaluated(i: taddr) -> t27 {
+    let a = [side(), other()];
+    a[i]
+}
+
+struct P { a: t27, b: t27 }
+
+// The other order, in the same file: a struct is filled field by field.
+fn both() -> t27 {
+    let p = P { a: side(), b: other() };
+    let a = [side(), other()];
+    p.a + a[0]
+}
+
+// Written out, so the element type is what the type says and not what the
+// first element is. `t9` is one tryte, which is what the index arithmetic
+// multiplies by.
+fn narrow(i: taddr) -> t9 {
+    let d: [t9; 4] = [1, 2, 3, 4];
+    d[i]
+}
+
+// The repeat form, with a call in it — evaluated once for all three.
+fn repeated(i: taddr) -> t27 {
+    let a = [side(); 3];
+    a[i]
+}
+
+// A constant index is checked exactly as a computed one is: what a lowering
+// writes is what the program said.
+fn first() -> t27 {
+    let a = [7, 8];
+    a[0]
+}
+
+// Assigning into an element, and then reading it back.
+fn written(i: taddr) -> t9 {
+    let mut d: [t9; 4] = [0; 4];
+    d[i] = 5;
+    d[0] = 6;
+    d[0] + d[i]
+}
+
+// An array of arrays. The inner one is an aggregate element, so it is built
+// where it can be and **copied** into place field by field — and reaching an
+// element of it is a place this can go on from.
+fn grid(i: taddr) -> t9 {
+    let g: [[t9; 2]; 3] = [[1, 2], [3, 4], [5, 6]];
+    g[i][0] + g[0][1]
+}
+
+// An array parameter arrives as a pointer and is copied into storage of its
+// own on entry, exactly as any other aggregate is (Ch. 3 §1.1).
+fn taken(a: [t27; 3]) -> t27 { a[0] + a[2] }
+
+fn main() -> t27 {
+    constants(1) + evaluated(0) + both() + (narrow(2) as t27) + repeated(1)
+        + first() + (written(3) as t27) + (grid(2) as t27) + taken([1, 2, 3])
+}

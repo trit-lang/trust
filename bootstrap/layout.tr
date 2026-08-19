@@ -134,7 +134,7 @@ pub fn raised(base: taddr, n: taddr) -> taddr {
 /// identifier as it was, so a length that is not digits is a `const` — and
 /// what a name stands for is a *value*, which is not a thing a layout can
 /// look up (Ch. 4 §2.4). It is refused rather than guessed at.
-fn written_length(text: &str) -> taddr {
+pub fn written_length(text: &str) -> taddr {
     let missing: taddr = 0 - 1;
     if text.len() == 0 || text.len() > 12 {
         return missing;

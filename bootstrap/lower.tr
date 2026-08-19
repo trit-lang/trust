@@ -386,6 +386,39 @@ pub fn fat_name(t: &ast::Ty) -> String {
     }
 }
 
+/// The name an array type has here: `array.<T>.<N>`.
+///
+/// An array is N elements of one type at `i × size_of::<T>()` (Ch. 2 §3),
+/// which is a definition with N fields — so it is given one, and everything
+/// that fills, copies and lays out an aggregate works on it unchanged. The
+/// definition is made where the type is first named, exactly as an
+/// instantiation is.
+pub fn array_name(elem: &str, n: taddr) -> String {
+    let mut out: String = Vec::new();
+    out.push_str("array.");
+    out.push_str(elem);
+    out.push_str(".");
+    push_int(&mut out, n as t27);
+    out
+}
+
+/// Whether a name is an array's. Only the head is asked: what is *in* the
+/// name is read off the definition, which is where it will still be right.
+pub fn is_array(name: &str) -> bool {
+    let head = "array.";
+    if name.len() <= head.len() {
+        return false;
+    }
+    let mut i: taddr = 0;
+    while i < head.len() {
+        if name[i] != head[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 /// Which trait a `dyn.<Trait>` is of, or nothing for a name that is not one.
 pub fn dyn_trait(name: &str) -> String {
     let head = "dyn.";
@@ -1216,41 +1249,66 @@ fn str_len(e: &mut Emit, slot: &str) -> Value {
 /// Nothing here folds a constant index. `s[0]` is checked exactly as `s[i]`
 /// is, because what a lowering writes is what the program said and what is
 /// provable about it is a later pass's business.
-fn index_str(e: &mut Emit, base: &ast::Expr, at: &ast::Expr) -> Value {
+fn index_place(e: &mut Emit, base: &ast::Expr, at: &ast::Expr) -> Value {
     let held = place(e, base);
     if e.stuck {
         return unknown_value();
     }
     let named = str_name();
-    // Only text, so far. An array and a `Vec` are indexed by the same three
-    // instructions over a different second word, and neither is lowered.
-    if !held.ty.same(&named) {
-        e.stuck = true;
-        return unknown_value();
-    }
-    let self_ty = ast::Ty::Name(one_name(&named));
-    let l = match layout::of(&e.defs, &self_ty, 0) {
-        Result::Ok(x) => x,
-        Result::Err(why) => {
+    let mut data: String = Vec::new();
+    let mut count: String = Vec::new();
+    let mut elem: String = Vec::new();
+    if held.ty.same(&named) {
+        // Text. Where the characters are and how many there are are the
+        // two words of the reference, so both are read out of it — and
+        // before the index is, because that is the order it is written in.
+        let self_ty = ast::Ty::Name(one_name(&named));
+        let l = match layout::of(&e.defs, &self_ty, 0) {
+            Result::Ok(x) => x,
+            Result::Err(why) => {
+                e.stuck = true;
+                return unknown_value();
+            }
+        };
+        data = fresh(e, "p");
+        let mut line: String = Vec::new();
+        line.push_str("    ");
+        line.push_str(&data);
+        line.push_str(" = load ptr ");
+        line.push_str(&held.text);
+        e.insts.push(line);
+        let ending = offset_of(e, &held.text, l.offsets[1]);
+        count = fresh(e, "v");
+        let mut line: String = Vec::new();
+        line.push_str("    ");
+        line.push_str(&count);
+        line.push_str(" = load t27 ");
+        line.push_str(&ending);
+        e.insts.push(line);
+        elem = "char".to_string();
+    } else {
+        // An array. Both answers are in the *type* — how many elements
+        // there are is what the definition has fields, and the storage is
+        // the array itself and not something it points at — so nothing is
+        // read before the index at all.
+        let which = def_at(&e.defs, &held.ty);
+        if which < 0 || !is_array(&held.ty) {
             e.stuck = true;
             return unknown_value();
         }
-    };
-    let data = fresh(e, "p");
-    let mut line: String = Vec::new();
-    line.push_str("    ");
-    line.push_str(&data);
-    line.push_str(" = load ptr ");
-    line.push_str(&held.text);
-    e.insts.push(line);
-    let ending = offset_of(e, &held.text, l.offsets[1]);
-    let count = fresh(e, "v");
-    let mut line: String = Vec::new();
-    line.push_str("    ");
-    line.push_str(&count);
-    line.push_str(" = load t27 ");
-    line.push_str(&ending);
-    e.insts.push(line);
+        data = held.text.to_string();
+        let mut written: String = Vec::new();
+        written.push_str("const t27 ");
+        push_int(&mut written, e.defs[which].fields.len() as t27);
+        count = written;
+        elem = name_head(&e.defs[which].fields[0]);
+        if elem.len() == 0 {
+            e.stuck = true;
+            return unknown_value();
+        }
+    }
+    let wide = tir_of(&elem);
+    let step = sized(e, &wide);
     let idx = value(e, at, "taddr");
     if e.stuck {
         return unknown_value();
@@ -1299,15 +1357,14 @@ fn index_str(e: &mut Emit, base: &ast::Expr, at: &ast::Expr) -> Value {
     line.push_str(&bad);
     e.insts.push(line);
     start(e, &ok);
-    let step = fresh(e, "a");
+    let scaled = fresh(e, "a");
     let mut line: String = Vec::new();
     line.push_str("    ");
-    line.push_str(&step);
+    line.push_str(&scaled);
     line.push_str(" = mul.trap t27 ");
     line.push_str(&idx.text);
     line.push_str(", const t27 ");
-    let wide = tir_of("char");
-    push_int(&mut line, trytes(&wide));
+    push_int(&mut line, step);
     e.insts.push(line);
     let there = fresh(e, "p");
     let mut line: String = Vec::new();
@@ -1316,18 +1373,164 @@ fn index_str(e: &mut Emit, base: &ast::Expr, at: &ast::Expr) -> Value {
     line.push_str(" = offset ");
     line.push_str(&data);
     line.push_str(", ");
-    line.push_str(&step);
+    line.push_str(&scaled);
     e.insts.push(line);
+    Value { text: there, ty: elem }
+}
+
+/// `s[i]` as a **value**: where it is, and then what is there.
+fn index_value(e: &mut Emit, base: &ast::Expr, at: &ast::Expr) -> Value {
+    let held = index_place(e, base, at);
+    if e.stuck {
+        return unknown_value();
+    }
+    // An element that is itself an aggregate has no value to load: it
+    // **is** the storage at that offset (TIR §3).
+    if def_at(&e.defs, &held.ty) >= 0 {
+        return held;
+    }
     let v = fresh(e, "v");
     let mut line: String = Vec::new();
     line.push_str("    ");
     line.push_str(&v);
     line.push_str(" = load ");
+    let wide = tir_of(&held.ty);
     line.push_str(&wide);
     line.push_str(" ");
-    line.push_str(&there);
+    line.push_str(&held.text);
     e.insts.push(line);
-    Value { text: v, ty: "char".to_string() }
+    Value { text: v, ty: held.ty }
+}
+
+/// `[a, b, c]` — a run of values, and then storage holding them (Ch. 2 §3).
+///
+/// Every element is lowered *before* the storage is made, which is what
+/// decides the numbers and is what an array literal says: it is a run of
+/// values, and each one is a value before any of them is anywhere. A struct
+/// literal is the other way round, field by field, and the two orders are
+/// both visible in the text.
+fn array_value(e: &mut Emit, items: &Vec<ast::Expr>, want: &str) -> Value {
+    let mut elem = array_element(e, want, items.len());
+    if elem.len() == 0 {
+        // Nothing said, so the first element does. An empty run with no
+        // written type says nothing at all and is refused (Ch. 4 §2.3).
+        if items.len() == 0 {
+            e.stuck = true;
+            return unknown_value();
+        }
+        elem = guess_ty(e, &items[0]);
+    }
+    if elem.len() == 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let mut texts: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < items.len() {
+        let v = value(e, &items[i], &elem);
+        if e.stuck {
+            return unknown_value();
+        }
+        texts.push(v.text);
+        i += 1;
+    }
+    array_storage(e, &elem, items.len(), &texts)
+}
+
+/// `[v; n]` — the same value in every element, and evaluated **once**
+/// (Ch. 2 §3).
+fn repeat_value(e: &mut Emit, v: &ast::Expr, count: &ast::Expr, want: &str) -> Value {
+    let n = match count {
+        ast::Expr::Int(k) => k as taddr,
+        _ => {
+            e.stuck = true;
+            return unknown_value();
+        }
+    };
+    if n < 1 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let mut elem = array_element(e, want, n);
+    if elem.len() == 0 {
+        elem = guess_ty(e, v);
+    }
+    if elem.len() == 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let held = value(e, v, &elem);
+    if e.stuck {
+        return unknown_value();
+    }
+    let mut texts: Vec<String> = Vec::new();
+    texts.push(held.text);
+    array_storage(e, &elem, n, &texts)
+}
+
+/// What the elements of an array written here are, where the type says so.
+///
+/// A written type is the only thing that can say when the run is empty, and
+/// it is what `let d: [t9; 4] = [0; 4]` is told by — without it the first
+/// element decides, which is what `let a = [1, 2, 3]` has to be read from.
+fn array_element(e: &mut Emit, want: &str, n: taddr) -> String {
+    let at = def_at(&e.defs, want);
+    if at >= 0 && is_array(want) {
+        if e.defs[at].fields.len() != n {
+            return "".to_string();
+        }
+        return name_head(&e.defs[at].fields[0]);
+    }
+    "".to_string()
+}
+
+/// Storage for a run of values already lowered, and each of them put in it.
+///
+/// One text per element, or **one** text for all of them, which is what
+/// `[v; n]` is: the value is evaluated once and stored n times.
+fn array_storage(e: &mut Emit, elem: &str, n: taddr, texts: &Vec<String>) -> Value {
+    let named = array_def(e, elem, n);
+    if named.len() == 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let self_ty = ast::Ty::Name(one_name(&named));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return unknown_value();
+        }
+    };
+    let held = fresh(e, "tmp.slot");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&held);
+    line.push_str(" = slot tryte[");
+    push_int(&mut line, l.size as t27);
+    line.push_str("]");
+    e.slots.push(line);
+    let aggregate = def_at(&e.defs, elem) >= 0;
+    let mut i: taddr = 0;
+    while i < n {
+        let there = offset_of(e, &held, l.offsets[i]);
+        let one: taddr = 0;
+        let which = if texts.len() == 1 {
+            one
+        } else {
+            i
+        };
+        if aggregate {
+            copy_between(e, &texts[which], &there, elem);
+        } else {
+            store_into(e, elem, &texts[which], &there);
+        }
+        if e.stuck {
+            return unknown_value();
+        }
+        i += 1;
+    }
+    Value { text: held, ty: named }
 }
 
 /// The global one string literal is written as: one word per character,
@@ -3188,9 +3391,12 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
         // `"abc"` — the characters go in a global and the two words that
         // reach them go in a temporary here (Ch. 2 §4).
         ast::Expr::Str(text) => text_value(e, text),
-        // `s[i]` — where the characters are, how many there are, and two
+        // `s[i]` — where the elements are, how many there are, and two
         // three-way tests before any arithmetic (Ch. 3 §3.2).
-        ast::Expr::Index(base, at) => index_str(e, base, at),
+        ast::Expr::Index(base, at) => index_value(e, base, at),
+        // `[a, b, c]` and `[v; n]` (Ch. 2 §3).
+        ast::Expr::Array(items) => array_value(e, items, want),
+        ast::Expr::Repeat(v, count) => repeat_value(e, v, count, want),
         // `match e { … }` — the discriminant once, then a three-way test per
         // arm, and a slot the arms agree to leave the answer in (§5.4).
         ast::Expr::Match(scrutinee, arms) => {
@@ -3198,6 +3404,32 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             match_expr(e, scrutinee, arms, want, &none, "")
         }
         ast::Expr::Assign(op, target, v) => {
+            // `d[i] = x` — where the element is, bounds tests and all, and
+            // then the value into it. The place first and the value after
+            // it, which is the order it is written in.
+            match target {
+                ast::Expr::Index(base, at) => {
+                    if !op.same("=") {
+                        e.stuck = true;
+                        return unknown_value();
+                    }
+                    let held = index_place(e, base, at);
+                    if e.stuck {
+                        return unknown_value();
+                    }
+                    let val = value(e, v, &held.ty);
+                    if e.stuck {
+                        return unknown_value();
+                    }
+                    if def_at(&e.defs, &held.ty) >= 0 {
+                        copy_between(e, &val.text, &held.text, &held.ty);
+                    } else {
+                        store_into(e, &held.ty, &val.text, &held.text);
+                    }
+                    return Value { text: "".to_string(), ty: "".to_string() };
+                }
+                _ => {}
+            }
             let name = match target {
                 ast::Expr::Name(n) => n.to_string(),
                 _ => {
@@ -3555,6 +3787,19 @@ fn place(e: &mut Emit, x: &ast::Expr) -> Value {
         // exactly what building the two words does. `"one".len()` is the
         // whole of what needs this.
         ast::Expr::Str(text) => text_value(e, text),
+        // `g[i][0]` — an element is a place, and one that is itself an
+        // aggregate is a place this can go on from.
+        ast::Expr::Index(base, at) => {
+            let held = index_place(e, base, at);
+            if e.stuck {
+                return unknown_value();
+            }
+            if def_at(&e.defs, &held.ty) < 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            held
+        }
         _ => {
             e.stuck = true;
             unknown_value()
@@ -4952,8 +5197,57 @@ fn nominal(e: &mut Emit, t: &ast::Ty) -> String {
             }
             instantiate(e, &head, &key)
         }
+        // `[T; N]` is a definition of N fields, made where it is first
+        // named. A length written as a `const` is a *value* and not a thing
+        // this can look up (Ch. 4 §2.4), so it is refused.
+        ast::Ty::Array(held, len) => {
+            let n = layout::written_length(len);
+            if n < 0 {
+                return "".to_string();
+            }
+            let inner = nominal(e, &*held);
+            if inner.len() == 0 {
+                return "".to_string();
+            }
+            array_def(e, &inner, n)
+        }
         _ => "".to_string(),
     }
+}
+
+/// The definition an array type has, made if it is not there already.
+///
+/// `linear` because an array's layout is the one no `repr` may choose
+/// (Ch. 2 §3): the elements in order, and the arithmetic indexing does is
+/// the layout rather than a consequence of it.
+fn array_def(e: &mut Emit, elem: &str, n: taddr) -> String {
+    let full = array_name(elem, n);
+    if def_at(&e.defs, &full) >= 0 {
+        return full;
+    }
+    if n < 0 {
+        return "".to_string();
+    }
+    let mut fields: Vec<ast::Ty> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < n {
+        fields.push(ast::Ty::Name(one_name(elem)));
+        let mut each: String = Vec::new();
+        push_int(&mut each, i as t27);
+        names.push(each);
+        i += 1;
+    }
+    e.defs.push(layout::Def {
+        name: full.to_string(),
+        is_enum: false,
+        linear: true,
+        fields: fields,
+        field_names: names,
+        counts: Vec::new(),
+        discriminants: Vec::new(),
+    });
+    full
 }
 
 /// One member of a family of types, made if it is not there already, and
@@ -5078,11 +5372,14 @@ fn subst_ty(
         }
         ast::Ty::Ref(held, m) => ast::Ty::Ref(Box::new(subst_ty(e, tyvars, key, held)), m),
         ast::Ty::Slice(held) => ast::Ty::Slice(Box::new(subst_ty(e, tyvars, key, held))),
+        ast::Ty::Array(held, len) => {
+            ast::Ty::Array(Box::new(subst_ty(e, tyvars, key, held)), len.to_string())
+        }
         ast::Ty::Unit => ast::Ty::Unit,
         ast::Ty::SelfTy => ast::Ty::SelfTy,
-        // Nothing inside a closure type, a tuple or an array names a type
-        // parameter that this reads: they are copied as they were written,
-        // and refused where they are used.
+        // Nothing inside a closure type or a tuple names a type parameter
+        // that this reads: they are copied as they were written, and
+        // refused where they are used.
         _ => ast::copy_ty(t),
     }
 }
