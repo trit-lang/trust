@@ -2621,6 +2621,60 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.135 — `Box<T>`, and the order a variant writes its payloads in.**
+
+`Box<T>` is the compiler's for the same reason `Raw<T>` is: it answers with
+a *pointer*, and this language has no way to write one (Ch. 5 §2.3). And it
+is `Raw`'s smaller sibling — one allocation of exactly one `T`, so there is
+no count beside the address and no arithmetic to find a position.
+
+Which makes it **one word and not two**, and that is the difference that
+matters. A `Raw` is a synthetic *definition* here — two fields, so
+`def_at` finds it and it is copied field by field. A `Box` is not: TIR calls
+it `ptr` and it is **stored**. So it is a scalar that owns a drop, which is
+a shape nothing in this file had: everything that owned something until now
+was an aggregate or a `Raw`.
+
+What it holds is not in the type as TIR sees it, so it is carried in the
+name — `box.<T>`, the way a `Raw`'s element is, and read back out of the
+same list a mangled name is. `tir_of` answers `ptr` for it and `def_at`
+finds nothing, which is what makes every scalar path take it unchanged.
+
+*Its destructor is a `Raw`'s with one step in front.* What it points at is
+dropped **first** — a `Box` knows what is in it, where a `Raw` does not —
+and then the room goes. There is no null test: a `Box` always points at one,
+which is the whole of what it is.
+
+*Dereferencing one is a **move**.* `*b` reads what the box owns, and there
+is no other way to get at that — so the flag is cleared and nothing is
+dropped at the end of the scope. In *place* position it is not: `(*b).n`
+reads nothing and moves nothing, and the box is still dropped. That is the
+place/value distinction this file already had, asked of one more thing.
+
+*And an arm that binds one through a reference reads the box.* A `Box` is an
+address, so a place *of* one is the box itself: binding `&Box<T>` would make
+`*a` the box and `&*a` a reference to one. What a reader means is what it
+**holds**, so the box is read and the binding is a `&T` (G9.50).
+
+**And one thing that was not about `Box` at all.** A **variant** writes
+every payload *first* and then stores them:
+
+    E::P(f(a), f(b))    calls both before it writes either
+
+A struct literal is the other way round — field by field, evaluate and store
+— and this file did it the struct way for both. It shows only where more
+than one payload has anything to evaluate, and no enum in the corpus had
+two. `Tree::Pair(Box::new(…), Box::new(…))` has two, and each is nine
+instructions.
+
+*`bootstrap/programs/boxed`* is the corpus: a recursive enum, which is what
+a `Box` is *for* (Ch. 2 §8) — a type cannot hold itself, but it can hold an
+address of itself, and the address is a word whatever is at the other end.
+
+*And one parenthesis.* `place` had no case for `(e)`, so `(*b).n` was
+refused for the grouping and not for the dereference. Parentheses group and
+nothing else (§2.1).
+
 **G9.134 — `_`, and what a reference lends an arm.**
 
 Three shapes the parser needs and the lexer did not, each measured off

@@ -544,6 +544,36 @@ pub fn raw_name(elem: &str) -> String {
     out
 }
 
+/// The name a `Box<T>` has here: `box.<T>`.
+///
+/// A `Box` is **one word** and not two — one allocation of exactly one `T`,
+/// so there is no count beside the address — which makes it a *scalar* and
+/// not an aggregate: it is stored where a `Raw` is copied. TIR calls it
+/// `ptr` and says nothing about what is in it, so what it is a box **of**
+/// is carried in this name, the way a `Raw`'s element is (Ch. 5 §2.3).
+pub fn box_name(elem: &str) -> String {
+    let mut out: String = Vec::new();
+    out.push_str("box.");
+    out.push_str(elem);
+    out
+}
+
+/// Whether a name is a `Box`'s.
+pub fn is_boxed(name: &str) -> bool {
+    let head = "box.";
+    if name.len() <= head.len() {
+        return false;
+    }
+    let mut i: taddr = 0;
+    while i < head.len() {
+        if name[i] != head[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 /// Whether a name is a `Raw`'s. What is *in* it is read off `instances`,
 /// which is what a mangled name cannot be parsed back into.
 pub fn is_raw(name: &str) -> bool {
@@ -681,7 +711,26 @@ pub fn field_tir(t: &ast::Ty) -> String {
                 "ptr".to_string()
             }
         }
+        // A `Box` is one word and TIR calls it `ptr`, so a field holding one
+        // is copied with a store and not walked into (Ch. 5 §2.3).
+        ast::Ty::App(segments, args) => {
+            if written_box(t) {
+                "ptr".to_string()
+            } else {
+                tir_ty(t)
+            }
+        }
         _ => tir_ty(t),
+    }
+}
+
+/// Whether a written type is a `Box<T>`.
+pub fn written_box(t: &ast::Ty) -> bool {
+    match t {
+        ast::Ty::App(segments, args) => {
+            joined(segments).same("Box") && args.len() == 1
+        }
+        _ => false,
     }
 }
 
@@ -767,6 +816,11 @@ pub fn tir_of(name: &str) -> String {
     // name that says *what* — which TIR does not need and a dereference
     // does (Ch. 3 §2.1).
     if name.len() > 1 && name[0] == '&' {
+        return "ptr".to_string();
+    }
+    // A `Box` is an address too, and the name says what is at the other end
+    // for the same reason a reference's does (Ch. 5 §2.3).
+    if is_boxed(name) {
         return "ptr".to_string();
     }
     if name.same("t9") {
@@ -1677,6 +1731,85 @@ fn raw_new(e: &mut Emit, want: &str) -> Value {
     let where_ = offset_of(e, &held, 3);
     store_into(e, "taddr", "const t27 0", &where_);
     Value { text: held, ty: want.to_string() }
+}
+
+/// `Box::new(v)` — room for exactly one `v`, and `v` in it (Ch. 5 §2.3).
+///
+/// The three steps a `Raw::alloc` has, with the count gone: the value
+/// somewhere first, then the room, then the value into the room. The
+/// allocator saying no is a trap, because a program that has nowhere to put
+/// something has nothing else to do (Ch. 5 §2.1).
+///
+/// What is stored is the address itself. A `Box` is one word, so there is
+/// nothing beside it to write.
+fn box_new(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
+    // What is wanted says what `T` is where it says anything: `let b:
+    // Box<Held> = …` is Ch. 4 §2.3 inferring from the binding. Where it
+    // does not, the value is asked.
+    let told = if is_boxed(want) {
+        raw_element(e, want)
+    } else {
+        "".to_string()
+    };
+    let held = value(e, x, &told);
+    if e.stuck {
+        return unknown_value();
+    }
+    let elem = held.ty.to_string();
+    if elem.len() == 0 || elem.same("?") {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let self_ty = ast::Ty::Name(one_name(&elem));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return unknown_value();
+        }
+    };
+    let got = fresh(e, "box");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&got);
+    line.push_str(" = call @alloc(const t27 ");
+    push_int(&mut line, l.size as t27);
+    line.push_str(", const t27 ");
+    push_int(&mut line, l.align as t27);
+    line.push_str(") -> ptr");
+    e.insts.push(line);
+    let ok = label(e, "box.ok");
+    let bad = label(e, "box.no");
+    let join = label(e, "box.join");
+    let number = as_number(e, &got);
+    let c = fresh(e, "c");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&c);
+    line.push_str(" = cmp t27 ");
+    line.push_str(&number);
+    line.push_str(", const t27 0");
+    e.insts.push(line);
+    three_ways(e, &c, &bad, &bad, &ok);
+
+    start(e, &ok);
+    if def_at(&e.defs, &elem) >= 0 {
+        copy_between(e, &held.text, &got, &elem);
+    } else {
+        store_into(e, &elem, &held.text, &got);
+    }
+    if e.stuck {
+        return unknown_value();
+    }
+    jump(e, &join);
+
+    start(e, &bad);
+    e.insts.push("    trap F_TRAP".to_string());
+    e.done = true;
+
+    start(e, &join);
+    let named = box_of(e, &elem);
+    Value { text: got, ty: named }
 }
 
 /// `Raw::alloc(n)` — room for `n`, or a fault where the target cannot give
@@ -3407,36 +3540,47 @@ fn fill_variant(
         return;
     }
     let start = variant_start(&e.defs[which], index);
+    // **Every payload first, and then where they go.** A struct literal is
+    // the other way round — field by field, evaluate and store — and this
+    // one is not, which is a fact about the text and shows only where more
+    // than one payload has anything to evaluate. `E::P(f(a), f(b))` calls
+    // both before it writes either.
+    let mut texts: Vec<String> = Vec::new();
+    let mut kinds: Vec<String> = Vec::new();
     let mut i: taddr = 0;
     while i < fields.len() {
         let written = ast::copy_ty(&e.defs[which].fields[start + i]);
         let held = nominal(e, &written);
-        let inner = def_at(&e.defs, &held);
-        if inner >= 0 {
-            let v = value(e, &fields[i].value, &held);
-            if e.stuck {
-                return;
-            }
-            let at = offset_of(e, dest, l.variant_offsets[index][i]);
-            if !copy_fields(e, &v.text, &at, &held) {
+        let kind = if def_at(&e.defs, &held) >= 0 {
+            held
+        } else {
+            let ty = field_tir(&e.defs[which].fields[start + i]);
+            if ty.same("?") {
                 e.stuck = true;
                 return;
             }
-            i += 1;
-            continue;
-        }
-        let ty = field_tir(&e.defs[which].fields[start + i]);
-        if ty.same("?") {
-            e.stuck = true;
-            return;
-        }
-        let v = value(e, &fields[i].value, &ty);
+            ty
+        };
+        let v = value(e, &fields[i].value, &kind);
         if e.stuck {
             return;
         }
-        let at = offset_of(e, dest, l.variant_offsets[index][i]);
-        store_into(e, &ty, &v.text, &at);
+        texts.push(v.text);
+        kinds.push(kind);
         i += 1;
+    }
+    let mut k: taddr = 0;
+    while k < fields.len() {
+        let at = offset_of(e, dest, l.variant_offsets[index][k]);
+        if def_at(&e.defs, &kinds[k]) >= 0 {
+            if !copy_fields(e, &texts[k], &at, &kinds[k]) {
+                e.stuck = true;
+                return;
+            }
+        } else {
+            store_into(e, &kinds[k], &texts[k], &at);
+        }
+        k += 1;
     }
     // Which variant it is.
     store_tag(e, dest, which, index);
@@ -3852,10 +3996,16 @@ fn bind_payload(
         // loaded: it has no value, it *is* its storage (TIR §3). What it is
         // called is `nominal`'s answer, because a variant may carry a
         // `Raw<T>` and an application is a type once it is instantiated.
+        //
+        // And a `Box` is a word that TIR calls `ptr` and this does not: it
+        // owns what it points at, so the binding has to know it is one.
+        if written_box(&e.defs[which].fields[first + i]) {
+            ty = "?".to_string();
+        }
         if ty.same("?") {
             let written = ast::copy_ty(&e.defs[which].fields[first + i]);
             let inner = nominal(e, &written);
-            if def_at(&e.defs, &inner) < 0 {
+            if def_at(&e.defs, &inner) < 0 && !is_boxed(&inner) {
                 e.stuck = true;
                 return;
             }
@@ -3871,7 +4021,33 @@ fn bind_payload(
         // anything that owns something is bound as the **place** it names,
         // because a copy of a `Vec` is a second header over one allocation.
         if borrowed && owns_drop(&e.defs, &e.drops, &ty, 0) {
+            // A `Box` is an address, so a place *of* one is the box itself:
+            // binding `&Box<T>` would make `*a` the box and `&*a` a
+            // reference to one. What a reader means is what it **holds**,
+            // so the box is read and the binding is a `&T` (Ch. 5 §2.3).
             let mut kind: String = Vec::new();
+            if is_boxed(&ty) {
+                let inner = raw_element(e, &ty);
+                if inner.len() == 0 {
+                    e.stuck = true;
+                    return;
+                }
+                // Read as the **value** it is: `%v` says the box, `%p`
+                // would say a step on the way to one (G9.94).
+                let at = fresh(e, "v");
+                let mut line: String = Vec::new();
+                line.push_str("    ");
+                line.push_str(&at);
+                line.push_str(" = load ptr ");
+                line.push_str(&src);
+                e.insts.push(line);
+                kind.push('&');
+                kind.push_str(&inner);
+                let slot = slot_for(e, &name, &kind);
+                store_into(e, "ptr", &at, &slot);
+                i += 1;
+                continue;
+            }
             kind.push('&');
             kind.push_str(&ty);
             let slot = slot_for(e, &name, &kind);
@@ -4363,12 +4539,57 @@ fn drop_one(e: &mut Emit, slot: &str, owner: &str) {
         drop_raw(e, slot, owner);
         return;
     }
+    if is_boxed(owner) {
+        drop_box(e, slot, owner);
+        return;
+    }
     note_drop(e, owner);
     let mut line: String = Vec::new();
     line.push_str("    call @drop.");
     line.push_str(owner);
     line.push_str("(");
     line.push_str(slot);
+    line.push_str(")");
+    e.insts.push(line);
+}
+
+/// A `Box`'s destructor, which is written out here rather than called: like
+/// a `Raw`'s, there is no `impl Drop for Box` to call, because `Box` is not
+/// a type the library wrote (Ch. 5 §2.3).
+///
+/// It is a `Raw`'s with one step in front of it. What it points at is
+/// dropped **first** — a `Box` knows what is in it, where a `Raw` does not
+/// — and then the room goes. There is no null test: a `Box` always points
+/// at one, which is the whole of what it is.
+fn drop_box(e: &mut Emit, slot: &str, owner: &str) {
+    let elem = raw_element(e, owner);
+    if elem.len() == 0 {
+        e.stuck = true;
+        return;
+    }
+    let self_ty = ast::Ty::Name(one_name(&elem));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return;
+        }
+    };
+    let at = loaded(e, "ptr", slot);
+    let drops = ast::copy_names(&e.drops);
+    if owns_drop(&e.defs, &drops, &elem, 0) {
+        drop_one(e, &at, &elem);
+        if e.stuck {
+            return;
+        }
+    }
+    let mut line: String = Vec::new();
+    line.push_str("    call @free(");
+    line.push_str(&at);
+    line.push_str(", const t27 ");
+    push_int(&mut line, l.size as t27);
+    line.push_str(", const t27 ");
+    push_int(&mut line, l.align as t27);
     line.push_str(")");
     e.insts.push(line);
 }
@@ -5046,7 +5267,10 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                     let key = ast::copy_names(&e.key);
                     let held = subst_ty(e, &tyvars, &key, t);
                     let named = nominal(e, &held);
-                    if def_at(&e.defs, &named) >= 0 {
+                    // A `Box` is not a definition — it is one word — but it
+                    // is still what the binding was written as, and what
+                    // `Box::new` reads its `T` off (Ch. 5 §2.3).
+                    if def_at(&e.defs, &named) >= 0 || is_boxed(&named) {
                         named
                     } else {
                         let mine = settled_ty(&e.aliases, t);
@@ -5170,6 +5394,32 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                         moved: Vec::new(),
                     });
                 }
+                return;
+            }
+            // A `Box` is stored and not copied — one word — and it **owns**
+            // what it points at, so it takes the flag an owned local takes
+            // and takes it before the value arrives (Ch. 5 §2.3).
+            if is_boxed(&val.ty) {
+                let slot = slot_for(e, name, &val.ty);
+                let mut prefix: String = Vec::new();
+                prefix.push_str(name);
+                prefix.push_str(".owns");
+                let flag = fresh(e, &prefix);
+                let mut line: String = Vec::new();
+                line.push_str("    ");
+                line.push_str(&flag);
+                line.push_str(" = slot tryte[1]");
+                e.slots.push(line);
+                store_into(e, "t1", "const t1 1", &flag);
+                e.owned.push(Owned {
+                    name: name.to_string(),
+                    slot: slot.to_string(),
+                    ty: val.ty.to_string(),
+                    flag: flag.to_string(),
+                    owns: Owns::Yes,
+                    moved: Vec::new(),
+                });
+                store_into(e, &val.ty, &val.text, &slot);
                 return;
             }
             // A binding to nothing is not a binding: `let x = f();` where
@@ -5567,6 +5817,15 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 move_out(e, n);
                 return Value { text: slot, ty: ty };
             }
+            // A `Box` is one word, so it is *loaded* like any other scalar
+            // — and reading it is still a move, because it owns what it
+            // points at (Ch. 5 §2.3).
+            if is_boxed(&ty) {
+                move_out(e, n);
+                if e.stuck {
+                    return unknown_value();
+                }
+            }
             let name = fresh(e, "v");
             let mut line: String = Vec::new();
             line.push_str("    ");
@@ -5809,6 +6068,31 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             Value { text: e.locals[at].slot.to_string(), ty: out }
         }
         ast::Expr::Deref(a) => {
+            // `*b` where `b` is a `Box` **moves the box**: reading it is
+            // reading what it owns, and there is no other way to get at
+            // that (Ch. 5 §2.3). In *place* position — `(*b).n` — nothing
+            // is read and nothing moves, which is what `place` does with
+            // the same expression.
+            if names_a_box(e, &*a) {
+                let held = value(e, &*a, "");
+                if e.stuck {
+                    return unknown_value();
+                }
+                let inner = raw_element(e, &held.ty);
+                if inner.len() == 0 {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+                if def_at(&e.defs, &inner) >= 0 {
+                    return Value { text: held.text, ty: inner };
+                }
+                if scalar_named(&inner).same("?") {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+                let v = loaded(e, &inner, &held.text);
+                return Value { text: v, ty: inner };
+            }
             let held = value(e, &*a, "");
             if e.stuck {
                 return unknown_value();
@@ -5949,6 +6233,16 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 }
                 if called.same("alloc") && fields.len() == 1 {
                     return raw_alloc(e, want, &fields[0].value);
+                }
+                e.stuck = true;
+                return unknown_value();
+            }
+            // `Box::new(v)` — room for exactly one `v`, and `v` in it
+            // (Ch. 5 §2.3). What `T` it is of is read off the value, which
+            // is the one direction there is: nothing else in the call says.
+            if head.same("Box") {
+                if called.same("new") && fields.len() == 1 {
+                    return box_new(e, &fields[0].value, want);
                 }
                 e.stuck = true;
                 return unknown_value();
@@ -6626,10 +6920,54 @@ fn place(e: &mut Emit, x: &ast::Expr) -> Value {
         // is what the bounds tests were for, and a receiver taken by value
         // is loaded out of it by whoever wanted the value.
         ast::Expr::Index(base, at) => index_place(e, base, at),
+        // `(p)` is `p`: parentheses group and nothing else (§2.1).
+        ast::Expr::Group(inner) => place(e, &*inner),
+        // `*b` — what a `Box` points at is a **place**, and getting there
+        // is one load: the box is one word and reading it is walking to the
+        // value rather than reading one (Ch. 5 §2.3). A *reference* needs
+        // no case here, because a name holding one is read through where it
+        // is named and `*r` has already happened by the time this is asked.
+        ast::Expr::Deref(a) => {
+            let held = place(e, &*a);
+            if e.stuck {
+                return unknown_value();
+            }
+            if !is_boxed(&held.ty) {
+                return held;
+            }
+            let inner = raw_element(e, &held.ty);
+            if inner.len() == 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            let p = fresh(e, "p");
+            let mut line: String = Vec::new();
+            line.push_str("    ");
+            line.push_str(&p);
+            line.push_str(" = load ptr ");
+            line.push_str(&held.text);
+            e.insts.push(line);
+            Value { text: p, ty: inner }
+        }
         _ => {
             e.stuck = true;
             unknown_value()
         }
+    }
+}
+
+/// Whether a name holds a `Box`, which is what decides whether `*` is a
+/// walk to a place or a read of a reference.
+fn names_a_box(e: &Emit, x: &ast::Expr) -> bool {
+    match x {
+        ast::Expr::Name(n) => {
+            let at = local_at(e, n);
+            if at < 0 {
+                return false;
+            }
+            is_boxed(&e.locals[at].ty)
+        }
+        _ => false,
     }
 }
 
@@ -8322,6 +8660,17 @@ fn nominal(e: &mut Emit, t: &ast::Ty) -> String {
                 }
                 return raw_def(e, &inner);
             }
+            // And so is `Box<T>` (Ch. 5 §2.3). It is not given a definition
+            // because it is not an aggregate: one word, which TIR calls
+            // `ptr`. What it is remembered by is the same list a mangled
+            // name is read back out of.
+            if head.same("Box") && args.len() == 1 {
+                let inner = nominal(e, &args[0]);
+                if inner.len() == 0 {
+                    return "".to_string();
+                }
+                return box_of(e, &inner);
+            }
             let mut key: Vec<String> = Vec::new();
             let mut i: taddr = 0;
             while i < args.len() {
@@ -8449,6 +8798,24 @@ fn raw_def(e: &mut Emit, elem: &str) -> String {
 
 /// What one `Raw` position holds, by name — read off `instances` and not
 /// off the definition, whose fields are two addresses whatever `T` is.
+/// The name a `Box<T>` is known by, remembering what is in it.
+fn box_of(e: &mut Emit, elem: &str) -> String {
+    let full = box_name(elem);
+    if inst_at(e, &full) >= 0 {
+        return full;
+    }
+    let mut key: Vec<String> = Vec::new();
+    key.push(elem.to_string());
+    e.instances.push(Inst {
+        full: full.to_string(),
+        base: "Box".to_string(),
+        key: key,
+    });
+    full
+}
+
+/// What a `Box` or a `Raw` is *of*, read off `instances` — which is what a
+/// mangled name cannot be parsed back into.
 fn raw_element(e: &Emit, name: &str) -> String {
     let at = inst_at(e, name);
     if at < 0 {
@@ -10526,8 +10893,9 @@ fn owns_drop(
         return true;
     }
     // A `Raw` owns its room and frees it, and nothing wrote an `impl Drop`
-    // saying so — it is the compiler's (Ch. 5 §2.7).
-    if is_raw(name) {
+    // saying so — it is the compiler's (Ch. 5 §2.7). A `Box` owns its room
+    // too, and what is *in* the room besides (Ch. 5 §2.3).
+    if is_raw(name) || is_boxed(name) {
         return true;
     }
     let at = def_at(defs, name);
@@ -10536,6 +10904,11 @@ fn owns_drop(
     }
     let mut i: taddr = 0;
     while i < defs[at].fields.len() {
+        // A `Box` is an address and owns what is at the other end of it, so
+        // it is the one `ptr` a type holding it is not free of.
+        if written_box(&defs[at].fields[i]) {
+            return true;
+        }
         let held = field_tir(&defs[at].fields[i]);
         if !held.same("ptr") {
             let inner = name_head(&defs[at].fields[i]);

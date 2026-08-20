@@ -1,0 +1,69 @@
+// `Box<T>` — one word that owns what it points at (Ch. 5 §2.3).
+//
+// It is the compiler's for the same reason `Raw<T>` is: it answers with a
+// *pointer*, and this language has no way to write one. And it is `Raw`'s
+// smaller sibling — one allocation of exactly one `T`, so there is no count
+// beside the address and no arithmetic to find a position.
+//
+// Which makes it **one word and not two**, and that is the difference that
+// matters: a `Raw` is an aggregate and is copied field by field, and a
+// `Box` is a scalar and is *stored*. What it holds is not in its type as
+// TIR sees it — TIR says `ptr` — so what it is a box *of* is carried in the
+// name the lowering gives it, the way a `Raw`'s element is.
+//
+// It is what makes a **recursive** type possible (Ch. 2 §8): a type cannot
+// hold itself, but it can hold an address of itself, and the address is a
+// word whatever is at the other end.
+
+enum Tree { Leaf(t27), Pair(Box<Tree>, Box<Tree>) }
+
+// `Box::new(v)` is three steps and they are `Raw::alloc`'s three: the value
+// somewhere first, then the room for exactly one of it, then the value into
+// the room. The allocator saying no is a trap, because a program that has
+// nowhere to put something has nothing else to do (Ch. 5 §2.1).
+fn leaf(n: t27) -> Tree {
+    Tree::Leaf(n)
+}
+
+fn pair(n: t27) -> Tree {
+    Tree::Pair(Box::new(leaf(n)), Box::new(leaf(n + 1)))
+}
+
+// Reading through one. A `Box` owns what it holds, so reaching through it
+// is a place it gives exclusively — there is nothing to borrow and nothing
+// to check.
+fn depth(t: &Tree) -> t27 {
+    match t {
+        Tree::Leaf(v) => 1,
+        Tree::Pair(a, b) => 2,
+    }
+}
+
+// And dropping one, which is the step a `Raw`'s destructor does not have:
+// what it points at is dropped **first**, and then the room goes. A `Raw`
+// frees the room and drops nothing, because a `Raw` does not know what is
+// in it; a `Box` does.
+fn built(n: t27) -> t27 {
+    let t = pair(n);
+    depth(&t)
+}
+
+// A `Box` of something with no destructor of its own still frees its room:
+// what it owns is the *allocation*, and that is true whatever is in it.
+fn plain(n: t27) -> t27 {
+    let b: Box<t27> = Box::new(n);
+    *b
+}
+
+// One that holds a structure, so that what goes into the room is copied
+// field by field and what comes back out is read through.
+struct Held { a: t27, b: t27 }
+
+fn structured(n: t27) -> t27 {
+    let h: Box<Held> = Box::new(Held { a: n, b: n + 1 });
+    (*h).a + (*h).b
+}
+
+fn main() -> t27 {
+    built(1) + plain(2) + structured(3)
+}
