@@ -2621,6 +2621,60 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.128 — `?`, and the two things it needed.**
+
+`?` is a `match` and nothing else (Ch. 5 §4.1):
+
+    e?   is   match e { Ok(#q) => #q, Err(#r) => return Err(#r) }
+
+so it is written that way and lowered by the arm that already knows how.
+Two lowerings would be two things to keep in step over an operator that is
+*defined* as the match it spells. The whole of `?` is thirty lines of
+building that tree; what it needed was two things that were not about `?`.
+
+*The two names are invented*, because `#` is not a character a program can
+write and nothing they bind can be shadowed. Their number is the **value
+counter's**, taken after the value is lowered and before anything else is —
+they name storage, so `%#q7.slot.15` is text and two implementations that
+disagreed about the number would disagree about the module. The reference
+takes it from `self.counter`, which is the number the last thing emitted
+*took*; this one's counter is the number the next thing *will* take, so it
+is one less, and getting that wrong is one character in one name.
+
+*And the value is matched twice over*, once per arm, so it is found once and
+both arms are given the place. Lowering it again would call the function
+again, which is not what `f(x)?` says. That is what split `match_expr` into
+a half that finds a place and a half that matches over one.
+
+**The first thing it needed: a `match` whose scrutinee is not a name.**
+`match lex::one(&src, at) { … }` was refused outright — the scrutinee had to
+be a local. But a scrutinee is a **place**, and anything that answers with
+an aggregate is one, because an aggregate has no value: it *is* its storage
+(TIR §3). So `place` learned that a call and a method call answer with one,
+which is what its own comment had claimed since `char::try_from(n).unwrap()`
+needed it for a struct literal. A scrutinee behind a reference is now read
+through as well, exactly as `.` is (Ch. 3 §2.3), because `place` already
+did that and nothing here has to.
+
+**The second: an arm that binds an aggregate payload.** `Result::Err(bad)`
+where the error is a struct bound `bad` and read as `bad.at`. Payloads were
+`load` and `store` — one scalar at a time — and an aggregate has nothing to
+load. It is copied, and the storage is made **before** the copy, which is
+what decides the number it gets: the reference's `%b.slot.17` sits between
+the `%p.16` that found the payload and the `%v.18` that began copying it.
+
+`bootstrap/programs/failing` is the corpus: one `?`, two in one function,
+one written inline, one whose value is thrown away, one on an `Option` where
+the failing arm carries nothing at all — and the match spelled out beside
+them, so that what `?` becomes and what it is short for are compared by
+being in one module.
+
+*What `?` refuses.* A `?` on a `Result<A, E>` in a function answering
+`Result<B, F>` where `E` and `F` differ: what comes out is carried on
+unchanged, and where the two differ there is a `From` to call (Ch. 4 §5.6)
+that is not written here. What they *succeed* with is nobody's business —
+that is what `?` unwraps.
+
 **G9.127 — a `return` whose value is an aggregate.**
 
 A function whose answer is an aggregate is given the storage for it and
@@ -2652,12 +2706,13 @@ function answering an aggregate. `bootstrap/lowered/23.tr` asks it four
 ways: one early answer, two in one function, one through a field that is
 itself an aggregate, and the tail beside them.
 
-*It is one of three things `?` needs*, and the other two are still refused:
-a **generic enum instantiated** (`Result<T, E>` — the families built so far
-are structs), and a **`match` whose scrutinee is not a name**. `?` itself is
-neither: it is `match e { Ok(#qN) => #qN, Err(#rN) => return Err(#rN) }`
-with two invented names, and the number in them is the value counter's — so
-it is text, and both implementations have to agree about it.
+*It is one of the things `?` needs*, and **G9.128** is the rest. The other
+two turned out to be a `match` whose scrutinee is not a name and an arm that
+binds an aggregate payload — a generic enum instantiated was not one of
+them, which this entry claimed until it was checked with the prelude
+attached. `Result<T, E>` had worked since families did; the probe that said
+otherwise was compiled without `--prelude`, so `Result` was not defined at
+all.
 
 **G9.126 — a loop's last expression, and the two words out of one.**
 

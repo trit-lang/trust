@@ -1,0 +1,100 @@
+// `?`, which is a `match` and nothing else (§5.5, Ch. 5 §4.1).
+//
+//     e?   is   match e { Ok(#q) => #q, Err(#r) => return Err(#r) }
+//
+// So it is written that way and lowered by the arm that already knows how.
+// Two lowerings would be two things to keep in step over an operator that
+// is *defined* as the match it spells.
+//
+// The two names in it are **invented**: `#` is not a character a program
+// can write, so nothing they bind can be shadowed. Their number is the
+// value counter's, taken after the value is lowered and before anything
+// else is — they name storage, so `%#q7.slot.15` is text, and two
+// implementations that disagreed about the number would disagree about the
+// module.
+//
+// And the value is matched twice over, once per arm, so it is found **once**
+// and both arms are given the place. Lowering it again would call the
+// function again — which is not what `f(x)?` says.
+
+struct Error { at: taddr }
+
+// The thing being asked. It fails above two and answers below it.
+fn checked(n: taddr) -> Result<taddr, Error> {
+    if n > 2 {
+        return Result::Err(Error { at: n });
+    }
+    Result::Ok(n)
+}
+
+// One `?`, whose value is bound. What the function answers with is what the
+// failing arm carries out — read from the *function* and not from the `let`
+// around the `?`.
+fn once(n: taddr) -> Result<taddr, Error> {
+    let k = checked(n)?;
+    Result::Ok(k + 1)
+}
+
+// Two of them, so the invented names are numbered twice and neither
+// shadows the other.
+fn twice(n: taddr) -> Result<taddr, Error> {
+    let a = checked(n)?;
+    let b = checked(a)?;
+    Result::Ok(a + b)
+}
+
+// One written where the value is used and not bound, which is the ordinary
+// way it is written.
+fn inline(n: taddr) -> Result<taddr, Error> {
+    Result::Ok(checked(n)? + 1)
+}
+
+// One whose value is thrown away: `?` in statement position is still the
+// same match, and its answer is what nobody reads.
+fn ignored(n: taddr) -> Result<taddr, Error> {
+    checked(n)?;
+    Result::Ok(0)
+}
+
+// `?` on an `Option`, where the failing arm carries nothing at all — the
+// pattern binds nothing and `None` is built with no fields.
+fn perhaps(n: taddr) -> Option<taddr> {
+    let k = maybe(n)?;
+    Option::Some(k + 1)
+}
+
+fn maybe(n: taddr) -> Option<taddr> {
+    if n > 2 {
+        return Option::None;
+    }
+    Option::Some(n)
+}
+
+// And the match written out, so that what `?` becomes is beside what it is
+// short for and the two are compared by being in one module.
+fn spelled(n: taddr) -> Result<taddr, Error> {
+    match checked(n) {
+        Result::Ok(k) => Result::Ok(k + 1),
+        Result::Err(bad) => Result::Err(bad),
+    }
+}
+
+fn read(r: Result<taddr, Error>) -> taddr {
+    match r {
+        Result::Ok(v) => v,
+        Result::Err(bad) => bad.at,
+    }
+}
+
+fn main() -> t27 {
+    let a = read(once(1));
+    let b = read(twice(1));
+    let c = read(inline(1));
+    let d = read(ignored(1));
+    let f = read(spelled(1));
+    let g: taddr = match perhaps(1) {
+        Option::Some(v) => v,
+        Option::None => a,
+    };
+    (a + b + c + d + f + g) as t27
+}

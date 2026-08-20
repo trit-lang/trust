@@ -2104,6 +2104,24 @@ fn field_place(e: &mut Emit, base: &ast::Expr, name: &str) -> Value {
     Value { text: at, ty: ty }
 }
 
+/// The place an expression that *answers* with an aggregate names: the
+/// storage it was given, which is the value (TIR §3).
+///
+/// Nothing owns it. A temporary made for one expression is dropped by
+/// whoever ends up owning it and by nobody where that is nobody, which is
+/// what makes matching over one safe to write.
+fn answered(e: &mut Emit, x: &ast::Expr) -> Value {
+    let held = value(e, x, "");
+    if e.stuck {
+        return unknown_value();
+    }
+    if def_at(&e.defs, &held.ty) < 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    held
+}
+
 /// `s[i]` as a **value**: where it is, and then what is there.
 fn index_value(e: &mut Emit, base: &ast::Expr, at: &ast::Expr) -> Value {
     let held = index_place(e, base, at);
@@ -2396,27 +2414,175 @@ fn match_expr(
     dest: &str,
     answer: &str,
 ) -> Value {
-            let base = match scrutinee {
-                ast::Expr::Name(n) => {
-                    let at = local_at(e, n);
-                    if at < 0 {
-                        e.stuck = true;
-                        return unknown_value();
-                    }
-                    e.locals[at].slot.to_string()
-                }
-                _ => {
-                    e.stuck = true;
-                    return unknown_value();
-                }
-            };
-            let owner = match scrutinee {
-                ast::Expr::Name(n) => {
-                    let at = local_at(e, n);
-                    e.locals[at].ty.to_string()
-                }
-                _ => "".to_string(),
-            };
+    // What is matched over is a **place**: a name is one, and so is
+    // anything that answers with an aggregate, because an aggregate *is*
+    // its storage (TIR §3). A scrutinee behind a reference is read through,
+    // exactly as `.` is (Ch. 3 §2.3) — which `place` already does and
+    // nothing here has to.
+    let held = place(e, scrutinee);
+    if e.stuck {
+        return unknown_value();
+    }
+    match_place(e, &held, arms, want, dest, answer)
+}
+
+/// `e?` (§5.5, Ch. 5 §4.1) — the two arms it **is**.
+///
+/// `e?` is `match e { Ok(#q) => #q, Err(#r) => return Err(#r) }` and nothing
+/// else, so it is written that way and lowered by the arm that already
+/// knows how. Two lowerings would be two things to keep in step over an
+/// operator that is *defined* as the match it spells.
+///
+/// The two names are invented — `#` is not a character a program can write,
+/// so nothing it binds can be shadowed — and their number is the value
+/// counter's, taken **after** the value is lowered and before anything else
+/// is. They name storage, so they reach TIR and are text the two
+/// implementations agree about.
+///
+/// The value is matched twice over, once per arm, so it is found **once**
+/// and both arms are given the place. Lowering it again would call the
+/// function again.
+fn try_expr(
+    e: &mut Emit,
+    inner: &ast::Expr,
+    want: &str,
+    dest: &str,
+    answer: &str,
+) -> Value {
+    let held = place(e, inner);
+    if e.stuck {
+        return unknown_value();
+    }
+    let kind = carrier(e, &held.ty);
+    if kind.len() == 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    // `?` needs a function that answers with the same one. There is no
+    // conversion between them, and where the two error types differ there
+    // is a `From` to call — neither is written here (Ch. 5 §4.1).
+    let mine = e.answer.to_string();
+    if !carrier(e, &mine).same(&kind) {
+        e.stuck = true;
+        return unknown_value();
+    }
+    if !same_failure(e, &held.ty, &mine) {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let n = e.next - 1;
+    let mut ok_bind: String = Vec::new();
+    ok_bind.push_str("#q");
+    push_int(&mut ok_bind, n);
+    let mut bad_bind: String = Vec::new();
+    bad_bind.push_str("#r");
+    push_int(&mut bad_bind, n);
+    let carried = kind.same("Result");
+    let mut good: String = Vec::new();
+    good.push_str(&kind);
+    good.push_str(if carried { "::Ok" } else { "::Some" });
+    let mut wrong: String = Vec::new();
+    wrong.push_str(&kind);
+    wrong.push_str(if carried { "::Err" } else { "::None" });
+
+    let mut arms: Vec<ast::Arm> = Vec::new();
+    let mut ok_fields: Vec<ast::PatField> = Vec::new();
+    ok_fields.push(ast::PatField {
+        name: "0".to_string(),
+        pat: ast::Pattern::Bind(ok_bind.to_string()),
+    });
+    let mut ok_pats: Vec<ast::Pattern> = Vec::new();
+    ok_pats.push(ast::Pattern::Aggregate(good.to_string(), ok_fields));
+    arms.push(ast::Arm {
+        patterns: ok_pats,
+        guard: Option::None,
+        body: ast::Expr::Name(ok_bind.to_string()),
+    });
+
+    // What the other arm answers with is written again rather than passed
+    // along: the value being carried out is the *function's* and not this
+    // expression's, and a `None` carries nothing at all.
+    let mut bad_fields: Vec<ast::PatField> = Vec::new();
+    let mut given: Vec<ast::Field> = Vec::new();
+    if carried {
+        bad_fields.push(ast::PatField {
+            name: "0".to_string(),
+            pat: ast::Pattern::Bind(bad_bind.to_string()),
+        });
+        given.push(ast::Field {
+            name: "0".to_string(),
+            value: ast::Expr::Name(bad_bind.to_string()),
+        });
+    }
+    let mut bad_pats: Vec<ast::Pattern> = Vec::new();
+    bad_pats.push(ast::Pattern::Aggregate(wrong.to_string(), bad_fields));
+    let out = ast::Expr::Aggregate(wrong.to_string(), given);
+    arms.push(ast::Arm {
+        patterns: bad_pats,
+        guard: Option::None,
+        body: ast::Expr::Return(Option::Some(Box::new(out))),
+    });
+
+    match_place(e, &held, &arms, want, dest, answer)
+}
+
+/// Whether a type is one of the two `?` carries, by the name of the family
+/// it is an instantiation of (Ch. 5 §4.1).
+fn carrier(e: &Emit, ty: &str) -> String {
+    let at = inst_at(e, ty);
+    if at < 0 {
+        return "".to_string();
+    }
+    let base = e.instances[at].base.to_string();
+    if base.same("Result") || base.same("Option") {
+        return base;
+    }
+    "".to_string()
+}
+
+/// Whether two `Result`s fail the same way.
+///
+/// `?` on a `Result<A, E>` in a function answering `Result<B, F>` needs `E`
+/// and `F` to be the same type: what comes out is carried on unchanged, and
+/// where the two differ there is a `From` to call that is not written here
+/// (Ch. 5 §4.1). What they *succeed* with is nobody's business — that is
+/// what `?` unwraps.
+///
+/// An `Option` has nothing to compare: there is one `None` and it carries
+/// nothing.
+fn same_failure(e: &Emit, a: &str, b: &str) -> bool {
+    let one = inst_at(e, a);
+    let two = inst_at(e, b);
+    if one < 0 || two < 0 {
+        return false;
+    }
+    let mut i: taddr = 1;
+    while i < e.instances[one].key.len() {
+        if i >= e.instances[two].key.len() {
+            return false;
+        }
+        if !e.instances[one].key[i].same(&e.instances[two].key[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    e.instances[one].key.len() == e.instances[two].key.len()
+}
+
+/// The same, over a place that has already been found.
+///
+/// `?` needs this: it matches over a value it lowered itself, and lowering
+/// the expression a second time would evaluate it a second time.
+fn match_place(
+    e: &mut Emit,
+    held: &Value,
+    arms: &Vec<ast::Arm>,
+    want: &str,
+    dest: &str,
+    answer: &str,
+) -> Value {
+            let base = held.text.to_string();
+            let owner = held.ty.to_string();
             let which = def_at(&e.defs, &owner);
             if which < 0 {
                 e.stuck = true;
@@ -2785,6 +2951,9 @@ fn aggregate_tail(e: &mut Emit, x: &ast::Expr, dest: &str, owner: &str) {
         }
         ast::Expr::Match(scrutinee, arms) => {
             match_expr(e, scrutinee, arms, "", dest, owner);
+        }
+        ast::Expr::Try(inner) => {
+            try_expr(e, &*inner, "", dest, owner);
         }
         // A call answers into storage the caller provides (TIR §3), and in
         // tail position that storage is `%sret` itself: what the callee
@@ -3342,13 +3511,33 @@ fn bind_payload(
                 return;
             }
         };
-        let ty = field_tir(&e.defs[which].fields[first + i]);
+        let mut ty = field_tir(&e.defs[which].fields[first + i]);
+        // A payload that is itself an **aggregate** is copied and not
+        // loaded: it has no value, it *is* its storage (TIR §3). What it is
+        // called is `nominal`'s answer, because a variant may carry a
+        // `Raw<T>` and an application is a type once it is instantiated.
         if ty.same("?") {
-            e.stuck = true;
-            return;
+            let written = ast::copy_ty(&e.defs[which].fields[first + i]);
+            let inner = nominal(e, &written);
+            if def_at(&e.defs, &inner) < 0 {
+                e.stuck = true;
+                return;
+            }
+            ty = inner;
         }
         let at = l.variant_offsets[index][i];
         let src = offset_of(e, base, at);
+        if def_at(&e.defs, &ty) >= 0 {
+            // The storage first and the copy after it, which is what
+            // decides the number the slot gets.
+            let slot = slot_for(e, &name, &ty);
+            copy_between(e, &src, &slot, &ty);
+            if e.stuck {
+                return;
+            }
+            i += 1;
+            continue;
+        }
         let got = fresh(e, "v");
         let mut load: String = Vec::new();
         load.push_str("    ");
@@ -5202,6 +5391,19 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             let none: String = Vec::new();
             match_expr(e, scrutinee, arms, want, &none, "")
         }
+        // `e?` **is** a match, so it is written as one (§5.5).
+        ast::Expr::Try(inner) => {
+            let none: String = Vec::new();
+            try_expr(e, &*inner, want, &none, "")
+        }
+        // A `return` written where a value is wanted answers no value at
+        // all: what follows it is not reached. It is lowered by the
+        // statement it is, so there is one of it (§5.1).
+        ast::Expr::Return(v) => {
+            let held = ast::Stmt::Do(ast::copy_expr(x));
+            stmt(e, &held, want);
+            Value { text: "".to_string(), ty: "".to_string() }
+        }
         ast::Expr::Assign(op, target, v) => {
             // `d[i] = x` — where the element is, bounds tests and all, and
             // then the value into it. The place first and the value after
@@ -5723,18 +5925,12 @@ fn place(e: &mut Emit, x: &ast::Expr) -> Value {
         ast::Expr::Str(text) => text_value(e, text),
         // And anything that *answers* with an aggregate answers with a
         // place: an aggregate has no value, it **is** its storage (TIR §3),
-        // so `char::try_from(n).unwrap()` has somewhere to point at.
-        ast::Expr::Aggregate(path, fields) => {
-            let held = value(e, x, "");
-            if e.stuck {
-                return unknown_value();
-            }
-            if def_at(&e.defs, &held.ty) < 0 {
-                e.stuck = true;
-                return unknown_value();
-            }
-            held
-        }
+        // so `char::try_from(n).unwrap()` has somewhere to point at — and so
+        // does `match lex::one(&src, at) { … }`, where what is matched over
+        // is the storage the call was given.
+        ast::Expr::Aggregate(path, fields) => answered(e, x),
+        ast::Expr::Call(name, args) => answered(e, x),
+        ast::Expr::Method(recv, name, args) => answered(e, x),
         // `g[i][0]`, and `s[i].to_utf8()` — an **element** is a place
         // whatever it holds. A field is not: a scalar field is read where
         // it is and there is nothing to go on to, but an element's address
