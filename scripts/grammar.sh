@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env sh
 # Check the tree-sitter grammar against the parser it can drift from.
 #
 # `editors/tree-sitter-trust` is a second grammar for this language. The first

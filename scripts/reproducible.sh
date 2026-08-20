@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Compiling the same source twice gives the same bytes.
 #
 # This is the property Diverse Double-Compiling rests on (docs/ddc.md): the

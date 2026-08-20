@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env sh
 # Every `Ch. N §M` / `AM §M` / `TIR §M` / `ISA §M` citation in the source *and
 # in the specification itself*, checked against the document it names.
 #

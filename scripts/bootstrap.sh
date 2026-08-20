@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Hold the lexer and parser written in Trust to the ones written in Rust.
 #
 # `bootstrap/` is this compiler written in the language it compiles — the

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env sh
 # Every number in docs/status.md §2 and §4. Generated, not recalled — the
 # document opens by claiming its numbers were produced by running something,
 # and a number nobody can reproduce quietly withdraws that claim.
