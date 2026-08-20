@@ -1,0 +1,74 @@
+// An impl written on **one member** of a family (Ch. 5 §2.6).
+//
+// `impl Vec<char>` is not `Vec`'s impl. `Vec`'s is one function per key —
+// `Vec.push.t27` and `Vec.push.char` are two functions read from one body —
+// and this one is one function, full stop, because there is nothing left to
+// read it under. So it is named after the **instantiation**:
+// `Bin.t27.doubled`, not `Bin.doubled`, which would be a family's name for
+// something that is not one.
+//
+// It is what `String` is: the library writes `type String = Vec<char>` and
+// then `impl String { … }`, which is an impl on `Vec<char>` and on no other
+// `Vec` (Ch. 0 §3.6, Ch. 5 §2.6).
+//
+// The instantiation it is written on has to be **made** where the method is
+// emitted, because nothing in the file wrote it down: `Bin<t27>` exists
+// because this impl mentions it and for no other reason.
+
+struct Bin<T> { held: T, n: taddr }
+
+impl<T> Bin<T> {
+    fn new(v: T) -> Bin<T> { Bin { held: v, n: 1 } }
+    fn count(&self) -> taddr { self.n }
+}
+
+// The one that is not a family. Its receiver is a `Bin<t27>` and nothing
+// else, so `self.held` is a `t27` and can be read as one — which is the
+// whole point of writing an impl this way.
+impl Bin<t27> {
+    fn doubled(&self) -> t27 { self.held * 2 }
+    fn held_twice(&self) -> t27 { self.doubled() + self.held }
+}
+
+// A second one, on a different member of the same family, so that the two
+// are told apart by the key in their names and not by anything else.
+impl Bin<t9> {
+    fn narrow(&self) -> t9 { self.held }
+}
+
+// And a **trait** impl on one member, whose method is named after the type
+// the same way an inherent one is (Ch. 4 §1.2).
+trait Doubling { fn twice(&self) -> t27; }
+
+impl Doubling for Bin<taddr> {
+    fn twice(&self) -> t27 { (self.held * 2) as t27 }
+}
+
+fn wide() -> t27 {
+    let b: Bin<t27> = Bin::new(5);
+    b.doubled() + b.held_twice() + (b.count() as t27)
+}
+
+fn narrow() -> t27 {
+    let b: Bin<t9> = Bin::new(1);
+    b.narrow() as t27
+}
+
+fn traited() -> t27 {
+    let b: Bin<taddr> = Bin::new(3);
+    b.twice()
+}
+
+// And the library's own, which is the reason for all of it: `Vec<char>` has
+// methods `Vec<t27>` does not, because `impl String` is written on that one
+// instantiation. None of this is in this file.
+fn text() -> taddr {
+    let mut s: Vec<char> = Vec::new();
+    s.push('a');
+    s.push('b');
+    s.len()
+}
+
+fn main() -> t27 {
+    wide() + narrow() + traited() + (text() as t27)
+}

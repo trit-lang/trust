@@ -2621,6 +2621,84 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.130 — an alias is only a name, and nothing here expands one.**
+
+`type String = Vec<char>` (Ch. 0 §3.6). An alias is only a name, so
+expanding it is the whole of what one *is*: after that, nothing below the
+frontend has ever heard of `String`. The reference does it in one pass over
+the file before anything else runs. This one parses aliases — `ast::What::
+Alias` has been there since the parser was written — and never expands them,
+so `String` reaches the lowering as a name nothing defines.
+
+It is the whole of what is left between here and `bootstrap/main.tr`. All
+seven refused `lex` functions are the same fact one level down:
+
+    pub struct Error { pub at: taddr, pub message: String }
+
+`Error` has no layout, so `wrong`, `one`, `escape_literal`, `escape_at`,
+`slice`, `skip` and `block_comment` have none either. `input::read_all`
+writes `let mut out: String = Vec::new()`, which is the same name in the
+same position.
+
+*It is two rewrites and not one.* A **type** written `String` becomes
+`Vec<char>`, which this tree can hold. A **path** written `String::new`
+becomes `Vec::new` *at* `char` — and this tree cannot hold that: an
+aggregate path here is a `String` and carries no type arguments, so
+`Vec::new` has nowhere to put the `char`. Where the binding says
+(`let out: String = Vec::new()`) the key comes from what is wanted and
+nothing is missing; `String::new()` on its own is the case that needs the
+arguments written down, and the AST needs a field before it can be written.
+
+*And an alias may name another*, so each is expanded until it names no alias
+at all — with the one that reaches itself refused rather than followed
+(Ch. 0 §3.6).
+
+**G9.129 — an impl written on one member of a family.**
+
+`impl Vec<char>` is not `Vec`'s impl. `Vec`'s is one function per key —
+`Vec.push.t27` and `Vec.push.char` are two functions read from one body —
+and this one is one function, because there is nothing left to read it
+under. So it is named after the **instantiation**: `Vec.char.push_str`, not
+`Vec.push_str`, which would be a family's name for something that is not
+one (Ch. 5 §2.6).
+
+It is what `String` is. The library writes `type String = Vec<char>` and
+then `impl String { … }`, and that impl is on `Vec<char>` and on no other
+`Vec` — which is why `Vec<char>` had methods `Vec<t27>` does not, and why
+G9.121 saw the two implementations disagree about **one function's
+position**: the reference lowered `impl Vec<char>` and so asked for
+`Vec.regrow.char` before the program did, and this one skipped the impl
+entirely.
+
+Skipping it was not one decision. `self_parameters(gs, ty)` answers with the
+parameters an impl's self type binds and answers with *none* where the self
+type is not the impl's own parameters in order — which is right, and every
+place that asked it then treated "no parameters" as "the impl is on the
+head". `impl Vec<char>` has no parameters and is not on `Vec`.
+
+So the name is one question with two answers, asked in six places: the
+methods' signatures, their parameters, their answers, what a trait gave
+them, which of them are families, and where they are emitted. All six ask
+`impl_owner` now, which is the head where the impl is on a family and the
+mangled instantiation where it is on one member.
+
+*And the instantiation has to be made where the method is emitted*, because
+nothing in the file wrote it down: `Vec.char` exists because an impl
+mentions it and for no other reason. That is the one new thing the emitter
+learned — a key for the **owner**, which is not the key a family method is
+read under and does not go in the same place in the name.
+
+`bootstrap/programs/oneof` is the corpus: a family, an impl on it, two impls
+on two different members of it, a trait impl on a third, and `Vec<char>`
+from the library beside them.
+
+*What it bought.* `bootstrap/main.tr` went from 33 of the reference's 48
+functions to **42**, and from 26 character-identical to 35. `str::to_string`,
+`Vec.char.push_str` and every `Vec.*.char` lower now.
+
+That closes **G9.121**. What is left of `String` is not the impl: it is the
+**alias**.
+
 **G9.128 — `?`, and the two things it needed.**
 
 `?` is a `match` and nothing else (Ch. 5 §4.1):
@@ -3008,6 +3086,10 @@ Nothing is wrong with either module — the bodies are character for
 character the same — and that is exactly why it is written down: the order
 *is* the text (docs/ddc.md §4), and an ordering that depends on what a
 pruned impl asked for is a fact about the compiler that no chapter states.
+
+*Closed by **G9.129**.* The ordering was not the thing: the impl was simply
+not being lowered at all, and once it is, the two queues drain in the same
+order for the same reason they always did.
 
 **G9.120 — a rename that replaced text and not names.**
 

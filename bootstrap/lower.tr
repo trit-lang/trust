@@ -892,6 +892,7 @@ pub fn function(
     owner: String,
     outer: Vec<String>,
     key: Vec<String>,
+    owner_key: Vec<String>,
     work: &mut Work,
     out: &mut String,
 ) -> bool {
@@ -958,6 +959,7 @@ pub fn function(
     // What `self` points at is the receiver's *instantiation*, not the
     // family: `&self` in an `impl<T> Pair<T>` reads the fields of the
     // `Pair.t27` this one is for.
+    let mut named_owner = owner.to_string();
     if outer.len() > 0 {
         let mut mine: Vec<String> = Vec::new();
         let mut o: taddr = 0;
@@ -971,13 +973,25 @@ pub fn function(
         }
         e.self_ty = held;
     }
+    // An impl written on **one member** of a family (Ch. 5 §2.6) is not the
+    // family's impl: its methods are one function each, named after the
+    // instantiation rather than read under a key. The instantiation has to
+    // be *made* here, because nothing in the file wrote it down.
+    if owner_key.len() > 0 {
+        let held = instantiate(&mut e, &owner, &owner_key);
+        if held.len() == 0 {
+            return false;
+        }
+        e.self_ty = held.to_string();
+        named_owner = held;
+    }
 
     // A parameter arrives as a value and is given storage at once, so that
     // everything below reads it the same way a local is read.
     let mut header: String = Vec::new();
     header.push_str("fn @");
-    if owner.len() > 0 {
-        header.push_str(&owner);
+    if named_owner.len() > 0 {
+        header.push_str(&named_owner);
         header.push_str(".");
     }
     header.push_str(&f.name);
@@ -993,8 +1007,8 @@ pub fn function(
     // emitted, instantiation and all, so two instantiations of one generic
     // do not name the same closure type.
     let mut mine: String = Vec::new();
-    if owner.len() > 0 {
-        mine.push_str(&owner);
+    if named_owner.len() > 0 {
+        mine.push_str(&named_owner);
         mine.push_str(".");
     }
     mine.push_str(&f.name);
@@ -6361,7 +6375,7 @@ pub fn givens(items: &Vec<ast::Item>) -> Vec<Given> {
                 // instantiation of the type, and what a *trait* gives it is
                 // not something this reaches yet.
                 if named.len() > 0 && plain_impl(gs) {
-                    let owner = written_head(ty);
+                    let owner = impl_owner(gs, ty);
                     let at = trait_at(items, &named);
                     if at >= 0 {
                         match &items[at].what {
@@ -6434,7 +6448,7 @@ pub fn returns(items: &Vec<ast::Item>) -> Vec<RetTy> {
                 out.push(RetTy { name: f.name.to_string(), ty: ast::copy_ty(&f.ret) });
             }
             ast::What::Impl(gs, tr, ty, fns) => {
-                let owner = written_head(ty);
+                let owner = impl_owner(gs, ty);
                 let mut k: taddr = 0;
                 while k < fns.len() {
                     let mut full: String = Vec::new();
@@ -7861,7 +7875,7 @@ pub fn parameters(items: &Vec<ast::Item>) -> Vec<Sig> {
                 });
             }
             ast::What::Impl(gs, tr, ty, fns) => {
-                let owner = written_head(ty);
+                let owner = impl_owner(gs, ty);
                 let mut k: taddr = 0;
                 while k < fns.len() {
                     let mut all: String = Vec::new();
@@ -7982,7 +7996,7 @@ pub fn signatures(items: &Vec<ast::Item>) -> Vec<Sig> {
             // A method is reached through its receiver, so the receiver's
             // name is half of its own (Ch. 4 §1.2).
             ast::What::Impl(gs, tr, ty, fns) => {
-                let owner = written_head(ty);
+                let owner = impl_owner(gs, ty);
                 let mut k: taddr = 0;
                 while k < fns.len() {
                     let mut full: String = Vec::new();
@@ -8246,7 +8260,7 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                 };
                 let outer = self_parameters(gs, ty);
                 if !named.same("Drop") {
-                    let owner = written_head(ty);
+                    let owner = impl_owner(gs, ty);
                     let mut k: taddr = 0;
                     while k < fns.len() {
                         if is_family(&fns[k], outer.len()) {
@@ -8289,6 +8303,53 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
 /// emitted under a name no call uses.
 pub fn plain_impl(gs: &Vec<ast::Generic>) -> bool {
     gs.len() == 0
+}
+
+/// The arguments an impl's self type was written at, where the impl has no
+/// parameters of its own.
+///
+/// `impl Vec<char>` is `Vec` read at `char` — an impl on **one member** of a
+/// family and not on the family (Ch. 5 §2.6), which is what `String` is. Its
+/// methods are one function each and not one per key, so they are named
+/// after the instantiation: `Vec.char.push_str`.
+///
+/// Only names. An argument that is itself an application has no name until
+/// it is instantiated, and nothing here can do that, so it answers with
+/// nothing rather than with the head.
+pub fn impl_key(gs: &Vec<ast::Generic>, ty: &ast::Ty) -> Vec<String> {
+    let none: Vec<String> = Vec::new();
+    if gs.len() > 0 {
+        return none;
+    }
+    match ty {
+        ast::Ty::App(segments, args) => {
+            let mut out: Vec<String> = Vec::new();
+            let mut i: taddr = 0;
+            while i < args.len() {
+                match &args[i] {
+                    ast::Ty::Name(ns) => out.push(joined(ns)),
+                    _ => {
+                        let empty: Vec<String> = Vec::new();
+                        return empty;
+                    }
+                }
+                i += 1;
+            }
+            out
+        }
+        _ => none,
+    }
+}
+
+/// The name an impl's methods are known by: the head of the type they are
+/// written on, or the **instantiation** where they are written on one.
+pub fn impl_owner(gs: &Vec<ast::Generic>, ty: &ast::Ty) -> String {
+    let head = written_head(ty);
+    let key = impl_key(gs, ty);
+    if key.len() == 0 {
+        return head;
+    }
+    mangled(&head, &key)
 }
 
 /// The parameters an `impl`'s *self type* binds, in the order the receiver's
@@ -8796,7 +8857,7 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
                 cx.closed = copy_closed(&work.closed);
                 if function(
                     f, cx, "".to_string(), Vec::new(),
-                    Vec::new(), &mut work, &mut text)
+                    Vec::new(), Vec::new(), &mut work, &mut text)
                 {
                     out.push(Made { name: f.name.to_string(), text: text });
                 }
@@ -8815,7 +8876,14 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
     while d < items.len() {
         match &items[d].what {
             ast::What::Impl(gs, tr, ty, fns) => {
-                let owner = written_head(ty);
+                // What the impl is written *on*, where that is one member
+                // of a family: `impl Vec<char>` is `Vec` read at `char`, and
+                // its methods are `Vec.char.push_str` (Ch. 5 §2.6). The
+                // head and the key are both wanted — the head is what
+                // `instantiate` is given and the two together are the name.
+                let base = written_head(ty);
+                let at_key = impl_key(gs, ty);
+                let owner = mangled(&base, &at_key);
                 let named = match tr {
                     Option::Some(t) => written_head(t),
                     Option::None => "".to_string(),
@@ -8834,8 +8902,9 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
                         destructor(&fns[m], &owner, context(items), &mut work, &mut text)
                     } else {
                         function(
-                            &fns[m], context(items), owner.to_string(),
-                            Vec::new(), Vec::new(), &mut work, &mut text)
+                            &fns[m], context(items), base.to_string(),
+                            Vec::new(), Vec::new(), ast::copy_names(&at_key),
+                            &mut work, &mut text)
                     };
                     if made {
                         let mut full: String = Vec::new();
@@ -8862,14 +8931,14 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
                     let at = trait_at(items, &given[g].trait_name);
                     let mut text: String = Vec::new();
                     let mut made = false;
-                    let mine = given[g].owner.to_string();
                     match &items[at].what {
                         ast::What::Trait(n, params, supers, assoc, tfns) => {
                             let k = named_fn(tfns, &given[g].name);
                             if k >= 0 {
                                 made = function(
-                                    &tfns[k], context(items), mine,
+                                    &tfns[k], context(items), base.to_string(),
                                     Vec::new(), Vec::new(),
+                                    ast::copy_names(&at_key),
                                     &mut work, &mut text);
                             }
                         }
@@ -8904,7 +8973,10 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
         let mut text: String = Vec::new();
         let mut cx = context(items);
         cx.closed = copy_closed(&work.closed);
-        if function(&held, cx, "".to_string(), Vec::new(), Vec::new(), &mut work, &mut text) {
+        if function(
+            &held, cx, "".to_string(), Vec::new(), Vec::new(), Vec::new(),
+            &mut work, &mut text)
+        {
             out.push(Made { name: held.name.to_string(), text: text });
         }
     }
@@ -9817,13 +9889,14 @@ pub fn instantiations(items: &Vec<ast::Item>, work: &mut Work) -> Vec<Made> {
                         cx.closed = copy_closed(&work.closed);
                         ok = function(
                             f, cx, "".to_string(), Vec::new(),
-                            ast::copy_names(&key), work, &mut text);
+                            ast::copy_names(&key), Vec::new(),
+                            work, &mut text);
                     }
                 }
                 ast::What::Impl(gs, tr, ty, fns) => {
                     let outer = self_parameters(gs, ty);
                     let owner = if gs.len() == outer.len() {
-                        written_head(ty)
+                        impl_owner(gs, ty)
                     } else {
                         "".to_string()
                     };
@@ -9839,7 +9912,7 @@ pub fn instantiations(items: &Vec<ast::Item>, work: &mut Work) -> Vec<Made> {
                             ok = function(
                                 &fns[k], cx, owner.to_string(),
                                 ast::copy_names(&outer), ast::copy_names(&key),
-                                work, &mut text);
+                                Vec::new(), work, &mut text);
                         }
                         k += 1;
                     }
