@@ -3383,12 +3383,18 @@ fn rename(e: &mut Emit, from: &str, to: &str) {
     }
 }
 
-/// One string with every occurrence of another put differently.
+/// One string with every occurrence of another put differently — where an
+/// occurrence is a whole **name** and not a run of characters.
+///
+/// `%tmp.slot.1` is the beginning of `%tmp.slot.10`, and a rename that did
+/// not say so renamed both: the binding got its slot and an unrelated
+/// temporary two lines above got a name nothing declared. What ends a name
+/// in TIR is any character a name cannot hold, so that is what is asked.
 fn replaced(line: &str, from: &str, to: &str) -> String {
     let mut out: String = Vec::new();
     let mut i: taddr = 0;
     while i < line.len() {
-        if at_here(line, i, from) {
+        if at_here(line, i, from) && !name_char(line, i + from.len()) {
             out.push_str(to);
             i += from.len();
         } else {
@@ -3397,6 +3403,24 @@ fn replaced(line: &str, from: &str, to: &str) -> String {
         }
     }
     out
+}
+
+/// Whether the character at this position could be more of a name.
+fn name_char(line: &str, at: taddr) -> bool {
+    if at >= line.len() {
+        return false;
+    }
+    let c = line[at];
+    if c >= '0' && c <= '9' {
+        return true;
+    }
+    if c >= 'a' && c <= 'z' {
+        return true;
+    }
+    if c >= 'A' && c <= 'Z' {
+        return true;
+    }
+    c == '.' || c == '_'
 }
 
 /// Whether `what` is written at this position.

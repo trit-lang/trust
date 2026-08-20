@@ -109,6 +109,19 @@ fn holds() -> taddr {
     h.n + h.room.room()
 }
 
+// A binding whose value is an aggregate **literal** that holds a `Raw`.
+//
+// The literal's storage was made for this binding and nothing else names
+// it, so it is taken rather than copied out of — and taking it is a
+// *rename*. The `Raw` inside is a temporary of its own, which is what makes
+// this the smallest program that catches a rename replacing a run of
+// characters rather than a name: `%tmp.slot.1` is the beginning of
+// `%tmp.slot.10`, and renaming the first renamed the second as well.
+fn literal() -> taddr {
+    let h = Held { room: Raw::alloc(1), n: 4 };
+    h.n
+}
+
 // One that holds a type that holds one, so the glue calls glue.
 struct Twice { inner: Held, k: taddr }
 
@@ -156,6 +169,6 @@ fn spare() -> taddr {
 fn main() -> t27 {
     (empty() + words(4) + trytes(9) + both(2)) as t27
         + stored(2) + (narrow(1) as t27) + pointed(1) + computed(3, 1)
-        + (holds() as t27) + (nested() as t27)
+        + (holds() as t27) + (literal() as t27) + (nested() as t27)
         + (kept() as t27) + (spare() as t27)
 }

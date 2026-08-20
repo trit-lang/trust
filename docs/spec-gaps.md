@@ -2621,6 +2621,27 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.120 — a rename that replaced text and not names.**
+
+A `let` whose initializer *computed* an aggregate takes that storage as the
+binding's own rather than copying out of it, and the way it is taken is that
+the temporary is renamed. The rename walked every instruction replacing one
+run of characters with another — and `%tmp.slot.1` is the beginning of
+`%tmp.slot.10`, so a binding taking slot 1 renamed an unrelated temporary
+two lines above it as well. What came out was `%b.slot.160`: a name nothing
+declared, in a module that was otherwise right, reported as success.
+
+A name in TIR ends where a character a name cannot hold begins, so that is
+what is asked now. The bug is as old as the rename and no corpus file had
+ever put a two-digit temporary next to a one-digit one that was renamed;
+`programs/heap` does, and it catches it.
+
+*It is worth naming the class.* This is the third finding this round that
+was **not** a refusal — the two implementations disagreed while both said
+they had succeeded. A refusal is loud and a wrong answer is not, and every
+one of these was found by running a program neither implementation had been
+asked about before, rather than by reading either of them.
+
 **G9.119 — a family that answers with an aggregate, or with nothing.**
 
 `generic_call` refused every answer TIR has no name for, which is two of the
