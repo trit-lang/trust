@@ -1,0 +1,47 @@
+// A whole local given a new aggregate value (Ch. 3 §1.1).
+//
+// `let mut p = Q { … }; p = Q { … };` reassigns a *local*. A field one
+// already did — `p.a = 5` is one place and one value, and Draft 0.1 stored
+// over it and leaked whatever it held; now the old value is dropped first
+// and the new is copied in. A whole local is the same fact and is the one
+// that had not been asked.
+//
+// A `Box<T>` is here too: it is one word and is *stored*, not copied, so
+// the mechanism is not the aggregate one — but it owns what it points at,
+// so the old box is dropped first for the same reason a struct's fields are.
+
+// A struct with no destructor. Nothing to drop, so the reassignment is a
+// copy over the storage and nothing else.
+struct Q { a: t27, b: t27 }
+
+fn plain(n: t27) -> t27 {
+    let mut p = Q { a: 0, b: 0 };
+    p = Q { a: n, b: n + 1 };
+    p.a + p.b
+}
+
+// A struct that *owns* a drop — a field is a `Raw`, which frees its room
+// on destruction (Ch. 5 §2.7). The old fields are dropped first, one
+// destructor per droppable field from the type's own glue, and then the
+// new is copied in. `plain` measured the copy path; this one is what
+// measures the drop.
+struct Holds { r: Raw<t27> }
+
+fn owning(n: taddr) -> taddr {
+    let mut h = Holds { r: Raw::alloc(n) };
+    h = Holds { r: Raw::alloc(n + 1) };
+    h.r.room()
+}
+
+// A `Box<T>` given a new one. Same shape at the language level — a local
+// reassigned — but the mechanism is a store of a pointer with a drop of the
+// old one in front of it, which is what Ch. 5 §2.3 asks of `Box`.
+fn boxed(n: t27) -> t27 {
+    let mut b: Box<t27> = Box::new(0);
+    b = Box::new(n);
+    *b
+}
+
+fn main() -> t27 {
+    plain(1) + (owning(2) as t27) + boxed(3)
+}

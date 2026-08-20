@@ -4475,6 +4475,23 @@ fn owns_same(a: &Owns, b: &Owns) -> bool {
     owns_maybe(b)
 }
 
+/// A local that was written to owns again, whether or not it had been
+/// moved out. The flag settles at 1 from the moment something is there,
+/// and any record of a field having gone is cleared — the whole is back.
+fn mark_owning_again(e: &mut Emit, name: &str) {
+    let mut i = e.owned.len();
+    while i > 0 {
+        i -= 1;
+        if e.owned[i].name.same(name) {
+            let flag = e.owned[i].flag.to_string();
+            store_into(e, "t1", "const t1 1", &flag);
+            e.owned[i].owns = Owns::Yes;
+            e.owned[i].moved = Vec::new();
+            return;
+        }
+    }
+}
+
 /// Record that **one field** of a local was moved out of (Ch. 3 §1.2).
 ///
 /// The local still owns the rest, so its flag is left alone and what is
@@ -6492,6 +6509,36 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             };
             if e.stuck {
                 return unknown_value();
+            }
+            // An aggregate local reassigned: the value being written over
+            // is going away, so Ch. 3 §1.1 gives it one drop and it is
+            // written **before** the copy — the same rule as `p.a = x`
+            // above, asked of a whole local rather than a field of one.
+            if def_at(&e.defs, &ty) >= 0 {
+                let owns = is_raw(&ty)
+                    || holds_name(&e.drops, &ty)
+                    || owns_drop(&e.defs, &e.drops, &ty, 0);
+                if owns {
+                    drop_one(e, &slot, &ty);
+                    if e.stuck {
+                        return unknown_value();
+                    }
+                }
+                copy_between(e, &val.text, &slot, &ty);
+                mark_owning_again(e, &name);
+                return Value { text: "".to_string(), ty: "".to_string() };
+            }
+            // A `Box<T>` is one word and is *stored*, but it owns what it
+            // points at, so the old box is dropped first — the pointee and
+            // then the room (Ch. 5 §2.3).
+            if is_boxed(&ty) {
+                drop_one(e, &slot, &ty);
+                if e.stuck {
+                    return unknown_value();
+                }
+                store_into(e, &ty, &val.text, &slot);
+                mark_owning_again(e, &name);
+                return Value { text: "".to_string(), ty: "".to_string() };
             }
             store_into(e, &ty, &val.text, &slot);
             Value { text: "".to_string(), ty: "".to_string() }

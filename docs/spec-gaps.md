@@ -2621,6 +2621,35 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.136 — `x = <aggregate>`, and the drop a whole local owes.**
+
+Ch. 3 §1.1's rule — that a value being written over is given exactly one
+drop, written **before** the copy — was here for a *field* (`p.a = x`)
+and for an *element* (`d[i] = x`), and not for a whole local. It was the
+same fact, one that had not been asked: the field path dropped the old
+and copied the new, and the name path stored scalar-wise into the slot,
+which is what `store_into` refuses for anything larger than a word, and so
+refused. Now it does what the field path does — drop first when the type
+owns a drop, `copy_between` after — and marks the local as owning again
+from the moment something new is in it, since a scope that has already
+retired the flag would not otherwise drop what was just put back.
+
+**And a `Box<T>` beside it.** A `Box` is one word, so it is *stored* and
+not copied, but it owns what it points at — so the mechanism is the
+aggregate one with `store_into` in place of `copy_between` and the old box
+dropped first (Ch. 5 §2.3), which is pointee and then the room. The flag
+settles at 1 the same way, because a `Box` always points at one from the
+moment it is there.
+
+*`bootstrap/programs/reassign`* is the corpus. `plain` is a struct with no
+destructor — nothing to drop, so the reassignment is a copy over the
+storage and what it measures is the copy path. `owning` is a struct
+holding a `Raw`, which frees its room on destruction (Ch. 5 §2.7): one
+`call @free` per droppable field from the type's own glue **before** the
+copy, and it is what makes this a memory-safety fix rather than a
+text-equality one. `boxed` is a `Box<t27>` given a new one — a store of a
+pointer with a drop of the old in front of it.
+
 **G9.135 — `Box<T>`, and the order a variant writes its payloads in.**
 
 `Box<T>` is the compiler's for the same reason `Raw<T>` is: it answers with
