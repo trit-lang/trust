@@ -2621,6 +2621,44 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.127 — a `return` whose value is an aggregate.**
+
+A function whose answer is an aggregate is given the storage for it and
+answers with **nothing**: `%sret` is where the answer goes and the `ret`
+carries no value at all (TIR §3). The *tail* of such a function already knew
+that — it is the whole of what `aggregate_body` is — and a `return` written
+in the middle of one did not. It built a temporary and answered with it:
+
+    ret %tmp.slot.8
+
+in a function whose header is `fn @f(%sret: ptr, %n: t27)` and which answers
+with nothing at all. TIR neither implementation would accept, emitted and
+reported as a success. That is the seventh finding of this shape.
+
+The fix is that it is the same path the tail takes: the value written where
+the answer goes, the drops after it, and a bare `ret`.
+
+*And it needed a second fact this file did not have.* What a function
+answers with is **not** what the expression around a `return` wants. A
+nested block written where an aggregate is wanted is handed that aggregate's
+name so it can write into it, and everywhere else in this file that name is
+threaded as `ret` — so a `return` inside one was asked what the *block*
+wanted and not what the *function* answers. Two facts, so two things to
+carry: the wanted type stays a parameter and the function's answer is a
+field of the emitter, set once where the header is written.
+
+Nothing had asked because nothing in the corpus returned early from a
+function answering an aggregate. `bootstrap/lowered/23.tr` asks it four
+ways: one early answer, two in one function, one through a field that is
+itself an aggregate, and the tail beside them.
+
+*It is one of three things `?` needs*, and the other two are still refused:
+a **generic enum instantiated** (`Result<T, E>` — the families built so far
+are structs), and a **`match` whose scrutinee is not a name**. `?` itself is
+neither: it is `match e { Ok(#qN) => #qN, Err(#rN) => return Err(#rN) }`
+with two invented names, and the number in them is the value counter's — so
+it is text, and both implementations have to agree about it.
+
 **G9.126 — a loop's last expression, and the two words out of one.**
 
 `loop`, `break` and `continue` had no lowering at all — `ast::Expr::Loop`,

@@ -1,0 +1,49 @@
+// A `return` whose value is an **aggregate** (TIR §3).
+//
+// A function whose answer is one is given the storage for it and answers
+// with *nothing*: `%sret` is where the answer goes, and the `ret` carries
+// no value at all. The tail of such a function already knew that — it is
+// what `aggregate_body` is — but a `return` written in the middle of one
+// did not, and built a temporary and answered with it. That is a `ret` of a
+// value in a function that has none: TIR neither implementation would
+// accept, emitted and reported as a success.
+//
+// So it is the same path: the value is written where the answer goes, the
+// drops go after it, and then a bare `ret`.
+//
+// What the function answers with is **not** what the expression around a
+// `return` wants — a nested block written where an aggregate is wanted is
+// handed *that* aggregate's name, and a `return` inside one is asked what
+// the **function** answers. They are two facts, so they are two fields.
+
+struct Pair { a: t27, b: t27 }
+
+fn early(n: t27) -> Pair {
+    if n > 2 {
+        return Pair { a: 1, b: 2 };
+    }
+    Pair { a: n, b: 0 }
+}
+
+// Two of them, so that the answer written in the middle and the answer
+// written at the end are both in one function and both go to `%sret`.
+fn twice(n: t27) -> Pair {
+    if n > 2 {
+        return Pair { a: 1, b: 2 };
+    }
+    if n < 0 {
+        return Pair { a: 0 - 1, b: 0 };
+    }
+    Pair { a: n, b: n }
+}
+
+// One that holds another, so that what goes to `%sret` is copied field by
+// field and through a field that is itself an aggregate.
+struct Wide { p: Pair, k: t27 }
+
+fn nested(n: t27) -> Wide {
+    if n > 2 {
+        return Wide { p: Pair { a: 1, b: 2 }, k: 3 };
+    }
+    Wide { p: Pair { a: n, b: n }, k: n }
+}

@@ -256,6 +256,11 @@ pub struct Emit {
     /// The loops being emitted, innermost last, so that a `break` and a
     /// `continue` can say where they go (§5.5).
     pub loops: Vec<LoopCtx>,
+    /// What **this function** answers with, where that is a type this file
+    /// defines. A `return` needs it and the wanted type is not it: what a
+    /// binding wants and what the function answers are two questions, and
+    /// a `return` inside a nested block is asked the second one.
+    pub answer: String,
     /// The type an `impl`'s `self` points at, for a field read through it.
     pub self_ty: String,
     /// The generic functions of the file, so a call to one can work out
@@ -923,6 +928,7 @@ pub fn function(
         drops: cx.drops,
         owned: Vec::new(),
         loops: Vec::new(),
+        answer: "".to_string(),
         self_ty: owner.to_string(),
         families: cx.families,
         jobs: copy_jobs(&work.jobs),
@@ -1009,6 +1015,7 @@ pub fn function(
     let sret = def_at(&e.defs, &answer) >= 0;
     if sret {
         header.push_str("%sret: ptr");
+        e.answer = answer.to_string();
     }
     let mut i: taddr = 0;
     while i < f.params.len() {
@@ -4079,6 +4086,7 @@ pub fn destructor(
         drops: cx.drops,
         owned: Vec::new(),
         loops: Vec::new(),
+        answer: "".to_string(),
         self_ty: owner.to_string(),
         // A destructor is reached by dropping and not by calling, so no
         // instantiation can be asked for from here: a generic call inside
@@ -4531,6 +4539,26 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                     // paths still own the same values (Ch. 3 §1.4).
                     match v {
                         Option::Some(inner) => {
+                            // A function whose answer is an aggregate
+                            // answers with **nothing**: what it was given is
+                            // where the answer goes, so a `return` writes
+                            // there and then leaves (TIR §3). Building a
+                            // temporary and answering with it was a `ret` of
+                            // a value in a function that has none.
+                            let answer = e.answer.to_string();
+                            if answer.len() > 0 {
+                                aggregate_tail(e, inner, "%sret", &answer);
+                                if e.stuck {
+                                    return;
+                                }
+                                drop_all(e);
+                                if e.stuck {
+                                    return;
+                                }
+                                e.insts.push("    ret".to_string());
+                                e.done = true;
+                                return;
+                            }
                             let val = value(e, inner, ret);
                             if e.stuck {
                                 return;
@@ -8946,6 +8974,7 @@ fn drop_glue(
         drops: cx.drops,
         owned: Vec::new(),
         loops: Vec::new(),
+        answer: "".to_string(),
         self_ty: owner.to_string(),
         families: Vec::new(),
         jobs: Vec::new(),
