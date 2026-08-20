@@ -2621,6 +2621,86 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.122 — `Vec`, and the four things one line needed.**
+
+`self.held = fresh` — an aggregate assigned to a field — was the last
+mechanism `Vec` was missing, and it is `Vec::regrow`'s free: allocate the
+new room, move what is in the old, and let the old go. It needed four
+things, and only the first was the one that was expected.
+
+*Where a field is, when the field is an aggregate.* `field_place` answered
+for a scalar and refused everything else, in as many words: "an aggregate
+field is assigned by copying, which is a different thing". So it is copied.
+What the field's type is *called* is `nominal`'s answer and not the written
+head's, exactly as it already was in `place` — a field written `Raw<T>` is a
+type once it has been instantiated and has no name before that.
+
+*And what was there is dropped **first**.* Ch. 3 §1.1 gives a value one
+owner and one drop; storing over it leaks the room it held. The order is the
+reference's and it is not the order it reads in: the place, then the
+right-hand side, then the drop of the old value, then the copy — so that
+`a.f = g(a.f)` still reads the old value before it dies.
+
+*A name in value position is a **move**.* Nothing here had ever said so.
+`e.owned` recorded a local's storage and its type and not the flag beside
+it, so there was no way to write the one instruction that says the value
+went somewhere else — and without it, `regrow` would have freed the *new*
+room at the end of the scope. `Owned` is a `Slot` and two more things now:
+the flag, and whether the local still owns anything. What is dropped when a
+scope ends is what still does.
+
+*A destructor's tail is a **statement**.* A written destructor answers with
+nothing, so a block-shaped expression in last position is where the parser
+puts a `while` (§5.1) — and reading it as a value refused **every
+destructor whose body did anything**. `bootstrap/lowered/08.tr` and
+`programs/methods` both write an `impl Drop`; both bodies are empty. Nothing
+in the corpus had a destructor that looped, and `Vec`'s does.
+
+*A destructor written on a **family**.* `impl<T> Drop for Vec<T>` is one
+function per key like every other method of one (Ch. 4 §2.5), and the impl
+loop cannot emit it: what asks for `drop.Vec.t27` is a `Vec<t27>` going out
+of scope and not a call, so the key is known where the drop is written and
+nowhere else. The loop skipped it — and the glue that fills in for a
+destructor nobody wrote then made a `drop.Vec.t27` that **silently skipped
+the body somebody had written**. Valid TIR, wrong program, reported as
+success. That is the same failure as G9.101 and it is the second time this
+round's shape of bug has been the dangerous one.
+
+The fix is one function doing both halves: the prologue, then what somebody
+wrote if anybody did, then the fields. But *which queue* it is asked on is
+what decides where it is printed. A written family destructor is a method
+being instantiated, so it goes on the instantiation queue and comes out
+beside `Vec.push.t27`; one nobody wrote goes on the glue queue, which is
+drained first. Putting it on the wrong one moved one function in a module
+of forty and was caught only because `programs/heap` now has both kinds.
+
+*What this bought.* `bootstrap/programs/vector` — the first program either
+implementation compiles that manages memory it did not name: `new`,
+`with_capacity`, `push` through two growths, `reserve`, `capacity`, `clear`,
+`is_empty`, `len`, over `Vec<t27>` and `Vec<t9>`, 803 lines of TIR agreed
+character for character. None of it is written in this repository and none
+of it is written in the compiler: `Vec` is library code, and a second
+implementation *compiles* it. That is the claim docs/ddc.md §3.4 makes, and
+until this round nothing had checked it.
+
+*Still refused, and each is one thing:* `v[i]` on a `Vec` (Ch. 2 §3.1's
+`index`/`index_mut`, an operator that is a trait method), `pop` (a family
+answering `Option<T>`, then matched), and `Box` and `String`.
+
+**G9.121 — an impl written on a single instantiation.**
+
+`type String = Vec<char>` and `impl String { … }`, which is an impl on one
+member of a family and not on the family (Ch. 5 §2.6). Both implementations
+agree about every `Vec<t27>` program tried; a `Vec<char>` one differs by
+**one function's position**, because the reference lowers `impl Vec<char>`
+and so asks for `Vec.regrow.char` before the program does, while this asks
+for it where the program does.
+
+Nothing is wrong with either module — the bodies are character for
+character the same — and that is exactly why it is written down: the order
+*is* the text (docs/ddc.md §4), and an ordering that depends on what a
+pruned impl asked for is a fact about the compiler that no chapter states.
+
 **G9.120 — a rename that replaced text and not names.**
 
 A `let` whose initializer *computed* an aggregate takes that storage as the

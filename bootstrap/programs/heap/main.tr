@@ -166,9 +166,91 @@ fn spare() -> taddr {
     r.len()
 }
 
+// Assigning an **aggregate** to a field, which is three things and not one:
+// where the field is, what is going into it, and what was already there.
+// The last is dropped *first* — Ch. 3 §1.1 gives a value one owner and one
+// drop, so storing over it would leak the room it held.
+//
+// And reading `fresh` is a **move**: a name in value position hands the
+// value over, which is the one thing a place cannot do twice (Ch. 3 §1.2).
+// The flag that says whether it is still there is written down here, and
+// what the scope drops at its end is what still owns something.
+//
+// It is `Vec::regrow` in miniature — allocate, move, let the old room go —
+// and it is the shape the library is written in.
+struct Bin<T> { held: Raw<T>, n: taddr }
+
+impl<T> Bin<T> {
+    fn start(n: taddr) -> Bin<T> { Bin { held: Raw::alloc(n), n: 0 } }
+
+    fn regrow(&mut self, want: taddr) {
+        let fresh: Raw<T> = Raw::alloc(want);
+        self.held = fresh;
+        self.n = 0;
+    }
+
+    fn room(&self) -> taddr { self.held.room() }
+}
+
+// A destructor somebody **wrote**, on a family. It is one function per key
+// like every other method of one (Ch. 4 §2.5), and the impl it is written
+// in cannot emit it: what asks for `drop.Bin.t27` is a `Bin<t27>` going out
+// of scope and not a call, so the key is known where the drop is written
+// and nowhere else. Leaving it to the fields alone would emit a
+// `drop.Bin.t27` that silently skipped the body.
+//
+// Its body **loops**, which no destructor here did before: a `while` in
+// last position is a block-shaped expression, so the parser puts it in the
+// tail — and a destructor answers with nothing, so its tail is a statement
+// (§5.1). Reading it as a value refused every destructor that did anything.
+impl<T> Drop for Bin<T> {
+    fn drop(self) {
+        let mut i: taddr = 0;
+        while i < self.n {
+            let held = self.held.read(i);
+            i += 1;
+        }
+    }
+}
+
+fn regrown() -> taddr {
+    let mut b: Bin<t27> = Bin::start(2);
+    b.regrow(5);
+    b.room()
+}
+
+// The same fact about a tail, on a type that is not a family and a body
+// that branches rather than loops.
+struct Counted { room: Raw<t27>, n: taddr }
+
+impl Drop for Counted {
+    fn drop(self) {
+        if self.n > 0 {
+            let held = self.room.read(0);
+        }
+    }
+}
+
+fn counted() -> taddr {
+    let c = Counted { room: Raw::alloc(1), n: 0 };
+    c.n
+}
+
+// And an aggregate into a field where nothing owns anything: the copy on
+// its own, with no drop before it and no flag to clear.
+struct Pair { a: taddr, b: taddr }
+struct Holder { p: Pair, k: taddr }
+
+fn replaced() -> taddr {
+    let mut h = Holder { p: Pair { a: 1, b: 2 }, k: 3 };
+    h.p = Pair { a: 4, b: 5 };
+    h.p.a + h.k
+}
+
 fn main() -> t27 {
     (empty() + words(4) + trytes(9) + both(2)) as t27
         + stored(2) + (narrow(1) as t27) + pointed(1) + computed(3, 1)
         + (holds() as t27) + (literal() as t27) + (nested() as t27)
         + (kept() as t27) + (spare() as t27)
+        + (regrown() as t27) + (counted() as t27) + (replaced() as t27)
 }

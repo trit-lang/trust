@@ -1,0 +1,87 @@
+// `Vec`, which is **library code** — and that is the whole point of it.
+//
+// Nothing below is written in this file and nothing below is written in the
+// compiler either: `Vec` is ordinary Trust carried inside the compiler and
+// handed over by `--prelude` (Ch. 6 §3.3). What the compiler provides is
+// `Raw<T>` and nothing else (Ch. 5 §2.7), so a second implementation
+// **compiles** this rather than reproducing it — which is the claim
+// docs/ddc.md §3.4 makes and this file is the first program to check.
+//
+// It is also the first program either implementation compiles that manages
+// memory it did not ask for by name: `push` grows, growing allocates,
+// moves and frees, and the freeing is `self.held = fresh` — an aggregate
+// assigned to a field, where what was there is dropped first and the source
+// is moved from. Three mechanisms, one line, and until this round none of
+// the three existed here.
+
+// The smallest thing there is: room for nothing, which is two zeroes, and a
+// destructor that frees nothing because there is nothing to free.
+fn empty() -> taddr {
+    let v: Vec<t27> = Vec::new();
+    v.len()
+}
+
+// A push into a `Vec` with no room asks `grown` for room, which asks
+// `regrow` for it — and `regrow` is the one function in the library that
+// assigns an aggregate to a field.
+fn one() -> t27 {
+    let mut v: Vec<t27> = Vec::new();
+    v.push(7);
+    v.len() as t27
+}
+
+// Enough pushes to grow more than once: four is the guess `grown` makes
+// when there is no room at all, and it doubles from there.
+fn many() -> taddr {
+    let mut v: Vec<t27> = Vec::new();
+    let mut i: taddr = 0;
+    while i < 9 {
+        v.push(2);
+        i += 1;
+    }
+    v.len()
+}
+
+// A program that says how much it wants has said something the guess cannot
+// improve on, so `reserve` gives it exactly that — and `with_capacity`
+// allocates before anything is pushed at all.
+fn asked() -> taddr {
+    let mut v: Vec<t27> = Vec::with_capacity(3);
+    v.push(1);
+    v.reserve(8);
+    v.capacity()
+}
+
+// `clear` drops what is held and keeps the room, which is the one operation
+// that shortens a `Vec` without freeing anything.
+fn emptied() -> taddr {
+    let mut v: Vec<t27> = Vec::new();
+    v.push(1);
+    v.push(2);
+    v.clear();
+    v.len()
+}
+
+// A `bool` answer, so that what the library says about emptiness goes
+// through the same widening every other answer does.
+fn none_left() -> bool {
+    let v: Vec<t27> = Vec::new();
+    v.is_empty()
+}
+
+// A second instantiation, of a *narrower* element: the arithmetic that
+// finds a position and the size the allocator is asked for are both read
+// off the element type, so `Vec<t9>` is not `Vec<t27>` with a different
+// name (Ch. 4 §2.5).
+fn narrow() -> taddr {
+    let mut v: Vec<t9> = Vec::new();
+    v.push(1);
+    v.push(2);
+    v.push(3);
+    v.len()
+}
+
+fn main() -> t27 {
+    (empty() + many() + asked() + emptied() + narrow()) as t27
+        + one() + (none_left() as t27)
+}

@@ -160,6 +160,22 @@ pub struct Slot {
     pub ty: String,
 }
 
+/// One local this scope is responsible for dropping (Ch. 3 §1.4).
+///
+/// It is a `Slot` and two more things. `flag` is the tryte that says whether
+/// the value is still there — a branch may decide, so the answer is not
+/// always known where the drop is written. `owns` is what *is* known: a
+/// local moved out of on every path is not dropped at all, and the flag it
+/// was given is written to and never read. Both are here rather than in
+/// `Slot` because only what is dropped has either.
+pub struct Owned {
+    pub name: String,
+    pub slot: String,
+    pub ty: String,
+    pub flag: String,
+    pub owns: bool,
+}
+
 /// One basic block: its label, and what runs in it (TIR §2).
 pub struct Chunk {
     pub label: String,
@@ -203,7 +219,7 @@ pub struct Emit {
     /// Which types have a destructor, by name (Ch. 3 §1.4).
     pub drops: Vec<String>,
     /// The locals this scope is responsible for dropping, innermost last.
-    pub owned: Vec<Slot>,
+    pub owned: Vec<Owned>,
     /// The type an `impl`'s `self` points at, for a field read through it.
     pub self_ty: String,
     /// The generic functions of the file, so a call to one can work out
@@ -1988,12 +2004,28 @@ fn field_place(e: &mut Emit, base: &ast::Expr, name: &str) -> Value {
             return unknown_value();
         }
     };
-    // Only a scalar: an aggregate field is assigned by copying, which is a
-    // different thing and is refused rather than stored as one word.
-    let ty = field_tir(&e.defs[which].fields[index]);
-    if ty.same("?") || ty.same("ptr") {
+    // A scalar is stored and an aggregate is copied, and both are places
+    // this can answer with — what differs is what the caller does with the
+    // address. What the field's type is *called* is `nominal`'s answer, as
+    // it is in `place`: a field written `Raw<T>` is a type once it has been
+    // instantiated and has no name before that (Ch. 4 §2.5).
+    //
+    // A reference is neither. `p.next = q` writes one address over another
+    // and Ch. 3 §2.2 has to have said which lifetime that leaves behind;
+    // nothing here can check it, so it is refused.
+    let mut ty = field_tir(&e.defs[which].fields[index]);
+    if ty.same("ptr") {
         e.stuck = true;
         return unknown_value();
+    }
+    if ty.same("?") {
+        let written = ast::copy_ty(&e.defs[which].fields[index]);
+        let inner = nominal(e, &written);
+        if def_at(&e.defs, &inner) < 0 {
+            e.stuck = true;
+            return unknown_value();
+        }
+        ty = inner;
     }
     let at = offset_of(e, &held.text, l.offsets[index]);
     Value { text: at, ty: ty }
@@ -3200,14 +3232,44 @@ fn forget(e: &mut Emit, mark: taddr) {
 }
 
 /// Call the destructor of everything this scope owns, innermost first.
+///
+/// What was moved out of is not dropped: its value went somewhere else and
+/// Ch. 3 §1.1 gives it one owner. Where that is not known until run time the
+/// flag decides, and nothing here can read one — so a local whose ownership
+/// a branch settled is refused rather than dropped twice or not at all.
 fn drop_all(e: &mut Emit) {
     let mut i = e.owned.len();
     while i > 0 {
         i -= 1;
+        if !e.owned[i].owns {
+            continue;
+        }
         let owner = e.owned[i].ty.to_string();
         let slot = e.owned[i].slot.to_string();
         drop_one(e, &slot, &owner);
         if e.stuck {
+            return;
+        }
+    }
+}
+
+/// Record that a local was moved out of (Ch. 3 §1.2).
+///
+/// Two things happen and they are not the same thing: the flag is written,
+/// because a destructor further out may be the one that reads it, and this
+/// scope stops holding the local responsible. A name that owns nothing has
+/// no entry here and no flag, and moving it out is no instruction at all.
+fn move_out(e: &mut Emit, name: &str) {
+    let mut i = e.owned.len();
+    while i > 0 {
+        i -= 1;
+        if e.owned[i].name.same(name) {
+            if !e.owned[i].owns {
+                return;
+            }
+            let flag = e.owned[i].flag.to_string();
+            e.owned[i].owns = false;
+            store_into(e, "t1", "const t1 0", &flag);
             return;
         }
     }
@@ -3235,20 +3297,34 @@ fn drop_one(e: &mut Emit, slot: &str, owner: &str) {
 }
 
 /// Record that a destructor was asked for, and what its type was made from.
+///
+/// Two queues, and which one it goes in is what decides where it is printed.
+/// A destructor **somebody wrote** on a family is a method of that family
+/// like any other — `drop.Vec.t27` is `drop.Vec` read at `t27` — so it is
+/// asked for the way every other instantiation is, and comes out beside
+/// them. One nobody wrote has no method to instantiate and goes on the glue
+/// queue, which is drained before the instantiations are.
 fn note_drop(e: &mut Emit, owner: &str) {
-    let mut i: taddr = 0;
-    while i < e.glue.len() {
-        if e.glue[i].full.same(owner) {
-            return;
-        }
-        i += 1;
-    }
     let at = inst_at(e, owner);
     let mut base = owner.to_string();
     let mut key: Vec<String> = Vec::new();
     if at >= 0 {
         base = e.instances[at].base.to_string();
         key = ast::copy_names(&e.instances[at].key);
+    }
+    if key.len() > 0 && holds_name(&e.drops, &base) {
+        let mut family: String = Vec::new();
+        family.push_str("drop.");
+        family.push_str(&base);
+        queue(e, &family, &key);
+        return;
+    }
+    let mut i: taddr = 0;
+    while i < e.glue.len() {
+        if e.glue[i].full.same(owner) {
+            return;
+        }
+        i += 1;
     }
     e.glue.push(Inst {
         full: owner.to_string(),
@@ -3464,6 +3540,39 @@ fn store_into(e: &mut Emit, ty: &str, what: &str, where_: &str) {
     e.insts.push(line);
 }
 
+/// The statements of a written destructor, which answers with nothing.
+///
+/// Its tail is a **statement** and not a value, for the same reason any
+/// other unit function's is: a block-shaped expression in last position is
+/// where the parser puts a `while`, and a destructor is the one function
+/// that is written that way more often than not (§5.1). Reading it as a
+/// value refused every destructor that looped.
+///
+/// A body that leaves by `return` is refused rather than followed: what is
+/// held is dropped after this and nothing here emits that along the other
+/// path (Ch. 3 §1.4).
+fn drop_body(e: &mut Emit, body: &ast::Block) -> bool {
+    let mut k: taddr = 0;
+    while k < body.stmts.len() {
+        stmt(e, &body.stmts[k], "");
+        if e.stuck {
+            return false;
+        }
+        k += 1;
+    }
+    match &body.tail {
+        Option::Some(x) => {
+            let held = ast::Stmt::Do(ast::copy_expr(&*x));
+            stmt(e, &held, "");
+            if e.stuck {
+                return false;
+            }
+        }
+        Option::None => {}
+    }
+    !e.done
+}
+
 /// `impl Drop for T` — the destructor, which is a function named after the
 /// type it is written on (Ch. 3 §1.4).
 ///
@@ -3555,14 +3664,8 @@ pub fn destructor(
         Option::Some(b) => b,
         Option::None => return false,
     };
-    let mut k: taddr = 0;
-    while k < body.stmts.len() {
-        stmt(&mut e, &body.stmts[k], "");
-        k += 1;
-    }
-    match &body.tail {
-        Option::Some(x) => return false,
-        Option::None => {}
+    if !drop_body(&mut e, body) {
+        return false;
     }
     // A written destructor's body runs and *then* what it held goes with
     // it: `drop.T` is the complete glue for a `T` (Ch. 3 §1.2).
@@ -3753,10 +3856,12 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                     line.push_str(" = slot tryte[1]");
                     e.slots.push(line);
                     store_into(e, "t1", "const t1 1", &flag);
-                    e.owned.push(Slot {
+                    e.owned.push(Owned {
                         name: name.to_string(),
                         slot: kept,
                         ty: val.ty.to_string(),
+                        flag: flag.to_string(),
+                        owns: true,
                     });
                 }
                 return;
@@ -4041,7 +4146,13 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             let slot = e.locals[at].slot.to_string();
             // An aggregate's value *is* its storage: it is too big to carry
             // and there is nothing to load it into (TIR §3).
+            //
+            // And reading one here is a **move**: a name in value position
+            // hands the value over, which is the one thing a place cannot
+            // do twice (Ch. 3 §1.2). Reading a field of it is `Field` and
+            // reading through it is `Method`, so neither reaches this.
             if def_at(&e.defs, &ty) >= 0 {
+                move_out(e, n);
                 return Value { text: slot, ty: ty };
             }
             let name = fresh(e, "v");
@@ -4562,6 +4673,28 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                     };
                     if e.stuck {
                         return unknown_value();
+                    }
+                    // An aggregate is copied and not stored, and what was
+                    // there is **dropped first**: the value being written
+                    // over is going away, and Ch. 3 §1.1 gives it one owner
+                    // and one drop. Storing over it would leak whatever it
+                    // held — which is exactly what `self.held = fresh` is
+                    // written to avoid (Ch. 5 §2.7).
+                    if def_at(&e.defs, &ty) >= 0 {
+                        let owns = is_raw(&ty)
+                            || holds_name(&e.drops, &ty)
+                            || owns_drop(&e.defs, &e.drops, &ty, 0);
+                        if owns {
+                            drop_one(e, &at.text, &ty);
+                            if e.stuck {
+                                return unknown_value();
+                            }
+                        }
+                        copy_between(e, &val, &at.text, &ty);
+                        return Value {
+                            text: "".to_string(),
+                            ty: "".to_string(),
+                        };
                     }
                     store_into(e, &ty, &val, &at.text);
                     return Value { text: "".to_string(), ty: "".to_string() };
@@ -8188,12 +8321,20 @@ fn declarations(items: &Vec<ast::Item>) -> Vec<Made> {
     out
 }
 
-/// A destructor nobody wrote: the fields' destructors, one after another.
+/// The destructor of one type: what somebody wrote, if anybody did, and then
+/// the fields' destructors one after another.
 ///
 /// A type that *holds* something with a destructor has one of its own
 /// (Ch. 3 §1.2), and it is the same function a written `impl Drop` becomes —
-/// the same prologue, and then nothing but the dropping. Written out here
-/// rather than in the source, because there is no source.
+/// the same prologue, and then the dropping. Where nobody wrote one there is
+/// no source to read and only the second half is written out.
+///
+/// A **family's** written destructor is read here and nowhere else. It is
+/// one function per key, like every other method of a family (Ch. 4 §2.5),
+/// and the impl loop cannot emit it: it has no key to read it under, since
+/// what asks for `drop.Vec.t27` is a `Vec<t27>` going out of scope and not
+/// a call. Leaving it to the fields alone would emit a `drop.Vec.t27` that
+/// silently skipped the body somebody wrote.
 fn drop_glue(
     items: &Vec<ast::Item>,
     owner: &str,
@@ -8203,6 +8344,22 @@ fn drop_glue(
     out: &mut String,
 ) -> bool {
     let cx = context(items);
+    // Which parameters the impl's self type binds, so that the body is read
+    // under the same key the type was. A `Drop` written on a shape the
+    // receiver cannot be read against is not one this can instantiate.
+    let dropper = written_drop(items, base);
+    let mut vars: Vec<String> = Vec::new();
+    if dropper >= 0 {
+        match &items[dropper].what {
+            ast::What::Impl(gs, tr, ty, fns) => {
+                vars = self_parameters(gs, ty);
+            }
+            _ => {}
+        }
+        if vars.len() != key.len() {
+            return false;
+        }
+    }
     let mut e = Emit {
         slots: Vec::new(),
         insts: Vec::new(),
@@ -8220,8 +8377,8 @@ fn drop_glue(
         self_ty: owner.to_string(),
         families: Vec::new(),
         jobs: Vec::new(),
-        tyvars: Vec::new(),
-        key: Vec::new(),
+        tyvars: vars,
+        key: ast::copy_names(key),
         tyfams: cx.tyfams,
         rets: cx.rets,
         instances: Vec::new(),
@@ -8229,7 +8386,7 @@ fn drop_glue(
         closed: Vec::new(),
         closures_made: 0,
         owner_name: "".to_string(),
-        strings: Vec::new(),
+        strings: ast::copy_names(&work.strings),
         glue: copy_insts(&work.glue),
     };
     settle(&mut e);
@@ -8271,15 +8428,56 @@ fn drop_glue(
     if !copy_fields(&mut e, "%self", &slot, owner) {
         return false;
     }
+    e.locals.push(Slot {
+        name: "self".to_string(),
+        slot: slot.to_string(),
+        ty: owner.to_string(),
+    });
+    // What somebody wrote runs first, and then the fields go with it: a
+    // written destructor says what to do *before* what is held is let go
+    // (Ch. 3 §1.4). It answers with nothing, so a tail is not one.
+    if dropper >= 0 {
+        match &items[dropper].what {
+            ast::What::Impl(gs, tr, ty, fns) => {
+                if fns.len() != 1 {
+                    return false;
+                }
+                let body = match &fns[0].body {
+                    Option::Some(b) => b,
+                    Option::None => return false,
+                };
+                if !drop_body(&mut e, body) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
     drop_fields(&mut e, &slot, owner);
     e.insts.push("    ret".to_string());
     if e.stuck {
         return false;
     }
+    let mut t = work.strings.len();
+    while t < e.strings.len() {
+        work.strings.push(e.strings[t].to_string());
+        t += 1;
+    }
     let mut d = work.glue.len();
     while d < e.glue.len() {
         work.glue.push(one_inst(&e.glue[d]));
         d += 1;
+    }
+    // A destructor drops what it held, and one of those may be a family's:
+    // what this asked for goes back to the queue the caller drains, exactly
+    // as a function's does.
+    let mut q = work.jobs.len();
+    while q < e.jobs.len() {
+        work.jobs.push(Job {
+            name: e.jobs[q].name.to_string(),
+            key: ast::copy_names(&e.jobs[q].key),
+        });
+        q += 1;
     }
     start(&mut e, "^");
     out.push_str("fn @drop.");
@@ -8340,6 +8538,35 @@ fn glue(items: &Vec<ast::Item>, made: &Vec<Made>, work: &mut Work) -> Vec<Made> 
             out.push(Made { name: named, text: text });
         }
     }
+}
+
+/// The `impl Drop` written for a type, or nothing where nobody wrote one.
+///
+/// By the head of the self type and not by the whole of it: `impl<T> Drop
+/// for Vec<T>` is `Vec`'s, and which `Vec` it is of is the key it is read
+/// under and not a second impl.
+fn written_drop(items: &Vec<ast::Item>, base: &str) -> taddr {
+    if base.len() == 0 {
+        return 0 - 1;
+    }
+    let mut i: taddr = 0;
+    while i < items.len() {
+        match &items[i].what {
+            ast::What::Impl(gs, tr, ty, fns) => {
+                let named = match tr {
+                    Option::Some(t) => written_head(t),
+                    Option::None => "".to_string(),
+                };
+                let mine = written_head(ty);
+                if named.same("Drop") && mine.same(base) {
+                    return i as taddr;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    0 - 1
 }
 
 /// Which destructor to make next: the one asked for most recently that is
@@ -8768,6 +8995,22 @@ pub fn instantiations(items: &Vec<ast::Item>, work: &mut Work) -> Vec<Made> {
         done.push(full.to_string());
         let mut text: String = Vec::new();
         let mut ok = false;
+        // `drop.Vec` is not a method anybody can call and is not written in
+        // the impl loop's form — `fn drop(self)` is what somebody wrote, and
+        // the function it becomes is named after the *type* (Ch. 3 §1.4). So
+        // it is made the way every destructor is made, under this key.
+        let inner = dropped(&name);
+        if inner.len() > 0 && written_drop(items, &inner) >= 0 {
+            // The job's name is the *function*'s and the glue wants the
+            // *type*'s: `drop.Bin` at `t27` is the function `drop.Bin.t27`
+            // of the type `Bin.t27`, and mangling the two separately is
+            // what keeps the dot from being read as part of either.
+            let held = mangled(&inner, &key);
+            if drop_glue(items, &held, &inner, &key, work, &mut text) {
+                made.push(Made { name: full, text: text });
+            }
+            continue;
+        }
         let mut i: taddr = 0;
         while i < items.len() {
             match &items[i].what {
