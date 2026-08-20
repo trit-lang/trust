@@ -2621,6 +2621,60 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.124 — a scope ends in seven places, and one of them is a parameter.**
+
+G9.123 refused what a scope could not drop. This writes them, and the whole
+of it is one rule with one ordering: **what the scope answers with is
+computed first, and the drops go after it.** `r.room()` reads the room while
+the room is still there, and then frees it.
+
+Seven places, because that is how many ways a scope ends:
+
+- a function that answers with **nothing** — no value to read, so the drops
+  are the whole of its end;
+- a function whose block has **no tail** at all;
+- a **`return`**, which leaves along one path while the scope's other paths
+  still own the same values — so the drops are written there *and* at the
+  tail, and **nothing is retired** at either;
+- a **loop body**, once per iteration, before the jump back to the head;
+- an **arm with a value**, between the value and the store the join reads;
+- an **arm that is a statement**, between its last statement and the join;
+- an **aggregate answer**, between the last store into `%sret` and the
+  `ret`.
+
+And the seventh is not a block: **a parameter taken by value owns what it
+was given** (Ch. 3 §1.2). The caller handed the value over and this frame is
+where it dies, so it takes the same flag an owned local takes and takes it
+*before* the value arrives — which is exactly what a destructor's `self`
+already did, for the same reason, in a function written next door.
+
+That one was not in G9.123's list because nothing had asked. It came out of
+`fn take(h: Holder) -> taddr { h.n }`, written to make an *arm* move
+something, and the arm was not what disagreed.
+
+*A path that left says nothing about the paths that did not.* `if c { return
+take(h); }` moves `h` on the path that returned and on no other, so what the
+branch was told about ownership is put back when the branch diverged. Get
+this wrong and the tail either drops what is gone or leaves what is there.
+
+*What is still refused, and it is one thing.* Two paths that come out the
+other end **disagreeing** about who owns what:
+
+    let h = Holder { … };
+    let mut k: taddr = 0;
+    if n > 0 { k = take(h); }
+    k
+
+The reference reads the flag at the tail — `br2 %h.owns.N, ^drop.yes,
+^drop.join` — which is the case the flag was *made* for and the only case
+that needs it. Everything above writes its drops plainly, because on the
+path that reaches them nothing was in doubt. Ownership here is two-valued
+and that case needs three; it is refused rather than dropped twice.
+
+*`bootstrap/programs/scopes`* is the corpus, and it was written before a
+line of this: twelve functions, one per way a scope ends, 770 lines of TIR
+agreed character for character.
+
 **G9.123 — where a scope ends, and what it owed.**
 
 `drop_all` was called in exactly one place: the tail of a function that
@@ -2663,10 +2717,11 @@ block — that either took ownership of something or gave some up. A refusal
 is loud and a leak is not, and the whole point of two implementations is
 that a disagreement be visible.
 
-*What was not done.* Emitting them. It is four sites and an ordering
+*What was not done here.* Emitting them. It is four sites and an ordering
 question at each — the arm's value is computed before its drops, the way a
 function's tail already is — and every one of them needs a corpus program of
-its own, since not one exists today. That is a round, not a patch.
+its own, since not one exists today. **G9.124 is that round**, and it found
+that four sites were seven and that one of them was not a block at all.
 
 It is worth saying why none of this showed up while `Vec` was being built.
 `Vec::regrow` is a function that answers with nothing and owns a `Raw`: it

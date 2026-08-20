@@ -1272,6 +1272,13 @@ fn offset_of(e: &mut Emit, base: &str, at: taddr) -> String {
 }
 
 /// Copy an aggregate parameter into storage of its own, field by field.
+///
+/// And a parameter taken **by value owns what it was given** (Ch. 3 §1.2):
+/// the caller handed the value over and this frame is where it dies. So it
+/// takes the flag an owned local takes, and it takes it *before* the value
+/// arrives — what the flag says is whether the fields are still there, and
+/// they are from the moment the function is entered. It is the same thing a
+/// destructor's `self` does, for the same reason.
 fn copy_in(e: &mut Emit, name: &str, at: taddr) -> bool {
     let self_ty = ast::Ty::Name(one_name(&e.defs[at].name));
     let l = match layout::of(&e.defs, &self_ty, 0) {
@@ -1303,11 +1310,33 @@ fn copy_in(e: &mut Emit, name: &str, at: taddr) -> bool {
         slot: slot.to_string(),
         ty: e.defs[at].name.to_string(),
     });
+    let owner = e.defs[at].name.to_string();
+    let owns = is_raw(&owner)
+        || holds_name(&e.drops, &owner)
+        || owns_drop(&e.defs, &e.drops, &owner, 0);
+    if owns {
+        let mut prefix: String = Vec::new();
+        prefix.push_str(name);
+        prefix.push_str(".owns");
+        let flag = fresh(e, &prefix);
+        let mut held: String = Vec::new();
+        held.push_str("    ");
+        held.push_str(&flag);
+        held.push_str(" = slot tryte[1]");
+        e.slots.push(held);
+        store_into(e, "t1", "const t1 1", &flag);
+        e.owned.push(Owned {
+            name: name.to_string(),
+            slot: slot.to_string(),
+            ty: owner.to_string(),
+            flag: flag.to_string(),
+            owns: true,
+        });
+    }
 
     let mut from: String = Vec::new();
     from.push_str("%");
     from.push_str(name);
-    let owner = e.defs[at].name.to_string();
     copy_fields(e, &from, &slot, &owner)
 }
 
@@ -2634,7 +2663,7 @@ fn if_expr(
 /// written where the value is going.
 fn aggregate_block(e: &mut Emit, b: &ast::Block, dest: &str, owner: &str) {
     let mark = e.owned.len();
-    let live = owed(e);
+    let was = owns_now(e);
     let mut i: taddr = 0;
     while i < b.stmts.len() {
         stmt(e, &b.stmts[i], "");
@@ -2647,14 +2676,13 @@ fn aggregate_block(e: &mut Emit, b: &ast::Block, dest: &str, owner: &str) {
         Option::Some(x) => aggregate_tail(e, x, dest, owner),
         Option::None => e.stuck = true,
     }
-    // A local this scope owns is dropped when the scope ends, and a local
-    // given up *on one path* is dropped where its flag says. Neither is
-    // written here — `drop_all` is the whole function's and runs once, at
-    // its tail — so a scope that took ownership or gave it up is refused
-    // rather than dropped at the wrong time, twice, or not at all.
-    if e.owned.len() > mark || owed(e) != live {
-        e.stuck = true;
+    if e.stuck {
+        return;
     }
+    // The answer is written where it is going and *then* the scope's drops
+    // go: what is answered with is read while what it was read out of is
+    // still there (Ch. 3 §1.4).
+    close_scope(e, mark, &was);
 }
 
 /// An expression whose value is an aggregate, written into the storage it
@@ -3023,7 +3051,7 @@ fn copy_fields(e: &mut Emit, from: &str, to: &str, owner: &str) -> bool {
 /// A block written as a branch's arm: its statements, then its value.
 fn branch_block(e: &mut Emit, b: &ast::Block, want: &str) -> Value {
     let mark = e.owned.len();
-    let live = owed(e);
+    let was = owns_now(e);
     let mut i: taddr = 0;
     while i < b.stmts.len() {
         stmt(e, &b.stmts[i], want);
@@ -3036,8 +3064,14 @@ fn branch_block(e: &mut Emit, b: &ast::Block, want: &str) -> Value {
             unknown_value()
         }
     };
-    if e.owned.len() > mark || owed(e) != live {
-        e.stuck = true;
+    if e.stuck {
+        return unknown_value();
+    }
+    // The arm's value first and the arm's drops after it, and both before
+    // whatever the caller does with the value: `r.room()` is read while the
+    // room is still there.
+    close_scope(e, mark, &was);
+    if e.stuck {
         return unknown_value();
     }
     held
@@ -3112,15 +3146,11 @@ fn if_statement(
 /// and so is everything in it — so it is lowered as one.
 fn statements(e: &mut Emit, b: &ast::Block, ret: &str) {
     let mark = e.owned.len();
-    let live = owed(e);
+    let was = owns_now(e);
     let mut i: taddr = 0;
     while i < b.stmts.len() {
         stmt(e, &b.stmts[i], ret);
         i += 1;
-    }
-    if e.owned.len() > mark || owed(e) != live {
-        e.stuck = true;
-        return;
     }
     match &b.tail {
         Option::Some(x) => {
@@ -3132,6 +3162,10 @@ fn statements(e: &mut Emit, b: &ast::Block, ret: &str) {
         }
         Option::None => {}
     }
+    if e.stuck {
+        return;
+    }
+    close_scope(e, mark, &was);
 }
 
 /// The operation `x op= e` performs, or nothing for an operator that is not
@@ -3254,15 +3288,17 @@ fn forget(e: &mut Emit, mark: taddr) {
     }
 }
 
-/// Call the destructor of everything this scope owns, innermost first.
+/// Call the destructor of everything owned above a mark, innermost first —
+/// which is declaration order reversed, and is what makes the second of two
+/// still be there while the first is let go.
 ///
 /// What was moved out of is not dropped: its value went somewhere else and
 /// Ch. 3 §1.1 gives it one owner. Where that is not known until run time the
 /// flag decides, and nothing here can read one — so a local whose ownership
 /// a branch settled is refused rather than dropped twice or not at all.
-fn drop_all(e: &mut Emit) {
+fn drop_above(e: &mut Emit, mark: taddr) {
     let mut i = e.owned.len();
-    while i > 0 {
+    while i > mark {
         i -= 1;
         if !e.owned[i].owns {
             continue;
@@ -3276,22 +3312,87 @@ fn drop_all(e: &mut Emit) {
     }
 }
 
-/// How many locals are still to be dropped.
-fn owed(e: &Emit) -> taddr {
-    let mut n: taddr = 0;
+/// Everything this function still owns, for a path that leaves it.
+///
+/// Nothing is retired: a `return` leaves along **one** path while the
+/// scope's other paths still own the same values, and they drop them where
+/// they end (Ch. 3 §1.4).
+fn drop_all(e: &mut Emit) {
+    drop_above(e, 0);
+}
+
+/// Leaving a scope: what it took ownership of is dropped, and then it is no
+/// longer this function's to drop.
+///
+/// A scope that already left — by a `return` inside it — dropped what it
+/// owned on the way out and does not do it twice. It is over either way,
+/// which is what the forgetting is for.
+fn leave(e: &mut Emit, mark: taddr) {
+    if !e.done {
+        drop_above(e, mark);
+    }
+    while e.owned.len() > mark {
+        e.owned.pop();
+    }
+}
+
+/// The end of a scope, in the order everything else in this file writes it:
+/// the drops, and then what the branch left behind said about ownership.
+///
+/// A path that **left** says nothing about the paths that did not, so what
+/// they knew is put back. A path that came out the other end having given
+/// something up is the case the flag was made for — two paths that disagree
+/// about who owns what — and nothing here reads a flag, so it is refused.
+fn close_scope(e: &mut Emit, mark: taddr, was: &Vec<bool>) {
+    let left = e.done;
+    leave(e, mark);
+    if e.stuck {
+        return;
+    }
+    if left {
+        owns_back(e, was);
+        return;
+    }
+    if owns_moved(e, was) {
+        e.stuck = true;
+    }
+}
+
+/// Which locals own something, saved across a branch.
+fn owns_now(e: &Emit) -> Vec<bool> {
+    let mut out: Vec<bool> = Vec::new();
     let mut i: taddr = 0;
     while i < e.owned.len() {
-        if e.owned[i].owns {
-            n += 1;
+        out.push(e.owned[i].owns);
+        i += 1;
+    }
+    out
+}
+
+/// Put back what a branch that **left** said about ownership.
+///
+/// A path that ends in a `return` says nothing about the paths that did
+/// not: `if c { return take(h); }` leaves `h` owned everywhere the program
+/// goes on from (Ch. 3 §1.2).
+fn owns_back(e: &mut Emit, was: &Vec<bool>) {
+    let mut i: taddr = 0;
+    while i < was.len() && i < e.owned.len() {
+        e.owned[i].owns = was[i];
+        i += 1;
+    }
+}
+
+/// Whether a branch changed who owns what, which is the case the flag was
+/// made for and the one nothing here can write.
+fn owns_moved(e: &Emit, was: &Vec<bool>) -> bool {
+    let mut i: taddr = 0;
+    while i < was.len() && i < e.owned.len() {
+        if e.owned[i].owns != was[i] {
+            return true;
         }
         i += 1;
     }
-    n
-}
-
-/// Whether anything this function owns is still to be dropped.
-fn still_owed(e: &Emit) -> bool {
-    owed(e) > 0
+    false
 }
 
 /// Record that a local was moved out of (Ch. 3 §1.2).
@@ -3611,7 +3712,10 @@ fn drop_body(e: &mut Emit, body: &ast::Block) -> bool {
         }
         Option::None => {}
     }
-    if still_owed(e) {
+    // What the body itself took ownership of goes before what `self` held:
+    // an inner scope ends before the frame it is in does (Ch. 3 §1.4).
+    drop_all(e);
+    if e.stuck {
         return false;
     }
     !e.done
@@ -3781,11 +3885,13 @@ fn block(e: &mut Emit, b: &ast::Block, ret: &str, unit: bool) {
                 if e.stuck {
                     return;
                 }
-                if still_owed(e) {
-                    e.stuck = true;
-                    return;
-                }
+                // A function that answers with nothing has no value to read
+                // first, so its drops are the whole of its end.
                 if !e.done {
+                    drop_all(e);
+                    if e.stuck {
+                        return;
+                    }
                     e.insts.push("    ret".to_string());
                 }
                 return;
@@ -3803,12 +3909,12 @@ fn block(e: &mut Emit, b: &ast::Block, ret: &str, unit: bool) {
             e.insts.push(line);
         }
         Option::None => {
-            if still_owed(e) {
-                e.stuck = true;
-                return;
-            }
             // A block that already left does not leave twice.
             if !e.done {
+                drop_all(e);
+                if e.stuck {
+                    return;
+                }
                 e.insts.push("    ret".to_string());
             }
         }
@@ -3999,14 +4105,20 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                     jump(e, &head);
                     start(e, &body);
                     let mark = e.owned.len();
-                    let live = owed(e);
+                    let was = owns_now(e);
                     let mut i: taddr = 0;
                     while i < b.stmts.len() {
                         stmt(e, &b.stmts[i], ret);
                         i += 1;
                     }
-                    if e.owned.len() > mark || owed(e) != live {
-                        e.stuck = true;
+                    if e.stuck {
+                        return;
+                    }
+                    // Once per iteration, before the jump back to the head:
+                    // dropping it after the loop would free the last
+                    // iteration's and leak every other.
+                    close_scope(e, mark, &was);
+                    if e.stuck {
                         return;
                     }
                     jump(e, &head);
@@ -4036,13 +4148,17 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                 }
                 // `return e;` as a statement is the whole of what follows.
                 ast::Expr::Return(v) => {
-                    if still_owed(e) {
-                        e.stuck = true;
-                        return;
-                    }
+                    // The value first and the drops after it, the way the
+                    // tail already does it — and **nothing is retired**: a
+                    // `return` leaves along one path while the scope's other
+                    // paths still own the same values (Ch. 3 §1.4).
                     match v {
                         Option::Some(inner) => {
                             let val = value(e, inner, ret);
+                            if e.stuck {
+                                return;
+                            }
+                            drop_all(e);
                             if e.stuck {
                                 return;
                             }
@@ -4053,6 +4169,10 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                             e.done = true;
                         }
                         Option::None => {
+                            drop_all(e);
+                            if e.stuck {
+                                return;
+                            }
                             e.insts.push("    ret".to_string());
                             e.done = true;
                         }

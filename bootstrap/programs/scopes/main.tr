@@ -1,0 +1,158 @@
+// Where a scope ends, and what it owed (Ch. 3 §1.4).
+//
+// A local whose type has a destructor is dropped when its scope ends. Which
+// scope, and where the drop is *written*, is the whole of this file — and
+// until it was asked, one implementation dropped at exactly one place, the
+// tail of a function that answers with a value, and leaked everywhere else.
+//
+// The order is the same everywhere and it is not the order it reads in:
+// **what the scope answers with is computed first, and the drops go after
+// it**. `r.room()` reads the room while the room is still there.
+
+// A function that answers with **nothing** still drops what it owned. There
+// is no value to read first, so the drops are the whole of its end.
+fn nothing(n: taddr) {
+    let r: Raw<t27> = Raw::alloc(n);
+}
+
+// Two of them, dropped innermost first — which is declaration order
+// reversed, and is what makes the second one's storage still be there while
+// the first is let go.
+fn two(n: taddr) {
+    let a: Raw<t9> = Raw::alloc(n);
+    let b: Raw<t27> = Raw::alloc(n);
+}
+
+// A `return` leaves along **one path** while the scope's other paths still
+// own the same values, so the drops are written at the `return` and again
+// at the tail, and nothing is retired at either.
+fn early(n: taddr) -> taddr {
+    let r: Raw<t27> = Raw::alloc(n);
+    if n > 0 {
+        return 1;
+    }
+    r.room()
+}
+
+// The same, with something to answer: the answer is read before the room
+// it was read out of is freed.
+fn early_value(n: taddr) -> taddr {
+    let r: Raw<t27> = Raw::alloc(n);
+    if n > 0 {
+        return r.room();
+    }
+    0
+}
+
+// A local owned **inside a loop** is dropped when the body ends — once per
+// iteration, before the jump back to the head. Dropping it once after the
+// loop would free the last iteration's room and leak every other.
+fn each(n: taddr) -> taddr {
+    let mut i: taddr = 0;
+    while i < n {
+        let r: Raw<t27> = Raw::alloc(1);
+        i += 1;
+    }
+    i
+}
+
+// An arm of an `if` **that has a value**: the arm's value first, then the
+// arm's drops, then the store into the storage the join reads.
+fn armed(n: taddr) -> taddr {
+    if n > 0 {
+        let r: Raw<t27> = Raw::alloc(n);
+        r.room()
+    } else {
+        0
+    }
+}
+
+// An arm of an `if` that is a **statement**, where there is no value and
+// the drops are all there is between the last statement and the join.
+fn armed_statement(n: taddr) -> taddr {
+    if n > 0 {
+        let r: Raw<t27> = Raw::alloc(n);
+    }
+    n
+}
+
+// A function whose answer is an **aggregate** writes it into the storage
+// the caller gave and then answers with nothing — so the drops go between
+// the last store into `%sret` and the `ret`.
+struct Pair { a: taddr, b: taddr }
+
+fn built(n: taddr) -> Pair {
+    let r: Raw<t27> = Raw::alloc(n);
+    Pair { a: r.room(), b: 1 }
+}
+
+// An arm of a `match`, which is an arm like any other — its block is a
+// block, and a block is where a scope ends.
+enum Pick { One, Two }
+
+fn picked(p: Pick, n: taddr) -> taddr {
+    match p {
+        Pick::One => {
+            let r: Raw<t27> = Raw::alloc(n);
+            r.room()
+        }
+        Pick::Two => 0,
+    }
+}
+
+// A block written for no reason but to be one. It is still a scope.
+fn nested(n: taddr) -> taddr {
+    let held = {
+        let r: Raw<t27> = Raw::alloc(n);
+        r.room()
+    };
+    held
+}
+
+// And a type with a destructor rather than a `Raw`, so that what a scope
+// ends with is a **call** and not a freeing written out in place.
+struct Held { room: Raw<t27>, n: taddr }
+
+fn holds(n: taddr) -> taddr {
+    let h = Held { room: Raw::alloc(n), n: 1 };
+    if n > 0 {
+        return h.n;
+    }
+    h.n
+}
+
+// A parameter taken **by value** owns what it was given (Ch. 3 §1.2): the
+// caller handed the value over and this frame is where it dies. So it takes
+// the same flag an owned local takes, and takes it *before* the value
+// arrives — what the flag says is whether the fields are still there, and
+// they are from the moment the function is entered.
+fn taken(h: Held) -> taddr {
+    h.n
+}
+
+fn hands_over(n: taddr) -> taddr {
+    let h = Held { room: Raw::alloc(n), n: 1 };
+    taken(h)
+}
+
+// And an arm that moves it away and then **leaves**. A path that returns
+// says nothing about the paths that did not, so `h` is still owned where
+// the program goes on from — and the drop at the tail is written plainly,
+// with no flag read, because on the only path that reaches it nothing was
+// given up.
+fn given_away(n: taddr) -> taddr {
+    let h = Held { room: Raw::alloc(n), n: 1 };
+    if n > 0 {
+        return taken(h);
+    }
+    h.n
+}
+
+fn main() -> t27 {
+    nothing(1);
+    two(2);
+    let p = built(3);
+    (early(1) + early_value(1) + each(2) + armed(1) + armed_statement(1)
+        + p.a + p.b + picked(Pick::One, 1) + nested(1) + holds(1)
+        + hands_over(1) + given_away(1)) as t27
+}
