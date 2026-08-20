@@ -2621,6 +2621,64 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.133 — the lexer, lowered twice, character for character.**
+
+`bootstrap/main.tr` is this compiler's lexer written in the language it
+compiles — 1400 lines of Trust across five modules and the library — and
+both implementations now lower it to the **same 7239 lines of TIR**. It is
+the first program in the corpus that neither implementation was written to
+handle: it was written to be *used*, and everything below came out of asking
+why it was not compiling yet.
+
+Seven things, and only the first was expected.
+
+*A `String` receiver falls back to `str`'s methods.* `w.same("_")` where `w`
+is a `String`, which is a `Vec<char>` (Ch. 0 §3.6), and `same` is written on
+`impl str`. A `Vec<char>` already **is** the two words a `&str` is — the
+characters and how many — so what makes the fallback work is building that
+pair out of the `Vec` and nothing else: its room's first word, and its
+length rather than its room, because the room beyond it holds nothing a
+program may read. Under a name `Vec<char>` does not have, which is why the
+method is called `same` and not `eq` (G9.36).
+
+*And so does a `&String` argument.* `lex::one(&src, at)` takes a `&str`, and
+the same pair is built. Which needed one thing first: a parameter written
+`&str` had no name for what it wanted — `param_name` answered `?` — so an
+argument could not see that a `&str` was what was asked for. It answers
+`&fat.str` now, the way the function's own parameter list already did.
+
+*A `match` written as a **statement**.* Its arms are statements too, so they
+need no tail and there is nothing to join. What says so is the wanted type:
+`()` is what a statement wants, and it is the one thing no expression
+answers with. Without it every arm that was a block without a value was
+refused — which is most of a lexer's arms.
+
+*A `return` answers what the **function** does*, and not what the expression
+around it wants. Those are two facts and this file had one field for them:
+an arm of a statement `match` wants nothing, and a `return` in one still
+answers `t27`. It emitted `ret const () 0`.
+
+*A binding that takes ownership from another name.* `let t = taken;` was
+refused outright — "a move out of a named place has to record that the place
+no longer owns what it held, and nothing here can say so". Something can
+now: reading a whole name is a move, which is what `value` does with one, so
+the new name takes the flag and the old one loses it. A move out of a *part*
+of a name is still refused, because that is a different record.
+
+*Matching a field is a **partial** move.* `match t.tok { … }` carries one
+field into the arms' bindings and leaves the rest where they were, so what
+the scope drops at its end is the rest — one field at a time, since the
+type's own glue would drop all of them.
+
+*And two blocks that never come back.* A block whose value is an aggregate
+and which leaves by `return` has no tail, and one with no tail has nothing
+to answer with — unless it already left. The same for an arm of a `match`,
+and the same for a tail that is a `loop` with no `break` in it: an
+expression that never comes back leaves nothing to copy.
+
+`bootstrap/main.tr` is in `scripts/bootstrap.sh` now, beside the fourteen
+programs written to exercise one thing each.
+
 **G9.132 — an enum's destructor, and the four things around it.**
 
 A type that holds something with a destructor has one of its own

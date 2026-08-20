@@ -286,6 +286,12 @@ done
 # A whole *program* as TIR: Ch. 6's three passes and then the lowering, cut
 # down to what `main` reaches — a function nothing calls is a function the
 # program does not contain, and the two have to agree about which.
+#
+# The last of these is **`bootstrap/main.tr` itself**: this compiler's lexer,
+# written in the language it compiles, lowered by both implementations to the
+# same 7239 lines of TIR. That is what a bootstrap is for, and it is the
+# first program in this list that neither implementation was written to
+# handle — it was written to be *used*.
 q=0
 for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
             bootstrap/programs/methods/main.tr \
@@ -299,7 +305,8 @@ for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
             bootstrap/programs/loops/main.tr \
             bootstrap/programs/failing/main.tr \
             bootstrap/programs/oneof/main.tr \
-            bootstrap/programs/named/main.tr; do
+            bootstrap/programs/named/main.tr \
+            bootstrap/main.tr; do
     # The one that uses the library is handed the library, which is what
     # `--prelude` is for (Ch. 6 §3.3) — and asking for it where there is
     # none costs nothing, since a prelude nothing names is pruned away.

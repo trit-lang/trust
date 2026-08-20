@@ -215,6 +215,11 @@ pub struct Owned {
     pub ty: String,
     pub flag: String,
     pub owns: Owns,
+    /// The fields that went somewhere else. The local still owns the rest,
+    /// so what is dropped at the end of the scope is the fields **not**
+    /// named here — one at a time, since the type's own glue would drop all
+    /// of them (Ch. 3 §1.2).
+    pub moved: Vec<String>,
 }
 
 /// One basic block: its label, and what runs in it (TIR §2).
@@ -649,6 +654,16 @@ pub fn param_name(t: &ast::Ty) -> String {
     if tuple.len() > 0 {
         return tuple;
     }
+    // And a `&str` is two words with a name of their own, for the same
+    // reason: an argument written `&s` where a `&str` is wanted has to be
+    // able to see that it is (Ch. 2 §4).
+    let text = fat_name(t);
+    if text.len() > 0 {
+        let mut out: String = Vec::new();
+        out.push('&');
+        out.push_str(&text);
+        return out;
+    }
     tir_ty(t)
 }
 
@@ -1039,9 +1054,9 @@ pub fn function(
     let written = subst_ty(&mut e, &tyvars, &key, &f.ret);
     let answer = nominal(&mut e, &written);
     let sret = def_at(&e.defs, &answer) >= 0;
+    e.answer = answer.to_string();
     if sret {
         header.push_str("%sret: ptr");
-        e.answer = answer.to_string();
     }
     let mut i: taddr = 0;
     while i < f.params.len() {
@@ -1403,6 +1418,7 @@ fn copy_in(e: &mut Emit, name: &str, at: taddr) -> bool {
             ty: owner.to_string(),
             flag: flag.to_string(),
             owns: Owns::Yes,
+            moved: Vec::new(),
         });
     }
 
@@ -2132,6 +2148,82 @@ fn field_place(e: &mut Emit, base: &ast::Expr, name: &str) -> Value {
     Value { text: at, ty: ty }
 }
 
+/// Whether a type is `String`, which is `Vec<char>` and no other `Vec`
+/// (Ch. 0 §3.6, Ch. 5 §2.6).
+fn is_string(e: &Emit, owner: &str) -> bool {
+    let at = inst_at(e, owner);
+    if at < 0 {
+        return false;
+    }
+    if !e.instances[at].base.same("Vec") {
+        return false;
+    }
+    e.instances[at].key.len() == 1 && e.instances[at].key[0].same("char")
+}
+
+/// Whether this type has a method of this name — its own, or its family's.
+fn has_method(e: &Emit, owner: &str, name: &str) -> bool {
+    let mut full: String = Vec::new();
+    full.push_str(owner);
+    full.push_str(".");
+    full.push_str(name);
+    if known_method(e, &full) {
+        return true;
+    }
+    let at = inst_at(e, owner);
+    if at < 0 {
+        return false;
+    }
+    let mut under: String = Vec::new();
+    under.push_str(&e.instances[at].base);
+    under.push_str(".");
+    under.push_str(name);
+    known_method(e, &under)
+}
+
+/// Whether anything of this name was written down, by its parameters —
+/// which every method has, since it has a receiver.
+fn known_method(e: &Emit, name: &str) -> bool {
+    let mut i: taddr = 0;
+    while i < e.params.len() {
+        if e.params[i].name.same(name) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The two words a `&str` **is**, built out of a `Vec<char>` (Ch. 2 §4).
+///
+/// The characters are where the `Vec`'s room begins — which is the first
+/// word of its `Raw`, and so the first word of the `Vec` — and how many
+/// there are is its length and not its room: the room beyond it holds
+/// nothing a program may read.
+fn as_text(e: &mut Emit, from: &str) -> String {
+    let text = str_name();
+    let held = slot_for(e, "tmp", &text);
+    let data = loaded(e, "ptr", from);
+    store_into(e, "ptr", &data, &held);
+    let vec_ty = ast::Ty::Name(one_name("Vec.char"));
+    let l = match layout::of(&e.defs, &vec_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return "".to_string();
+        }
+    };
+    if l.offsets.len() < 2 {
+        e.stuck = true;
+        return "".to_string();
+    }
+    let at = offset_of(e, from, l.offsets[1]);
+    let n = loaded(e, "t27", &at);
+    let into = offset_of(e, &held, 3);
+    store_into(e, "t27", &n, &into);
+    held
+}
+
 /// Whether an expression **is** a place, syntactically (Ch. 3 §2.1).
 ///
 /// A name, a field of one, an element of one, and what a reference points
@@ -2478,6 +2570,19 @@ fn match_expr(
                 }
             }
         }
+        // `match t.tok { … }` carries **one field** away and leaves the
+        // rest where they were, so what the scope drops at its end is the
+        // rest (Ch. 3 §1.2).
+        ast::Expr::Field(base, field) => {
+            let root = match &*base {
+                ast::Expr::Name(n) => n.to_string(),
+                _ => "".to_string(),
+            };
+            if root.len() > 0 {
+                let named = field.to_string();
+                move_field(e, &root, &named);
+            }
+        }
         _ => {}
     }
     // What is matched over is a **place**: a name is one, and so is
@@ -2801,7 +2906,7 @@ fn match_place(
                     // An arm that has already left has nothing to store and
                     // nowhere to store it: `trap()` is the arm `unwrap`
                     // writes for `None` (Ch. 5 §4).
-                    if !e.done {
+                    if !e.done && v.ty.len() > 0 {
                         if held.len() == 0 {
                             ty = v.ty.to_string();
                             held = slot_for(e, "tmp", &ty);
@@ -2861,6 +2966,10 @@ fn match_place(
             start(e, &join);
             if dest.len() > 0 {
                 return Value { text: dest.to_string(), ty: answer.to_string() };
+            }
+            // Nothing was left anywhere, because nothing was wanted.
+            if held.len() == 0 {
+                return Value { text: "".to_string(), ty: "".to_string() };
             }
             // And nothing to load back out of it, for the same reason.
             if def_at(&e.defs, &ty) >= 0 {
@@ -3079,6 +3188,12 @@ fn aggregate_tail(e: &mut Emit, x: &ast::Expr, dest: &str, owner: &str) {
         _ => {
             let v = value(e, x, owner);
             if e.stuck {
+                return;
+            }
+            // An expression that never comes back leaves nothing to copy:
+            // a `loop` with no `break` in it is the whole of what reaches
+            // this in tail position (§5.5).
+            if e.done {
                 return;
             }
             copy_between(e, &v.text, dest, owner);
@@ -3398,9 +3513,15 @@ fn branch_block(e: &mut Emit, b: &ast::Block, want: &str) -> Value {
     }
     let held = match &b.tail {
         Option::Some(x) => value(e, x, want),
+        // A block with no tail has no value — unless it already **left**,
+        // in which case there is nothing after it to want one, or unless
+        // nothing was wanted of it at all, which is what an arm of a
+        // `match` written as a statement is (§5.1).
         Option::None => {
-            e.stuck = true;
-            unknown_value()
+            if !e.done && !answers_nothing(want) {
+                e.stuck = true;
+            }
+            Value { text: "".to_string(), ty: "".to_string() }
         }
     };
     if e.stuck {
@@ -3651,6 +3772,7 @@ fn bind_payload(
                     ty: ty.to_string(),
                     flag: flag.to_string(),
                     owns: Owns::Yes,
+                    moved: Vec::new(),
                 });
             }
             copy_between(e, &src, &slot, &ty);
@@ -3705,6 +3827,12 @@ fn drop_above(e: &mut Emit, mark: taddr) {
         if owns_maybe(&e.owned[i].owns) {
             let flag = e.owned[i].flag.to_string();
             drop_maybe(e, &slot, &owner, &flag);
+        } else if e.owned[i].moved.len() > 0 {
+            // Some of it went somewhere else, so what is dropped is what is
+            // left — one field at a time, since the type's own glue would
+            // drop all of them (Ch. 3 §1.2).
+            let kept = ast::copy_names(&e.owned[i].moved);
+            drop_fields_but(e, &slot, &owner, &kept);
         } else {
             drop_one(e, &slot, &owner);
         }
@@ -4035,6 +4163,30 @@ fn owns_same(a: &Owns, b: &Owns) -> bool {
     owns_maybe(b)
 }
 
+/// Record that **one field** of a local was moved out of (Ch. 3 §1.2).
+///
+/// The local still owns the rest, so its flag is left alone and what is
+/// dropped when the scope ends is the fields not named here. Matching over
+/// `t.tok` carries that field into the arms' bindings and leaves `t.at`
+/// where it was.
+fn move_field(e: &mut Emit, name: &str, field: &str) {
+    let mut i = e.owned.len();
+    while i > 0 {
+        i -= 1;
+        if e.owned[i].name.same(name) {
+            let mut k: taddr = 0;
+            while k < e.owned[i].moved.len() {
+                if e.owned[i].moved[k].same(field) {
+                    return;
+                }
+                k += 1;
+            }
+            e.owned[i].moved.push(field.to_string());
+            return;
+        }
+    }
+}
+
 /// Record that a local was moved out of (Ch. 3 §1.2).
 ///
 /// Two things happen and they are not the same thing: the flag is written,
@@ -4164,6 +4316,42 @@ fn drop_fields(e: &mut Emit, slot: &str, owner: &str) {
         drop_one(e, &where_, &inner);
         if e.stuck {
             return;
+        }
+        i += 1;
+    }
+}
+
+/// The fields of a type, dropped — except the ones named, which went
+/// somewhere else and are not there to drop (Ch. 3 §1.2).
+fn drop_fields_but(e: &mut Emit, slot: &str, owner: &str, kept: &Vec<String>) {
+    let which = def_at(&e.defs, owner);
+    if which < 0 || e.defs[which].is_enum {
+        e.stuck = true;
+        return;
+    }
+    let self_ty = ast::Ty::Name(one_name(owner));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return;
+        }
+    };
+    let drops = ast::copy_names(&e.drops);
+    let mut i: taddr = 0;
+    while i < l.offsets.len() {
+        if holds_name(kept, &e.defs[which].field_names[i]) {
+            i += 1;
+            continue;
+        }
+        let written = ast::copy_ty(&e.defs[which].fields[i]);
+        let inner = nominal(e, &written);
+        if inner.len() > 0 && owns_drop(&e.defs, &drops, &inner, 0) {
+            let where_ = offset_of(e, slot, l.offsets[i]);
+            drop_one(e, &where_, &inner);
+            if e.stuck {
+                return;
+            }
         }
         i += 1;
     }
@@ -4769,14 +4957,43 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                 // that no longer exists.
                 if !is_temporary(&val.text) {
                     // A move out of a *named* place has to record that the
-                    // place no longer owns what it held, and nothing here
-                    // can say so — so a type with a destructor is refused
-                    // rather than dropped twice (Ch. 3 §1.4).
-                    if owns {
+                    // place no longer owns what it held. Reading a whole
+                    // name has already said so — that is what `value` does
+                    // with one (Ch. 3 §1.2) — but reading a *part* of one
+                    // has not, and a partial move is not something this
+                    // records, so it is refused rather than dropped twice.
+                    let whole = match v {
+                        ast::Expr::Name(n) => true,
+                        _ => false,
+                    };
+                    if owns && !whole {
                         e.stuck = true;
                         return;
                     }
                     let slot = slot_for(e, name, &val.ty);
+                    // The new name owns it now, from before the fields
+                    // arrive: what the flag says is whether they are there,
+                    // and they are from the moment this binding exists.
+                    if owns {
+                        let mut prefix: String = Vec::new();
+                        prefix.push_str(name);
+                        prefix.push_str(".owns");
+                        let flag = fresh(e, &prefix);
+                        let mut line: String = Vec::new();
+                        line.push_str("    ");
+                        line.push_str(&flag);
+                        line.push_str(" = slot tryte[1]");
+                        e.slots.push(line);
+                        store_into(e, "t1", "const t1 1", &flag);
+                        e.owned.push(Owned {
+                            name: name.to_string(),
+                            slot: slot.to_string(),
+                            ty: val.ty.to_string(),
+                            flag: flag.to_string(),
+                            owns: Owns::Yes,
+                            moved: Vec::new(),
+                        });
+                    }
                     copy_between(e, &val.text, &slot, &val.ty);
                     return;
                 }
@@ -4814,6 +5031,7 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                         ty: val.ty.to_string(),
                         flag: flag.to_string(),
                         owns: Owns::Yes,
+                        moved: Vec::new(),
                     });
                 }
                 return;
@@ -4973,6 +5191,16 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                 ast::Expr::If(c, t, o) => {
                     if_statement(e, c, t, o, ret);
                 }
+                // `match e { … }` as a statement: its arms are statements
+                // too, so they need no tail and there is nothing to join.
+                // What says so is the wanted type — `()` is what a
+                // statement wants, and it is the one thing no expression
+                // answers with (§5.1).
+                ast::Expr::Match(scrutinee, arms) => {
+                    let none: String = Vec::new();
+                    let held = match_expr(e, scrutinee, arms, "()", &none, "");
+                    let _ = held;
+                }
                 // `loop { … }` as a statement, which is the only way one
                 // that never ends can be written (§5.5).
                 ast::Expr::Loop(b) => {
@@ -4995,8 +5223,14 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                             // there and then leaves (TIR §3). Building a
                             // temporary and answering with it was a `ret` of
                             // a value in a function that has none.
+                            // What the **function** answers with, which is
+                            // not what the expression around the `return`
+                            // wants: an arm of a `match` written as a
+                            // statement wants nothing at all, and a
+                            // `return` in one still answers what the
+                            // function does (§5.1).
                             let answer = e.answer.to_string();
-                            if answer.len() > 0 {
+                            if def_at(&e.defs, &answer) >= 0 {
                                 aggregate_tail(e, inner, "%sret", &answer);
                                 if e.stuck {
                                     return;
@@ -5009,7 +5243,12 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                                 e.done = true;
                                 return;
                             }
-                            let val = value(e, inner, ret);
+                            let mine = if answer.len() > 0 {
+                                answer
+                            } else {
+                                ret.to_string()
+                            };
+                            let val = value(e, inner, &mine);
                             if e.stuck {
                                 return;
                             }
@@ -5403,6 +5642,23 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             let named = dyn_trait(&object);
             if named.len() > 0 {
                 return coerce(e, at, &object, &named);
+            }
+            // `&s` where a `&str` is wanted and `s` is a `String`: the same
+            // two words, built the same way, for the same reason a method
+            // written on `str` is found on one (Ch. 0 §3.6, G9.36). A
+            // `String` *is* the characters and how many, so the pair is
+            // read out of it rather than anything being copied.
+            let text = str_name();
+            if is_string(e, &owner) && object.same(&text) {
+                let from = e.locals[at].slot.to_string();
+                let made = as_text(e, &from);
+                if e.stuck {
+                    return unknown_value();
+                }
+                let mut kind: String = Vec::new();
+                kind.push('&');
+                kind.push_str(&text);
+                return Value { text: made, ty: kind };
             }
             let mut out: String = Vec::new();
             out.push('&');
@@ -5893,6 +6149,21 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 }
                 owner = "str".to_string();
             }
+            // A `String` **is** a `Vec<char>` (Ch. 0 §3.6), and where the
+            // name it is asked for is not one of that type's, `str`'s
+            // methods are tried: a `Vec<char>` is already the two words a
+            // `&str` is — the characters and how many — so what makes the
+            // fallback work is building that pair and nothing else (G9.36).
+            //
+            // Under a name `Vec<char>` does not have, which is why `same`
+            // is not called `eq`: an `eq` here would be hidden by the one
+            // `Eq for Vec<char>` writes, and text could not be compared
+            // with a literal at all.
+            let mut from_text: String = Vec::new();
+            if is_string(e, &owner) && !has_method(e, &owner, name) {
+                from_text = slot.to_string();
+                owner = "str".to_string();
+            }
             let mut full: String = Vec::new();
             full.push_str(&owner);
             full.push_str(".");
@@ -5953,7 +6224,13 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             if big.len() > 0 && sited {
                 into = slot_for(e, "tmp", &big);
             }
-            slot = receiver_at(e, at, recv, &slot, &by_value);
+            if from_text.len() > 0 {
+                // The pair is built where the receiver would have been
+                // evaluated, out of storage the `Vec` already holds.
+                slot = as_text(e, &from_text);
+            } else {
+                slot = receiver_at(e, at, recv, &slot, &by_value);
+            }
             if e.stuck {
                 return unknown_value();
             }
