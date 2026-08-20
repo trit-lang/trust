@@ -2633,6 +2633,8 @@ fn if_expr(
 /// A block whose value is an aggregate: its statements, then its tail
 /// written where the value is going.
 fn aggregate_block(e: &mut Emit, b: &ast::Block, dest: &str, owner: &str) {
+    let mark = e.owned.len();
+    let live = owed(e);
     let mut i: taddr = 0;
     while i < b.stmts.len() {
         stmt(e, &b.stmts[i], "");
@@ -2644,6 +2646,14 @@ fn aggregate_block(e: &mut Emit, b: &ast::Block, dest: &str, owner: &str) {
     match &b.tail {
         Option::Some(x) => aggregate_tail(e, x, dest, owner),
         Option::None => e.stuck = true,
+    }
+    // A local this scope owns is dropped when the scope ends, and a local
+    // given up *on one path* is dropped where its flag says. Neither is
+    // written here — `drop_all` is the whole function's and runs once, at
+    // its tail — so a scope that took ownership or gave it up is refused
+    // rather than dropped at the wrong time, twice, or not at all.
+    if e.owned.len() > mark || owed(e) != live {
+        e.stuck = true;
     }
 }
 
@@ -3012,18 +3022,25 @@ fn copy_fields(e: &mut Emit, from: &str, to: &str, owner: &str) -> bool {
 
 /// A block written as a branch's arm: its statements, then its value.
 fn branch_block(e: &mut Emit, b: &ast::Block, want: &str) -> Value {
+    let mark = e.owned.len();
+    let live = owed(e);
     let mut i: taddr = 0;
     while i < b.stmts.len() {
         stmt(e, &b.stmts[i], want);
         i += 1;
     }
-    match &b.tail {
+    let held = match &b.tail {
         Option::Some(x) => value(e, x, want),
         Option::None => {
             e.stuck = true;
             unknown_value()
         }
+    };
+    if e.owned.len() > mark || owed(e) != live {
+        e.stuck = true;
+        return unknown_value();
     }
+    held
 }
 
 /// `if c { … } else { … }` where nothing wants its value (§5.3).
@@ -3094,10 +3111,16 @@ fn if_statement(
 /// wants a value. A tail here has no value either — the arm is a statement
 /// and so is everything in it — so it is lowered as one.
 fn statements(e: &mut Emit, b: &ast::Block, ret: &str) {
+    let mark = e.owned.len();
+    let live = owed(e);
     let mut i: taddr = 0;
     while i < b.stmts.len() {
         stmt(e, &b.stmts[i], ret);
         i += 1;
+    }
+    if e.owned.len() > mark || owed(e) != live {
+        e.stuck = true;
+        return;
     }
     match &b.tail {
         Option::Some(x) => {
@@ -3251,6 +3274,24 @@ fn drop_all(e: &mut Emit) {
             return;
         }
     }
+}
+
+/// How many locals are still to be dropped.
+fn owed(e: &Emit) -> taddr {
+    let mut n: taddr = 0;
+    let mut i: taddr = 0;
+    while i < e.owned.len() {
+        if e.owned[i].owns {
+            n += 1;
+        }
+        i += 1;
+    }
+    n
+}
+
+/// Whether anything this function owns is still to be dropped.
+fn still_owed(e: &Emit) -> bool {
+    owed(e) > 0
 }
 
 /// Record that a local was moved out of (Ch. 3 §1.2).
@@ -3570,6 +3611,9 @@ fn drop_body(e: &mut Emit, body: &ast::Block) -> bool {
         }
         Option::None => {}
     }
+    if still_owed(e) {
+        return false;
+    }
     !e.done
 }
 
@@ -3737,6 +3781,10 @@ fn block(e: &mut Emit, b: &ast::Block, ret: &str, unit: bool) {
                 if e.stuck {
                     return;
                 }
+                if still_owed(e) {
+                    e.stuck = true;
+                    return;
+                }
                 if !e.done {
                     e.insts.push("    ret".to_string());
                 }
@@ -3755,6 +3803,10 @@ fn block(e: &mut Emit, b: &ast::Block, ret: &str, unit: bool) {
             e.insts.push(line);
         }
         Option::None => {
+            if still_owed(e) {
+                e.stuck = true;
+                return;
+            }
             // A block that already left does not leave twice.
             if !e.done {
                 e.insts.push("    ret".to_string());
@@ -3946,10 +3998,16 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                     let done = label(e, "done");
                     jump(e, &head);
                     start(e, &body);
+                    let mark = e.owned.len();
+                    let live = owed(e);
                     let mut i: taddr = 0;
                     while i < b.stmts.len() {
                         stmt(e, &b.stmts[i], ret);
                         i += 1;
+                    }
+                    if e.owned.len() > mark || owed(e) != live {
+                        e.stuck = true;
+                        return;
                     }
                     jump(e, &head);
                     start(e, &head);
@@ -3978,6 +4036,10 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                 }
                 // `return e;` as a statement is the whole of what follows.
                 ast::Expr::Return(v) => {
+                    if still_owed(e) {
+                        e.stuck = true;
+                        return;
+                    }
                     match v {
                         Option::Some(inner) => {
                             let val = value(e, inner, ret);

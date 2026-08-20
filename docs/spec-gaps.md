@@ -2621,6 +2621,61 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.123 — where a scope ends, and what it owed.**
+
+`drop_all` was called in exactly one place: the tail of a function that
+answers with a value. Everywhere else a scope ended, what it owned was
+simply not dropped — and this was found by asking four questions of both
+implementations after `Vec` compiled, none of which any corpus program had
+ever asked.
+
+    fn g(n: taddr) { let r: Raw<t27> = Raw::alloc(n); }
+
+A function that answers with **nothing** never dropped anything. The
+reference frees the room; this emitted a `ret` and leaked it, and did not
+even declare `@free`.
+
+    fn f(n: taddr) -> taddr {
+        let r: Raw<t27> = Raw::alloc(n);
+        if n > 0 { return 1; }
+        r.room()
+    }
+
+A **`return`** leaves along one path while the scope's other paths still own
+the same values (Ch. 3 §1.4). The reference emits the drops at the `return`
+and again at the tail, and retires neither; this emitted them only at the
+tail, so the early path leaked.
+
+    while i < n { let r: Raw<t27> = Raw::alloc(1); i += 1; }
+
+A local owned **inside a block** is dropped when that block ends — once per
+iteration. This dropped it once, after the loop, out of the storage the last
+iteration left behind.
+
+And the fourth, which no probe reached but which the same machinery is
+missing: a local given up on **one arm of a branch** is owned on the other,
+and what decides at run time is the flag. Nothing here reads a flag.
+
+*What was done about it.* Each of these is refused, in the four places a
+scope can end: a function that answers with nothing and still owes a drop, a
+`return` that does, and a block — an arm, a loop body, or an aggregate
+block — that either took ownership of something or gave some up. A refusal
+is loud and a leak is not, and the whole point of two implementations is
+that a disagreement be visible.
+
+*What was not done.* Emitting them. It is four sites and an ordering
+question at each — the arm's value is computed before its drops, the way a
+function's tail already is — and every one of them needs a corpus program of
+its own, since not one exists today. That is a round, not a patch.
+
+It is worth saying why none of this showed up while `Vec` was being built.
+`Vec::regrow` is a function that answers with nothing and owns a `Raw`: it
+escapes only because `self.held = fresh` moves that `Raw` away, so by the
+time the function ends it owes nothing. `push`, `grown` and `clear` own
+nothing at all. The corpus agreed because the library happens not to write
+the shape that breaks, which is the least reassuring reason for a test to
+pass.
+
 **G9.122 — `Vec`, and the four things one line needed.**
 
 `self.held = fresh` — an aggregate assigned to a field — was the last
