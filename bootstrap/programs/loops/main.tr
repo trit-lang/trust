@@ -1,0 +1,118 @@
+// The three ways out of a loop that are not falling off the end (§5.5).
+//
+// A `while` is a loop with a test written at the top, and this file is
+// about the rest of what a loop is: a head to go back to, an end to jump
+// to, and the two words that do either. `break` and `continue` are written
+// where the head and the end are not, so what makes them writable at all is
+// a *stack* of the loops being emitted — innermost last, because the
+// innermost is the one they mean.
+
+// `loop { … }` with nothing that leaves it **never ends**, so its type is
+// never: there is nowhere after it, and the block that would have followed
+// is emitted no more than the block after a `return` is. What ends this one
+// is a `return`, which leaves the function and not the loop.
+fn counted(n: t27) -> t27 {
+    let mut i: t27 = 0;
+    loop {
+        i += 1;
+        if i > n {
+            return i;
+        }
+    }
+}
+
+// `break` with a value: the storage it writes to is made **before the
+// body**, because what is wanted is known where the loop begins and what is
+// written is known further in. It is made whenever anything is wanted, even
+// where no `break` turns out to carry one — which is why `counted` above
+// has a slot it never stores to.
+fn broken(n: t27) -> t27 {
+    let mut i: t27 = 0;
+    loop {
+        i += 1;
+        if i > n {
+            break i;
+        }
+    }
+}
+
+// `break` out of a `while`, which is the same jump to the same end: the
+// block the test already falls through to when it is done.
+fn stopped(n: t27) -> t27 {
+    let mut i: t27 = 0;
+    while i < n {
+        if i == 2 {
+            break;
+        }
+        i += 1;
+    }
+    i
+}
+
+// `continue`, which goes back to the head — and to the **head** and not to
+// the body, so the test is asked again.
+fn skipped(n: t27) -> t27 {
+    let mut i: t27 = 0;
+    let mut k: t27 = 0;
+    while i < n {
+        i += 1;
+        if i == 2 {
+            continue;
+        }
+        k += 1;
+    }
+    k
+}
+
+// One inside another, so that a `break` in the inner one means the inner
+// one. The stack is what says so.
+fn nested(n: t27) -> t27 {
+    let mut i: t27 = 0;
+    let mut k: t27 = 0;
+    while i < n {
+        let mut j: t27 = 0;
+        while j < n {
+            if j == 1 {
+                break;
+            }
+            j += 1;
+            k += 1;
+        }
+        i += 1;
+    }
+    k
+}
+
+// And leaving a loop that owns something: the scopes between the `break`
+// and the loop are being left, so what they own dies with them — written
+// out where the `break` is and **not retired**, because the loop's other
+// paths still own the same values (Ch. 3 §1.1).
+fn let_go(n: taddr) -> taddr {
+    let mut i: taddr = 0;
+    loop {
+        let r: Raw<t27> = Raw::alloc(1);
+        i += 1;
+        if i > n {
+            break i;
+        }
+    }
+}
+
+// The same for a `continue`, which leaves the same scopes by the other
+// door.
+fn round_again(n: taddr) -> taddr {
+    let mut i: taddr = 0;
+    while i < n {
+        let r: Raw<t27> = Raw::alloc(1);
+        i += 1;
+        if i == 1 {
+            continue;
+        }
+    }
+    i
+}
+
+fn main() -> t27 {
+    counted(2) + broken(2) + stopped(3) + skipped(3) + nested(2)
+        + (let_go(2) as t27) + (round_again(2) as t27)
+}

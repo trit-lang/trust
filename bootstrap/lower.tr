@@ -160,6 +160,25 @@ pub struct Slot {
     pub ty: String,
 }
 
+/// The loop a `break` or a `continue` is inside (§5.5).
+///
+/// Both are written where the loop's head and end are not, so a stack of
+/// these is what makes them writable at all — and it is a *stack* because
+/// the innermost loop is the one they mean.
+///
+/// `slot` is where a `break` with a value puts it, and is nothing where the
+/// loop answers with nothing. `mark` is what the loop owned when it began,
+/// so that leaving it early drops what the scopes in between took — emitted
+/// and **not retired**, because the loop's other paths still own them.
+pub struct LoopCtx {
+    pub head: String,
+    pub exit: String,
+    pub slot: String,
+    pub ty: String,
+    pub broke: bool,
+    pub mark: taddr,
+}
+
 /// What is known about whether a local still owns its value (Ch. 3 §1.2).
 ///
 /// Three, and not two, because a branch may decide. `if c { take(h); }`
@@ -234,6 +253,9 @@ pub struct Emit {
     pub drops: Vec<String>,
     /// The locals this scope is responsible for dropping, innermost last.
     pub owned: Vec<Owned>,
+    /// The loops being emitted, innermost last, so that a `break` and a
+    /// `continue` can say where they go (§5.5).
+    pub loops: Vec<LoopCtx>,
     /// The type an `impl`'s `self` points at, for a field read through it.
     pub self_ty: String,
     /// The generic functions of the file, so a call to one can work out
@@ -900,6 +922,7 @@ pub fn function(
         defs: cx.defs,
         drops: cx.drops,
         owned: Vec::new(),
+        loops: Vec::new(),
         self_ty: owner.to_string(),
         families: cx.families,
         jobs: copy_jobs(&work.jobs),
@@ -3373,6 +3396,163 @@ fn drop_above(e: &mut Emit, mark: taddr) {
     }
 }
 
+/// `loop { … }` (§5.5): a head jumped back to, and an end nothing reaches
+/// unless something `break`s to it.
+///
+/// A loop with no `break` in it never ends, so its type is **never**: there
+/// is nowhere after it, and the block that would have followed is emitted
+/// no more than the block after a `return` is. That is what `e.done` says
+/// here, and it is why the end label is made before the body and started
+/// only afterwards.
+///
+/// The storage a `break` with a value writes to is made **before the body**
+/// too, and made whenever anything is wanted — even where no `break` turns
+/// out to carry one, since what is wanted is known here and what is written
+/// is known further in. Its number is what the two implementations agree
+/// about, so it is taken whether or not it is used.
+fn loop_expr(e: &mut Emit, b: &ast::Block, want: &str, ret: &str) -> Value {
+    let head = label(e, "loop");
+    let exit = label(e, "done");
+    let mut slot: String = Vec::new();
+    let mut ty: String = Vec::new();
+    if carries(e, want) {
+        ty = want.to_string();
+        slot = slot_for(e, "tmp", &ty);
+    }
+    jump(e, &head);
+    start(e, &head);
+    let mark = e.owned.len();
+    let was = owns_now(e);
+    e.loops.push(LoopCtx {
+        head: head.to_string(),
+        exit: exit.to_string(),
+        slot: slot.to_string(),
+        ty: ty.to_string(),
+        broke: false,
+        mark: mark,
+    });
+    let mut i: taddr = 0;
+    while i < b.stmts.len() {
+        stmt(e, &b.stmts[i], ret);
+        i += 1;
+    }
+    match &b.tail {
+        // A loop answers with nothing, so its last expression is a
+        // statement like every other one in it (§5.1).
+        Option::Some(x) => {
+            let held = ast::Stmt::Do(ast::copy_expr(&*x));
+            stmt(e, &held, ret);
+        }
+        Option::None => {}
+    }
+    let broke = last_broke(e);
+    e.loops.pop();
+    if e.stuck {
+        return unknown_value();
+    }
+    close_scope(e, mark, &was);
+    if e.stuck {
+        return unknown_value();
+    }
+    // A body that gives up something it did not own is a body the loop may
+    // reach again with nothing there.
+    if owns_moved(e, &was) {
+        e.stuck = true;
+        return unknown_value();
+    }
+    jump(e, &head);
+    if !broke {
+        return Value { text: "".to_string(), ty: "".to_string() };
+    }
+    start(e, &exit);
+    if slot.len() == 0 {
+        return Value { text: "".to_string(), ty: "".to_string() };
+    }
+    let held = loaded(e, &ty, &slot);
+    Value { text: held, ty: ty }
+}
+
+/// Whether a `break` in this loop could carry something: a scalar, or an
+/// aggregate, and nothing where nothing is wanted.
+fn carries(e: &Emit, want: &str) -> bool {
+    if want.len() == 0 || want.same("?") || answers_nothing(want) {
+        return false;
+    }
+    if def_at(&e.defs, want) >= 0 {
+        return true;
+    }
+    let shown = tir_of(want);
+    shown.same("t1") || shown.same("t9") || shown.same("t27") || shown.same("ptr")
+}
+
+/// Whether the loop being emitted has had a `break` written in it.
+fn last_broke(e: &Emit) -> bool {
+    if e.loops.len() == 0 {
+        return false;
+    }
+    e.loops[e.loops.len() - 1].broke
+}
+
+/// `break e?` (§5.5): the value where there is one, the drops the scopes
+/// being left owe, and then the jump to the loop's end.
+fn break_out(e: &mut Emit, v: &Option<Box<ast::Expr>>, ret: &str) {
+    if e.loops.len() == 0 {
+        e.stuck = true;
+        return;
+    }
+    let at = e.loops.len() - 1;
+    let slot = e.loops[at].slot.to_string();
+    let ty = e.loops[at].ty.to_string();
+    let exit = e.loops[at].exit.to_string();
+    let mark = e.loops[at].mark;
+    e.loops[at].broke = true;
+    match v {
+        Option::Some(x) => {
+            if slot.len() == 0 {
+                e.stuck = true;
+                return;
+            }
+            let held = value(e, &*x, &ty);
+            if e.stuck {
+                return;
+            }
+            if def_at(&e.defs, &ty) >= 0 {
+                copy_between(e, &held.text, &slot, &ty);
+            } else {
+                store_into(e, &ty, &held.text, &slot);
+            }
+            if e.stuck {
+                return;
+            }
+        }
+        Option::None => {}
+    }
+    // The scopes between here and the loop are being left, and what they
+    // own dies with them (Ch. 3 §1.1) — written out and not retired,
+    // because the loop's other paths still own the same values.
+    drop_above(e, mark);
+    if e.stuck {
+        return;
+    }
+    jump(e, &exit);
+}
+
+/// `continue` (§5.5): the same drops, and the jump back to the head.
+fn go_again(e: &mut Emit, ret: &str) {
+    if e.loops.len() == 0 {
+        e.stuck = true;
+        return;
+    }
+    let at = e.loops.len() - 1;
+    let head = e.loops[at].head.to_string();
+    let mark = e.loops[at].mark;
+    drop_above(e, mark);
+    if e.stuck {
+        return;
+    }
+    jump(e, &head);
+}
+
 /// `if the flag says so, drop it` — the three blocks Ch. 3 §1.4 needs where
 /// two paths came out disagreeing about who owns what.
 fn drop_maybe(e: &mut Emit, slot: &str, owner: &str, flag: &str) {
@@ -3898,6 +4078,7 @@ pub fn destructor(
         defs: cx.defs,
         drops: cx.drops,
         owned: Vec::new(),
+        loops: Vec::new(),
         self_ty: owner.to_string(),
         // A destructor is reached by dropping and not by calling, so no
         // instantiation can be asked for from here: a generic call inside
@@ -4047,6 +4228,12 @@ fn block(e: &mut Emit, b: &ast::Block, ret: &str, unit: bool) {
             }
             let v = value(e, x, ret);
             if e.stuck {
+                return;
+            }
+            // A tail that never comes back has nothing to answer with and
+            // nowhere to write it: a `loop` with no `break` in it is the
+            // whole of what reaches this (§5.5).
+            if e.done {
                 return;
             }
             // The value first and the drops after it: what is answered is
@@ -4255,11 +4442,36 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                     start(e, &body);
                     let mark = e.owned.len();
                     let was = owns_now(e);
+                    // A `while` is a loop, so `break` and `continue` mean
+                    // it too: its head is what one goes back to and its end
+                    // is what the other goes to. It answers with nothing,
+                    // so there is no storage for a `break` to write.
+                    e.loops.push(LoopCtx {
+                        head: head.to_string(),
+                        exit: done.to_string(),
+                        slot: "".to_string(),
+                        ty: "".to_string(),
+                        broke: false,
+                        mark: mark,
+                    });
                     let mut i: taddr = 0;
                     while i < b.stmts.len() {
                         stmt(e, &b.stmts[i], ret);
                         i += 1;
                     }
+                    // A loop's body answers with nothing, so its last
+                    // expression is a **statement** like every other one in
+                    // it — and a block-shaped one is where the parser puts
+                    // it (§5.1). Reading only the statements dropped it on
+                    // the floor and said the module was fine.
+                    match &b.tail {
+                        Option::Some(x) => {
+                            let held = ast::Stmt::Do(ast::copy_expr(&*x));
+                            stmt(e, &held, ret);
+                        }
+                        Option::None => {}
+                    }
+                    e.loops.pop();
                     if e.stuck {
                         return;
                     }
@@ -4303,6 +4515,14 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                 ast::Expr::If(c, t, o) => {
                     if_statement(e, c, t, o, ret);
                 }
+                // `loop { … }` as a statement, which is the only way one
+                // that never ends can be written (§5.5).
+                ast::Expr::Loop(b) => {
+                    let held = loop_expr(e, &*b, "", ret);
+                    let _ = held;
+                }
+                ast::Expr::Break(v) => break_out(e, v, ret),
+                ast::Expr::Continue => go_again(e, ret),
                 // `return e;` as a statement is the whole of what follows.
                 ast::Expr::Return(v) => {
                     // The value first and the drops after it, the way the
@@ -4505,6 +4725,18 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             line.push_str(&slot);
             e.insts.push(line);
             Value { text: name, ty: ty }
+        }
+        // A `loop` in value position: what it answers with is what a
+        // `break` in it carried, and where that goes is decided here
+        // because it is here that anything is wanted (§5.5).
+        ast::Expr::Loop(b) => loop_expr(e, &*b, want, want),
+        ast::Expr::Break(v) => {
+            break_out(e, v, want);
+            Value { text: "".to_string(), ty: "".to_string() }
+        }
+        ast::Expr::Continue => {
+            go_again(e, want);
+            Value { text: "".to_string(), ty: "".to_string() }
         }
         ast::Expr::Binary(op, a, b) => {
             if op.same("&&") || op.same("||") {
@@ -8713,6 +8945,7 @@ fn drop_glue(
         defs: cx.defs,
         drops: cx.drops,
         owned: Vec::new(),
+        loops: Vec::new(),
         self_ty: owner.to_string(),
         families: Vec::new(),
         jobs: Vec::new(),

@@ -2621,6 +2621,61 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.126 — a loop's last expression, and the two words out of one.**
+
+`loop`, `break` and `continue` had no lowering at all — `ast::Expr::Loop`,
+`Break` and `Continue` appeared in this file only in the two functions that
+*walk* a tree and never in the one that lowers it. Three of the five things
+`bootstrap/main.tr` still needs were one of them: `input::next_byte` and
+`main` are both a `loop`.
+
+*A loop with no `break` in it never ends*, so its type is **never**: there
+is nowhere after it, and the block that would have followed is emitted no
+more than the block after a `return` is. That is one line at the function's
+tail — a tail that never comes back writes no `ret` — and without it the
+first `loop` either implementation compiled would have had an unreachable
+block with a `ret` in it.
+
+*The storage a `break` carries a value in is made before the body*, because
+what is wanted is known where the loop begins and what is written is known
+further in. It is made **whenever anything is wanted**, even where no
+`break` turns out to carry one, and the slot's number is part of the text
+both implementations agree about — so a loop that never breaks still has a
+slot it never stores to, and `counted` in the corpus is exactly that.
+
+*`break` and `continue` are written where the head and the end are not*, so
+what makes them writable is a stack of the loops being emitted — innermost
+last, because the innermost is the one they mean. A `while` pushes one too:
+it is a loop with its test written at the top, and `break` in one means the
+block its test already falls through to.
+
+*And both leave scopes.* What the scopes between the jump and the loop own
+dies with them (Ch. 3 §1.1) — emitted where the jump is and **not retired**,
+because the loop's other paths still own the same values. That is
+`drop_above` at the loop's mark, which is the same function a `return`
+already used for the same reason.
+
+**And one thing that was not about loops at all.** A `while` body's
+statements were lowered and its **tail was dropped on the floor**:
+
+    while i < n {
+        i += 1;
+        if i == 1 { k += 5; }
+    }
+
+A loop's body answers with nothing, so its last expression is a *statement*
+like every other one in it, and a block-shaped one is where the parser puts
+it (§5.1, G9.105). Reading only `b.stmts` emitted the `i += 1` and nothing
+else, and said the module was fine. Every `while` in `bootstrap/` and in the
+prelude ends with a plain statement, so in a corpus of ten programs and
+twenty-three files nothing had ever written one — and it was found by
+writing `if i == 1 { continue; }` at the end of a loop body, which is the
+most ordinary line in this entry.
+
+That is the sixth finding of this shape in two rounds: **both implementations
+said they had succeeded and the answers were different.** The fix is one
+`match` on `b.tail` and it is the same three lines `loop` needed next door.
+
 **G9.125 — the one thing a drop flag was ever for.**
 
 Every drop written so far was written plainly, because on the path that
