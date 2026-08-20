@@ -160,6 +160,20 @@ pub struct Slot {
     pub ty: String,
 }
 
+/// What is known about whether a local still owns its value (Ch. 3 §1.2).
+///
+/// Three, and not two, because a branch may decide. `if c { take(h); }`
+/// leaves `h` owned on one path and not on the other, and which it is is
+/// not known until the program runs — so the drop is written under a test
+/// of the flag. That is the whole of what a flag is for, and the only case
+/// that reads one: everywhere else what is known is known where the drop is
+/// written, and the drop is written plainly.
+pub enum Owns {
+    No,
+    Yes,
+    Maybe,
+}
+
 /// One local this scope is responsible for dropping (Ch. 3 §1.4).
 ///
 /// It is a `Slot` and two more things. `flag` is the tryte that says whether
@@ -173,7 +187,7 @@ pub struct Owned {
     pub slot: String,
     pub ty: String,
     pub flag: String,
-    pub owns: bool,
+    pub owns: Owns,
 }
 
 /// One basic block: its label, and what runs in it (TIR §2).
@@ -1330,7 +1344,7 @@ fn copy_in(e: &mut Emit, name: &str, at: taddr) -> bool {
             slot: slot.to_string(),
             ty: owner.to_string(),
             flag: flag.to_string(),
-            owns: true,
+            owns: Owns::Yes,
         });
     }
 
@@ -2461,9 +2475,15 @@ fn match_expr(
 
             let mut held: String = Vec::new();
             let mut ty: String = Vec::new();
+            // Arms are alternatives, so each is lowered from what was known
+            // before any of them, and what comes after the join is what all
+            // of them agreed about (Ch. 3 §1.2).
+            let was = owns_now(e);
+            let mut agreed: Vec<Owns> = Vec::new();
             let mut n: taddr = 0;
             while n < order.len() {
                 let a = order[n];
+                owns_back(e, &was);
                 let index = arm_variant(e, which, &arms[a]);
                 // The one that is not tested has no labels of its own: its
                 // body is what the last test fell through to.
@@ -2532,12 +2552,25 @@ fn match_expr(
                 if !e.done {
                     jump(e, &join);
                 }
+                let after = owns_now(e);
+                if n == 0 {
+                    agreed = after;
+                } else {
+                    let mut j: taddr = 0;
+                    let mut both: Vec<Owns> = Vec::new();
+                    while j < agreed.len() && j < after.len() {
+                        both.push(joined_owns(&agreed[j], &after[j]));
+                        j += 1;
+                    }
+                    agreed = both;
+                }
                 forget(e, mark);
                 if tested {
                     start(e, &next_at);
                 }
                 n += 1;
             }
+            owns_back(e, &agreed);
             // Exhaustiveness was checked, so control cannot arrive here in a
             // well-typed program — but TIR wants a terminator. A niche has
             // no such block: the variant nothing ruled out is the last arm
@@ -2595,6 +2628,10 @@ fn if_expr(
             br.push_str(&else_at);
             e.insts.push(br);
 
+            // What each arm did to ownership. The second is lowered from
+            // what was known *before* the first: two arms are alternatives
+            // and not a sequence (Ch. 3 §1.2).
+            let was = owns_now(e);
             start(e, &then_at);
             if dest.len() > 0 {
                 aggregate_block(e, t, dest, owner);
@@ -2602,6 +2639,8 @@ fn if_expr(
                     return unknown_value();
                 }
                 jump(e, &join_at);
+                let after_then = owns_now(e);
+                owns_back(e, &was);
                 start(e, &else_at);
                 match o {
                     Option::Some(x) => {
@@ -2618,6 +2657,8 @@ fn if_expr(
                     }
                 }
                 jump(e, &join_at);
+                let after_else = owns_now(e);
+                owns_agree(e, &after_then, &after_else);
                 start(e, &join_at);
                 return Value { text: dest.to_string(), ty: owner.to_string() };
             }
@@ -2631,6 +2672,8 @@ fn if_expr(
             let held = slot_for(e, "tmp", &ty);
             store_into(e, &ty, &a.text, &held);
             jump(e, &join_at);
+            let after_then = owns_now(e);
+            owns_back(e, &was);
 
             start(e, &else_at);
             match o {
@@ -2644,6 +2687,8 @@ fn if_expr(
                 Option::None => {}
             }
             jump(e, &join_at);
+            let after_else = owns_now(e);
+            owns_agree(e, &after_then, &after_else);
 
             start(e, &join_at);
             let name = fresh(e, "v");
@@ -3106,6 +3151,11 @@ fn if_statement(
     br.push_str(&else_at);
     e.insts.push(br);
 
+    // What each arm did to ownership, so that what comes after the join
+    // knows what the two of them agreed about (Ch. 3 §1.2). The second arm
+    // is lowered from what was known *before* the first, not from what the
+    // first left behind — the two are alternatives and not a sequence.
+    let was = owns_now(e);
     start(e, &then_at);
     statements(e, t, ret);
     if e.stuck {
@@ -3114,6 +3164,8 @@ fn if_statement(
     if !e.done {
         jump(e, &join_at);
     }
+    let after_then = owns_now(e);
+    owns_back(e, &was);
 
     start(e, &else_at);
     match o {
@@ -3135,6 +3187,8 @@ fn if_statement(
     if !e.done {
         jump(e, &join_at);
     }
+    let after_else = owns_now(e);
+    owns_agree(e, &after_then, &after_else);
 
     start(e, &join_at);
 }
@@ -3300,16 +3354,88 @@ fn drop_above(e: &mut Emit, mark: taddr) {
     let mut i = e.owned.len();
     while i > mark {
         i -= 1;
-        if !e.owned[i].owns {
+        if owns_no(&e.owned[i].owns) {
             continue;
         }
         let owner = e.owned[i].ty.to_string();
         let slot = e.owned[i].slot.to_string();
-        drop_one(e, &slot, &owner);
+        // Where a branch decided, the flag decides — one test around one
+        // drop, and the only place in this file that reads a flag back.
+        if owns_maybe(&e.owned[i].owns) {
+            let flag = e.owned[i].flag.to_string();
+            drop_maybe(e, &slot, &owner, &flag);
+        } else {
+            drop_one(e, &slot, &owner);
+        }
         if e.stuck {
             return;
         }
     }
+}
+
+/// `if the flag says so, drop it` — the three blocks Ch. 3 §1.4 needs where
+/// two paths came out disagreeing about who owns what.
+fn drop_maybe(e: &mut Emit, slot: &str, owner: &str, flag: &str) {
+    let f = loaded(e, "t1", flag);
+    let yes = label(e, "drop.yes");
+    let join_at = label(e, "drop.join");
+    let mut br: String = Vec::new();
+    br.push_str("    br2 ");
+    br.push_str(&f);
+    br.push_str(", ");
+    br.push_str(&yes);
+    br.push_str(", ");
+    br.push_str(&join_at);
+    e.insts.push(br);
+    start(e, &yes);
+    drop_one(e, slot, owner);
+    if e.stuck {
+        return;
+    }
+    jump(e, &join_at);
+    start(e, &join_at);
+}
+
+/// Which of the three a state is, asked one at a time because a fieldless
+/// enum is read by matching and these are read everywhere.
+fn owns_no(o: &Owns) -> bool {
+    match o {
+        Owns::No => true,
+        _ => false,
+    }
+}
+
+fn owns_yes(o: &Owns) -> bool {
+    match o {
+        Owns::Yes => true,
+        _ => false,
+    }
+}
+
+fn owns_maybe(o: &Owns) -> bool {
+    match o {
+        Owns::Maybe => true,
+        _ => false,
+    }
+}
+
+fn copy_owns(o: &Owns) -> Owns {
+    match o {
+        Owns::No => Owns::No,
+        Owns::Yes => Owns::Yes,
+        Owns::Maybe => Owns::Maybe,
+    }
+}
+
+/// What two paths agreed about, which is `Maybe` wherever they did not.
+fn joined_owns(a: &Owns, b: &Owns) -> Owns {
+    if owns_no(a) && owns_no(b) {
+        return Owns::No;
+    }
+    if owns_yes(a) && owns_yes(b) {
+        return Owns::Yes;
+    }
+    Owns::Maybe
 }
 
 /// Everything this function still owns, for a path that leaves it.
@@ -3343,27 +3469,24 @@ fn leave(e: &mut Emit, mark: taddr) {
 /// they knew is put back. A path that came out the other end having given
 /// something up is the case the flag was made for — two paths that disagree
 /// about who owns what — and nothing here reads a flag, so it is refused.
-fn close_scope(e: &mut Emit, mark: taddr, was: &Vec<bool>) {
+fn close_scope(e: &mut Emit, mark: taddr, was: &Vec<Owns>) {
     let left = e.done;
     leave(e, mark);
     if e.stuck {
         return;
     }
+    // A path that left says nothing about the paths that did not.
     if left {
         owns_back(e, was);
-        return;
-    }
-    if owns_moved(e, was) {
-        e.stuck = true;
     }
 }
 
-/// Which locals own something, saved across a branch.
-fn owns_now(e: &Emit) -> Vec<bool> {
-    let mut out: Vec<bool> = Vec::new();
+/// What is known about every local's ownership, saved across a branch.
+fn owns_now(e: &Emit) -> Vec<Owns> {
+    let mut out: Vec<Owns> = Vec::new();
     let mut i: taddr = 0;
     while i < e.owned.len() {
-        out.push(e.owned[i].owns);
+        out.push(copy_owns(&e.owned[i].owns));
         i += 1;
     }
     out
@@ -3374,25 +3497,44 @@ fn owns_now(e: &Emit) -> Vec<bool> {
 /// A path that ends in a `return` says nothing about the paths that did
 /// not: `if c { return take(h); }` leaves `h` owned everywhere the program
 /// goes on from (Ch. 3 §1.2).
-fn owns_back(e: &mut Emit, was: &Vec<bool>) {
+fn owns_back(e: &mut Emit, was: &Vec<Owns>) {
     let mut i: taddr = 0;
     while i < was.len() && i < e.owned.len() {
-        e.owned[i].owns = was[i];
+        e.owned[i].owns = copy_owns(&was[i]);
+        i += 1;
+    }
+}
+
+/// What the two paths out of a branch agreed about, put back as one.
+fn owns_agree(e: &mut Emit, a: &Vec<Owns>, b: &Vec<Owns>) {
+    let mut i: taddr = 0;
+    while i < a.len() && i < b.len() && i < e.owned.len() {
+        e.owned[i].owns = joined_owns(&a[i], &b[i]);
         i += 1;
     }
 }
 
 /// Whether a branch changed who owns what, which is the case the flag was
 /// made for and the one nothing here can write.
-fn owns_moved(e: &Emit, was: &Vec<bool>) -> bool {
+fn owns_moved(e: &Emit, was: &Vec<Owns>) -> bool {
     let mut i: taddr = 0;
     while i < was.len() && i < e.owned.len() {
-        if e.owned[i].owns != was[i] {
+        if !owns_same(&e.owned[i].owns, &was[i]) {
             return true;
         }
         i += 1;
     }
     false
+}
+
+fn owns_same(a: &Owns, b: &Owns) -> bool {
+    if owns_no(a) {
+        return owns_no(b);
+    }
+    if owns_yes(a) {
+        return owns_yes(b);
+    }
+    owns_maybe(b)
 }
 
 /// Record that a local was moved out of (Ch. 3 §1.2).
@@ -3406,11 +3548,18 @@ fn move_out(e: &mut Emit, name: &str) {
     while i > 0 {
         i -= 1;
         if e.owned[i].name.same(name) {
-            if !e.owned[i].owns {
+            if owns_no(&e.owned[i].owns) {
+                return;
+            }
+            // A local that *may* have been moved out of on some path is one
+            // no path may read again: which value it names is not a thing
+            // the program can be told (Ch. 3 §1.2).
+            if owns_maybe(&e.owned[i].owns) {
+                e.stuck = true;
                 return;
             }
             let flag = e.owned[i].flag.to_string();
-            e.owned[i].owns = false;
+            e.owned[i].owns = Owns::No;
             store_into(e, "t1", "const t1 0", &flag);
             return;
         }
@@ -4019,7 +4168,7 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                         slot: kept,
                         ty: val.ty.to_string(),
                         flag: flag.to_string(),
-                        owns: true,
+                        owns: Owns::Yes,
                     });
                 }
                 return;
@@ -4119,6 +4268,14 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                     // iteration's and leak every other.
                     close_scope(e, mark, &was);
                     if e.stuck {
+                        return;
+                    }
+                    // And a body that gives up something it did not own is
+                    // a body the loop may reach again with nothing there.
+                    // The other implementation refuses it in as many words;
+                    // this refuses it too, rather than move twice.
+                    if owns_moved(e, &was) {
+                        e.stuck = true;
                         return;
                     }
                     jump(e, &head);

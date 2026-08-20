@@ -148,11 +148,57 @@ fn given_away(n: taddr) -> taddr {
     h.n
 }
 
+// And the one case a flag was ever made for: two paths that come out the
+// other end **disagreeing** about who owns what. Neither the drop nor the
+// no-drop is right where the program cannot say which, so the drop is
+// written under a test of the flag — the only place anything reads one.
+fn maybe_gone(n: taddr) -> taddr {
+    let h = Held { room: Raw::alloc(n), n: 1 };
+    let mut k: taddr = 0;
+    if n > 0 {
+        k = taken(h);
+    }
+    k
+}
+
+// The same question asked of an `if` that **has a value**, where the arms
+// are two expressions rather than two blocks of statements.
+fn maybe_valued(n: taddr) -> taddr {
+    let h = Held { room: Raw::alloc(n), n: 1 };
+    let k: taddr = if n > 0 { taken(h) } else { n };
+    k
+}
+
+// And of a `match`, where there may be more than two paths and what comes
+// after the join is what **all** of them agreed about.
+fn maybe_picked(p: Pick, n: taddr) -> taddr {
+    let h = Held { room: Raw::alloc(n), n: 1 };
+    let k: taddr = match p {
+        Pick::One => taken(h),
+        Pick::Two => n,
+    };
+    k
+}
+
+// Both paths giving it up is not a doubt at all: they agree, so nothing is
+// dropped and no flag is read. It is the same join answering `No`.
+fn both_ways(n: taddr) -> taddr {
+    let h = Held { room: Raw::alloc(n), n: 1 };
+    let mut k: taddr = 0;
+    if n > 0 {
+        k = taken(h);
+    } else {
+        k = taken(h);
+    }
+    k
+}
+
 fn main() -> t27 {
     nothing(1);
     two(2);
     let p = built(3);
     (early(1) + early_value(1) + each(2) + armed(1) + armed_statement(1)
         + p.a + p.b + picked(Pick::One, 1) + nested(1) + holds(1)
-        + hands_over(1) + given_away(1)) as t27
+        + hands_over(1) + given_away(1) + maybe_gone(1) + maybe_valued(1)
+        + maybe_picked(Pick::Two, 1) + both_ways(1)) as t27
 }

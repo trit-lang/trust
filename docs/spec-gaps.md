@@ -2621,6 +2621,56 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.125 — the one thing a drop flag was ever for.**
+
+Every drop written so far was written plainly, because on the path that
+reached it there was nothing in doubt. The flag was stored to and never
+read. This is the case that reads it:
+
+    let h = Held { room: Raw::alloc(n), n: 1 };
+    let mut k: taddr = 0;
+    if n > 0 { k = taken(h); }
+    k
+
+One path gave `h` away and the other did not, and which one ran is not
+something the program can be told. So the drop goes under a test — one
+load, `br2 flag, ^drop.yes, ^drop.join`, one call, one join — and that is
+the only place in either implementation that reads a flag back.
+
+Ownership is three-valued for exactly this reason. `No` and `Yes` are what
+one path knows; `Maybe` is what two paths that disagreed leave behind, and
+it is a **join** and not a third thing a statement can do: every arm is
+lowered from what was known *before* any of them, because arms are
+alternatives and not a sequence. Get that wrong and the second arm is
+lowered against the first's conclusions, which is a program neither
+implementation would write.
+
+Three joins, and they are the same join: an `if` with a value, an `if` that
+is a statement, and a `match`, where there may be more than two paths and
+what comes after is what **all** of them agreed about.
+
+Two more things fall out of having the third state at all:
+
+*A `Maybe` may not be read.* `h` after that `if` names a value the program
+cannot be told the identity of, so any use of it is refused — which is what
+the other implementation says in as many words ("`h` may have been moved out
+of on some path here").
+
+*A loop body that gives something up is refused*, and this is the one place
+where refusing is the answer rather than a step towards one. The body may be
+reached again, and the second time there is nothing there. The other
+implementation refuses it too, and says so: "`h` is moved out of here, and
+the loop may reach this again."
+
+And two paths that **agree** are not a doubt: both giving it up joins to
+`No` and nothing is dropped, both keeping it joins to `Yes` and the drop is
+written plainly. The flag is read only where the answer is genuinely not
+known until the program runs, which is the whole of Ch. 3 §1.4's claim that
+a destructor costs nothing where nothing is uncertain.
+
+With this the drops of Ch. 3 are complete: every way a scope can end writes
+them, and the one way two scopes can disagree tests for them.
+
 **G9.124 — a scope ends in seven places, and one of them is a parameter.**
 
 G9.123 refused what a scope could not drop. This writes them, and the whole
@@ -2657,8 +2707,8 @@ take(h); }` moves `h` on the path that returned and on no other, so what the
 branch was told about ownership is put back when the branch diverged. Get
 this wrong and the tail either drops what is gone or leaves what is there.
 
-*What is still refused, and it is one thing.* Two paths that come out the
-other end **disagreeing** about who owns what:
+*What was still refused here, and it was one thing* — **G9.125** is it.
+Two paths that come out the other end **disagreeing** about who owns what:
 
     let h = Holder { … };
     let mut k: taddr = 0;
@@ -2668,8 +2718,8 @@ other end **disagreeing** about who owns what:
 The reference reads the flag at the tail — `br2 %h.owns.N, ^drop.yes,
 ^drop.join` — which is the case the flag was *made* for and the only case
 that needs it. Everything above writes its drops plainly, because on the
-path that reaches them nothing was in doubt. Ownership here is two-valued
-and that case needs three; it is refused rather than dropped twice.
+path that reaches them nothing was in doubt. Ownership here was two-valued
+and that case needs three.
 
 *`bootstrap/programs/scopes`* is the corpus, and it was written before a
 line of this: twelve functions, one per way a scope ends, 770 lines of TIR
