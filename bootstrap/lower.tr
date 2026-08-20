@@ -2439,6 +2439,10 @@ fn aggregate_body(e: &mut Emit, b: &ast::Block, owner: &str) {
     if e.stuck {
         return;
     }
+    // A body that already left does not leave twice.
+    if e.done {
+        return;
+    }
     e.insts.push("    ret".to_string());
 }
 
@@ -2458,6 +2462,24 @@ fn match_expr(
     dest: &str,
     answer: &str,
 ) -> Value {
+    // Matching a **value** moves it: the arms' bindings receive what it
+    // held, so what it named is not there to be dropped again (Ch. 3 §1.2).
+    // Matching *through a reference* moves nothing — the bindings are
+    // copies of storage the referent still owns — and `place` reads through
+    // one without going near this.
+    match scrutinee {
+        ast::Expr::Name(n) => {
+            let at = local_at(e, n);
+            if at >= 0 && def_at(&e.defs, &e.locals[at].ty) >= 0 {
+                let mine = n.to_string();
+                move_out(e, &mine);
+                if e.stuck {
+                    return unknown_value();
+                }
+            }
+        }
+        _ => {}
+    }
     // What is matched over is a **place**: a name is one, and so is
     // anything that answers with an aggregate, because an aggregate *is*
     // its storage (TIR §3). A scrutinee behind a reference is read through,
@@ -2979,7 +3001,16 @@ fn aggregate_block(e: &mut Emit, b: &ast::Block, dest: &str, owner: &str) {
     }
     match &b.tail {
         Option::Some(x) => aggregate_tail(e, x, dest, owner),
-        Option::None => e.stuck = true,
+        // A block with no tail has nothing to answer with — unless it
+        // already **left**, in which case the `return` in it wrote the
+        // answer where the answer goes and there is nothing after it
+        // (§5.1). `fn f() -> P { return P { … }; }` is a whole function
+        // written that way.
+        Option::None => {
+            if !e.done {
+                e.stuck = true;
+            }
+        }
     }
     if e.stuck {
         return;
@@ -4099,7 +4130,13 @@ fn note_drop(e: &mut Emit, owner: &str) {
 /// held goes with it (Ch. 3 §1.2).
 fn drop_fields(e: &mut Emit, slot: &str, owner: &str) {
     let which = def_at(&e.defs, owner);
-    if which < 0 || e.defs[which].is_enum {
+    if which < 0 {
+        return;
+    }
+    // An enum has no one set of fields — which set it has depends on which
+    // variant it holds — so what is dropped is decided at run time.
+    if e.defs[which].is_enum {
+        drop_variants(e, slot, owner);
         return;
     }
     let self_ty = ast::Ty::Name(one_name(owner));
@@ -4130,6 +4167,124 @@ fn drop_fields(e: &mut Emit, slot: &str, owner: &str) {
         }
         i += 1;
     }
+}
+
+/// The fields of an **enum**, dropped — which is one variant's fields and
+/// not all of them, so it is a test per variant and not a walk (Ch. 2 §5).
+///
+/// A discriminant read once, then for each variant an arm and the block the
+/// test falls through to, and every arm ends at one join. A variant that
+/// carries nothing to drop still gets its arm: it is where the test that
+/// ruled it in goes, and the arm is empty.
+///
+/// Only a tag of its own. A **niche** enum says which variant it is by a
+/// value inside the payload (§6), and reading that here would be reading
+/// the payload of a variant that may not be there — so it is refused, and
+/// nothing that carries a destructor is laid out that way anyway.
+fn drop_variants(e: &mut Emit, slot: &str, owner: &str) {
+    let which = def_at(&e.defs, owner);
+    if which < 0 {
+        e.stuck = true;
+        return;
+    }
+    let self_ty = ast::Ty::Name(one_name(owner));
+    let l = match layout::of(&e.defs, &self_ty, 0) {
+        Result::Ok(x) => x,
+        Result::Err(why) => {
+            e.stuck = true;
+            return;
+        }
+    };
+    let tag = match &l.tag {
+        layout::Tag::Direct(width, at) => {
+            if width == 1 {
+                "t9".to_string()
+            } else {
+                "t27".to_string()
+            }
+        }
+        _ => {
+            e.stuck = true;
+            return;
+        }
+    };
+    let d = fresh(e, "d");
+    let mut read: String = Vec::new();
+    read.push_str("    ");
+    read.push_str(&d);
+    read.push_str(" = load ");
+    read.push_str(&tag);
+    read.push_str(" ");
+    read.push_str(slot);
+    e.insts.push(read);
+    let join = label(e, "drop.join");
+    let drops = ast::copy_names(&e.drops);
+    let mut first: taddr = 0;
+    let mut v: taddr = 0;
+    while v < e.defs[which].counts.len() {
+        // Which of this variant's fields are worth a drop, and whether any
+        // of them is — the label says which, and the label is text.
+        let mut owns = false;
+        let mut q: taddr = 0;
+        while q < e.defs[which].counts[v] {
+            let written = ast::copy_ty(&e.defs[which].fields[first + q]);
+            let inner = nominal(e, &written);
+            if inner.len() > 0 && owns_drop(&e.defs, &drops, &inner, 0) {
+                owns = true;
+            }
+            q += 1;
+        }
+        let arm = if owns {
+            label(e, "drop.arm")
+        } else {
+            label(e, "drop.none")
+        };
+        let next_at = label(e, "drop.next");
+        let c = fresh(e, "c");
+        let mut test: String = Vec::new();
+        test.push_str("    ");
+        test.push_str(&c);
+        test.push_str(" = cmp ");
+        test.push_str(&tag);
+        test.push_str(" ");
+        test.push_str(&d);
+        test.push_str(", const ");
+        test.push_str(&tag);
+        test.push_str(" ");
+        push_int(&mut test, l.discriminants[v]);
+        e.insts.push(test);
+        let mut br: String = Vec::new();
+        br.push_str("    br3 ");
+        br.push_str(&c);
+        br.push_str(", ");
+        br.push_str(&next_at);
+        br.push_str(", ");
+        br.push_str(&arm);
+        br.push_str(", ");
+        br.push_str(&next_at);
+        e.insts.push(br);
+        start(e, &arm);
+        let mut k: taddr = 0;
+        while k < e.defs[which].counts[v] {
+            let written = ast::copy_ty(&e.defs[which].fields[first + k]);
+            let inner = nominal(e, &written);
+            if inner.len() > 0 && owns_drop(&e.defs, &drops, &inner, 0) {
+                let at = l.variant_offsets[v][k];
+                let where_ = offset_of(e, slot, at);
+                drop_one(e, &where_, &inner);
+                if e.stuck {
+                    return;
+                }
+            }
+            k += 1;
+        }
+        jump(e, &join);
+        start(e, &next_at);
+        first = first + e.defs[which].counts[v];
+        v += 1;
+    }
+    jump(e, &join);
+    start(e, &join);
 }
 
 /// One `Inst`, copied.
@@ -9526,7 +9681,7 @@ fn drop_glue(
         }
     }
     let at = def_at(&e.defs, owner);
-    if at < 0 || e.defs[at].is_enum {
+    if at < 0 {
         return false;
     }
     let self_ty = ast::Ty::Name(one_name(owner));

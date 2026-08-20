@@ -247,10 +247,49 @@ fn replaced() -> taddr {
     h.p.a + h.k
 }
 
+// An **enum** that holds something with a destructor (Ch. 2 §5).
+//
+// It has no one set of fields — which set it has depends on which variant
+// it holds — so what is dropped is decided when it runs: the discriminant
+// read once, a test per variant, and every arm ending at one join. A
+// variant that carries nothing to drop still gets its arm; it is where the
+// test that ruled it in goes, and the arm is empty.
+//
+// And this is where a `Raw`'s **niche** matters. A `raw.<T>` is a `Raw<T>`
+// under the name the lowering gives it, and it is the same type: two words
+// with neither of them spare, because the address may be null and a `Raw`
+// with no allocation is exactly that (Ch. 5 §2.7). Its first word is
+// written down as an address — that is what it is copied as — and reading
+// its fields would say there was a value to spare, which would give this
+// enum a discriminant with no space and no tag to read.
+enum Either { Nothing, Room(Bin<t27>), Number(taddr) }
+
+fn wrapped(n: taddr) -> taddr {
+    let held = Either::Room(Bin::start(n));
+    match held {
+        Either::Nothing => 0,
+        Either::Room(r) => r.room(),
+        Either::Number(k) => k,
+    }
+}
+
+// And one whose arm keeps what it bound rather than carrying it on: the
+// binding is that arm's to drop, and it is dropped **after** the answer has
+// been stored, because the answer was read out of it.
+fn held_on(n: taddr) -> taddr {
+    let held = Either::Room(Bin::start(n));
+    match held {
+        Either::Nothing => 0,
+        Either::Room(r) => r.room() + 1,
+        Either::Number(k) => k,
+    }
+}
+
 fn main() -> t27 {
     (empty() + words(4) + trytes(9) + both(2)) as t27
         + stored(2) + (narrow(1) as t27) + pointed(1) + computed(3, 1)
         + (holds() as t27) + (literal() as t27) + (nested() as t27)
         + (kept() as t27) + (spare() as t27)
         + (regrown() as t27) + (counted() as t27) + (replaced() as t27)
+        + (wrapped(2) as t27) + (held_on(2) as t27)
 }

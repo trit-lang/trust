@@ -434,17 +434,58 @@ fn named(defs: &Vec<Def>, name: &str, depth: taddr) -> Result<Layout, String> {
         // surrogates as valid only *under*-counts what is spare (Ch. 5 §1.2).
         return Result::Ok(ranged(3, 0, 1114111));
     }
+    // `raw.<T>` is `Raw<T>` under the name the lowering gives it, and it is
+    // the same type: two words, whatever `T` is, with **neither of them
+    // spare** (Ch. 5 §2.7). Its first word is written down as an address
+    // because that is what it is copied as, and an address that may be null
+    // is exactly what a `Raw` with no allocation holds — so nothing
+    // enclosing one may take a discriminant out of it, and asking its
+    // fields would say otherwise. A program cannot write this name: an
+    // identifier holds no dot.
     let mut i: taddr = 0;
     while i < defs.len() {
         if defs[i].name.same(name) {
             if defs[i].is_enum {
                 return of_enum(defs, i, depth);
             }
-            return of_struct(defs, i, depth);
+            let mut l = match of_struct(defs, i, depth) {
+                Result::Ok(x) => x,
+                Result::Err(why) => return Result::Err(why),
+            };
+            // Its fields, and then **nothing spare**. A `raw.<T>`'s first
+            // word is written down as an address because that is what it is
+            // copied as, and an address that may be null is exactly what a
+            // `Raw` with no allocation holds — so nothing enclosing one may
+            // take a discriminant out of it, and its fields would say
+            // otherwise (Ch. 5 §2.7). Asked here and not by the `Raw<T>`
+            // branch above because a use of one reaches this by name: a
+            // program cannot write the name, since an identifier holds no
+            // dot.
+            if raw_named(name) {
+                l.niches = 0;
+                l.spot = Option::None;
+            }
+            return Result::Ok(l);
         }
         i += 1;
     }
     Result::Err("no such type".to_string())
+}
+
+/// Whether a name is the one the lowering gives a `Raw<T>`.
+fn raw_named(name: &str) -> bool {
+    let head = "raw.";
+    if name.len() <= head.len() {
+        return false;
+    }
+    let mut i: taddr = 0;
+    while i < head.len() {
+        if name[i] != head[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 /// Lay out a product (§4).

@@ -37,6 +37,17 @@ fn twice(n: t27) -> Pair {
     Pair { a: n, b: n }
 }
 
+// And one that answers **only** by returning, so its block has no tail at
+// all. A block with none has nothing to answer with — unless it already
+// left, in which case the `return` in it wrote the answer where the answer
+// goes and there is nothing after it (§5.1).
+fn only(n: t27) -> Pair {
+    if n > 2 {
+        return Pair { a: 1, b: 2 };
+    }
+    return Pair { a: n, b: n };
+}
+
 // One that holds another, so that what goes to `%sret` is copied field by
 // field and through a field that is itself an aggregate.
 struct Wide { p: Pair, k: t27 }

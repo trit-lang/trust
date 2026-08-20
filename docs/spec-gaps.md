@@ -2621,6 +2621,54 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.132 — an enum's destructor, and the four things around it.**
+
+A type that holds something with a destructor has one of its own
+(Ch. 3 §1.2), and an **enum** is one of those — but it has no one set of
+fields. Which set it has depends on which variant it holds (Ch. 2 §5), so
+what is dropped is decided when it runs: the discriminant read once, a test
+per variant, and every arm ending at one join. A variant that carries nothing to
+drop still gets its arm; it is where the test that ruled it in goes, and the
+arm is empty.
+
+`drop_glue` had refused every enum in one line — `if at < 0 || is_enum` —
+and `struct Error { at: taddr, message: String }` inside an
+`enum Tok { …, Str(String), … }` is what asked for it. Nothing in the corpus
+had put a destructor inside an enum.
+
+*A `Raw`'s niche, or rather its absence.* `raw.<T>` is `Raw<T>` under the
+name the lowering gives it, and it is the same type: two words with
+**neither of them spare**, because the address may be null and a `Raw` with
+no allocation is exactly that (Ch. 5 §2.7). Its first word is written down
+as an address — that is what it is copied as — and the layout engine then
+read a reference's niche out of it. So an enum holding a `Vec` was laid out
+with a discriminant in a value that is not spare, and read a tag that was
+not there. The `Ty::App("Raw")` branch had said "no spot" since G9.116; the
+def reached by *name* had not, and every use goes by name. It keeps its
+fields, because they are what a copy walks, and loses its spot.
+
+*A block that answers with an aggregate and leaves by `return`.* Such a
+block has no tail, and a block with no tail has nothing to answer with —
+unless it already left, in which case the `return` in it wrote the answer
+where the answer goes and there is nothing after it. `fn f() -> P { return
+P { … }; }` is a whole function written that way, and it was refused.
+
+*Matching a value moves it.* The arms' bindings receive what it held, so
+what it named is not there to be dropped again (Ch. 3 §1.2) — and matching
+*through a reference* moves nothing, because the bindings are copies of
+storage the referent still owns. The scrutinee was found as a **place**
+here, and a place is not read, so an owned local matched over was dropped
+after its payload had been carried off. The other implementation gets this
+for nothing: it lowers the scrutinee as a *value*, and a value of a
+non-copyable type moves by the ordinary rule.
+
+*What is left.* One thing, and it is G9.36's: `w.same("_")` where `w` is a
+`String`. `same` is written on `impl str` and found by the fallback that
+makes a `Vec<char>` a `&str` — two words, the data address and the length —
+and nothing here builds that pair from a `Vec`. `lex::one` and `main` are
+the only two functions of `bootstrap/main.tr` still refused, and that is
+what both of them need.
+
 **G9.131 — an alias is only a name, and four other things that were not.**
 
 `type String = Vec<char>` (Ch. 0 §3.6). An alias is only a name, so
