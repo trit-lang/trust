@@ -1,0 +1,59 @@
+// `type X = T;` — an alias is **only a name** (Ch. 0 §3.6).
+//
+// So expanding it is the whole of what one *is*: after that, nothing below
+// has ever heard of `Text`, and a layout that says `Vec<char>` is saying the
+// same thing. It is what `String` is — the library writes
+// `type String = Vec<char>` and nothing else — so a program that names a
+// `String` is naming a `Vec<char>` and the two implementations have to
+// agree that it is.
+//
+// An alias may name another, so each is followed until it names none. One
+// that reaches itself has no such form and is left naming itself, and every
+// use of it is then refused by name.
+
+type Word = taddr;
+type Small = Word;
+type Text = Vec<char>;
+
+// In a **field**, which is where it reaches the layout: `Held` is a word and
+// a `Vec<char>`, which is three words, and its destructor is `Vec`'s.
+struct Held { at: Small, message: Text }
+
+fn made(n: Word) -> Held {
+    let mut m: Text = Vec::new();
+    m.push('a');
+    m.push('b');
+    Held { at: n, message: m }
+}
+
+// In a **parameter** and in an **answer**, which is where it reaches the
+// header: `Small` is `Word` is `taddr`, and the header says `t27`.
+fn read(h: &Held) -> Small {
+    h.at + h.message.len()
+}
+
+// In a `let`, which is where it reaches inference: what a binding was
+// written as is what an aggregate with nothing to infer from is told by
+// (Ch. 4 §2.3), and `Text` says `Vec<char>` there too.
+fn built(n: Word) -> Word {
+    let mut t: Text = Vec::new();
+    let mut i: Word = 0;
+    while i < n {
+        t.push('x');
+        i += 1;
+    }
+    t.len()
+}
+
+// And the library's own, which is the reason for all of it. `to_string` is
+// written on `impl str` and answers a `String`, and none of this file says
+// what a `String` is.
+fn spelled() -> taddr {
+    let s = "one".to_string();
+    s.len()
+}
+
+fn main() -> t27 {
+    let h = made(2);
+    (read(&h) + built(3) + spelled()) as t27
+}

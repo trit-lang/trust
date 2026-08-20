@@ -151,6 +151,14 @@ pub struct Cx {
     pub families: Vec<Family>,
     pub tyfams: Vec<TyFamily>,
     pub rets: Vec<RetTy>,
+    /// What every alias names, settled (Ch. 0 §3.6).
+    pub aliases: Vec<Alias>,
+}
+
+/// One `type X = T;` (Ch. 0 §3.6).
+pub struct Alias {
+    pub name: String,
+    pub ty: ast::Ty,
 }
 
 /// One local: the name it was written with, its slot, and its type.
@@ -256,6 +264,9 @@ pub struct Emit {
     /// The loops being emitted, innermost last, so that a `break` and a
     /// `continue` can say where they go (§5.5).
     pub loops: Vec<LoopCtx>,
+    /// What every alias names, settled — so that a written type is read as
+    /// what it *is* and not as the name somebody gave it (Ch. 0 §3.6).
+    pub aliases: Vec<Alias>,
     /// What **this function** answers with, where that is a type this file
     /// defines. A `return` needs it and the wanted type is not it: what a
     /// binding wants and what the function answers are two questions, and
@@ -929,6 +940,7 @@ pub fn function(
         drops: cx.drops,
         owned: Vec::new(),
         loops: Vec::new(),
+        aliases: cx.aliases,
         answer: "".to_string(),
         self_ty: owner.to_string(),
         families: cx.families,
@@ -1036,7 +1048,8 @@ pub fn function(
         if i > 0 || sret {
             header.push_str(", ");
         }
-        let written_param = param_written(f, i);
+        let held_param = param_written(f, i);
+        let written_param = settled_ty(&e.aliases, &held_param);
         let ty = tir_ty_at(&tyvars, &key, &written_param);
         let name = f.params[i].name.to_string();
         // `&self` is a reference and stays one: what a method is given is an
@@ -1188,8 +1201,9 @@ pub fn function(
         i += 1;
     }
     header.push_str(")");
-    let ret = tir_ty_at(&tyvars, &key, &f.ret);
-    let unit = match &f.ret {
+    let answered = settled_ty(&e.aliases, &f.ret);
+    let ret = tir_ty_at(&tyvars, &key, &answered);
+    let unit = match &answered {
         ast::Ty::Unit => true,
         _ => sret,
     };
@@ -2118,6 +2132,22 @@ fn field_place(e: &mut Emit, base: &ast::Expr, name: &str) -> Value {
     Value { text: at, ty: ty }
 }
 
+/// Whether an expression **is** a place, syntactically (Ch. 3 §2.1).
+///
+/// A name, a field of one, an element of one, and what a reference points
+/// at. A literal is not, and neither is anything that answers: those have
+/// to be *lowered* before there is anywhere to point, which is why the
+/// order they are lowered in is visible and a place's is not.
+fn is_place_expr(x: &ast::Expr) -> bool {
+    match x {
+        ast::Expr::Name(n) => true,
+        ast::Expr::Field(a, name) => true,
+        ast::Expr::Index(a, at) => true,
+        ast::Expr::Deref(a) => true,
+        _ => false,
+    }
+}
+
 /// The place an expression that *answers* with an aggregate names: the
 /// storage it was given, which is the value (TIR §3).
 ///
@@ -2734,6 +2764,7 @@ fn match_place(
                     start(e, &arm_at);
                 }
                 let mark = e.locals.len();
+                let owned_mark = e.owned.len();
                 bind_payload(e, which, index, &base, &l, &arms[a]);
                 if e.stuck {
                     return unknown_value();
@@ -2753,9 +2784,24 @@ fn match_place(
                             ty = v.ty.to_string();
                             held = slot_for(e, "tmp", &ty);
                         }
-                        store_into(e, &ty, &v.text, &held);
+                        // An arm whose value is an aggregate has nothing to
+                        // store: it **is** its storage, so what the arms
+                        // agree to leave the answer in is copied into and
+                        // not written to (TIR §3).
+                        if def_at(&e.defs, &ty) >= 0 {
+                            copy_between(e, &v.text, &held, &ty);
+                        } else {
+                            store_into(e, &ty, &v.text, &held);
+                        }
                     }
                 }
+                if e.stuck {
+                    return unknown_value();
+                }
+                // A payload this arm bound is this arm's to drop, and it is
+                // dropped **after** the answer has been stored: the answer
+                // may be read out of it, and `b.at` is exactly that.
+                leave(e, owned_mark);
                 if e.stuck {
                     return unknown_value();
                 }
@@ -2793,6 +2839,10 @@ fn match_place(
             start(e, &join);
             if dest.len() > 0 {
                 return Value { text: dest.to_string(), ty: answer.to_string() };
+            }
+            // And nothing to load back out of it, for the same reason.
+            if def_at(&e.defs, &ty) >= 0 {
+                return Value { text: held, ty: ty };
             }
             let name = fresh(e, "v");
             let mut line: String = Vec::new();
@@ -3545,6 +3595,33 @@ fn bind_payload(
             // The storage first and the copy after it, which is what
             // decides the number the slot gets.
             let slot = slot_for(e, &name, &ty);
+            // And a payload with a destructor is this arm's to drop, so it
+            // takes the flag an owned local takes — **before** the value
+            // arrives, because what the flag says is whether the fields are
+            // there and they are from the moment the arm is entered
+            // (Ch. 3 §1.4).
+            let owns = is_raw(&ty)
+                || holds_name(&e.drops, &ty)
+                || owns_drop(&e.defs, &e.drops, &ty, 0);
+            if owns {
+                let mut prefix: String = Vec::new();
+                prefix.push_str(&name);
+                prefix.push_str(".owns");
+                let flag = fresh(e, &prefix);
+                let mut line: String = Vec::new();
+                line.push_str("    ");
+                line.push_str(&flag);
+                line.push_str(" = slot tryte[1]");
+                e.slots.push(line);
+                store_into(e, "t1", "const t1 1", &flag);
+                e.owned.push(Owned {
+                    name: name.to_string(),
+                    slot: slot.to_string(),
+                    ty: ty.to_string(),
+                    flag: flag.to_string(),
+                    owns: Owns::Yes,
+                });
+            }
             copy_between(e, &src, &slot, &ty);
             if e.stuck {
                 return;
@@ -4289,13 +4366,16 @@ pub fn destructor(
         drops: cx.drops,
         owned: Vec::new(),
         loops: Vec::new(),
+        aliases: cx.aliases,
         answer: "".to_string(),
         self_ty: owner.to_string(),
         // A destructor is reached by dropping and not by calling, so no
         // instantiation can be asked for from here: a generic call inside
         // one is refused rather than emitted under a name nothing queued.
+        // A **drop** is not a call, though: what a destructor drops may be
+        // a family's, and that is asked for the way every instantiation is.
         families: Vec::new(),
-        jobs: Vec::new(),
+        jobs: copy_jobs(&work.jobs),
         tyvars: Vec::new(),
         key: Vec::new(),
         tyfams: cx.tyfams,
@@ -4376,6 +4456,14 @@ pub fn destructor(
     while d < e.glue.len() {
         work.glue.push(one_inst(&e.glue[d]));
         d += 1;
+    }
+    let mut q = work.jobs.len();
+    while q < e.jobs.len() {
+        work.jobs.push(Job {
+            name: e.jobs[q].name.to_string(),
+            key: ast::copy_names(&e.jobs[q].key),
+        });
+        q += 1;
     }
 
     start(&mut e, "^");
@@ -4482,7 +4570,8 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                     if def_at(&e.defs, &named) >= 0 {
                         named
                     } else {
-                        tir_ty_at(&e.tyvars, &e.key, t)
+                        let mine = settled_ty(&e.aliases, t);
+                        tir_ty_at(&e.tyvars, &e.key, &mine)
                     }
                 }
                 Option::None => "".to_string(),
@@ -4494,7 +4583,10 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
             // The slot is made *after* the value is ready, which is what
             // decides the number it gets.
             let ty = match written {
-                Option::Some(t) => tir_ty_at(&e.tyvars, &e.key, t),
+                Option::Some(t) => {
+                    let mine = settled_ty(&e.aliases, t);
+                    tir_ty_at(&e.tyvars, &e.key, &mine)
+                }
                 Option::None => val.ty.to_string(),
             };
             // A written type that names an aggregate says which one, and a
@@ -5693,17 +5785,25 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 }
                 return generic_call(e, fam, &under, &slot, &given, args);
             }
-            // The storage a call answers into, taken before the receiver is
-            // evaluated: `%sret` is what the function is *for* (TIR §3).
+            // The storage a call answers into is taken before the receiver
+            // is evaluated — `%sret` is what the function is *for* (TIR §3)
+            // — **unless the receiver is not a place**. One that is not has
+            // to be lowered to be a receiver at all: `"no".to_string()` is
+            // two words that have to go somewhere first, and where they go
+            // is decided before anything else is. A place needs nothing
+            // made, so it shows neither order.
             let big = returned_aggregate(e, &full);
-            let into = if big.len() > 0 {
-                slot_for(e, "tmp", &big)
-            } else {
-                "".to_string()
-            };
+            let sited = is_place_expr(recv);
+            let mut into: String = Vec::new();
+            if big.len() > 0 && sited {
+                into = slot_for(e, "tmp", &big);
+            }
             slot = receiver_at(e, at, recv, &slot, &by_value);
             if e.stuck {
                 return unknown_value();
+            }
+            if big.len() > 0 && !sited {
+                into = slot_for(e, "tmp", &big);
             }
             if big.len() > 0 {
                 return aggregate_call(e, &full, &big, &into, &slot, args);
@@ -6278,7 +6378,133 @@ fn note_tuples(t: &ast::Ty, out: &mut Vec<layout::Def>) {
 /// Every struct and enum of the file, with the parameters each was written
 /// with — none for most of them, which is what makes those types as they
 /// stand and the rest families.
+/// What every `type X = T;` in the file names, settled (Ch. 0 §3.6).
+///
+/// An alias is **only a name**, so expanding it is the whole of what one is:
+/// after that, nothing below has ever heard of `String`, and a layout that
+/// says `Vec<char>` is saying the same thing.
+///
+/// An alias may name another, so each is followed until it names none — and
+/// one that reaches itself has no such form, so it is left naming itself
+/// rather than followed for ever. Every use of it is then refused by name,
+/// which is the honest answer to a definition that does not have one.
+pub fn aliases(items: &Vec<ast::Item>) -> Vec<Alias> {
+    let mut out: Vec<Alias> = Vec::new();
+    let mut i: taddr = 0;
+    while i < items.len() {
+        match &items[i].what {
+            ast::What::Alias(name, ty) => {
+                out.push(Alias {
+                    name: name.to_string(),
+                    ty: ast::copy_ty(ty),
+                });
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    // Each one followed until it names no alias at all. Bounded by how many
+    // there are, which is what stops a cycle rather than a mark on each.
+    let mut k: taddr = 0;
+    while k < out.len() {
+        let mut held = ast::copy_ty(&out[k].ty);
+        let mut steps: taddr = 0;
+        while steps < out.len() {
+            let head = alias_name(&held);
+            if head.len() == 0 || head.same(&out[k].name) {
+                steps = out.len();
+                continue;
+            }
+            let at = alias_at(&out, &head);
+            if at < 0 {
+                steps = out.len();
+                continue;
+            }
+            held = ast::copy_ty(&out[at].ty);
+            steps += 1;
+        }
+        out[k].ty = held;
+        k += 1;
+    }
+    out
+}
+
+/// The bare name a type is, or nothing where it is not one. Only a bare
+/// name is an alias: an alias takes no parameters, so `String<T>` names
+/// nothing and is left for the type checker to refuse by name.
+fn alias_name(t: &ast::Ty) -> String {
+    match t {
+        ast::Ty::Name(segments) => joined(segments),
+        _ => "".to_string(),
+    }
+}
+
+fn alias_at(al: &Vec<Alias>, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < al.len() {
+        if al[i].name.same(name) {
+            return i;
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
+/// A written type with every alias in it replaced by what it names.
+pub fn settled_ty(al: &Vec<Alias>, t: &ast::Ty) -> ast::Ty {
+    match t {
+        ast::Ty::Name(segments) => {
+            let head = joined(segments);
+            let at = alias_at(al, &head);
+            if at < 0 {
+                return ast::copy_ty(t);
+            }
+            ast::copy_ty(&al[at].ty)
+        }
+        ast::Ty::App(segments, args) => {
+            ast::Ty::App(ast::copy_names(segments), settled_tys(al, args))
+        }
+        ast::Ty::Ref(held, m) => {
+            ast::Ty::Ref(Box::new(settled_ty(al, &*held)), m)
+        }
+        ast::Ty::Slice(held) => ast::Ty::Slice(Box::new(settled_ty(al, &*held))),
+        ast::Ty::Array(held, n) => {
+            ast::Ty::Array(Box::new(settled_ty(al, &*held)), n.to_string())
+        }
+        ast::Ty::Tuple(args) => ast::Ty::Tuple(settled_tys(al, args)),
+        _ => ast::copy_ty(t),
+    }
+}
+
+/// A parameter list with every alias in it replaced by what it names.
+fn settled_named(al: &Vec<Alias>, from: &Vec<ast::Param>) -> Vec<ast::Param> {
+    let mut out: Vec<ast::Param> = Vec::new();
+    let mut i: taddr = 0;
+    while i < from.len() {
+        out.push(ast::Param {
+            name: from[i].name.to_string(),
+            ty: settled_ty(al, &from[i].ty),
+        });
+        i += 1;
+    }
+    out
+}
+
+fn settled_tys(al: &Vec<Alias>, from: &Vec<ast::Ty>) -> Vec<ast::Ty> {
+    let mut out: Vec<ast::Ty> = Vec::new();
+    let mut i: taddr = 0;
+    while i < from.len() {
+        out.push(settled_ty(al, &from[i]));
+        i += 1;
+    }
+    out
+}
+
 pub fn type_families(items: &Vec<ast::Item>) -> Vec<TyFamily> {
+    // Every field type in the file passes through here, and a `layout::Def`
+    // is what everything downstream reads a type's shape out of — so this
+    // is where an alias stops existing (Ch. 0 §3.6).
+    let al = aliases(items);
     let mut out: Vec<TyFamily> = Vec::new();
     let mut i: taddr = 0;
     while i < items.len() {
@@ -6289,7 +6515,7 @@ pub fn type_families(items: &Vec<ast::Item>) -> Vec<TyFamily> {
                 let mut k: taddr = 0;
                 while k < fields.len() {
                     names.push(fields[k].name.to_string());
-                    tys.push(ast::copy_ty(&fields[k].ty));
+                    tys.push(settled_ty(&al, &fields[k].ty));
                     k += 1;
                 }
                 out.push(TyFamily {
@@ -6317,7 +6543,7 @@ pub fn type_families(items: &Vec<ast::Item>) -> Vec<TyFamily> {
                     let mut n: taddr = 0;
                     let mut k: taddr = 0;
                     while k < variants[v].fields.len() {
-                        tys.push(ast::copy_ty(&variants[v].fields[k]));
+                        tys.push(settled_ty(&al, &variants[v].fields[k]));
                         n += 1;
                         k += 1;
                     }
@@ -6440,12 +6666,13 @@ fn named_fn(fns: &Vec<ast::Fn>, name: &str) -> taddr {
 
 /// What every function answers with, as it was written.
 pub fn returns(items: &Vec<ast::Item>) -> Vec<RetTy> {
+    let al = aliases(items);
     let mut out: Vec<RetTy> = Vec::new();
     let mut i: taddr = 0;
     while i < items.len() {
         match &items[i].what {
             ast::What::Function(f) => {
-                out.push(RetTy { name: f.name.to_string(), ty: ast::copy_ty(&f.ret) });
+                out.push(RetTy { name: f.name.to_string(), ty: settled_ty(&al, &f.ret) });
             }
             ast::What::Impl(gs, tr, ty, fns) => {
                 let owner = impl_owner(gs, ty);
@@ -7492,7 +7719,19 @@ fn tyfamily_at(e: &Emit, name: &str) -> taddr {
 /// in an identifier and not a `<`.
 fn nominal(e: &mut Emit, t: &ast::Ty) -> String {
     match t {
-        ast::Ty::Name(segments) => joined(segments),
+        // An alias is only a name, so it is not one of these: what it names
+        // is (Ch. 0 §3.6). Asked here rather than rewritten over the tree
+        // because this is where every written type that has to *be* a type
+        // arrives, and a name that got past it has no layout either way.
+        ast::Ty::Name(segments) => {
+            let head = joined(segments);
+            let at = alias_at(&e.aliases, &head);
+            if at >= 0 {
+                let held = ast::copy_ty(&e.aliases[at].ty);
+                return nominal(e, &held);
+            }
+            head
+        }
         // `Self` is the type the impl is written on, and inside an
         // instantiation that is the instantiation (Ch. 4 §1.2) — which is
         // what a `fn unwrap_or(self, …)` is given.
@@ -7783,7 +8022,14 @@ fn subst_ty(
     match t {
         ast::Ty::Name(segments) => {
             let written = joined(segments);
+            // A type parameter first — `T` is not an alias and an alias is
+            // not a parameter — and then what an alias names (Ch. 0 §3.6).
             let n = subst(tyvars, key, &written);
+            let at = alias_at(&e.aliases, &n);
+            if at >= 0 {
+                let held = ast::copy_ty(&e.aliases[at].ty);
+                return subst_ty(e, tyvars, key, &held);
+            }
             ast::Ty::Name(one_name(&n))
         }
         ast::Ty::App(segments, args) => {
@@ -7864,14 +8110,16 @@ pub fn destructors(items: &Vec<ast::Item>) -> Vec<String> {
 
 /// The parameter types of every function, as one comma-joined string each.
 pub fn parameters(items: &Vec<ast::Item>) -> Vec<Sig> {
+    let al = aliases(items);
     let mut out: Vec<Sig> = Vec::new();
     let mut i: taddr = 0;
     while i < items.len() {
         match &items[i].what {
             ast::What::Function(f) => {
+                let mine = settled_named(&al, &f.params);
                 out.push(Sig {
                     name: f.name.to_string(),
-                    ret: written_types(&f.params),
+                    ret: written_types(&mine),
                 });
             }
             ast::What::Impl(gs, tr, ty, fns) => {
@@ -7944,7 +8192,8 @@ pub fn parameters(items: &Vec<ast::Item>) -> Vec<Sig> {
                     full.push_str(&held);
                     full.push_str(".");
                     full.push_str(&fns[k].name);
-                    let all = written_types(&fns[k].params);
+                    let taken = settled_named(&al, &fns[k].params);
+                    let all = written_types(&taken);
                     out.push(Sig { name: full, ret: all });
                     k += 1;
                 }
@@ -7977,6 +8226,7 @@ fn written_types(params: &Vec<ast::Param>) -> String {
 }
 
 pub fn signatures(items: &Vec<ast::Item>) -> Vec<Sig> {
+    let al = aliases(items);
     let mut out: Vec<Sig> = Vec::new();
     let mut i: taddr = 0;
     while i < items.len() {
@@ -7989,7 +8239,8 @@ pub fn signatures(items: &Vec<ast::Item>) -> Vec<Sig> {
                 let ret = if f.generics.len() > 0 {
                     "?".to_string()
                 } else {
-                    written_answer(&f.ret)
+                    let mine = settled_ty(&al, &f.ret);
+                    written_answer(&mine)
                 };
                 out.push(Sig { name: f.name.to_string(), ret: ret });
             }
@@ -8010,7 +8261,8 @@ pub fn signatures(items: &Vec<ast::Item>) -> Vec<Sig> {
                     let ret = if fns[k].generics.len() > 0 || !plain_impl(gs) {
                         "?".to_string()
                     } else {
-                        written_answer(&fns[k].ret)
+                        let mine = settled_ty(&al, &fns[k].ret);
+                        written_answer(&mine)
                     };
                     out.push(Sig { name: full, ret: ret });
                     k += 1;
@@ -8058,7 +8310,8 @@ pub fn signatures(items: &Vec<ast::Item>) -> Vec<Sig> {
                     let ret = if fns[k].generics.len() > 0 {
                         "?".to_string()
                     } else {
-                        written_answer(&fns[k].ret)
+                        let mine = settled_ty(&al, &fns[k].ret);
+                        written_answer(&mine)
                     };
                     out.push(Sig { name: full, ret: ret });
                     k += 1;
@@ -8207,6 +8460,7 @@ pub fn context(items: &Vec<ast::Item>) -> Cx {
         families: families(items),
         tyfams: type_families(items),
         rets: returns(items),
+        aliases: aliases(items),
     }
 }
 
@@ -9242,10 +9496,14 @@ fn drop_glue(
         drops: cx.drops,
         owned: Vec::new(),
         loops: Vec::new(),
+        aliases: cx.aliases,
         answer: "".to_string(),
         self_ty: owner.to_string(),
         families: Vec::new(),
-        jobs: Vec::new(),
+        // **Seeded**, because what is handed back is the *new* part of it:
+        // a queue that started empty hands back nothing, since nothing in
+        // it is past where the caller's ends.
+        jobs: copy_jobs(&work.jobs),
         tyvars: vars,
         key: ast::copy_names(key),
         tyfams: cx.tyfams,

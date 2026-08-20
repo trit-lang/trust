@@ -79,6 +79,52 @@ fn spelled(n: taddr) -> Result<taddr, Error> {
     }
 }
 
+// An error that **owns** something. `Held` holds a `String`, so the binding
+// an arm makes for it takes the flag an owned local takes — before the
+// value arrives, because what the flag says is whether the fields are there
+// and they are from the moment the arm is entered (Ch. 3 §1.4).
+//
+// The arm that carries it out **moves** it, so the flag is cleared and
+// nothing is dropped. The arm that reads it and keeps it drops it — and
+// *after* the answer has been stored, because the answer was read out of it.
+struct Held { at: taddr, message: String }
+
+fn opened(n: taddr) -> Result<taddr, Held> {
+    if n > 2 {
+        return Result::Err(Held { at: n, message: "too many".to_string() });
+    }
+    Result::Ok(n)
+}
+
+fn carried(n: taddr) -> Result<taddr, Held> {
+    let k = opened(n)?;
+    Result::Ok(k + 1)
+}
+
+fn kept(n: taddr) -> taddr {
+    match carried(n) {
+        Result::Ok(v) => v,
+        Result::Err(bad) => bad.at,
+    }
+}
+
+// And a `?` whose success is an **aggregate**, so what the match answers
+// with is storage the arms agree to copy into rather than a value they
+// store — an aggregate has none, it *is* its storage (TIR §3).
+struct Pair { a: taddr, b: taddr }
+
+fn paired(n: taddr) -> Result<Pair, Error> {
+    if n > 2 {
+        return Result::Err(Error { at: n });
+    }
+    Result::Ok(Pair { a: n, b: n + 1 })
+}
+
+fn through(n: taddr) -> Result<Pair, Error> {
+    let p = paired(n)?;
+    Result::Ok(Pair { a: p.b, b: p.a })
+}
+
 fn read(r: Result<taddr, Error>) -> taddr {
     match r {
         Result::Ok(v) => v,
@@ -96,5 +142,10 @@ fn main() -> t27 {
         Option::Some(v) => v,
         Option::None => a,
     };
-    (a + b + c + d + f + g) as t27
+    let h = kept(1);
+    let i: taddr = match through(1) {
+        Result::Ok(p) => p.a + p.b,
+        Result::Err(bad) => bad.at,
+    };
+    (a + b + c + d + f + g + h + i) as t27
 }

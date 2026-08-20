@@ -2621,6 +2621,69 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.131 — an alias is only a name, and four other things that were not.**
+
+`type String = Vec<char>` (Ch. 0 §3.6). An alias is only a name, so
+expanding it is the whole of what one *is*: after that, nothing below has
+ever heard of `String`. This file parsed aliases — `ast::What::Alias` has
+been there since the parser was written — and never expanded one.
+
+It is asked at two kinds of place and they want different answers. A
+**layout** wants it expanded once, where the field types are collected, and
+`type_families` is the one function every struct and enum field passes
+through — so that is where an alias stops existing. Everything that reads a
+type by *name* wants it expanded where the name is read, and those are three
+functions: `nominal`, which is where every written type that has to *be* a
+type arrives; `subst_ty`, which is the same question under a key; and the
+scalar reading, which is not one function but four call sites — a parameter,
+an answer, and the two halves of a `let`.
+
+Missing one of those is a **refusal** and not a divergence, which is what
+made it safe to do this way: a name that got past is a name nothing defines,
+and everything downstream says so.
+
+*And an alias may name another*, so each is followed until it names none.
+One that reaches itself is left naming itself rather than followed for ever,
+and every use of it is refused by name — which is the honest answer to a
+definition that does not have one.
+
+**Four things came out of it that were not about aliases at all**, and every
+one of them was found by writing one program and asking why it was still
+refused.
+
+*A harvest that assumed a seed.* `drop_glue` handed back the part of its
+instantiation queue past where the caller's ended — but its queue started
+**empty**, so nothing in it was ever past that, and every job a destructor
+asked for was dropped on the floor. A struct holding a `Vec<char>` therefore
+called a `drop.Vec.char` nobody made. `function` seeds its queue from the
+caller's and hands back the new part; these two did the second half without
+the first. Both seed now, and `destructor` hands its part back as well.
+
+*A `match` whose value is an aggregate.* The arms stored into the slot they
+agreed to leave the answer in, and an aggregate has nothing to store: it
+*is* its storage (TIR §3). It is copied, and nothing is loaded back out of
+it at the join. `?` is what reached it — `let e = escape_at(s, i)?` where
+the success is a struct — and no `match` in the corpus had ever answered
+with one.
+
+*An arm that binds a payload with a destructor.* The binding is that arm's
+to drop, so it takes a flag like any owned local, and it is dropped **after**
+the answer has been stored — the answer may have been read out of it, and
+`Err(bad) => bad.at` is exactly that. An arm that carries it on instead
+moves it and drops nothing.
+
+*And an order that was right for the wrong reason.* The storage a call
+answers into is taken before the receiver is evaluated — `%sret` is what the
+function is *for* — **unless the receiver is not a place**. One that is not
+has to be lowered before it is a receiver at all: `"no".to_string()` is two
+words that have to go somewhere, and where they go is decided first. A place
+needs nothing made, so it shows neither order; the corpus had only places,
+so "always first" and "first unless" agreed everywhere until a string
+literal was the receiver of a method answering a `String`.
+
+*What it bought.* `bootstrap/main.tr` went from 42 of the reference's 48
+functions to **all but two**: `lex::one` and `main` itself.
+
 **G9.130 — an alias is only a name, and nothing here expands one.**
 
 `type String = Vec<char>` (Ch. 0 §3.6). An alias is only a name, so
@@ -2639,6 +2702,9 @@ seven refused `lex` functions are the same fact one level down:
 `slice`, `skip` and `block_comment` have none either. `input::read_all`
 writes `let mut out: String = Vec::new()`, which is the same name in the
 same position.
+
+*Done by **G9.131**, in the type half.* The path half is still refused, and
+nothing in `bootstrap/` or the prelude writes it.
 
 *It is two rewrites and not one.* A **type** written `String` becomes
 `Vec<char>`, which this tree can hold. A **path** written `String::new`
