@@ -2621,6 +2621,44 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.134 — `_`, and what a reference lends an arm.**
+
+Three shapes the parser needs and the lexer did not, each measured off
+`bootstrap/items.tr` with the trace that prints the statement `e.stuck` was
+set on.
+
+*`_` is not tested.* It matches whatever the tests ruled out, so it is the
+block the last one falls through to — the same shape the arm carrying a
+niche's payload gets, for the same reason (§5.4). And there is no trap after
+it, because control does arrive there: that is the whole of what
+"exhaustive" means once one is written. `ast::Pattern::Wild` had no case at
+all in `arm_variant`, so a `match` with one was refused entire.
+
+*Matching **through a reference** moves nothing.* What is at the other end
+belongs to whoever it points at (Ch. 3 §2.3), so the scrutinee is not moved
+and the arms' bindings do not own. And an arm's binding is not a copy
+either: a scalar is — a copy of one is the same value and nothing can be
+lost — but anything that owns something is bound as the **place** it names,
+because a copy of a `Vec` is a second header over one allocation and
+dropping it would free a room somebody is still holding (G9.50).
+
+That needed one more thing to be right, and it is a character: a name that
+*holds* a reference is read as the **value** it is — the address — and `%v`
+says that where `%p` would not. Walking to a place loads a step on the way
+to the object; this is the object itself (G9.94).
+
+*`&p.src` — a reference to a place that is not a name.* The borrow is no
+instruction, because a place already is an address; what it may need is the
+widening a name's borrow needs, and a `String` borrowed where a `&str` is
+wanted is the same two words built the same way. `parse::peek` is
+`lex::one(&p.src, p.at)` and could not be written before.
+
+*Where the parser stands.* 232 functions, and the two things now in the way
+are both `Box`: `ast::Expr` is a recursive enum whose payloads are boxed, so
+a `Box<T>` needs the layout a `Raw<T>` has and the destructor a `Raw` has
+with one more step — drop what it points at, and *then* free the room
+(Ch. 5 §2.3).
+
 **G9.133 — the lexer, lowered twice, character for character.**
 
 `bootstrap/main.tr` is this compiler's lexer written in the language it

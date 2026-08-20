@@ -53,7 +53,19 @@ fn spelled() -> taddr {
     s.len()
 }
 
+// And `&h.message` — a reference to a **place that is not a name**, where a
+// `&str` is wanted. The borrow is no instruction, because a place already
+// is an address; what it needs is the widening a name's borrow needs, and
+// it is the same two words built the same way (Ch. 2 §4).
+fn measured(h: &Held) -> Word {
+    counted(&h.message) + h.at
+}
+
+fn counted(s: &str) -> Word {
+    s.len()
+}
+
 fn main() -> t27 {
     let h = made(2);
-    (read(&h) + built(3) + spelled()) as t27
+    (read(&h) + built(3) + spelled() + measured(&h)) as t27
 }

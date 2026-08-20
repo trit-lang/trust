@@ -2224,6 +2224,57 @@ fn as_text(e: &mut Emit, from: &str) -> String {
     held
 }
 
+/// `&<place>` where the place is not a name: the address it already is, and
+/// the widening it may need to be what is wanted.
+fn borrowed_place(e: &mut Emit, inner: &ast::Expr, want: &str) -> Value {
+    let held = place(e, inner);
+    if e.stuck {
+        return unknown_value();
+    }
+    let object = referent_name(want);
+    let text = str_name();
+    if is_string(e, &held.ty) && object.same(&text) {
+        let from = held.text.to_string();
+        let made = as_text(e, &from);
+        if e.stuck {
+            return unknown_value();
+        }
+        let mut kind: String = Vec::new();
+        kind.push('&');
+        kind.push_str(&text);
+        return Value { text: made, ty: kind };
+    }
+    let mut out: String = Vec::new();
+    out.push('&');
+    out.push_str(&held.ty);
+    Value { text: held.text, ty: out }
+}
+
+/// Whether a place is reached **through a reference** (Ch. 3 §2.3).
+///
+/// What is at the other end of one belongs to whoever it points at, so
+/// nothing read out of it is moved and nothing read out of it is owned.
+/// `&e` is one written down; a name whose type is a reference is one; and a
+/// field or an element of either is still one, because the path began at a
+/// reference and reading it never left.
+fn through_reference(e: &Emit, x: &ast::Expr) -> bool {
+    match x {
+        ast::Expr::Name(n) => {
+            let at = local_at(e, n);
+            if at < 0 {
+                return false;
+            }
+            let owner = e.locals[at].ty.to_string();
+            owner.same("ptr") || referent_name(&owner).len() > 0
+        }
+        ast::Expr::Borrow(inner, m) => true,
+        ast::Expr::Deref(inner) => true,
+        ast::Expr::Field(base, name) => through_reference(e, &*base),
+        ast::Expr::Index(base, at) => through_reference(e, &*base),
+        _ => false,
+    }
+}
+
 /// Whether an expression **is** a place, syntactically (Ch. 3 §2.1).
 ///
 /// A name, a field of one, an element of one, and what a reference points
@@ -2556,13 +2607,14 @@ fn match_expr(
 ) -> Value {
     // Matching a **value** moves it: the arms' bindings receive what it
     // held, so what it named is not there to be dropped again (Ch. 3 §1.2).
-    // Matching *through a reference* moves nothing — the bindings are
-    // copies of storage the referent still owns — and `place` reads through
-    // one without going near this.
+    // Matching *through a reference* moves nothing — the bindings name
+    // storage the referent still owns — and neither does it need saying
+    // here, because there is nothing to say it about.
+    let through = through_reference(e, scrutinee);
     match scrutinee {
         ast::Expr::Name(n) => {
             let at = local_at(e, n);
-            if at >= 0 && def_at(&e.defs, &e.locals[at].ty) >= 0 {
+            if !through && at >= 0 && def_at(&e.defs, &e.locals[at].ty) >= 0 {
                 let mine = n.to_string();
                 move_out(e, &mine);
                 if e.stuck {
@@ -2578,7 +2630,7 @@ fn match_expr(
                 ast::Expr::Name(n) => n.to_string(),
                 _ => "".to_string(),
             };
-            if root.len() > 0 {
+            if !through && root.len() > 0 {
                 let named = field.to_string();
                 move_field(e, &root, &named);
             }
@@ -2587,14 +2639,43 @@ fn match_expr(
     }
     // What is matched over is a **place**: a name is one, and so is
     // anything that answers with an aggregate, because an aggregate *is*
-    // its storage (TIR §3). A scrutinee behind a reference is read through,
-    // exactly as `.` is (Ch. 3 §2.3) — which `place` already does and
-    // nothing here has to.
-    let held = place(e, scrutinee);
+    // its storage (TIR §3).
+    //
+    // A name that *holds* a reference is read as the **value** it is — the
+    // address — and then matched through, which is what `%v` says and `%p`
+    // would not: walking to a place loads a step on the way to the object,
+    // and this is the object itself (Ch. 3 §2.1, G9.94).
+    let mut held = unknown_value();
+    let mut direct = true;
+    match scrutinee {
+        ast::Expr::Name(n) => {
+            let at = local_at(e, n);
+            if at >= 0 {
+                let owner = e.locals[at].ty.to_string();
+                let points = referent_name(&owner);
+                if points.len() > 0 {
+                    let slot = e.locals[at].slot.to_string();
+                    let v = fresh(e, "v");
+                    let mut line: String = Vec::new();
+                    line.push_str("    ");
+                    line.push_str(&v);
+                    line.push_str(" = load ptr ");
+                    line.push_str(&slot);
+                    e.insts.push(line);
+                    held = Value { text: v, ty: points };
+                    direct = false;
+                }
+            }
+        }
+        _ => {}
+    }
+    if direct {
+        held = place(e, scrutinee);
+    }
     if e.stuck {
         return unknown_value();
     }
-    match_place(e, &held, arms, want, dest, answer)
+    match_place(e, &held, arms, want, dest, answer, through)
 }
 
 /// `e?` (§5.5, Ch. 5 §4.1) — the two arms it **is**.
@@ -2694,7 +2775,8 @@ fn try_expr(
         body: ast::Expr::Return(Option::Some(Box::new(out))),
     });
 
-    match_place(e, &held, &arms, want, dest, answer)
+    // `?` matches over a value it lowered itself, which nothing borrowed.
+    match_place(e, &held, &arms, want, dest, answer, false)
 }
 
 /// Whether a type is one of the two `?` carries, by the name of the family
@@ -2751,6 +2833,7 @@ fn match_place(
     want: &str,
     dest: &str,
     answer: &str,
+    borrowed: bool,
 ) -> Value {
             let base = held.text.to_string();
             let owner = held.ty.to_string();
@@ -2815,11 +2898,21 @@ fn match_place(
 
             // The arm that carries a niche's payload is not *tested*: it is
             // what is left when every other value has been ruled out, so it
-            // comes last whatever order it was written in.
+            // comes last whatever order it was written in. `_` is the same
+            // shape for a different reason — it matches whatever the tests
+            // ruled out — so it is the block the last one falls through to,
+            // and there is no trap after it because control does arrive
+            // there (§5.4).
             let mut order: Vec<taddr> = Vec::new();
             let mut untagged: taddr = 0 - 1;
+            let mut wild: taddr = 0 - 1;
             let mut q: taddr = 0;
             while q < arms.len() {
+                if catches_all(&arms[q]) {
+                    wild = q;
+                    q += 1;
+                    continue;
+                }
                 let index = arm_variant(e, which, &arms[q]);
                 if index < 0 {
                     e.stuck = true;
@@ -2832,12 +2925,21 @@ fn match_place(
                 }
                 q += 1;
             }
+            // Two arms that are both what is left over is one too many, and
+            // saying so is better than choosing.
+            if carrier >= 0 && wild >= 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
             if carrier >= 0 {
                 if untagged < 0 {
                     e.stuck = true;
                     return unknown_value();
                 }
                 order.push(untagged);
+            }
+            if wild >= 0 {
+                order.push(wild);
             }
 
             let mut held: String = Vec::new();
@@ -2851,10 +2953,16 @@ fn match_place(
             while n < order.len() {
                 let a = order[n];
                 owns_back(e, &was);
-                let index = arm_variant(e, which, &arms[a]);
+                let catch = catches_all(&arms[a]);
+                let none: taddr = 0 - 1;
+                let index = if catch {
+                    none
+                } else {
+                    arm_variant(e, which, &arms[a])
+                };
                 // The one that is not tested has no labels of its own: its
                 // body is what the last test fell through to.
-                let tested = index != carrier;
+                let tested = !catch && index != carrier;
                 let mut next_at: String = Vec::new();
                 if tested {
                     let arm_at = label(e, "arm");
@@ -2892,7 +3000,7 @@ fn match_place(
                 }
                 let mark = e.locals.len();
                 let owned_mark = e.owned.len();
-                bind_payload(e, which, index, &base, &l, &arms[a]);
+                bind_payload(e, which, index, &base, &l, &arms[a], borrowed);
                 if e.stuck {
                     return unknown_value();
                 }
@@ -2958,7 +3066,7 @@ fn match_place(
             // well-typed program — but TIR wants a terminator. A niche has
             // no such block: the variant nothing ruled out is the last arm
             // and it has already left.
-            if carrier < 0 {
+            if carrier < 0 && wild < 0 {
                 e.insts.push("    trap F_TRAP".to_string());
                 e.done = true;
             }
@@ -3679,6 +3787,17 @@ fn arm_variant(e: &Emit, which: taddr, arm: &ast::Arm) -> taddr {
     0 - 1
 }
 
+/// Whether an arm matches whatever the tests ruled out (§5.4).
+fn catches_all(arm: &ast::Arm) -> bool {
+    if arm.patterns.len() != 1 {
+        return false;
+    }
+    match &arm.patterns[0] {
+        ast::Pattern::Wild => true,
+        _ => false,
+    }
+}
+
 /// The last segment of a written path: `K::A` names `A`.
 fn last_segment(path: &str) -> String {
     let mut out: String = Vec::new();
@@ -3705,6 +3824,7 @@ fn bind_payload(
     base: &str,
     l: &layout::Layout,
     arm: &ast::Arm,
+    borrowed: bool,
 ) {
     let fields = match &arm.patterns[0] {
         ast::Pattern::Aggregate(path, fs) => fs,
@@ -3743,6 +3863,22 @@ fn bind_payload(
         }
         let at = l.variant_offsets[index][i];
         let src = offset_of(e, base, at);
+        // A binding read out of **borrowed** storage never owns: the
+        // referent still does, and two owners of one value is the bug this
+        // whole chapter exists to make impossible (Ch. 3 §1.2). What it
+        // *is* depends on what it holds — a scalar is copied, because a
+        // copy of one is the same value and nothing can be lost, and
+        // anything that owns something is bound as the **place** it names,
+        // because a copy of a `Vec` is a second header over one allocation.
+        if borrowed && owns_drop(&e.defs, &e.drops, &ty, 0) {
+            let mut kind: String = Vec::new();
+            kind.push('&');
+            kind.push_str(&ty);
+            let slot = slot_for(e, &name, &kind);
+            store_into(e, "ptr", &src, &slot);
+            i += 1;
+            continue;
+        }
         if def_at(&e.defs, &ty) >= 0 {
             // The storage first and the copy after it, which is what
             // decides the number the slot gets.
@@ -5615,6 +5751,13 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
         // Nothing is emitted: a slot *is* an address (TIR §3), and what the
         // borrow adds is a name for what it points at.
         ast::Expr::Borrow(inner, mutable) => {
+            // `&p.src` — a reference to a **place** that is not a name. The
+            // borrow is still no instruction, because a place already is an
+            // address; what it may need is the same widening a name's does.
+            match inner {
+                ast::Expr::Name(n) => {}
+                _ => return borrowed_place(e, inner, want),
+            }
             let held = match inner {
                 ast::Expr::Name(n) => n.to_string(),
                 _ => {

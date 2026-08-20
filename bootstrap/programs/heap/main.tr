@@ -285,6 +285,43 @@ fn held_on(n: taddr) -> taddr {
     }
 }
 
+// `_` — the arm that matches whatever the tests ruled out (§5.4).
+//
+// It is not tested: it is the block the last test falls through to, which
+// is the same shape the arm carrying a niche's payload gets and for the
+// same reason. And there is no trap after it, because control does arrive
+// there — which is the whole of what "exhaustive" means once one is
+// written.
+fn either_way(n: taddr) -> taddr {
+    let held = Either::Room(Bin::start(n));
+    match held {
+        Either::Room(r) => r.room(),
+        _ => 0,
+    }
+}
+
+// Matching **through a reference** (Ch. 3 §2.3). The scrutinee is read
+// through, and then nothing is moved: what is at the other end belongs to
+// whoever it points at.
+//
+// So an arm's binding is not a copy either. A scalar is — a copy of one is
+// the same value and nothing can be lost — but anything that owns something
+// is bound as the **place** it names, because a copy of a `Bin` would be a
+// second header over one allocation and dropping it would free a room
+// somebody is still holding.
+fn looked_at(held: &Either) -> taddr {
+    match held {
+        Either::Nothing => 0,
+        Either::Room(r) => r.room(),
+        Either::Number(k) => k,
+    }
+}
+
+fn borrowed(n: taddr) -> taddr {
+    let held = Either::Room(Bin::start(n));
+    looked_at(&held)
+}
+
 fn main() -> t27 {
     (empty() + words(4) + trytes(9) + both(2)) as t27
         + stored(2) + (narrow(1) as t27) + pointed(1) + computed(3, 1)
@@ -292,4 +329,5 @@ fn main() -> t27 {
         + (kept() as t27) + (spare() as t27)
         + (regrown() as t27) + (counted() as t27) + (replaced() as t27)
         + (wrapped(2) as t27) + (held_on(2) as t27)
+        + (either_way(2) as t27) + (borrowed(2) as t27)
 }
