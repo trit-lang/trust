@@ -2454,7 +2454,7 @@ fn trait_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
         supers.push(b.name);
     }
     expect_op(p, "{")?;
-    let mut assoc: Vec<String> = Vec::new();
+    let mut assoc: Vec<ast::Assoc> = Vec::new();
     let mut fns: Vec<ast::Fn> = Vec::new();
     loop {
         let t4 = peek(p)?;
@@ -2473,7 +2473,9 @@ fn trait_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
         };
         if word.same("type") {
             p.at = at4;
-            assoc.push(ident(p)?);
+            let held = ident(p)?;
+            let on_it = bound_list(p)?;
+            assoc.push(ast::Assoc { name: held, bounds: on_it });
             expect_op(p, ";")?;
         } else if word.same("fn") {
             fns.push(function(p)?);

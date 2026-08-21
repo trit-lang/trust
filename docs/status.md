@@ -595,12 +595,12 @@ What remains:
   reader does not fully understand reports nothing at all — not its verdicts
   either, since a body half-understood is a body whose rejections might be
   consequences of the half that was not (G9.139). The one body left is
-  `Range<T>`, which the read rejects correctly and cannot report (G9.137). The
-  question the read still cannot answer is what an **opaque** type implements.
-  A trait now keeps the bounds it declared on an associated type, and every
-  impl's choice is held to them (G9.142) — but nothing files them under the
-  projection's key, so `T::Item` has no methods and no body in the corpus
-  happens to ask for one. The one thing that is *not* fail-open
+  `Range<T>`, which the read rejects correctly and cannot report (G9.137). What
+  an **opaque** type implements is now answered from what was declared on it: a
+  parameter has the methods its bounds give it, and a projection `T::Item` has
+  the ones the trait that declared `Item` bound it with (G9.142). One level —
+  `T::Item::Inner` names nothing, and the read stays open there. The one thing
+  that is *not* fail-open
   is an argument's type where both sides are ground — no parameter, and no
   nominal name that an instantiation could rename.
 - **Shadowing a prelude type breaks the prelude items that named it.**

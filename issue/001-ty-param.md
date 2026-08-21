@@ -6,7 +6,7 @@
 | **Blocks** | Ch. 4 §2.5 (`Sized` / `?Sized`) |
 | **Closed** | Ch. 4 §2.2 (a generic body checked once), for the shapes §"What the read catches" lists |
 | **Contradicts** | Ch. 4 Appendix B — the scorecard claims the C++ template failure mode is removed by construction. It is removed at the call site, and now for a named method in the body. Not by construction. |
-| **Tests** | `a_generic_body_is_read_once_against_its_bounds`, `a_parameter_is_called_against_its_fn_bound`, `an_associated_function_is_reached_through_a_bound`, `an_associated_type_binding_says_what_a_projection_is`, `known_limit_reading_a_generic_body_is_fail_open`, `known_limit_there_is_no_sized_bound` (all `compiler/tests/frontend.rs`) |
+| **Tests** | `a_generic_body_is_read_once_against_its_bounds`, `a_parameter_is_called_against_its_fn_bound`, `an_associated_function_is_reached_through_a_bound`, `an_associated_type_binding_says_what_a_projection_is`, `a_bound_on_an_associated_type_holds_the_impl_to_it`, `a_projection_has_the_methods_its_declaring_trait_bound_it_with`, `known_limit_reading_a_generic_body_is_fail_open`, `known_limit_there_is_no_sized_bound` (all `compiler/tests/frontend.rs`) |
 
 ## The decision
 
@@ -147,19 +147,24 @@ those are the same type at exactly one of them.
 Measured over the corpus: 174 of 175 bodies read cleanly, none unsure, and one
 rejected — `Range<T>`, the true positive below, which is not reported.
 
-So nothing in the corpus walks past any more. One question the read cannot
-answer remains, and no body happens to ask it: **what a projection is bound
-by**. `T::Item` is a type of its own, and a method called on it is
-unanswerable.
+So nothing in the corpus walks past any more, and the last question the read
+could not answer — **what a projection is bound by** — is answered (G9.142).
 
-Half of that is now done. Ch. 4 §1.7 allows an associated type bounds — `type
-Iter: Iterator;` — and `parse.rs` used to read one and throw it away, so an
-impl choosing a type that failed the bound was accepted (G9.142). The bounds
-are kept now, and `check_assoc_bounds` holds each impl to them. What remains is
-the other end: filing them under the projection's key so that `T::Item` has the
-methods `Iterator` gives it. Nothing reads them yet.
+Ch. 4 §1.7 allows an associated type bounds — `type Iter: Iterator;` — and
+`parse.rs` used to read one and throw it away, so both ends were open: an impl
+choosing a type that failed the bound was accepted, and a body calling a method
+on `T::Iter` had nothing to resolve it against. The bounds are kept now.
+`check_assoc_bounds` holds every impl's choice to them, and `Check::new` files
+them under the projection's key, so `T::Iter` has exactly the methods
+`Iterator` gives it. The first thing this caught was the prelude:
+`IntoIterator` declared `type IntoIter;` with no bound, which is not what
+§1.7's own example writes.
 
-Seven groups have been closed since the read landed.
+One level only. `T::Item::Inner` is a projection of a projection, and the key
+it would need is never built, so the read stays open there — the same
+fail-open as before, over a much smaller thing.
+
+Eight groups have been closed since the read landed.
 
 - **An `Fn`-bounded parameter called as a function** (15). `param_call` reads
   the signature out of the bound: `impl Fn(A) -> R` and `F: Fn(A) -> R` are one
@@ -203,6 +208,11 @@ Seven groups have been closed since the read landed.
   deliberately **not cached**, since `Types::assoc` outlives the read. Four
   bodies were unsure on this and three more could not have their signatures
   written at all.
+- **A method called on a projection.** `Check::new` files a trait's declared
+  associated-type bounds under `T::Item`, so `param_method` resolves through
+  them exactly as it does for `T` itself. This is the only one of the eight
+  that also *rejects*: a trait that declared no bound has said its associated
+  type has no methods, which is an answer.
 
 `never_called`-shaped bugs now hide only in the comparisons a read body passed
 over, and in shapes the corpus does not contain. Neither is `Sized`.
@@ -238,10 +248,11 @@ a compiler fix.
    for methods (`Fn::param_method`), calls (`Fn::param_call`), associated
    functions (`Fn::param_assoc`, including ones with parameters of their own)
    and associated types (a projection is a type, or the type a binding pinned
-   it to). **Not done for a bound with arguments**, nor for anything a type
-   the read knows only as opaque might implement — the bounds an associated
-   type was declared with, and a parameter a callee's inference would have
-   settled. That is the one thing that still makes a read unsure.
+   it to), and for what a projection is bound by — `Check::new` files a trait's
+   declared associated-type bounds under `T::Item`, one level deep. **Not done
+   for a bound with arguments**, nor for a projection of a projection, nor for
+   a parameter a callee's inference would have settled. Those are what still
+   make a read unsure.
 3. ~~A decision, per downstream component, between handling a `Ty::Param` and
    proving it cannot arrive.~~ Done, and the answer was neither: layout and
    codegen answer one word into output that is thrown away.

@@ -163,6 +163,13 @@ pub struct Named {
     pub ty: Ty,
 }
 
+/// An associated type a trait declares: its name, and the bounds every
+/// implementation's choice must satisfy — `type Iter: Iterator;` (Ch. 4 §1.7).
+pub struct Assoc {
+    pub name: String,
+    pub bounds: Vec<Bound>,
+}
+
 /// One generic parameter (Ch. 4 §2.1).
 pub enum Generic {
     /// `T: Bound + Other`.
@@ -215,8 +222,8 @@ pub enum What {
     /// (Ch. 4 §1.2), which is the difference a reader sees.
     Impl(Vec<Generic>, Option<Ty>, Ty, Vec<Fn>),
     /// `trait Name<T>: Super { … }` (Ch. 4 §1.1): its type parameters, its
-    /// supertraits, its associated type names, and its methods.
-    Trait(String, Vec<String>, Vec<String>, Vec<String>, Vec<Fn>),
+    /// supertraits, its associated types, and its methods.
+    Trait(String, Vec<String>, Vec<String>, Vec<Assoc>, Vec<Fn>),
 }
 
 /// One arm: its patterns, its guard if it has one, and its value.
@@ -941,7 +948,17 @@ pub fn show_item(i: &Item, out: &mut String) {
             let mut j: taddr = 0;
             while j < assoc.len() {
                 out.push_str(" (type ");
-                out.push_str(&assoc[j]);
+                out.push_str(&assoc[j].name);
+                let mut q: taddr = 0;
+                while q < assoc[j].bounds.len() {
+                    if q == 0 {
+                        out.push_str(":");
+                    } else {
+                        out.push_str("+");
+                    }
+                    show_bound(&assoc[j].bounds[q], out);
+                    q += 1;
+                }
                 out.push_str(")");
                 j += 1;
             }

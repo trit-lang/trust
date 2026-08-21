@@ -2154,14 +2154,15 @@ fn known_limit_reading_a_generic_body_is_fail_open() {
     // rather than closed, and what still walks through is one question: what
     // does a type the read knows only as *opaque* implement?
     //
-    // A projection — `T::Item` — is a type of its own under a read, but what
-    // *it* is bound by is not read out of the trait that declared it, so a
-    // method called on one is unanswerable and the whole body goes unjudged.
-    // A parameter a callee's inference would have settled is the same, from
-    // the other side: it has no declaration to read bounds off at all.
+    // A projection of a projection. `T::Item`'s bounds come from the trait
+    // `T` is bound by, and that is as far as it goes: `T::Item::Inner` has no
+    // entry, so a method called on it is unanswerable and the whole body goes
+    // unjudged.
     tir_of(
-        "trait Feed { type Item; fn next(&mut self) -> Self::Item; } \
-         fn drain<T: Feed>(x: &mut T) -> t27 { let v = x.next(); v.no_such_method() } \
+        "trait Feed2 { type Inner; fn inner(&self) -> Self::Inner; } \
+         trait Feed { type Item: Feed2; fn next(&mut self) -> Self::Item; } \
+         fn drain<T: Feed>(x: &mut T) -> t27 { \
+             let v = x.next(); let w = v.inner(); w.no_such_method() } \
          fn main() -> t27 { 0 }",
     );
     // Nor is a parameter bound by a trait that takes arguments (Ch. 4 §1.7).
@@ -2170,6 +2171,34 @@ fn known_limit_reading_a_generic_body_is_fail_open() {
          fn conv<T: Into<t27>>(x: &T) -> t27 { x.no_such_method() } \
          fn main() -> t27 { 0 }",
     );
+}
+
+#[test]
+fn a_projection_has_the_methods_its_declaring_trait_bound_it_with() {
+    // `T::Item` is opaque, but not unknown: the trait that declared the
+    // associated type may have said what it must implement, and that is the
+    // whole of what a body reading it may call (Ch. 4 §1.7, G9.142).
+    tir_of(
+        "trait Show { fn show(&self) -> t27; } \
+         trait Feed { type Item: Show; fn next(&mut self) -> Self::Item; } \
+         fn drain<T: Feed>(x: &mut T) -> t27 { let v = x.next(); v.show() } \
+         fn main() -> t27 { 0 }",
+    );
+    let e = error(
+        "trait Show { fn show(&self) -> t27; } \
+         trait Feed { type Item: Show; fn next(&mut self) -> Self::Item; } \
+         fn drain<T: Feed>(x: &mut T) -> t27 { let v = x.next(); v.no_such_method() } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("there is no `no_such_method` there"), "{e}");
+    // A trait that declared no bound said the projection has no methods, which
+    // is an answer and not a gap.
+    let e = error(
+        "trait Feed { type Item; fn next(&mut self) -> Self::Item; } \
+         fn drain<T: Feed>(x: &mut T) -> t27 { let v = x.next(); v.no_such_method() } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("it is bound by nothing"), "{e}");
 }
 
 #[test]

@@ -446,7 +446,9 @@ impl<T> Iterator for Range<T> {
 // blanket impl below, and so is anything that can produce one.
 trait IntoIterator {
     type Item;
-    type IntoIter;
+    // What `into_iter` hands back is an iterator, and saying so is what lets
+    // a body written against `T: IntoIterator` call `next` on it (§1.7).
+    type IntoIter: Iterator;
     fn into_iter(self) -> Self::IntoIter;
 }
 

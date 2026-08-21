@@ -1617,7 +1617,7 @@ fn check_generic_bodies(
         sigs.borrow_mut().insert(key.clone(), sig);
         let signature = signature_of(def, &key, sigs);
 
-        let check = Check::new(&def.generics);
+        let check = Check::new(&def.generics, world.traits);
         // The read's own error is not a verdict. Most of the ways reading a
         // body fails today are this checker running out of road — an
         // associated type projected through a parameter, a parameter called
@@ -4484,11 +4484,30 @@ struct Check {
 }
 
 impl Check {
-    fn new(generics: &[ast::GenericParam]) -> Check {
-        let mut bounds = HashMap::new();
+    fn new(generics: &[ast::GenericParam], traits: &HashMap<String, ast::TraitItem>) -> Check {
+        let mut bounds: HashMap<String, Vec<ast::Bound>> = HashMap::new();
         for p in generics {
-            if let ast::GenericParam::Type { name, bounds: bs } = p {
-                bounds.insert(name.clone(), bs.clone());
+            let ast::GenericParam::Type { name, bounds: bs } = p else {
+                continue;
+            };
+            bounds.insert(name.clone(), bs.clone());
+            // A projection has its bounds from the trait that declared the
+            // associated type: `I: Iterator` makes `I::Item` whatever
+            // `Iterator` said `Item` must be (Ch. 4 §1.7, G9.142). A trait
+            // the file does not declare says nothing, and the projection
+            // stays unanswered rather than empty.
+            //
+            // Only one level. The bounds on an associated type may declare
+            // associated types of their own, and `T::Item::Inner` is left
+            // where it was — the read is fail-open, and that is a limit and
+            // not a wrong answer.
+            for b in bs {
+                let Some(decl) = traits.get(&b.name) else {
+                    continue;
+                };
+                for (a, abs) in &decl.assoc {
+                    bounds.insert(format!("{name}::{a}"), abs.clone());
+                }
             }
         }
         Check {
@@ -10366,15 +10385,14 @@ impl Fn<'_> {
     /// a rejection this read stands behind; a bound this read cannot read is
     /// `cannot_tell`, and silences the read entirely.
     fn bound_item(&mut self, check: &Check, param: &str, name: &str, span: Span) -> R<ast::FnItem> {
-        // A projection — `I::Item` — is a parameter with no declaration to
-        // read bounds off. The trait that owns the associated type may well
-        // bound it, and finding that out is the next piece of this work; until
-        // then what a projection has is unanswerable rather than empty.
+        // A projection whose bounds are not in hand: `T::Item::Inner`, or a
+        // projection through a trait the file does not declare. What it has is
+        // unanswerable rather than empty, so the read says nothing at all.
         let Some(bounds) = check.bounds.get(param).cloned() else {
             self.cannot_tell();
             return err(
                 span,
-                format!("`{param}` is a projection, and its bounds are not read yet"),
+                format!("`{param}` is a projection whose bounds are not in hand"),
             );
         };
 
@@ -10649,7 +10667,7 @@ impl Fn<'_> {
             self.cannot_tell();
             return err(
                 span,
-                format!("`{param}` is a projection, and its bounds are not read yet"),
+                format!("`{param}` is a projection whose bounds are not in hand"),
             );
         };
         let key = bounds

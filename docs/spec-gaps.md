@@ -2661,16 +2661,26 @@ bound satisfies it too (§1.6), and nothing else does. This is sound because
 §2.2 holds every instantiation of the impl to those same bounds at the call
 site.
 
-*Still open, and the reason this one mattered:* a projection through a
-parameter does not yet get its methods from these bounds (G9.141, issue/001).
-The information is now recorded; the other end has not been wired to it.
+*And the other end, which is why this one mattered.* `Check::new` files a
+trait's declared bounds under the projection's key, so `T::Item` has exactly
+the methods `Iterator` — or whatever the trait wrote — gives it. The read's one
+unanswerable question is answered (G9.141, issue/001). What is left of it is
+narrow: a projection *of* a projection, `T::Item::Inner`, which is one level
+past where this stops.
 
-*The bootstrap compiler cannot parse the form at all.* `parse.tr`'s trait body
-reads the name and demands `;` immediately, so `type Item: Show;` is a syntax
-error there. It rejects rather than mis-accepts, which is the safe direction,
-and no file in the corpus writes one — so the two compilers still agree on
-everything they are asked about. Closing it means giving `What::Trait` a paired
-list in place of its `Vec<String>`. *Not fixed.*
+The prelude was the first thing this caught. `IntoIterator` declared `type
+IntoIter;` and `into_iter().count()` in a generic body was unanswerable — the
+read walked past the whole function. It says `type IntoIter: Iterator;` now,
+which is what Ch. 4 §1.7's own example writes, and the body reads through.
+
+*The bootstrap compiler* did not parse the form at all: `parse.tr`'s trait body
+read the name and demanded `;`. It does now — `What::Trait` carries a
+`Vec<Assoc>` in place of its `Vec<String>` — because the prelude writes one and
+the two compilers have to agree on the tree they get from it. What `lower.tr`
+does *not* do is check it: no bootstrap pass corresponds to
+`check_assoc_bounds`, so a program the Rust compiler rejects for a violated
+bound is accepted there. That is a divergence in what is refused and not in
+what is produced, and nothing in the corpus violates one. *Not fixed.*
 
 **G9.141 — what `T::Item` is before there is a `T`.** Ch. 4 §1.7 says an
 associated type is the type an implementation chooses. While a generic body is
@@ -2692,11 +2702,17 @@ t27>` — and the read believes it, because `check_assoc_bindings` holds every
 instantiation to exactly that. A binding is not a trait argument and does not
 divide the trait's methods, so it is read where an argument is turned away.
 
-What it does **not** buy: where there is no binding, the bounds the trait
-declared on the associated type — `type Item: Show` — are not read out, so a
-method called on a projection is unanswerable and takes the whole body down
-with it (G9.139). The projection is a type; it is not yet a type that has
-anything.
+Where there is no binding, the bounds the trait declared on the associated
+type — `type Item: Show` — say what the projection has: `Check::new` files them
+under `T::Item`, and a method call on one resolves through them exactly as a
+call on `T` resolves through `T`'s (G9.142). A trait that declared no bound has
+said the projection has no methods, which is an answer and a rejection, not a
+gap.
+
+What it does **not** buy: `T::Item::Inner`. The bounds on an associated type
+may declare associated types of their own, and this stops one level short — so
+a projection of a projection is unanswerable and takes the whole body down with
+it (G9.139). Nothing in the corpus goes there.
 
 **G9.140 — a size the layout engine is told, in an answer nobody reads.**
 Ch. 4 §2.2 says a generic body is checked once, against its bounds. To check
@@ -2748,10 +2764,14 @@ parameter then stands for itself, which is the name the body's values already
 have, so the two agree. Resolving that is what used to stop four bodies, and
 what used to stop three more before their signatures could be written at all.
 
+An eighth closed after those: **what an opaque type implements**, which was the
+last shape the read could not answer at all. A projection's bounds are now read
+out of the trait that declared the associated type (G9.142), so `T::Item` has
+methods. One level only — `T::Item::Inner` is still unanswerable, and nothing
+in the corpus asks for it.
+
 **What is left is one body**: `Range<T>`, the true positive of G9.137, which
-is not reported. The shape the read still cannot answer is **what an opaque
-type implements** — a projection's bounds are not read out of the trait that
-declared it — and no body in the corpus asks it today.
+is not reported.
 
 If the read's own `Err` were reported, every one of those would be a false
 rejection of a program that compiles and runs.
