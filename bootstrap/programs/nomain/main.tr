@@ -1,0 +1,23 @@
+// A whole program whose `main` is refused, which is a program neither
+// implementation contains. Every other function here compiles, and that is
+// the point: without the entry there is nothing to print them *for*, and a
+// module that printed them anyway would be a library wearing a program's
+// name.
+//
+// The one before it does not even have to be called. Pruning roots at
+// `main`, and where the module has no `main` at all it roots at every
+// function instead — right for one file, which is what `bootstrap/build.tr`
+// is handed, and wrong here (G9.149).
+
+fn helper() -> t27 {
+    1
+}
+
+fn unreached() -> t27 {
+    helper() + 1
+}
+
+fn main() -> t27 {
+    let x: t27 = helper();
+    x.no_such_method()
+}

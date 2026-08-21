@@ -588,5 +588,23 @@ report_errors "$tmp"
 q=$((q + $(sum_ns "$tmp")))
 rm -rf "$tmp"
 
+# And a whole program that is *refused*, which the loop above cannot ask
+# about: there is no text to compare, because a refusal prints none. What
+# the two agree on is that the program does not exist — `trust tir` says so
+# by failing, and `bootstrap/program.tr`, which carries no spans and no
+# error text, by printing the header and nothing under it.
+for root in bootstrap/programs/nomain/main.tr; do
+    if "$trust" tir "$root" > /dev/null 2>&1; then
+        echo "bootstrap: $root is meant to be refused and the Rust one lowered it"
+        exit 1
+    fi
+    mine=$("$trust" bundle "$root" --prelude | "$trust" run bootstrap/program.tr)
+    if [ "$mine" != 'tir 0.1 target "tritium"' ]; then
+        echo "bootstrap: $root is refused by the Rust one and lowered by this one"
+        printf '%s\n' "$mine" | head -5
+        exit 1
+    fi
+done
+
 printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d lines about the library, %d modules of whole programs, %d names defined, %d names resolved, %d items rewritten, %d types laid out, %d bindings typed, %d functions checked, %d lines of TIR, %d of whole programs — all agreed\n' \
     "$n" "$r" "$e" "$i" "$w" "$b" "$v" "$m" "$y" "$u" "$z" "$l" "$t" "$c" "$g" "$q"

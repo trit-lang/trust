@@ -2626,6 +2626,31 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.149 — a program with no `main` and a program whose `main` was refused
+print the same module, and only one of them should print anything.** Pruning
+roots at `main`, and where there is no `main` it roots at every function
+instead — which is right, because `bootstrap/build.tr` is handed one file at
+a time and a file is not a program. But *whose* `main` the rule asks about
+was the module's, and a module has one only when the lowering managed to
+make one. So a whole program whose `main` was refused fell through to the
+same branch and printed every function it could still compile: 1614 lines of
+prelude with no way into them, where the Rust one printed an error and
+stopped.
+
+No chapter says this, and the reason is that no chapter needs to. Ch. 6 §4
+says a module is a list of items; it does not say a *program* is a module
+with an entry, because the only implementation that existed had a driver
+that failed before it could ask. This one has no spans and no error text —
+its whole vocabulary for a refusal is printing nothing — so it has to know
+the difference between a `main` that was never written and a `main` that was
+written and lost. Those are two questions and there was one answer.
+
+The fix asks the source, not the module: `wrote_main(items)` where
+`reachable` asks `made`. `bootstrap/programs/nomain` is the corpus entry,
+and it is compared differently from every other program — there is no text
+to diff against a refusal, so what the two agree on is that the program does
+not exist.
+
 **G9.148 — `v[i]` is a call, and a call answering with a *place* is the one
 answer this lowering had no name for.** Ch. 2 §3.1 gives the whole rule:
 `v[i]` is `*v.index(i)` where it is read and `*v.index_mut(i)` where it is

@@ -10607,6 +10607,16 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
     }
     let out = all;
 
+    // A program that wrote a `main` and did not get one is a program this
+    // did not compile, and there is nothing honest to print for it. Saying
+    // so here is not the same question `reachable` asks: that one roots at
+    // every function where the *module* has no `main`, which is right for
+    // one file and would here keep a program with no way into it.
+    if wrote_main(items) && made_at(&out, "main") < 0 {
+        let none: Vec<Made> = Vec::new();
+        return none;
+    }
+
     let live = reachable(&out);
     let mut kept: Vec<Made> = Vec::new();
     let mut n: taddr = 0;
@@ -10637,6 +10647,25 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
         i += 1;
     }
     kept
+}
+
+/// Whether the source wrote a `fn main`. Not whether one was *made* — the
+/// difference between the two is exactly a refusal, and it is the only place
+/// the question is worth asking.
+fn wrote_main(items: &Vec<ast::Item>) -> bool {
+    let mut i: taddr = 0;
+    while i < items.len() {
+        match &items[i].what {
+            ast::What::Function(f) => {
+                if f.name.same("main") {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
 }
 
 /// A function with no body, as TIR's declaration form: the header a
