@@ -111,8 +111,35 @@ fn owning() -> taddr {
     v.len()
 }
 
+// `v[i]`, which is not syntax the compiler knows about a `Vec` but a call to
+// a method the library wrote: `*v.index(i)` where it is read and
+// `*v.index_mut(i)` where it is written (Ch. 2 §3.1). The bound is checked
+// against the *length* inside those two, which is why nothing here checks it
+// — the room beyond the length holds nothing a program may read.
+//
+// It is also the first place a function answers with a **reference** and the
+// answer is used as a place. `v[0][0]` reaches through two of them, and the
+// receiver of the inner is the address the outer answered with rather than
+// the expression, so `v[0]` is asked for once (G9.148).
+fn indexed() -> t27 {
+    let mut v: Vec<t27> = Vec::new();
+    v.push(1);
+    v.push(2);
+    v[0] = 9;
+    v[0] + v[1]
+}
+
+fn reached() -> taddr {
+    let mut v: Vec<Vec<taddr>> = Vec::new();
+    let mut inner: Vec<taddr> = Vec::new();
+    inner.push(4);
+    v.push(inner);
+    v[0][0]
+}
+
 fn main() -> t27 {
-    (empty() + many() + asked() + emptied() + narrow() + nested() + owning())
+    (empty() + many() + asked() + emptied() + narrow() + nested() + owning()
+        + reached())
         as t27
-        + one() + (none_left() as t27)
+        + one() + (none_left() as t27) + indexed()
 }

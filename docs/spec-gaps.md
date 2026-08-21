@@ -2626,6 +2626,39 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.148 — `v[i]` is a call, and a call answering with a *place* is the one
+answer this lowering had no name for.** Ch. 2 §3.1 gives the whole rule:
+`v[i]` is `*v.index(i)` where it is read and `*v.index_mut(i)` where it is
+written. What no chapter says is what a function answering `&T` answers
+*with*, because TIR spells every address `ptr` (TIR §1) and a `ptr` is a
+value like any other. So `bootstrap/lower.tr` dropped the `&` everywhere a
+written type became a name, and a family whose answer was a reference had an
+**empty head** — refused before its first call was ever looked at.
+
+Three readings keep it now. `family_answer` keeps the `&` where every other
+head drops it, because the head is all a family records about its answer.
+`function` reads its own answer through `ref_name`, which is the reading a
+*parameter* that is a reference already got and an answer never needed. And
+`guess_ty` — asked what an expression will be *before* anything is lowered —
+answers for an index by reading `index`'s own answer under the receiver's
+key. The last is what makes `v[0].len()` work at all: a method asks its
+receiver's type before emitting it, and an element had none to give.
+
+The receiver is the address the caller already holds and **not** the
+expression it came from. `a[i][j]` would otherwise lower `a[i]` twice — two
+calls where the program wrote one, and two borrows of `a` where it takes one,
+which is a program refusing itself.
+
+Which of the two methods an index means is a flag around one call. Which side
+of an `=` a place is on is the only thing that depends on it, so threading it
+through every arm of `place` would be paying everywhere for one question.
+
+Still refused: a type whose `index` is not a **family**. An
+`impl Grid { fn index(&self, i: taddr) -> &t27 }` is an ordinary method and
+`trustc` desugars to it just the same; this reaches only the generic path,
+because the plain one is written inline in `method_value` rather than shared.
+`Vec<T>` is what Ch. 5 §2.6 makes the question about, and it is a family.
+
 **G9.147 — a destructor is handed a key that is a name, and a name says
 nothing about what to lay out.** G9.59 said a mangled name cannot be read
 back into a family and a key. G9.116 said the same thing about glue and

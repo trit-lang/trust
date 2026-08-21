@@ -329,6 +329,12 @@ pub struct Emit {
     /// travels the way `strings` does and for the same reason: a name that
     /// cannot be read back has to be remembered where it was written.
     pub glue: Vec<Inst>,
+    /// Whether the place being walked to is the one an `=` writes, because
+    /// `v[i] = x` is `*v.index_mut(i)` and `v[i]` alone is `*v.index(i)`
+    /// (Ch. 2 §3.1). Nothing else about a place depends on which side of the
+    /// `=` it is on, which is why this is a flag around one call rather than
+    /// an argument threaded through every arm.
+    pub writing: bool,
 }
 
 /// A value in TIR: either a name or a constant, as it is written.
@@ -1033,6 +1039,7 @@ pub fn function(
         owner_name: "".to_string(),
         strings: ast::copy_names(&work.strings),
         glue: copy_insts(&work.glue),
+        writing: false,
     };
     // What a closure found before this was lowered is a type like any
     // other: its storage is a field per capture, holding an address.
@@ -1280,7 +1287,19 @@ pub fn function(
     }
     header.push_str(")");
     let answered = settled_ty(&e.aliases, &f.ret);
-    let ret = tir_ty_at(&tyvars, &key, &answered);
+    let mut ret = tir_ty_at(&tyvars, &key, &answered);
+    // An answer that is a *reference* is an address, and TIR spells every
+    // address `ptr`: the name `&T` is kept only so that what it points at is
+    // known, which is the same reading a parameter already gets (Ch. 3
+    // §2.1). An answer needs it for the one thing a parameter does not —
+    // `v[i]` is the place `index` answers with, and a place has a type.
+    if ret.same("?") {
+        let held = subst_ty(&mut e, &tyvars, &key, &answered);
+        let by_ref = ref_name(&held);
+        if by_ref.len() > 0 {
+            ret = by_ref;
+        }
+    }
     let unit = match &answered {
         ast::Ty::Unit => true,
         _ => sret,
@@ -2109,6 +2128,103 @@ fn three_ways(e: &mut Emit, c: &str, neg: &str, zero: &str, pos: &str) {
     e.done = true;
 }
 
+/// `<Type>.index` or `<Type>.index_mut`, spelled out.
+fn index_named(owner: &str, exclusive: bool) -> String {
+    let mut out: String = Vec::new();
+    out.push_str(owner);
+    out.push_str(".index");
+    if exclusive {
+        out.push_str("_mut");
+    }
+    out
+}
+
+/// What one element of that type is, read off the method that answers for
+/// it: `index`'s answer under the receiver's own key, with the `&` taken
+/// off, because `v[i]` is the place and not the address of it.
+///
+/// Nothing is lowered to find out, which is why this can be asked before the
+/// receiver is emitted. It is answered only where the receiver decides every
+/// type parameter — an `index` whose *argument* said would need the argument
+/// lowered, and that is the question this one exists to avoid.
+fn index_answer(e: &Emit, owner: &str) -> String {
+    let inst = inst_at(e, owner);
+    if inst < 0 {
+        return "".to_string();
+    }
+    let base = e.instances[inst].base.to_string();
+    let mut exclusive = false;
+    let probe = index_named(&base, exclusive);
+    if family_at(e, &probe) < 0 {
+        exclusive = true;
+    }
+    let under = index_named(&base, exclusive);
+    let fam = family_at(e, &under);
+    if fam < 0 {
+        return "".to_string();
+    }
+    if e.families[fam].tyvars.len() != e.instances[inst].key.len() {
+        return "".to_string();
+    }
+    let answered = subst_through(
+        &e.families[fam].tyvars,
+        &e.instances[inst].key,
+        &e.families[fam].ret,
+    );
+    referent_name(&answered)
+}
+
+/// `v[i]` where `v`'s type is the program's own: the place `index_mut`
+/// answers with where it is written, and `index`'s where it is read
+/// (Ch. 2 §3.1) — the other one where there is only one.
+///
+/// The receiver is the address the caller already has and **not** the
+/// expression it came from. `a[i][j]` would otherwise lower `a[i]` twice:
+/// two calls where the program wrote one, and two borrows of `a` where it
+/// takes one.
+fn indexed_by_method(e: &mut Emit, held: &Value, at: &ast::Expr) -> Value {
+    // Which instantiation the receiver is, because the family is written on
+    // the type it instantiates — `Vec.index`, not `Vec.t27.index` — and its
+    // key starts with the receiver's (Ch. 4 §2.5).
+    let inst = inst_at(e, &held.ty);
+    let none: Vec<String> = Vec::new();
+    let base = if inst < 0 {
+        held.ty.to_string()
+    } else {
+        e.instances[inst].base.to_string()
+    };
+    let given = if inst < 0 {
+        none
+    } else {
+        ast::copy_names(&e.instances[inst].key)
+    };
+    let mut exclusive = e.writing;
+    let probe = index_named(&base, exclusive);
+    if family_at(e, &probe) < 0 {
+        exclusive = !exclusive;
+    }
+    let under = index_named(&base, exclusive);
+    let fam = family_at(e, &under);
+    if fam < 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let mut args: Vec<ast::Expr> = Vec::new();
+    args.push(ast::copy_expr(at));
+    let got = generic_call(e, fam, &under, &held.text, &given, &args);
+    if e.stuck {
+        return unknown_value();
+    }
+    // What it answers with is a reference, and the place is what the
+    // reference points at: `v[i]` is `*v.index(i)` and the `*` is here.
+    let points_at = referent_name(&got.ty);
+    if points_at.len() == 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    Value { text: got.text, ty: points_at }
+}
+
 /// `s[i]` where `s` is text: the first thing this language lowers that can
 /// fail while it *runs* rather than be refused before it does.
 ///
@@ -2128,6 +2244,12 @@ fn index_place(e: &mut Emit, base: &ast::Expr, at: &ast::Expr) -> Value {
         return unknown_value();
     }
     let named = str_name();
+    // A type the language does not know is indexed by the method the program
+    // wrote for it (Ch. 2 §3.1). Text and arrays are the two it does know,
+    // and everything else is asked.
+    if !held.ty.same(&named) && !is_array(&held.ty) {
+        return indexed_by_method(e, &held, at);
+    }
     let mut data: String = Vec::new();
     let mut count: String = Vec::new();
     let mut elem: String = Vec::new();
@@ -5143,6 +5265,7 @@ pub fn destructor(
         owner_name: "".to_string(),
         strings: ast::copy_names(&work.strings),
         glue: copy_insts(&work.glue),
+        writing: false,
     };
     remake(&mut e, &work.instances);
     settle(&mut e);
@@ -6435,7 +6558,15 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                         e.stuck = true;
                         return unknown_value();
                     }
+                    // Which side of the `=` the element is on is the whole
+                    // of what tells `index_mut` from `index`, and it is one
+                    // question about one call — so the flag goes up here and
+                    // comes back down before the value is lowered, which is
+                    // on the other side.
+                    let before = e.writing;
+                    e.writing = true;
                     let held = index_place(e, base, at);
+                    e.writing = before;
                     if e.stuck {
                         return unknown_value();
                     }
@@ -8069,8 +8200,14 @@ fn guess_ty(e: &mut Emit, x: &ast::Expr) -> String {
             if owner.same(&text) {
                 return "char".to_string();
             }
+            if !is_array(&owner) {
+                // Indexed by the method the program wrote for it, so what
+                // one element *is* is what that method answers with
+                // (Ch. 2 §3.1).
+                return index_answer(e, &owner);
+            }
             let which = def_at(&e.defs, &owner);
-            if which < 0 || !is_array(&owner) {
+            if which < 0 {
                 return "".to_string();
             }
             name_head(&e.defs[which].fields[0])
@@ -9617,8 +9754,34 @@ pub fn context(items: &Vec<ast::Item>) -> Cx {
 fn family_answer(t: &ast::Ty) -> String {
     match t {
         ast::Ty::Unit => "()".to_string(),
+        // The one head that keeps what it was written with. Everywhere else
+        // a `&` is dropped because TIR calls an address an address whatever
+        // is at the other end — but a family answering `&T` answers with a
+        // **place**, and `v[i]` is the place and not the address (Ch. 3
+        // §2.1). Without it the head is empty and the family is refused.
+        ast::Ty::Ref(held, m) => {
+            let inner = head_of(&*held);
+            let mut out: String = Vec::new();
+            out.push('&');
+            out.push_str(&inner);
+            out
+        }
         _ => written_head(t),
     }
+}
+
+/// `subst`, through a reference: `&T` under `T = t27` is `&t27`, which the
+/// plain reading cannot say because it matches a name whole.
+fn subst_through(tyvars: &Vec<String>, key: &Vec<String>, name: &str) -> String {
+    let points_at = referent_name(name);
+    if points_at.len() == 0 {
+        return subst(tyvars, key, name);
+    }
+    let inner = subst(tyvars, key, &points_at);
+    let mut out: String = Vec::new();
+    out.push('&');
+    out.push_str(&inner);
+    out
 }
 
 pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
@@ -9954,8 +10117,11 @@ fn generic_call(
     let mut into: String = Vec::new();
     let mut answer: String = Vec::new();
     if given.len() == front.len() {
-        let head = subst(&front, given, &e.families[fam].ret);
-        if scalar_named(&head).same("?") && !answers_nothing(&head) {
+        let head = subst_through(&front, given, &e.families[fam].ret);
+        // A reference is an address and an address is a value, so nothing is
+        // taken for it: `-> &T` answers with where something already is.
+        let addressed = referent_name(&head).len() > 0;
+        if scalar_named(&head).same("?") && !answers_nothing(&head) && !addressed {
             // What a family answers with is remembered as a *head* — `Vec`
             // for a `-> Vec<T>` — so under a key it is the family to
             // instantiate. A head that is a type parameter is not: `-> T`
@@ -10029,9 +10195,10 @@ fn generic_call(
         key.push(found);
         t += 1;
     }
-    let ret = subst(&e.families[fam].tyvars, &key, &e.families[fam].ret);
+    let ret = subst_through(&e.families[fam].tyvars, &key, &e.families[fam].ret);
     let none = answers_nothing(&ret);
-    if answer.len() == 0 && !none && scalar_named(&ret).same("?") {
+    let addressed = referent_name(&ret).len() > 0;
+    if answer.len() == 0 && !none && !addressed && scalar_named(&ret).same("?") {
         e.stuck = true;
         return unknown_value();
     }
@@ -10643,6 +10810,7 @@ fn drop_glue(
         owner_name: "".to_string(),
         strings: ast::copy_names(&work.strings),
         glue: copy_insts(&work.glue),
+        writing: false,
     };
     remake(&mut e, &work.instances);
     settle(&mut e);
