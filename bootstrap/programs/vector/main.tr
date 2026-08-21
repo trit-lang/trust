@@ -81,7 +81,38 @@ fn narrow() -> taddr {
     v.len()
 }
 
+// An element that owns a **destructor**, which is the one thing about a
+// `Vec` that is not about the `Vec`. `drop.Vec` at `Vec<taddr>` has to know
+// how big a `Vec<taddr>` is and that it has a destructor of its own — and
+// `Vec.taddr` is not a definition this file wrote. It was made while `held`
+// was being lowered and would be gone by the time the destructor is read
+// (G9.147).
+fn nested() -> taddr {
+    let mut v: Vec<Vec<taddr>> = Vec::new();
+    let mut inner: Vec<taddr> = Vec::new();
+    inner.push(7);
+    v.push(inner);
+    v.len()
+}
+
+// The same thing through a struct, where the element's destructor is not
+// its own but its field's: nobody wrote `impl Drop for Held`, so its glue
+// is made where it is first asked for — and making it is what asks for the
+// `Vec<taddr>`'s.
+struct Held {
+    v: Vec<taddr>,
+}
+
+fn owning() -> taddr {
+    let mut v: Vec<Held> = Vec::new();
+    let mut inner: Vec<taddr> = Vec::new();
+    inner.push(1);
+    v.push(Held { v: inner });
+    v.len()
+}
+
 fn main() -> t27 {
-    (empty() + many() + asked() + emptied() + narrow()) as t27
+    (empty() + many() + asked() + emptied() + narrow() + nested() + owning())
+        as t27
         + one() + (none_left() as t27)
 }

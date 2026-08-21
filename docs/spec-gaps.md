@@ -2626,6 +2626,42 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.147 — a destructor is handed a key that is a name, and a name says
+nothing about what to lay out.** G9.59 said a mangled name cannot be read
+back into a family and a key. G9.116 said the same thing about glue and
+recorded the request instead of the name. This is where the two meet:
+`drop.Vec` under the key `Vec.taddr` is a whole function whose every
+`self.held.read(i)` has to know that `Vec.taddr` is nine trytes and owns a
+destructor — and `Vec.taddr` is not one of the definitions the *file* wrote.
+It was made while some other function was being lowered, and it went away
+with that function.
+
+Ch. 4 §2.5 does not say a monomorphization is a definition, because in a
+compiler that rewrites the body there is nothing to say: the argument is a
+type and it is substituted in. Reading the body again under a key is the
+other way to do it, and it needs the argument to still *be* something when
+the second reading starts. So `Work.instances` carries every instantiation a
+module has made across the readings, and a fresh reading replays them before
+it begins — in the order they were learned, which is inner-first because that
+is the order `instantiate` recurses in. It is not a cache. It is the only
+record that `Vec.taddr` was ever `Vec` at `taddr`.
+
+The second half is an order, and the order is the text. Destructors nobody
+wrote and instantiations of families are **two queues and one loop**, with
+the unwritten glue taking priority — because either queue fills the other.
+`drop.Vec.Own` is an instantiation, and making it is what discovers that
+`Own` needs glue; `drop.Own` is glue, and making it is what discovers that
+its `Vec<taddr>` field needs an instantiation. Draining one queue to the end
+and then the other asks for the second thing later than it was wanted, and
+two implementations that both terminate then print the same functions in
+different orders. `bootstrap/lower.tr` ran two phases with the
+instantiations between them and diverged on exactly that shape; it runs one
+loop now, which is what `lower.rs` already did with `extra_fns` popped ahead
+of `pending`.
+
+`Vec<Vec<t27>>`, `Vec<String>` and a struct holding a `Vec` all lower now,
+which was the last thing G9.116 listed as refused.
+
 **G9.146 — `Raw<T>::read` moves a `T` out, and nothing says where it lands
 when a `T` is an aggregate.** Ch. 5 §2.7 gives `read` one sentence: the `i`-th,
 moved out. Where `T` is a scalar that sentence is a `load` and there is nothing

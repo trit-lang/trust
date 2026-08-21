@@ -133,6 +133,14 @@ pub struct Work {
     /// the only place the key is known is where the drop is *written* — so
     /// it is recorded there, as a job is (Ch. 4 §2.5).
     pub glue: Vec<Inst>,
+    /// Every **type** the module has instantiated, in the order it made
+    /// them. Each function is lowered against a table of the definitions the
+    /// *file* wrote, and a member of a family is not one of those — it is
+    /// made where it is first named and lost when that function is done. A
+    /// key is a name and not a shape, so `Vec.taddr` arriving as the key of
+    /// `drop.Vec` says nothing about what to build: this is the only record
+    /// of it, and a fresh reading replays it before it starts.
+    pub instances: Vec<Inst>,
 }
 
 /// What a function is lowered against: everything about the file that is not
@@ -1035,6 +1043,7 @@ pub fn function(
         c += 1;
     }
 
+    remake(&mut e, &work.instances);
     settle(&mut e);
 
     // What `self` points at is the receiver's *instantiation*, not the
@@ -1324,6 +1333,16 @@ pub fn function(
     while d < e.glue.len() {
         work.glue.push(one_inst(&e.glue[d]));
         d += 1;
+    }
+    // And what it *made* goes back too: a later reading is handed a key that
+    // is a name, and this is the only thing that says what the name was
+    // built from.
+    let mut y: taddr = 0;
+    while y < e.instances.len() {
+        if !known_inst(&work.instances, &e.instances[y].full) {
+            work.instances.push(one_inst(&e.instances[y]));
+        }
+        y += 1;
     }
 
     start(&mut e, "^");
@@ -4866,6 +4885,18 @@ fn one_inst(from: &Inst) -> Inst {
     }
 }
 
+/// Whether that name is already among them.
+fn known_inst(from: &Vec<Inst>, full: &str) -> bool {
+    let mut i: taddr = 0;
+    while i < from.len() {
+        if from[i].full.same(full) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 /// The instantiations, copied.
 fn copy_insts(from: &Vec<Inst>) -> Vec<Inst> {
     let mut out: Vec<Inst> = Vec::new();
@@ -5113,6 +5144,7 @@ pub fn destructor(
         strings: ast::copy_names(&work.strings),
         glue: copy_insts(&work.glue),
     };
+    remake(&mut e, &work.instances);
     settle(&mut e);
     let at = def_at(&e.defs, owner);
     if at < 0 {
@@ -5181,6 +5213,16 @@ pub fn destructor(
     while d < e.glue.len() {
         work.glue.push(one_inst(&e.glue[d]));
         d += 1;
+    }
+    // And what it *made* goes back too: a later reading is handed a key that
+    // is a name, and this is the only thing that says what the name was
+    // built from.
+    let mut y: taddr = 0;
+    while y < e.instances.len() {
+        if !known_inst(&work.instances, &e.instances[y].full) {
+            work.instances.push(one_inst(&e.instances[y]));
+        }
+        y += 1;
     }
     let mut q = work.jobs.len();
     while q < e.jobs.len() {
@@ -9045,6 +9087,25 @@ fn instantiate(e: &mut Emit, head: &str, key: &Vec<String>) -> String {
     full
 }
 
+/// Every instantiation an earlier reading made, made again here.
+///
+/// The definitions a function is lowered against are the *file's*, and a
+/// member of a family is not one of those. `Vec<Vec<taddr>>` makes
+/// `Vec.taddr` where it is written, and the destructor of the outer one is a
+/// separate reading that is handed `Vec.taddr` as a **name** — with no way to
+/// read it back into a family and a key, and so no way to lay it out. What
+/// the earlier reading knew is replayed instead, in the order it was learned,
+/// which is inner-first because that is the order `instantiate` recurses in.
+fn remake(e: &mut Emit, from: &Vec<Inst>) {
+    let mut i: taddr = 0;
+    while i < from.len() {
+        let key = ast::copy_names(&from[i].key);
+        let base = from[i].base.to_string();
+        let _ = instantiate(e, &base, &key);
+        i += 1;
+    }
+}
+
 /// Read every definition's fields once more, now that instantiating is
 /// possible.
 ///
@@ -10187,6 +10248,7 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
         closed: Vec::new(),
         strings: Vec::new(),
         glue: Vec::new(),
+        instances: Vec::new(),
     };
     // Ordinary functions first, then the impls, then the instantiations of
     // Ch. 4 §2.5 — a call is what asks for one, so they are known last.
@@ -10323,20 +10385,11 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
         }
     }
 
-    // The destructors, before the instantiations: a drop is written at the
-    // *end* of a scope, so it is the most recent thing asked for, and a
-    // stack gives back the most recent first (G9.58).
-    let held = glue(items, &out, &mut work);
-    let mut h: taddr = 0;
-    while h < held.len() {
-        out.push(Made {
-            name: held[h].name.to_string(),
-            text: held[h].text.to_string(),
-        });
-        h += 1;
-    }
-
-    let extra = instantiations(items, &mut work);
+    // The destructors and the instantiations together, because they ask for
+    // each other: a drop is written at the *end* of a scope, so it is the
+    // most recent thing asked for and comes back first (G9.58) — and what a
+    // destructor drops is asked for while it is made.
+    let extra = instantiations(items, &out, &mut work);
     let mut z: taddr = 0;
     while z < extra.len() {
         out.push(Made {
@@ -10344,19 +10397,6 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
             text: extra[z].text.to_string(),
         });
         z += 1;
-    }
-
-    // The destructors nobody wrote, and the ones written on a *family* —
-    // both are asked for where a drop is written down, because that is the
-    // only place the key is known (Ch. 4 §2.5).
-    let extra = glue(items, &out, &mut work);
-    let mut g: taddr = 0;
-    while g < extra.len() {
-        out.push(Made {
-            name: extra[g].name.to_string(),
-            text: extra[g].text.to_string(),
-        });
-        g += 1;
     }
 
     // The tables the coercions asked for. Nothing recorded them while they
@@ -10604,6 +10644,7 @@ fn drop_glue(
         strings: ast::copy_names(&work.strings),
         glue: copy_insts(&work.glue),
     };
+    remake(&mut e, &work.instances);
     settle(&mut e);
     // A destructor for one member of a family is that family's type read
     // under a key, which is what makes `Vec.char` exist at all (Ch. 4 §2.5).
@@ -10683,6 +10724,16 @@ fn drop_glue(
         work.glue.push(one_inst(&e.glue[d]));
         d += 1;
     }
+    // And what it *made* goes back too: a later reading is handed a key that
+    // is a name, and this is the only thing that says what the name was
+    // built from.
+    let mut y: taddr = 0;
+    while y < e.instances.len() {
+        if !known_inst(&work.instances, &e.instances[y].full) {
+            work.instances.push(one_inst(&e.instances[y]));
+        }
+        y += 1;
+    }
     // A destructor drops what it held, and one of those may be a family's:
     // what this asked for goes back to the queue the caller drains, exactly
     // as a function's does.
@@ -10720,39 +10771,6 @@ fn drop_glue(
     }
     out.push_str("}\n");
     true
-}
-
-/// The destructors this module has to make: the ones nobody wrote, and the
-/// ones written on a **family**, which are one function per instantiation
-/// like any other member (Ch. 4 §2.5).
-///
-/// Both are asked for where a drop is *written down* — `drop.Vec.char`
-/// cannot be read back into `Vec` and `char` — so the queue is what the
-/// emitters recorded, and it grows as they are made: a destructor that
-/// drops a field asks for that field's.
-///
-/// Drained as a **stack**, which is the order the other implementation
-/// gives back and the same question G9.58 asked about instantiations.
-fn glue(items: &Vec<ast::Item>, made: &Vec<Made>, work: &mut Work) -> Vec<Made> {
-    let mut out: Vec<Made> = Vec::new();
-    let mut done: Vec<String> = Vec::new();
-    loop {
-        let at = last_wanted(&work.glue, &done, made, &out);
-        if at < 0 {
-            return out;
-        }
-        let full = work.glue[at].full.to_string();
-        let base = work.glue[at].base.to_string();
-        let key = ast::copy_names(&work.glue[at].key);
-        done.push(full.to_string());
-        let mut text: String = Vec::new();
-        if drop_glue(items, &full, &base, &key, work, &mut text) {
-            let mut named: String = Vec::new();
-            named.push_str("drop.");
-            named.push_str(&full);
-            out.push(Made { name: named, text: text });
-        }
-    }
 }
 
 /// The `impl Drop` written for a type, or nothing where nobody wrote one.
@@ -11198,14 +11216,45 @@ fn in_name(c: char) -> bool {
 }
 
 /// Every instantiation the queue asks for, drained: the members of each
-/// family that this program contains (Ch. 4 §2.5).
+/// family that this program contains (Ch. 4 §2.5), and the destructors
+/// nobody wrote along with them.
 ///
 /// It runs after the ordinary functions and the impls, because that is when
 /// what a program asks for is known — a call is the only thing that asks.
-pub fn instantiations(items: &Vec<ast::Item>, work: &mut Work) -> Vec<Made> {
+///
+/// Two queues and one loop, because either one fills the other: a destructor
+/// asks for the destructors of what it holds, and a `drop.Vec.Own` asks for
+/// `drop.Own`. Both are drained as **stacks** — the most recently asked for
+/// first, which is the order the other implementation gives back (G9.58).
+pub fn instantiations(
+    items: &Vec<ast::Item>,
+    before: &Vec<Made>,
+    work: &mut Work,
+) -> Vec<Made> {
     let mut made: Vec<Made> = Vec::new();
     let mut done: Vec<String> = Vec::new();
+    let mut glued: Vec<String> = Vec::new();
     loop {
+        // A destructor nobody wrote goes first, always — including one asked
+        // for by an instantiation that was made a moment ago. `drop.Own` is
+        // where a `Vec<taddr>` field is found to need one, so deferring it
+        // would ask for that `Vec`'s destructor later than it was wanted,
+        // and the order things are asked in is the order they are printed.
+        let g = last_wanted(&work.glue, &glued, before, &made);
+        if g >= 0 {
+            let full = work.glue[g].full.to_string();
+            let base = work.glue[g].base.to_string();
+            let key = ast::copy_names(&work.glue[g].key);
+            glued.push(full.to_string());
+            let mut text: String = Vec::new();
+            if drop_glue(items, &full, &base, &key, work, &mut text) {
+                let mut named: String = Vec::new();
+                named.push_str("drop.");
+                named.push_str(&full);
+                made.push(Made { name: named, text: text });
+            }
+            continue;
+        }
         let at = pending_at(&work.jobs, &done);
         if at < 0 {
             return made;
