@@ -144,17 +144,20 @@ those are the same type at exactly one of them.
 
 ## What the read still walks past
 
-Measured over the corpus: 167 of 172 bodies read cleanly, 4 were unsure and
-therefore say nothing, and 1 was rejected — `Range<T>`, the true positive
-below, which is not reported either.
+Measured over the corpus: 174 of 175 bodies read cleanly, none unsure, and one
+rejected — `Range<T>`, the true positive below, which is not reported.
 
-The 4 are all one shape: a method named on a type the read knows only as
-opaque. `Map.all`, `Map.any`, `Map.for_each` and `Map.position` work in
-`Map`'s `B`, which is the closure's result type and has nothing to be read out
-of. A projection is the same shape from the other side — `T::Item` is a type,
-but what *it* is bound by is not read out of the trait that declared it.
+So nothing in the corpus walks past any more. One question the read cannot
+answer remains, and no body happens to ask it: **what a projection is bound
+by**. `T::Item` is a type of its own, but the bounds an associated type was
+declared with are not read out of the trait that declared it, so a method
+called on a projection is unanswerable. Ch. 4 §1.7 allows those bounds — `type
+Iter: Iterator;` — and `parse.rs` reads one and **throws it away**, on a
+comment claiming the impl is checked directly. It is not: an impl choosing a
+type that fails the bound is accepted (G9.142). Fixing that is what would give
+a projection its bounds, and closing this is the same work.
 
-Six groups have been closed since the read landed.
+Seven groups have been closed since the read landed.
 
 - **An `Fn`-bounded parameter called as a function** (15). `param_call` reads
   the signature out of the bound: `impl Fn(A) -> R` and `F: Fn(A) -> R` are one
@@ -189,9 +192,18 @@ Six groups have been closed since the read landed.
   than failed — a parameter implements nothing yet, and the call sites that
   emit code ask the same question with a real type in hand. The instantiation
   this queues is never lowered: the read runs after `pending` has drained.
+- **An associated type the self type does not name** (7). `Map<I, F>`'s `Item`
+  is what `F`'s closure returns, so `assoc_of_instantiation` settles it from
+  the closure's recorded signature — and under a read `F` is a parameter with
+  no closure behind it. The impl's own parameter then stands for itself: `type
+  Item = B` answers `B`, which is the name the body's values already have, so
+  the two agree where an invented `Map.I.F::Item` would not. The answer is
+  deliberately **not cached**, since `Types::assoc` outlives the read. Four
+  bodies were unsure on this and three more could not have their signatures
+  written at all.
 
-`never_called`-shaped bugs still hide in the four bodies that are unsure — and
-in the comparisons a read body passed over. Neither is `Sized`.
+`never_called`-shaped bugs now hide only in the comparisons a read body passed
+over, and in shapes the corpus does not contain. Neither is `Sized`.
 
 There is also a hole that is not the read's: a program may declare an item the
 prelude also declares (Ch. 6 §3.3), and `mod.rs`'s `merged` drops the prelude's

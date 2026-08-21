@@ -2075,6 +2075,24 @@ fn an_associated_type_binding_says_what_a_projection_is() {
          fn f<T: Feed>(x: &T) -> t27 { x.take(true) } \
          fn main() -> t27 { 0 }",
     );
+
+    // An impl may choose a type the *self type does not name*: `W<A, F>`'s
+    // `Out` is what `F`'s closure returns, and under a read `F` is a parameter
+    // with no closure behind it. `Out` is then the impl's own `R`, standing
+    // for itself — which is the name the body's values already have, so the
+    // two agree and the read carries on to the rejection below. Resolving it
+    // is what used to stop this read before it began.
+    let e = error(
+        "trait Area { fn area(&self) -> t27; } \
+         trait Give { type Out; fn give(&self) -> Self::Out; } \
+         struct W<A, F> { a: A, f: F } \
+         impl<A: Area, R, F: Fn(t27) -> R> Give for W<A, F> { \
+             type Out = R; \
+             fn give(&self) -> R { let n: Self::Out = (self.f)(1); self.a.no_such() } \
+         } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("there is no `no_such` there"), "{e}");
 }
 
 #[test]
@@ -2150,6 +2168,21 @@ fn known_limit_reading_a_generic_body_is_fail_open() {
     tir_of(
         "trait Into<T> { fn into(&self) -> T; } \
          fn conv<T: Into<t27>>(x: &T) -> t27 { x.no_such_method() } \
+         fn main() -> t27 { 0 }",
+    );
+}
+
+#[test]
+fn known_limit_a_bound_on_an_associated_type_is_not_enforced() {
+    // Ch. 4 §1.7 says an associated type may carry bounds. The parser reads
+    // one and throws it away, on the claim that the impl is checked directly
+    // — and nothing checks it, so a bound written where the spec says to write
+    // it is worth nothing and the author cannot find out (G9.142).
+    tir_of(
+        "trait Show { fn show(&self) -> t27; } \
+         trait Holds { type Item: Show; fn get(&self) -> Self::Item; } \
+         struct P { x: t27 } struct Q { y: t27 } \
+         impl Holds for P { type Item = Q; fn get(&self) -> Q { Q { y: 1 } } } \
          fn main() -> t27 { 0 }",
     );
 }

@@ -600,10 +600,25 @@ impl Types {
             );
         }
         let mut env: HashMap<String, Ty> = params.into_iter().zip(args.iter().cloned()).collect();
+        // Whether any of them was left standing for itself below.
+        let mut opaque = false;
         // The parameters the self type does not name, each settled by a
         // closure's recorded signature (Ch. 4 §4.3). This is what lets
         // `Map`'s `Item` be `B` rather than a fixed type.
         for e in &extras {
+            // A generic body being read, one level up from a projection
+            // through a bare parameter: `Map<I, F>`'s `Item` is what `F`'s
+            // closure returns, and under a read `F` is a parameter with no
+            // closure behind it. So the parameter the impl wrote — `type Item
+            // = B` — stands for itself, which is the name the body's own
+            // types are in and therefore the one they agree with (issue/001,
+            // G9.141). Nothing else can put a `Ty::Param` here: an
+            // instantiation's arguments are concrete.
+            if matches!(args.get(e.from), Some(Ty::Param(_))) {
+                env.insert(e.param.clone(), Ty::Param(e.param.clone()));
+                opaque = true;
+                continue;
+            }
             let Some(cname) = args.get(e.from).and_then(nominal_name) else {
                 return err(
                     span,
@@ -631,9 +646,13 @@ impl Types {
             env.insert(e.param.clone(), t);
         }
         let resolved = resolve_ty_env(&written, self, &env)?;
-        self.assoc
-            .borrow_mut()
-            .insert((mangled, name.to_string()), resolved.clone());
+        // An answer true of one read only: `self.assoc` outlives it, and the
+        // instantiation that asks this next has a real type in the slot.
+        if !opaque {
+            self.assoc
+                .borrow_mut()
+                .insert((mangled, name.to_string()), resolved.clone());
+        }
         Ok(Some(resolved))
     }
 

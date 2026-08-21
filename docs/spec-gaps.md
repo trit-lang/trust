@@ -2621,6 +2621,30 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.142 — a bound on an associated type is parsed and thrown away.** Ch. 4
+§1.7 says an associated type "may carry bounds (`type Iter: Iterator;`)".
+`parse.rs` reads one, discards it, and says why in a comment: *"A bound on an
+associated type is accepted and ignored: it constrains the impl, and the impl
+is checked directly."*
+
+The second half of that sentence is false. Nothing checks it:
+
+```
+trait Show { fn show(&self) -> t27; }
+trait Holds { type Item: Show; fn get(&self) -> Self::Item; }
+struct Q { y: t27 }
+impl Holds for P { type Item = Q; fn get(&self) -> Q { … } }   // accepted
+```
+
+`Q` implements nothing, and the program compiles. So a bound written where the
+spec says to write it is silently worth nothing — which is worse than
+rejecting the syntax, because the author has no way to find out.
+
+*Not fixed.* It is also the last thing standing between the generic-body read
+and the question it cannot answer: what a projection is bound by (G9.141,
+issue/001). Keeping the bounds would give a projection methods, and checking
+them at the impl is the same information used at the other end.
+
 **G9.141 — what `T::Item` is before there is a `T`.** Ch. 4 §1.7 says an
 associated type is the type an implementation chooses. While a generic body is
 read there is no implementation, so `T::Item` names nothing — and 25 of the
@@ -2679,7 +2703,7 @@ Ch. 4 §2.2 unimplemented, which is where this was.
 **G9.139 — what a checker owes when it does not understand the program.**
 `check_generic_bodies` reads each generic body once with every parameter
 bound to `Ty::Param(name)`, and the ways that read fails are mostly the reader
-running out of road rather than the body being wrong. Six shapes have been
+running out of road rather than the body being wrong. Seven shapes have been
 closed since it landed: a parameter called as a function (15 bodies, read out
 of its `Fn` bound), an associated type projected through a parameter (25,
 answered as a projection type of its own), an associated function reached
@@ -2690,11 +2714,17 @@ arguments to infer them from), and a callee whose own parameter is settled by
 inference (5, which stand for themselves for the same reason, and whose bounds
 are therefore left to the real call site to check).
 
-What is left is one shape, and it is the one the read is furthest from: **a
-question about what an opaque type implements**. A projection's bounds are not
-read out of the trait that declared it, and a parameter a callee's inference
-would have settled has none to read at all — so a method named on either is
-unanswerable.
+A seventh followed from the sixth: an impl may choose an associated type the
+self type does not name — `Map<I, F>`'s `Item` is what `F`'s closure returns —
+and under a read `F` is a parameter with no closure behind it. The impl's own
+parameter then stands for itself, which is the name the body's values already
+have, so the two agree. Resolving that is what used to stop four bodies, and
+what used to stop three more before their signatures could be written at all.
+
+**What is left is one body**: `Range<T>`, the true positive of G9.137, which
+is not reported. The shape the read still cannot answer is **what an opaque
+type implements** — a projection's bounds are not read out of the trait that
+declared it — and no body in the corpus asks it today.
 
 If the read's own `Err` were reported, every one of those would be a false
 rejection of a program that compiles and runs.
@@ -2721,11 +2751,11 @@ asked about. The read skips the check rather than failing it. Nothing is lost:
 the read emits no code, and the call sites that do emit code ask the same
 question with a real type in hand.
 
-The measured result is 167 of 172 bodies read cleanly, 4 unsure, and 1
-rejected — that one being `Range<T>`, the true positive of G9.137. So
-`never_called`-shaped bugs still hide in the four, and in the parts of a read
-body that were passed over. That is the honest statement of what Ch. 4 §2.2
-buys today, and it is a statement about
+The measured result is 174 of 175 bodies read cleanly, none unsure, and 1
+rejected — `Range<T>` again. So `never_called`-shaped bugs now hide only in
+the parts of a read body that were passed over, and in whatever shape the
+corpus does not happen to contain. That is the honest statement of what Ch. 4
+§2.2 buys today, and it is a statement about
 *coverage*, which no chapter has vocabulary for. Ch. 4 says a body is checked.
 It does not say what a compiler may do when it cannot.
 
@@ -2779,9 +2809,9 @@ which is precisely the C++ template failure mode Ch. 4 Appendix B's scorecard
 claims is removed by construction, sitting in the prelude, accepted for as
 long as it has existed because nothing looked inside a generic body.
 
-The read looks. It finds it. It is the one true positive among the six bodies
-the read rejects, and it is **not reported**, because reporting it fails the
-prelude and therefore every program.
+The read looks. It finds it. It is now the *only* body in the corpus the read
+does not get through, and it is **not reported**, because reporting it fails
+the prelude and therefore every program.
 
 *Not decided.* Two ways out and both are the user's: a numeric bound in the
 language, so `Range<T: Num>` can be written and the body checked against it,

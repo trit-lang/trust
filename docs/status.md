@@ -568,6 +568,7 @@ pointed the wrong way, about a memory-safety hole.
 |---|---|
 | reading a generic body is fail-open — what an opaque type implements is not known | `known_limit_reading_a_generic_body_is_fail_open` |
 | there is no `Sized` bound | `known_limit_there_is_no_sized_bound` |
+| a bound on an associated type is parsed and thrown away | `known_limit_a_bound_on_an_associated_type_is_not_enforced` |
 | shadowing a prelude type breaks what named it | `known_limit_shadowing_a_prelude_type_breaks_what_named_it` |
 | a returned borrow is rooted syntactically | `known_limit_a_returned_borrow_is_rooted_syntactically` |
 | a closure captures by variable, not by place | `known_limit_a_closure_captures_by_variable_not_by_place` |
@@ -591,15 +592,16 @@ the entire `Function` a read produces is thrown away (G9.140).
 
 What remains:
 
-- **The read is fail-open, and its coverage is 167 of 172 bodies.** A body the
+- **The read is fail-open, and its coverage is 174 of 175 bodies.** A body the
   reader does not fully understand reports nothing at all — not its verdicts
   either, since a body half-understood is a body whose rejections might be
-  consequences of the half that was not (G9.139). One shape walks through
-  unread, and it is the question the read is furthest from answering: what an
-  **opaque** type implements — a projection, or a parameter a callee's
-  inference would have settled. The one thing that is *not* fail-open is an
-  argument's type where both sides are ground — no parameter, and no nominal
-  name that an instantiation could rename.
+  consequences of the half that was not (G9.139). The one body left is
+  `Range<T>`, which the read rejects correctly and cannot report (G9.137). The
+  question the read still cannot answer is what an **opaque** type implements —
+  a projection's bounds are not read out of the trait that declared it — and no
+  body in the corpus happens to ask it. The one thing that is *not* fail-open
+  is an argument's type where both sides are ground — no parameter, and no
+  nominal name that an instantiation could rename.
 - **Shadowing a prelude type breaks the prelude items that named it.**
   `merged` drops the shadowed item and the impls on or for it, and keeps
   everything that *mentions* it — so a program declaring anything called
