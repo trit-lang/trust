@@ -1,0 +1,78 @@
+// A **method** in tail position whose answer is an aggregate (TIR §3).
+//
+// A call to a name already answered into `%sret` directly: the storage the
+// caller gave is the storage the callee writes, and nothing is copied. A
+// method is the same fact and was refused, because the receiver is worked
+// out in the middle of `value` and `value` had nowhere to be told where the
+// answer goes. It is told now — `method_value` takes a destination — and
+// what that replaces is a temporary and a copy `trustc` does not write,
+// which is a disagreement about text and so a failed bootstrap.
+//
+// **Only a receiver that is a place.** One that is not has to be lowered to
+// *be* a receiver, and it is lowered before the storage is settled, so in
+// `trustc` the receiver takes the destination first and the method's own
+// answer goes to a temporary that is then copied — `made(n).twin()` writes
+// `made`'s answer into `%sret` and copies `twin`'s over it. That is a
+// second shape and this implementation refuses it, which is why there is no
+// chained receiver below.
+
+struct Pair { a: t27, b: t27 }
+
+impl Pair {
+    fn twin(&self) -> Pair {
+        Pair { a: self.a, b: self.b }
+    }
+
+    fn shifted(&self, by: t27) -> Pair {
+        Pair { a: self.a + by, b: self.b + by }
+    }
+
+    fn sum(&self) -> t27 {
+        self.a + self.b
+    }
+}
+
+// A place receiver, and the method takes nothing.
+fn same_again(p: &Pair) -> Pair {
+    p.twin()
+}
+
+// A place receiver and an argument, which is lowered after the storage is
+// settled and before the call.
+fn moved(p: &Pair, by: t27) -> Pair {
+    p.shifted(by)
+}
+
+// A field of an aggregate is a place, and reaching one through a reference
+// is still a place.
+struct Wide { p: Pair, k: t27 }
+
+fn inner(w: &Wide) -> Pair {
+    w.p.shifted(w.k)
+}
+
+// The same receiver where the answer is *not* an aggregate, so that both
+// paths out of `method_value` are walked.
+fn added(p: &Pair) -> t27 {
+    p.sum()
+}
+
+// A `return` in the middle is the same destination as the tail, which is
+// what `23.tr` established for aggregates built in place and this extends
+// to one a method answers with.
+fn either(p: &Pair, n: t27) -> Pair {
+    if n > 0 {
+        return p.twin();
+    }
+    p.shifted(n)
+}
+
+fn main() -> t27 {
+    let p = Pair { a: 1, b: 2 };
+    let q = same_again(&p);
+    let r = moved(&q, 3);
+    let w = Wide { p: r, k: 4 };
+    let t = inner(&w);
+    let u = either(&t, 1);
+    added(&u)
+}

@@ -3419,12 +3419,14 @@ fn aggregate_tail(e: &mut Emit, x: &ast::Expr, dest: &str, owner: &str) {
             let v = aggregate_call(e, callee, &big, dest, "", args);
             let _ = v;
         }
-        // A *method* in tail position is the same fact and is refused: the
-        // receiver is worked out inside `value`, which has no destination
-        // to be told about, and copying through a temporary would be text
-        // the other implementation does not write.
+        // A *method* in tail position is the same fact: what the callee
+        // wrote into `%sret` is already this function's answer. It was
+        // refused until `method_value` existed to be told a destination,
+        // because the alternative was a copy through a temporary that the
+        // other implementation does not write.
         ast::Expr::Method(recv, name, args) => {
-            e.stuck = true;
+            let v = method_value(e, &*recv, name, args, dest, owner);
+            let _ = v;
         }
         _ => {
             let v = value(e, x, owner);
@@ -6546,231 +6548,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
         // `x.m(a)` — the receiver is the first argument, as an address,
         // and the function is named after the type it is written on.
         ast::Expr::Method(recv, name, args) => {
-            let missing: taddr = 0 - 1;
-            let at = match recv {
-                ast::Expr::Name(n) => local_at(e, n),
-                _ => missing,
-            };
-            // A receiver that is not a name is a **place**: `b.a.get()`
-            // asks where `b.a` is and hands that address over. Walking into
-            // a place loads `%p` and not `%v`, because what is loaded is a
-            // step on the way to the object rather than the object itself
-            // — and `place` has already done any reading-through, so only
-            // the plain name below still has one to do (G9.94).
-            //
-            // What it *is* is answered before it is lowered, because a call
-            // whose answer is an aggregate takes the storage for it first
-            // and that decides the numbers (TIR §3). A name costs nothing
-            // to read, so only the other kind waits.
-            let mut owner = if at < 0 {
-                guess_ty(e, recv)
-            } else {
-                e.locals[at].ty.to_string()
-            };
-            if owner.len() == 0 {
-                e.stuck = true;
-                return unknown_value();
-            }
-            let mut slot = if at < 0 {
-                "".to_string()
-            } else {
-                e.locals[at].slot.to_string()
-            };
-            // A receiver that is itself a reference holds the *address* of
-            // the object, so what a method is given is what the slot holds
-            // and not the slot: `self.area()` inside a `&self` method reads
-            // through `self` exactly as `self.field` does (Ch. 3 §2.2).
-            let points_at = referent_name(&owner);
-            if at >= 0 && (owner.same("ptr") || points_at.len() > 0) {
-                owner = if points_at.len() > 0 {
-                    points_at
-                } else {
-                    e.self_ty.to_string()
-                };
-                let held = fresh(e, "v");
-                let mut line: String = Vec::new();
-                line.push_str("    ");
-                line.push_str(&held);
-                line.push_str(" = load ptr ");
-                line.push_str(&slot);
-                e.insts.push(line);
-                slot = held;
-            }
-            // A method through a trait object is the one call in this
-            // language that is not to a name: the receiver's two words say
-            // where the object is and where its table is, and the table
-            // says which function (Ch. 4 §3.3).
-            let named = dyn_trait(&owner);
-            if named.len() > 0 {
-                slot = receiver_at(e, at, recv, &slot, "");
-                if e.stuck {
-                    return unknown_value();
-                }
-                return dyn_call(e, &owner, &named, &slot, name, args);
-            }
-            // A `Raw`'s five methods, which are the compiler's like the
-            // type is (Ch. 5 §2.7).
-            if is_raw(&owner) {
-                slot = receiver_at(e, at, recv, &slot, "");
-                if e.stuck {
-                    return unknown_value();
-                }
-                return raw_method(e, &slot, &owner, name, args);
-            }
-            // The other fat reference answers one of its methods out of
-            // itself: `s.len()` is the second of the two words and no call
-            // at all. Everything else `str` has is a function written on
-            // `impl str` and named after it, and what it is given is the
-            // two words — which is what the slot already holds.
-            let text = str_name();
-            if owner.same(&text) {
-                if name.same("len") && args.len() == 0 {
-                    slot = receiver_at(e, at, recv, &slot, "");
-                    if e.stuck {
-                        return unknown_value();
-                    }
-                    return str_len(e, &slot);
-                }
-                owner = "str".to_string();
-            }
-            // A `String` **is** a `Vec<char>` (Ch. 0 §3.6), and where the
-            // name it is asked for is not one of that type's, `str`'s
-            // methods are tried: a `Vec<char>` is already the two words a
-            // `&str` is — the characters and how many — so what makes the
-            // fallback work is building that pair and nothing else (G9.36).
-            //
-            // Under a name `Vec<char>` does not have, which is why `same`
-            // is not called `eq`: an `eq` here would be hidden by the one
-            // `Eq for Vec<char>` writes, and text could not be compared
-            // with a literal at all.
-            let mut from_text: String = Vec::new();
-            if is_string(e, &owner) && !has_method(e, &owner, name) {
-                from_text = slot.to_string();
-                owner = "str".to_string();
-            }
-            let mut full: String = Vec::new();
-            full.push_str(&owner);
-            full.push_str(".");
-            full.push_str(name);
-            // What the method was written to take. A receiver is `ptr`
-            // where it is a reference and the type itself where it is by
-            // value, and a scalar taken by value is *loaded* — what is
-            // handed over is the value and not where it is (Ch. 3 §2.2).
-            // Where the answer is an aggregate the load waits: the storage
-            // is what the function is for and is taken first (TIR §3).
-            let receiver = param_type(e, &full, 0);
-            let scalar = scalar_named(&receiver);
-            let by_value = if scalar.same("?") {
-                "".to_string()
-            } else {
-                receiver.to_string()
-            };
-            // A generic method is a family like any other; what tells it
-            // from a free one is that its receiver is already an argument.
-            // Where the receiver is an *instantiation*, the family is the
-            // one written on the type it instantiates — `Pair.first`, not
-            // `Pair.t27.first` — and its own key starts with the
-            // receiver's (Ch. 4 §2.5).
-            let inst = inst_at(e, &owner);
-            let base = if inst < 0 {
-                owner.to_string()
-            } else {
-                e.instances[inst].base.to_string()
-            };
-            let none: Vec<String> = Vec::new();
-            let given = if inst < 0 {
-                none
-            } else {
-                ast::copy_names(&e.instances[inst].key)
-            };
-            let mut under: String = Vec::new();
-            under.push_str(&base);
-            under.push_str(".");
-            under.push_str(name);
-            let fam = family_at(e, &under);
-            if fam >= 0 {
-                slot = receiver_at(e, at, recv, &slot, &by_value);
-                if e.stuck {
-                    return unknown_value();
-                }
-                return generic_call(e, fam, &under, &slot, &given, args);
-            }
-            // The storage a call answers into is taken before the receiver
-            // is evaluated — `%sret` is what the function is *for* (TIR §3)
-            // — **unless the receiver is not a place**. One that is not has
-            // to be lowered to be a receiver at all: `"no".to_string()` is
-            // two words that have to go somewhere first, and where they go
-            // is decided before anything else is. A place needs nothing
-            // made, so it shows neither order.
-            let big = returned_aggregate(e, &full);
-            let sited = is_place_expr(recv);
-            let mut into: String = Vec::new();
-            if big.len() > 0 && sited {
-                into = slot_for(e, "tmp", &big);
-            }
-            if from_text.len() > 0 {
-                // The pair is built where the receiver would have been
-                // evaluated, out of storage the `Vec` already holds.
-                slot = as_text(e, &from_text);
-            } else {
-                slot = receiver_at(e, at, recv, &slot, &by_value);
-            }
-            if e.stuck {
-                return unknown_value();
-            }
-            if big.len() > 0 && !sited {
-                into = slot_for(e, "tmp", &big);
-            }
-            if big.len() > 0 {
-                return aggregate_call(e, &full, &big, &into, &slot, args);
-            }
-            let mut texts: Vec<String> = Vec::new();
-            let mut i: taddr = 0;
-            while i < args.len() {
-                let each = param_type(e, &full, i + 1);
-                let v = value(e, &args[i], &each);
-                if e.stuck {
-                    return unknown_value();
-                }
-                texts.push(v.text);
-                i += 1;
-            }
-            let ty = call_type(e, &full);
-            if e.stuck {
-                return unknown_value();
-            }
-            // A method that answers nothing is a call with no result to
-            // name and no arrow to write (TIR §3.7).
-            let none = answers_nothing(&ty);
-            let out = if none {
-                "".to_string()
-            } else {
-                fresh(e, "r")
-            };
-            let mut line: String = Vec::new();
-            line.push_str("    ");
-            if !none {
-                line.push_str(&out);
-                line.push_str(" = ");
-            }
-            line.push_str("call @");
-            line.push_str(&full);
-            line.push_str("(");
-            line.push_str(&slot);
-            let mut k: taddr = 0;
-            while k < texts.len() {
-                line.push_str(", ");
-                line.push_str(&texts[k]);
-                k += 1;
-            }
-            line.push_str(")");
-            if !none {
-                line.push_str(" -> ");
-                let shown = tir_of(&ty);
-                line.push_str(&shown);
-            }
-            e.insts.push(line);
-            Value { text: out, ty: ty }
+            method_value(e, &*recv, name, args, "", "")
         }
         // `g(x)` where `g` is a closure: what it calls is the `call` of
         // whatever type the closure turned out to be, and the closure
@@ -6870,6 +6648,297 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             unknown_value()
         }
     }
+}
+
+/// Storage a call cannot be given, and so is refused rather than answered
+/// somewhere the caller is not looking.
+///
+/// A vtable, a `Raw`, `str` and a family each answer through a path of their
+/// own, and none of them takes a destination. A caller that offered one has
+/// asked something this does not do.
+fn refuse_dest(e: &mut Emit, dest: &str) -> bool {
+    if dest.len() > 0 {
+        e.stuck = true;
+        return true;
+    }
+    false
+}
+
+/// A method call, and where its answer goes.
+///
+/// `dest` is storage the answer is to be written into rather than a
+/// temporary — in tail position it is `%sret` itself, and what the callee
+/// wrote is already where this function's answer goes (TIR §3). It is empty
+/// everywhere else, and then this takes a temporary the way it always did.
+/// `into_ty` is what the caller expects to find there, and a method
+/// answering with anything else is refused rather than copied through a
+/// temporary the other implementation does not make.
+///
+/// Written apart from `value` because it is the one expression with two
+/// destinations. Every other aggregate-valued expression in tail position —
+/// an `if`, a `match`, a call to a name — already had a way to be told, and
+/// this had none, so it was refused (`aggregate_tail`).
+fn method_value(
+    e: &mut Emit,
+    recv: &ast::Expr,
+    name: &str,
+    args: &Vec<ast::Expr>,
+    dest: &str,
+    into_ty: &str,
+) -> Value {
+    let missing: taddr = 0 - 1;
+    let at = match recv {
+        ast::Expr::Name(n) => local_at(e, n),
+        _ => missing,
+    };
+    // A receiver that is not a name is a **place**: `b.a.get()` asks where
+    // `b.a` is and hands that address over. Walking into a place loads `%p`
+    // and not `%v`, because what is loaded is a step on the way to the object
+    // rather than the object itself — and `place` has already done any
+    // reading-through, so only the plain name below still has one to do
+    // (G9.94).
+    //
+    // What it *is* is answered before it is lowered, because a call whose
+    // answer is an aggregate takes the storage for it first and that decides
+    // the numbers (TIR §3). A name costs nothing to read, so only the other
+    // kind waits.
+    let mut owner = if at < 0 {
+        guess_ty(e, recv)
+    } else {
+        e.locals[at].ty.to_string()
+    };
+    if owner.len() == 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let mut slot = if at < 0 {
+        "".to_string()
+    } else {
+        e.locals[at].slot.to_string()
+    };
+    // A receiver that is itself a reference holds the *address* of the
+    // object, so what a method is given is what the slot holds and not the
+    // slot: `self.area()` inside a `&self` method reads through `self`
+    // exactly as `self.field` does (Ch. 3 §2.2).
+    let points_at = referent_name(&owner);
+    if at >= 0 && (owner.same("ptr") || points_at.len() > 0) {
+        owner = if points_at.len() > 0 {
+            points_at
+        } else {
+            e.self_ty.to_string()
+        };
+        let held = fresh(e, "v");
+        let mut line: String = Vec::new();
+        line.push_str("    ");
+        line.push_str(&held);
+        line.push_str(" = load ptr ");
+        line.push_str(&slot);
+        e.insts.push(line);
+        slot = held;
+    }
+    // A method through a trait object is the one call in this language that
+    // is not to a name: the receiver's two words say where the object is and
+    // where its table is, and the table says which function (Ch. 4 §3.3).
+    let named = dyn_trait(&owner);
+    if named.len() > 0 {
+        if refuse_dest(e, dest) {
+            return unknown_value();
+        }
+        slot = receiver_at(e, at, recv, &slot, "");
+        if e.stuck {
+            return unknown_value();
+        }
+        return dyn_call(e, &owner, &named, &slot, name, args);
+    }
+    // A `Raw`'s five methods, which are the compiler's like the type is
+    // (Ch. 5 §2.7).
+    if is_raw(&owner) {
+        if refuse_dest(e, dest) {
+            return unknown_value();
+        }
+        slot = receiver_at(e, at, recv, &slot, "");
+        if e.stuck {
+            return unknown_value();
+        }
+        return raw_method(e, &slot, &owner, name, args);
+    }
+    // The other fat reference answers one of its methods out of itself:
+    // `s.len()` is the second of the two words and no call at all. Everything
+    // else `str` has is a function written on `impl str` and named after it,
+    // and what it is given is the two words — which is what the slot already
+    // holds.
+    let text = str_name();
+    if owner.same(&text) {
+        if name.same("len") && args.len() == 0 {
+            if refuse_dest(e, dest) {
+                return unknown_value();
+            }
+            slot = receiver_at(e, at, recv, &slot, "");
+            if e.stuck {
+                return unknown_value();
+            }
+            return str_len(e, &slot);
+        }
+        owner = "str".to_string();
+    }
+    // A `String` **is** a `Vec<char>` (Ch. 0 §3.6), and where the name it is
+    // asked for is not one of that type's, `str`'s methods are tried: a
+    // `Vec<char>` is already the two words a `&str` is — the characters and
+    // how many — so what makes the fallback work is building that pair and
+    // nothing else (G9.36).
+    //
+    // Under a name `Vec<char>` does not have, which is why `same` is not
+    // called `eq`: an `eq` here would be hidden by the one `Eq for Vec<char>`
+    // writes, and text could not be compared with a literal at all.
+    let mut from_text: String = Vec::new();
+    if is_string(e, &owner) && !has_method(e, &owner, name) {
+        from_text = slot.to_string();
+        owner = "str".to_string();
+    }
+    let mut full: String = Vec::new();
+    full.push_str(&owner);
+    full.push_str(".");
+    full.push_str(name);
+    // What the method was written to take. A receiver is `ptr` where it is a
+    // reference and the type itself where it is by value, and a scalar taken
+    // by value is *loaded* — what is handed over is the value and not where
+    // it is (Ch. 3 §2.2). Where the answer is an aggregate the load waits:
+    // the storage is what the function is for and is taken first (TIR §3).
+    let receiver = param_type(e, &full, 0);
+    let scalar = scalar_named(&receiver);
+    let by_value = if scalar.same("?") {
+        "".to_string()
+    } else {
+        receiver.to_string()
+    };
+    // A generic method is a family like any other; what tells it from a free
+    // one is that its receiver is already an argument. Where the receiver is
+    // an *instantiation*, the family is the one written on the type it
+    // instantiates — `Pair.first`, not `Pair.t27.first` — and its own key
+    // starts with the receiver's (Ch. 4 §2.5).
+    let inst = inst_at(e, &owner);
+    let base = if inst < 0 {
+        owner.to_string()
+    } else {
+        e.instances[inst].base.to_string()
+    };
+    let none: Vec<String> = Vec::new();
+    let given = if inst < 0 {
+        none
+    } else {
+        ast::copy_names(&e.instances[inst].key)
+    };
+    let mut under: String = Vec::new();
+    under.push_str(&base);
+    under.push_str(".");
+    under.push_str(name);
+    let fam = family_at(e, &under);
+    if fam >= 0 {
+        if refuse_dest(e, dest) {
+            return unknown_value();
+        }
+        slot = receiver_at(e, at, recv, &slot, &by_value);
+        if e.stuck {
+            return unknown_value();
+        }
+        return generic_call(e, fam, &under, &slot, &given, args);
+    }
+    // The storage a call answers into is taken before the receiver is
+    // evaluated — `%sret` is what the function is *for* (TIR §3) — **unless
+    // the receiver is not a place**. One that is not has to be lowered to be
+    // a receiver at all: `"no".to_string()` is two words that have to go
+    // somewhere first, and where they go is decided before anything else is.
+    // A place needs nothing made, so it shows neither order.
+    let big = returned_aggregate(e, &full);
+    // Storage offered is storage for one thing. A method answering with
+    // another aggregate, or with no aggregate at all, is not what it was
+    // taken for, and is refused rather than written somewhere else.
+    if dest.len() > 0 && !big.same(into_ty) {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let sited = is_place_expr(recv);
+    // A receiver that is not a place has to be lowered to *be* a receiver,
+    // and it is lowered before the storage is settled — so in `trustc` the
+    // receiver takes the destination first, and what the method answers
+    // goes to a temporary that is copied. That is a second shape and this
+    // has only the first, so it is refused rather than written the other
+    // way round.
+    if dest.len() > 0 && !sited {
+        e.stuck = true;
+        return unknown_value();
+    }
+    let mut into: String = Vec::new();
+    if big.len() > 0 && sited {
+        into = if dest.len() > 0 {
+            dest.to_string()
+        } else {
+            slot_for(e, "tmp", &big)
+        };
+    }
+    if from_text.len() > 0 {
+        // The pair is built where the receiver would have been evaluated,
+        // out of storage the `Vec` already holds.
+        slot = as_text(e, &from_text);
+    } else {
+        slot = receiver_at(e, at, recv, &slot, &by_value);
+    }
+    if e.stuck {
+        return unknown_value();
+    }
+    if big.len() > 0 && !sited {
+        into = slot_for(e, "tmp", &big);
+    }
+    if big.len() > 0 {
+        return aggregate_call(e, &full, &big, &into, &slot, args);
+    }
+    let mut texts: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < args.len() {
+        let each = param_type(e, &full, i + 1);
+        let v = value(e, &args[i], &each);
+        if e.stuck {
+            return unknown_value();
+        }
+        texts.push(v.text);
+        i += 1;
+    }
+    let ty = call_type(e, &full);
+    if e.stuck {
+        return unknown_value();
+    }
+    // A method that answers nothing is a call with no result to name and no
+    // arrow to write (TIR §3.7).
+    let none = answers_nothing(&ty);
+    let out = if none {
+        "".to_string()
+    } else {
+        fresh(e, "r")
+    };
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    if !none {
+        line.push_str(&out);
+        line.push_str(" = ");
+    }
+    line.push_str("call @");
+    line.push_str(&full);
+    line.push_str("(");
+    line.push_str(&slot);
+    let mut k: taddr = 0;
+    while k < texts.len() {
+        line.push_str(", ");
+        line.push_str(&texts[k]);
+        k += 1;
+    }
+    line.push_str(")");
+    if !none {
+        line.push_str(" -> ");
+        let shown = tir_of(&ty);
+        line.push_str(&shown);
+    }
+    e.insts.push(line);
+    Value { text: out, ty: ty }
 }
 
 /// Where a place is, and what is there: the **storage** an expression names

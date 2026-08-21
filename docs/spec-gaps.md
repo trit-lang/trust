@@ -2626,6 +2626,41 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.145 — a method in tail position answers into `%sret`, and nothing says
+whether its receiver may take that storage first.** TIR §3: an aggregate has
+no value, it *is* its storage, and a function that answers with one is given
+`%sret` and writes there. A call to a name in tail position has always been
+lowered straight into it — the storage the caller gave is the storage the
+callee writes, and nothing is copied. A **method** is the same fact and was
+refused in `bootstrap/lower.tr`, because the receiver is worked out in the
+middle of lowering the call and the call had nowhere to be told where its
+answer goes. It is told now: `method_value` takes a destination, and
+`aggregate_tail` hands it `%sret`.
+
+What the chapters do not say is what happens when the receiver is *not* a
+place. `made(n).twin()` has to build `made(n)` before there is anything to
+call `twin` on, and building it needs storage of its own — so there are two
+aggregates and one destination, and something has to decide which gets it.
+`trustc` gives it to the receiver, because `lower.rs`'s `self.dest` flows
+down into the receiver's own lowering (`method` at 8218 lowers it with the
+destination still set) and the *first* aggregate-producing expression that
+can take it does. The method's own answer then goes to a temporary that is
+copied over the top: nine instructions where three would do.
+
+That is not obviously the right answer — it is what falls out of one
+compiler's plumbing — and it is not written down anywhere, so the second
+implementation should not be made to reproduce it by accident. It refuses a
+non-place receiver instead (`dest.len() > 0 && !sited`), and a **place**
+receiver, where no storage has to be found for the receiver at all, is the
+whole of what both now agree on. `bootstrap/lowered/24.tr` is the corpus
+case, and it has no chained receiver in it for exactly this reason.
+
+The decision owed is a language one: either the receiver's storage is
+independent of the answer's — which costs a temporary in `trustc` and makes
+the two agree on the short form — or the order is written into Ch. 3 as
+observable. Until then this is a divergence in what is *refused*, like
+G9.142 and G9.143, and not in what is produced.
+
 **G9.144 — `Sized` is a bound now, and the spec's own grammar cannot write
 the one that removes it.** Ch. 4 §2.5 gives every type parameter an implicit
 `Sized` bound and `?Sized` to remove it. G4.4 recorded that the implementation
