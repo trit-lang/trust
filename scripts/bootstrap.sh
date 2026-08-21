@@ -29,92 +29,202 @@ cargo build --quiet --release -p trust -p trustc
 trust=target/release/trust
 trustc=target/release/trustc
 
-n=0
-for f in bootstrap/corpus/*.tr; do
-    rust=$("$trust" lex "$f")
-    mine=$("$trust" run bootstrap/main.tr < "$f")
-    if [ "$rust" != "$mine" ]; then
-        echo "bootstrap: the two lexers disagree on $f" >&2
-        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -20 >&2
-        exit 1
+# Some loops here run one comparison per file and their iterations do not
+# depend on one another; the machine's cores stayed idle for most of the
+# 25-minute run in the sequential form. `throttle` caps how many are in
+# flight, so the two-way `trust` invocations of each iteration have room
+# without swamping memory. Overridable so a CI machine can pick its own.
+: "${BOOTSTRAP_JOBS:=$(nproc 2>/dev/null || echo 4)}"
+throttle() {
+    while [ "$(jobs -pr 2>/dev/null | wc -l)" -ge "$BOOTSTRAP_JOBS" ]; do
+        wait -n 2>/dev/null || wait
+    done
+}
+# After a parallel batch: sort by index so a diagnostic reads in the same
+# order the loop was written in, and exit if any iteration wrote one.
+report_errors() {
+    local dir=$1 had=0
+    if compgen -G "$dir/*.err" > /dev/null; then
+        for f in $(ls "$dir"/*.err | sort -V); do
+            cat "$f" >&2
+            had=1
+        done
     fi
-    n=$((n + $(printf '%s\n' "$rust" | wc -l)))
+    [ "$had" = 1 ] && exit 1 || true
+}
+# Sum the integer written to each `*.n` file in a batch directory.
+sum_ns() {
+    local dir=$1 tot=0
+    if compgen -G "$dir/*.n" > /dev/null; then
+        for f in "$dir"/*.n; do
+            tot=$((tot + $(cat "$f")))
+        done
+    fi
+    echo "$tot"
+}
+
+n=0
+tmp=$(mktemp -d)
+idx=0
+for f in bootstrap/corpus/*.tr; do
+    (
+        rust=$("$trust" lex "$f")
+        mine=$("$trust" run bootstrap/main.tr < "$f")
+        if [ "$rust" != "$mine" ]; then
+            {
+                echo "bootstrap: the two lexers disagree on $f"
+                diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -20
+            } > "$tmp/$idx.err"
+            exit 1
+        fi
+        printf '%s\n' "$rust" | wc -l > "$tmp/$idx.n"
+    ) &
+    idx=$((idx + 1))
+    throttle
 done
+wait
+report_errors "$tmp"
+n=$((n + $(sum_ns "$tmp")))
+rm -rf "$tmp"
 
 r=0
+tmp=$(mktemp -d)
+idx=0
 for f in bootstrap/refuse/*.tr; do
-    rust=$("$trust" lex "$f" | tail -1)
-    mine=$("$trust" run bootstrap/main.tr < "$f" | tail -1)
-    case "$rust" in
-        error\ *) ;;
-        *) echo "bootstrap: $f is in refuse/ and the Rust lexer accepted it" >&2; exit 1 ;;
-    esac
-    if [ "$rust" != "$mine" ]; then
-        echo "bootstrap: the two lexers refuse $f differently" >&2
-        echo "  rust: $rust" >&2
-        echo "  trust: $mine" >&2
-        exit 1
-    fi
-    r=$((r + 1))
+    (
+        rust=$("$trust" lex "$f" | tail -1)
+        mine=$("$trust" run bootstrap/main.tr < "$f" | tail -1)
+        case "$rust" in
+            error\ *) ;;
+            *)
+                echo "bootstrap: $f is in refuse/ and the Rust lexer accepted it" \
+                    > "$tmp/$idx.err"
+                exit 1
+                ;;
+        esac
+        if [ "$rust" != "$mine" ]; then
+            {
+                echo "bootstrap: the two lexers refuse $f differently"
+                echo "  rust: $rust"
+                echo "  trust: $mine"
+            } > "$tmp/$idx.err"
+            exit 1
+        fi
+        echo 1 > "$tmp/$idx.n"
+    ) &
+    idx=$((idx + 1))
+    throttle
 done
+wait
+report_errors "$tmp"
+r=$((r + $(sum_ns "$tmp")))
+rm -rf "$tmp"
 
 # The parsers are compared on the *tree*, printed with every operator a
 # prefix and every child parenthesized — a form neither of them writes for
 # any other purpose, so agreeing on it is agreeing on the shape and not on
 # the printing.
 e=0
+tmp=$(mktemp -d)
+idx=0
 for f in bootstrap/exprs/*.txt; do
-    rust=$("$trust" ast "$f")
-    mine=$("$trust" run bootstrap/tree.tr < "$f")
-    if [ "$rust" != "$mine" ]; then
-        echo "bootstrap: the two parsers disagree on $(cat "$f")" >&2
-        echo "  rust : $rust" >&2
-        echo "  trust: $mine" >&2
-        exit 1
-    fi
-    e=$((e + 1))
+    (
+        rust=$("$trust" ast "$f")
+        mine=$("$trust" run bootstrap/tree.tr < "$f")
+        if [ "$rust" != "$mine" ]; then
+            {
+                echo "bootstrap: the two parsers disagree on $(cat "$f")"
+                echo "  rust : $rust"
+                echo "  trust: $mine"
+            } > "$tmp/$idx.err"
+            exit 1
+        fi
+        echo 1 > "$tmp/$idx.n"
+    ) &
+    idx=$((idx + 1))
+    throttle
 done
+wait
+report_errors "$tmp"
+e=$((e + $(sum_ns "$tmp")))
+rm -rf "$tmp"
 
 i=0
+tmp=$(mktemp -d)
+idx=0
 for f in bootstrap/fns/*.tr; do
-    rust=$("$trust" item "$f")
-    mine=$("$trust" run bootstrap/items.tr < "$f")
-    if [ "$rust" != "$mine" ]; then
-        echo "bootstrap: the two parsers disagree on $f" >&2
-        echo "  rust : $rust" >&2
-        echo "  trust: $mine" >&2
-        exit 1
-    fi
-    i=$((i + 1))
+    (
+        rust=$("$trust" item "$f")
+        mine=$("$trust" run bootstrap/items.tr < "$f")
+        if [ "$rust" != "$mine" ]; then
+            {
+                echo "bootstrap: the two parsers disagree on $f"
+                echo "  rust : $rust"
+                echo "  trust: $mine"
+            } > "$tmp/$idx.err"
+            exit 1
+        fi
+        echo 1 > "$tmp/$idx.n"
+    ) &
+    idx=$((idx + 1))
+    throttle
 done
+wait
+report_errors "$tmp"
+i=$((i + $(sum_ns "$tmp")))
+rm -rf "$tmp"
 
 w=0
+tmp=$(mktemp -d)
+idx=0
 for f in bootstrap/files/*.tr; do
-    rust=$("$trust" file "$f")
-    mine=$("$trust" run bootstrap/file.tr < "$f")
-    if [ "$rust" != "$mine" ]; then
-        echo "bootstrap: the two parsers disagree on the items of $f" >&2
-        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10 >&2
-        exit 1
-    fi
-    w=$((w + $(printf '%s\n' "$rust" | wc -l)))
+    (
+        rust=$("$trust" file "$f")
+        mine=$("$trust" run bootstrap/file.tr < "$f")
+        if [ "$rust" != "$mine" ]; then
+            {
+                echo "bootstrap: the two parsers disagree on the items of $f"
+                diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10
+            } > "$tmp/$idx.err"
+            exit 1
+        fi
+        printf '%s\n' "$rust" | wc -l > "$tmp/$idx.n"
+    ) &
+    idx=$((idx + 1))
+    throttle
 done
+wait
+report_errors "$tmp"
+w=$((w + $(sum_ns "$tmp")))
+rm -rf "$tmp"
 
 # The parser over its own source. Every file this directory holds goes
 # through both parsers, and the two trees must be the same characters — which
 # is the whole claim of a bootstrap, made against the largest Trust program
 # that exists. It is the slow part of this script and it is the point of it.
 b=0
+tmp=$(mktemp -d)
+i=0
 for f in bootstrap/*.tr; do
-    rust=$("$trust" file "$f")
-    mine=$("$trust" run bootstrap/file.tr < "$f")
-    if [ "$rust" != "$mine" ]; then
-        echo "bootstrap: the two parsers disagree on the parser's own $f" >&2
-        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10 >&2
-        exit 1
-    fi
-    b=$((b + $(printf '%s\n' "$rust" | wc -l)))
+    (
+        rust=$("$trust" file "$f")
+        mine=$("$trust" run bootstrap/file.tr < "$f")
+        if [ "$rust" != "$mine" ]; then
+            {
+                echo "bootstrap: the two parsers disagree on the parser's own $f"
+                diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10
+            } > "$tmp/$i.err"
+            exit 1
+        fi
+        printf '%s\n' "$rust" | wc -l > "$tmp/$i.n"
+    ) &
+    i=$((i + 1))
+    throttle
 done
+wait
+report_errors "$tmp"
+b=$((b + $(sum_ns "$tmp")))
+rm -rf "$tmp"
 
 # The **library**, which is the largest Trust program neither implementation
 # wrote and the one they both have to agree about before either can compile a
@@ -160,74 +270,134 @@ ask "$("$trust" agree "$prelude")" \
 # program over on stdin — which is where finding files belongs anyway, since
 # which files are compiled is a fact about a build (Ch. 6 §1.2).
 m=0
+tmp=$(mktemp -d)
+idx=0
 for root in examples/trust/modules/main.tr bootstrap/whole.tr bootstrap/items.tr; do
-    rust=$("$trust" modules "$root")
-    mine=$("$trust" bundle "$root" | "$trust" run bootstrap/whole.tr)
-    if [ "$rust" != "$mine" ]; then
-        echo "bootstrap: the two disagree about the program rooted at $root" >&2
-        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10 >&2
-        exit 1
-    fi
-    m=$((m + $(printf '%s\n' "$rust" | wc -l)))
+    (
+        rust=$("$trust" modules "$root")
+        mine=$("$trust" bundle "$root" | "$trust" run bootstrap/whole.tr)
+        if [ "$rust" != "$mine" ]; then
+            {
+                echo "bootstrap: the two disagree about the program rooted at $root"
+                diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10
+            } > "$tmp/$idx.err"
+            exit 1
+        fi
+        printf '%s\n' "$rust" | wc -l > "$tmp/$idx.n"
+    ) &
+    idx=$((idx + 1))
+    throttle
 done
+wait
+report_errors "$tmp"
+m=$((m + $(sum_ns "$tmp")))
+rm -rf "$tmp"
 
 # Pass one of Ch. 6 §4: what the program defines, and what each name is
 # called. Two implementations of the chapter, one answer.
 y=0
+tmp=$(mktemp -d)
+idx=0
 for root in examples/trust/modules/main.tr bootstrap/symbols.tr bootstrap/file.tr; do
-    rust=$("$trust" symbols "$root")
-    mine=$("$trust" bundle "$root" | "$trust" run bootstrap/symbols.tr)
-    if [ "$rust" != "$mine" ]; then
-        echo "bootstrap: the two disagree about what $root defines" >&2
-        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10 >&2
-        exit 1
-    fi
-    y=$((y + $(printf '%s\n' "$rust" | wc -l)))
+    (
+        rust=$("$trust" symbols "$root")
+        mine=$("$trust" bundle "$root" | "$trust" run bootstrap/symbols.tr)
+        if [ "$rust" != "$mine" ]; then
+            {
+                echo "bootstrap: the two disagree about what $root defines"
+                diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10
+            } > "$tmp/$idx.err"
+            exit 1
+        fi
+        printf '%s\n' "$rust" | wc -l > "$tmp/$idx.n"
+    ) &
+    idx=$((idx + 1))
+    throttle
 done
+wait
+report_errors "$tmp"
+y=$((y + $(sum_ns "$tmp")))
+rm -rf "$tmp"
 
 # Pass two: what every `use` reaches, and by which rule it was refused when
 # it reached nothing. `bootstrap/programs/refused` is every way it can fail.
 u=0
+tmp=$(mktemp -d)
+idx=0
 for root in examples/trust/modules/main.tr bootstrap/programs/refused/main.tr bootstrap/uses.tr; do
-    rust=$("$trust" uses "$root")
-    mine=$("$trust" bundle "$root" | "$trust" run bootstrap/uses.tr)
-    if [ "$rust" != "$mine" ]; then
-        echo "bootstrap: the two disagree about what the \`use\`s of $root reach" >&2
-        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10 >&2
-        exit 1
-    fi
-    u=$((u + $(printf '%s\n' "$rust" | wc -l)))
+    (
+        rust=$("$trust" uses "$root")
+        mine=$("$trust" bundle "$root" | "$trust" run bootstrap/uses.tr)
+        if [ "$rust" != "$mine" ]; then
+            {
+                echo "bootstrap: the two disagree about what the \`use\`s of $root reach"
+                diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10
+            } > "$tmp/$idx.err"
+            exit 1
+        fi
+        printf '%s\n' "$rust" | wc -l > "$tmp/$idx.n"
+    ) &
+    idx=$((idx + 1))
+    throttle
 done
+wait
+report_errors "$tmp"
+u=$((u + $(sum_ns "$tmp")))
+rm -rf "$tmp"
 
 # Pass three: the whole program as one list of items, every name resolved.
 # It is what the rest of the compiler has always been handed, and the last
 # question about Ch. 6 that can be asked without asking about types.
 z=0
+tmp=$(mktemp -d)
+idx=0
 for root in examples/trust/modules/main.tr bootstrap/symbols.tr bootstrap/flat.tr; do
-    rust=$("$trust" flat "$root")
-    mine=$("$trust" bundle "$root" | "$trust" run bootstrap/flat.tr)
-    if [ "$rust" != "$mine" ]; then
-        echo "bootstrap: the two disagree about the resolved items of $root" >&2
-        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -4 | cut -c1-200 >&2
-        exit 1
-    fi
-    z=$((z + $(printf '%s\n' "$rust" | wc -l)))
+    (
+        rust=$("$trust" flat "$root")
+        mine=$("$trust" bundle "$root" | "$trust" run bootstrap/flat.tr)
+        if [ "$rust" != "$mine" ]; then
+            {
+                echo "bootstrap: the two disagree about the resolved items of $root"
+                diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -4 | cut -c1-200
+            } > "$tmp/$idx.err"
+            exit 1
+        fi
+        printf '%s\n' "$rust" | wc -l > "$tmp/$idx.n"
+    ) &
+    idx=$((idx + 1))
+    throttle
 done
+wait
+report_errors "$tmp"
+z=$((z + $(sum_ns "$tmp")))
+rm -rf "$tmp"
 
 # Ch. 2: what every type the program defines is laid out as. Sizes and
 # offsets are facts about types and need no inference, which is what makes
 # this the first part of the middle two implementations can both answer.
 l=0
+tmp=$(mktemp -d)
+idx=0
 for f in bootstrap/layouts/*.tr; do
-    rust=$("$trust" layout "$f")
-    mine=$("$trust" bundle "$f" | "$trust" run bootstrap/sizes.tr)
-    if [ "$rust" != "$mine" ]; then
-        echo "bootstrap: the two disagree about the layouts in $f" >&2
-        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -6 >&2
-        exit 1
-    fi
-    l=$((l + $(printf '%s\n' "$rust" | wc -l)))
+    (
+        rust=$("$trust" layout "$f")
+        mine=$("$trust" bundle "$f" | "$trust" run bootstrap/sizes.tr)
+        if [ "$rust" != "$mine" ]; then
+            {
+                echo "bootstrap: the two disagree about the layouts in $f"
+                diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -6
+            } > "$tmp/$idx.err"
+            exit 1
+        fi
+        printf '%s\n' "$rust" | wc -l > "$tmp/$idx.n"
+    ) &
+    idx=$((idx + 1))
+    throttle
 done
+wait
+report_errors "$tmp"
+l=$((l + $(sum_ns "$tmp")))
+rm -rf "$tmp"
 
 # Ch. 4: what type every binding turned out to have. A `let` is where
 # inference is visible — it is the thing `let n = 1;` does not say.
@@ -236,17 +406,29 @@ t=0
 # their own: a type is a fact about a file, so the ones that declare no
 # module can be asked directly, and they are the largest Trust programs
 # there are to ask about.
+tmp=$(mktemp -d)
+idx=0
 for f in bootstrap/typed/*.tr bootstrap/ast.tr bootstrap/input.tr \
          bootstrap/bundle.tr bootstrap/lex.tr; do
-    rust=$("$trust" types "$f")
-    mine=$("$trust" run bootstrap/types.tr < "$f")
-    if [ "$rust" != "$mine" ]; then
-        echo "bootstrap: the two disagree about the types in $f" >&2
-        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -6 >&2
-        exit 1
-    fi
-    t=$((t + $(printf '%s\n' "$rust" | wc -l)))
+    (
+        rust=$("$trust" types "$f")
+        mine=$("$trust" run bootstrap/types.tr < "$f")
+        if [ "$rust" != "$mine" ]; then
+            {
+                echo "bootstrap: the two disagree about the types in $f"
+                diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -6
+            } > "$tmp/$idx.err"
+            exit 1
+        fi
+        printf '%s\n' "$rust" | wc -l > "$tmp/$idx.n"
+    ) &
+    idx=$((idx + 1))
+    throttle
 done
+wait
+report_errors "$tmp"
+t=$((t + $(sum_ns "$tmp")))
+rm -rf "$tmp"
 
 # Ch. 4, the other question: which functions are *refused*, and by which
 # rule. Reported per function rather than by position — two implementations
@@ -255,33 +437,57 @@ done
 # and `bootstrap/typed` is the same programs the two agreed about above, so
 # a checker that refused what compiles would be caught here.
 c=0
+tmp=$(mktemp -d)
+idx=0
 for f in bootstrap/mismatch/*.tr bootstrap/typed/*.tr bootstrap/ast.tr \
          bootstrap/lex.tr bootstrap/bundle.tr bootstrap/input.tr; do
-    rust=$("$trust" agree "$f")
-    mine=$({ printf '// agree\n'; cat "$f"; } | "$trust" run bootstrap/types.tr)
-    if [ "$rust" != "$mine" ]; then
-        echo "bootstrap: the two disagree about which functions type-check in $f" >&2
-        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -6 >&2
-        exit 1
-    fi
-    c=$((c + $(printf '%s\n' "$rust" | wc -l)))
+    (
+        rust=$("$trust" agree "$f")
+        mine=$({ printf '// agree\n'; cat "$f"; } | "$trust" run bootstrap/types.tr)
+        if [ "$rust" != "$mine" ]; then
+            {
+                echo "bootstrap: the two disagree about which functions type-check in $f"
+                diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -6
+            } > "$tmp/$idx.err"
+            exit 1
+        fi
+        printf '%s\n' "$rust" | wc -l > "$tmp/$idx.n"
+    ) &
+    idx=$((idx + 1))
+    throttle
 done
+wait
+report_errors "$tmp"
+c=$((c + $(sum_ns "$tmp")))
+rm -rf "$tmp"
 
 # TIR: the module a program lowers to, character for character — names
 # included, since equality is on the text (docs/ddc.md §4). This is the pass
 # that makes `stage1` exist, and it is the first slice of it: scalars, the
 # arithmetic of Ch. 1, calls, `return` and a tail.
 g=0
+tmp=$(mktemp -d)
+i=0
 for f in bootstrap/lowered/*.tr; do
-    rust=$("$trustc" tir "$f")
-    mine=$("$trust" run bootstrap/build.tr < "$f")
-    if [ "$rust" != "$mine" ]; then
-        echo "bootstrap: the two lower $f differently" >&2
-        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10 >&2
-        exit 1
-    fi
-    g=$((g + $(printf '%s\n' "$rust" | wc -l)))
+    (
+        rust=$("$trustc" tir "$f")
+        mine=$("$trust" run bootstrap/build.tr < "$f")
+        if [ "$rust" != "$mine" ]; then
+            {
+                echo "bootstrap: the two lower $f differently"
+                diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10
+            } > "$tmp/$i.err"
+            exit 1
+        fi
+        printf '%s\n' "$rust" | wc -l > "$tmp/$i.n"
+    ) &
+    i=$((i + 1))
+    throttle
 done
+wait
+report_errors "$tmp"
+g=$((g + $(sum_ns "$tmp")))
+rm -rf "$tmp"
 
 # A whole *program* as TIR: Ch. 6's three passes and then the lowering, cut
 # down to what `main` reaches — a function nothing calls is a function the
@@ -293,6 +499,8 @@ done
 # first program in this list that neither implementation was written to
 # handle — it was written to be *used*.
 q=0
+tmp=$(mktemp -d)
+i=0
 for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
             bootstrap/programs/methods/main.tr \
             bootstrap/programs/generic/main.tr \
@@ -312,15 +520,25 @@ for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
     # The one that uses the library is handed the library, which is what
     # `--prelude` is for (Ch. 6 §3.3) — and asking for it where there is
     # none costs nothing, since a prelude nothing names is pruned away.
-    rust=$("$trust" tir "$root")
-    mine=$("$trust" bundle "$root" --prelude | "$trust" run bootstrap/program.tr)
-    if [ "$rust" != "$mine" ]; then
-        echo "bootstrap: the two lower the program at $root differently" >&2
-        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10 >&2
-        exit 1
-    fi
-    q=$((q + $(printf '%s\n' "$rust" | wc -l)))
+    (
+        rust=$("$trust" tir "$root")
+        mine=$("$trust" bundle "$root" --prelude | "$trust" run bootstrap/program.tr)
+        if [ "$rust" != "$mine" ]; then
+            {
+                echo "bootstrap: the two lower the program at $root differently"
+                diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10
+            } > "$tmp/$i.err"
+            exit 1
+        fi
+        printf '%s\n' "$rust" | wc -l > "$tmp/$i.n"
+    ) &
+    i=$((i + 1))
+    throttle
 done
+wait
+report_errors "$tmp"
+q=$((q + $(sum_ns "$tmp")))
+rm -rf "$tmp"
 
 printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d lines about the library, %d modules of whole programs, %d names defined, %d names resolved, %d items rewritten, %d types laid out, %d bindings typed, %d functions checked, %d lines of TIR, %d of whole programs — all agreed\n' \
     "$n" "$r" "$e" "$i" "$w" "$b" "$v" "$m" "$y" "$u" "$z" "$l" "$t" "$c" "$g" "$q"
