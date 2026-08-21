@@ -210,6 +210,31 @@ impl Ty {
         }
     }
 
+    /// Whether this type is the same type at every instantiation, so that a
+    /// mismatch involving it is a fact about the body rather than about the
+    /// reading of it (issue/001).
+    ///
+    /// A nominal name is not, and that is not conservatism: `Vec<T>` is
+    /// `Vec.T` under a read and `Vec.t27` under an instantiation, and the two
+    /// are the same type at exactly one of them.
+    fn is_ground(&self) -> bool {
+        match self {
+            Ty::Trit
+            | Ty::Bool
+            | Ty::T9
+            | Ty::T27
+            | Ty::TAddr
+            | Ty::Char
+            | Ty::Unit
+            | Ty::Never => true,
+            Ty::Array(t, _) | Ty::Ref(t, _) | Ty::Boxed(t) | Ty::RawOf(t) | Ty::Slice(t) => {
+                t.is_ground()
+            }
+            Ty::Tuple(ts) => ts.iter().all(Ty::is_ground),
+            Ty::Struct(_) | Ty::Enum(_) | Ty::Dyn(_) | Ty::Param(_) => false,
+        }
+    }
+
     /// The layout-engine spelling of this type.
     fn layout_ty(&self) -> layout::Ty {
         match self {
@@ -1379,11 +1404,36 @@ fn check_generic_bodies(
         {
             continue;
         }
-        let env: HashMap<String, Ty> = def
+        let mut env: HashMap<String, Ty> = def
             .generics
             .iter()
             .map(|p| (p.name().to_string(), Ty::Param(p.name().to_string())))
             .collect();
+        // `I: Iterator<Item = t27>` says which type the projection `I::Item`
+        // is, and every instantiation is held to it (`check_assoc_bindings`),
+        // so a read may believe it. A binding whose own type cannot be
+        // resolved here leaves the projection opaque, which is where it would
+        // have been anyway (G9.141).
+        let bindings: Vec<(String, ast::Ty)> = def
+            .generics
+            .iter()
+            .filter_map(|p| match p {
+                ast::GenericParam::Type { name, bounds } => Some((name, bounds)),
+                _ => None,
+            })
+            .flat_map(|(name, bounds)| {
+                bounds.iter().flat_map(move |b| {
+                    b.assoc
+                        .iter()
+                        .map(move |(a, t)| (format!("{name}::{a}"), t.clone()))
+                })
+            })
+            .collect();
+        for (key, written) in bindings {
+            if let Ok(t) = resolve_ty_env(&written, world.types, &env) {
+                env.insert(key, t);
+            }
+        }
 
         // A key no source can spell, so nothing calls what this leaves behind.
         let key = format!("{name}$read");
@@ -3989,6 +4039,16 @@ fn resolve_ty_env(t: &ast::Ty, types: &Types, env: &HashMap<String, Ty>) -> R<Ty
         // `T::Item` — the type this impl chose (Ch. 4 §1.7).
         ast::Ty::Assoc(base, name, span) => {
             let base = resolve_ty_env(base, types, env)?;
+            // `I::Item` with `I` a parameter, while a generic body is read
+            // (issue/001, G9.141). A bound may have said which type it is —
+            // `I: Iterator<Item = t27>`, filed in the environment under this
+            // key — and otherwise the projection is a type in its own right:
+            // the same projection through the same parameter is the same type
+            // at every instantiation, which is what a `Ty::Param` means here.
+            if let Ty::Param(p) = &base {
+                let key = format!("{p}::{name}");
+                return Ok(env.get(&key).cloned().unwrap_or(Ty::Param(key)));
+            }
             let Some(owner) = nominal_name(&base) else {
                 return err(*span, format!("{base} has no associated types"));
             };
@@ -4702,6 +4762,24 @@ impl Fn<'_> {
             }
         }
         e
+    }
+
+    /// An argument to something reached through a parameter's bound.
+    ///
+    /// The bound's signature is the same signature at every instantiation, so
+    /// a mismatch between two *ground* types is a rejection this read stands
+    /// behind. A mismatch where either side is a parameter or a nominal name
+    /// built from one is not: the instantiation may make them equal.
+    fn bound_arg(&mut self, arg: &ast::Expr, want: &Ty) -> R<()> {
+        let (_, got) = self.expr(arg, Some(want))?;
+        let Err(e) = self.check(&got, want, arg.span(), "argument") else {
+            return Ok(());
+        };
+        if got.is_ground() && want.is_ground() {
+            return Err(self.reject(e));
+        }
+        self.cannot_tell();
+        Err(e)
     }
 
     // ------------------------------------------------------- block building
@@ -5930,6 +6008,13 @@ impl Fn<'_> {
                     Some(t) => t,
                     None => self.expr(callee, None)?.1,
                 };
+                // `(self.f)(x)` with `f` of a parameter's type, while a
+                // generic body is read: the parameter's `Fn` bound is what
+                // says what the call takes (issue/001).
+                if let Ty::Param(p) = &ty {
+                    let p = p.clone();
+                    return self.param_call(&p, &p, args, *span);
+                }
                 let Some(info) =
                     nominal_name(&ty).and_then(|n| self.types.closures.borrow().get(&n).cloned())
                 else {
@@ -7112,6 +7197,15 @@ impl Fn<'_> {
             let mut full = vec![recv];
             full.extend(args.iter().cloned());
             return self.call_key(&info.call, Vec::new(), &full, span);
+        }
+
+        // `f(args)` where `f` is a type parameter: a body being read, and
+        // the parameter's `Fn` bound is the whole of what the call can be
+        // checked against (issue/001).
+        if let Some(local) = self.lookup(name)
+            && let Ty::Param(p) = local.ty.clone()
+        {
+            return self.param_call(&p, name, args, span);
         }
 
         // A generic callee is instantiated here, at the call site, which is
@@ -10049,39 +10143,33 @@ impl Fn<'_> {
         out
     }
 
-    /// A method called on a type parameter, resolved from its bounds.
+    /// An item named through a type parameter, found in one of its bounds.
     ///
-    /// The trait declares the signature every implementation must have, so
-    /// the call can be checked against it without knowing which one will run
-    /// — which is the resolution path issue/001 says both of Ch. 4's generic
-    /// limits were waiting on. Nothing is emitted for the call itself: this
-    /// runs only while a generic body is being read, and that reading's TIR
-    /// is thrown away. The receiver and the arguments *are* lowered, because
-    /// the moves and borrows they make are part of what is being checked.
-    fn param_method(
-        &mut self,
-        param: &str,
-        recv: &ast::Expr,
-        name: &str,
-        args: &[ast::Expr],
-        derefs: usize,
-        span: Span,
-    ) -> R<(Operand, Ty)> {
-        let Some(check) = self.check else {
+    /// This is the whole of what a parameter has: a bound declares the
+    /// signatures every implementation must carry, and nothing else about the
+    /// type is known until the instantiation. A name that no bound declares is
+    /// a rejection this read stands behind; a bound this read cannot read is
+    /// `cannot_tell`, and silences the read entirely.
+    fn bound_item(&mut self, check: &Check, param: &str, name: &str, span: Span) -> R<ast::FnItem> {
+        // A projection — `I::Item` — is a parameter with no declaration to
+        // read bounds off. The trait that owns the associated type may well
+        // bound it, and finding that out is the next piece of this work; until
+        // then what a projection has is unanswerable rather than empty.
+        let Some(bounds) = check.bounds.get(param).cloned() else {
+            self.cannot_tell();
             return err(
                 span,
-                format!("`{param}` is a type parameter, and this is not a generic body"),
+                format!("`{param}` is a projection, and its bounds are not read yet"),
             );
         };
-        let bounds = check.bounds.get(param).cloned().unwrap_or_default();
 
         // A trait with arguments — `T: From<U>` — declares a different
         // signature per argument, and picking the right one is Ch. 4 §1.7
-        // work this read does not do yet.
-        if bounds
-            .iter()
-            .any(|b| !b.args.is_empty() || !b.assoc.is_empty())
-        {
+        // work this read does not do yet. An associated-type *binding* is not
+        // an argument and does not divide the methods: it says which type the
+        // implementor chose, which the read has already believed by resolving
+        // the projection to it.
+        if bounds.iter().any(|b| !b.args.is_empty()) {
             self.cannot_tell();
             return err(
                 span,
@@ -10107,16 +10195,11 @@ impl Fn<'_> {
             );
         }
 
-        let mut found = None;
-        for b in &bounds {
-            if let Some(m) = object_methods(self.traits, &b.name, &mut Vec::new())
+        let found = bounds.iter().find_map(|b| {
+            object_methods(self.traits, &b.name, &mut Vec::new())
                 .into_iter()
                 .find(|m| m.name == name)
-            {
-                found = Some(m);
-                break;
-            }
-        }
+        });
         let Some(m) = found else {
             let bound_list = bounds
                 .iter()
@@ -10131,11 +10214,39 @@ impl Fn<'_> {
             return Err(self.reject(one_err(
                 span,
                 format!(
-                    "`{param}` is a type parameter, so its methods are its bounds' — \
+                    "`{param}` is a type parameter, so what it has is its bounds' — \
                      there is no `{name}` there {by} (Ch. 4 §2.2)"
                 ),
             )));
         };
+        Ok(m)
+    }
+
+    /// A method called on a type parameter, resolved from its bounds.
+    ///
+    /// The trait declares the signature every implementation must have, so
+    /// the call can be checked against it without knowing which one will run
+    /// — which is the resolution path issue/001 says both of Ch. 4's generic
+    /// limits were waiting on. Nothing is emitted for the call itself: this
+    /// runs only while a generic body is being read, and that reading's TIR
+    /// is thrown away. The receiver and the arguments *are* lowered, because
+    /// the moves and borrows they make are part of what is being checked.
+    fn param_method(
+        &mut self,
+        param: &str,
+        recv: &ast::Expr,
+        name: &str,
+        args: &[ast::Expr],
+        derefs: usize,
+        span: Span,
+    ) -> R<(Operand, Ty)> {
+        let Some(check) = self.check else {
+            return err(
+                span,
+                format!("`{param}` is a type parameter, and this is not a generic body"),
+            );
+        };
+        let m = self.bound_item(check, param, name, span)?;
 
         // The signature, with `Self` read as the parameter itself.
         let me = SelfTy {
@@ -10190,19 +10301,169 @@ impl Fn<'_> {
         }
         self.expr(&receiver, params.first())?;
         for (arg, want) in args.iter().zip(&params[1..]) {
-            let (_, got) = self.expr(arg, Some(want))?;
-            self.check(&got, want, arg.span(), "argument")?;
+            self.bound_arg(arg, want)?;
         }
 
-        // A value of the right type, standing where the call's result would
-        // be. It is not the result of anything, and nothing reads it.
-        let out = if ret == Ty::Unit {
+        let out = self.stand_in(&ret);
+        Ok((out, ret))
+    }
+
+    /// A value of the right type, standing where a read's call result would
+    /// be. It is not the result of anything, and nothing reads it: the TIR a
+    /// read emits is thrown away, and only the rejections survive.
+    fn stand_in(&mut self, ret: &Ty) -> Operand {
+        if *ret == Ty::Unit {
             unit()
         } else if ret.is_aggregate() {
-            Operand::Value(self.temp_slot(&ret))
+            Operand::Value(self.temp_slot(ret))
         } else {
             Operand::Const(ret.tir(), Bt::ZERO)
+        }
+    }
+
+    /// `T::item(args)` with `T` a type parameter, while a generic body is
+    /// read — `C::new()` inside `collect`.
+    ///
+    /// An associated function is reached the same way a method is, and differs
+    /// in the one thing that makes it associated: there is no receiver, so the
+    /// bound's declaration is the whole of what says what it takes.
+    fn param_assoc(
+        &mut self,
+        param: &str,
+        name: &str,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> R<(Operand, Ty)> {
+        let Some(check) = self.check else {
+            return err(
+                span,
+                format!("`{param}` is a type parameter, and this is not a generic body"),
+            );
         };
+        let m = self.bound_item(check, param, name, span)?;
+        if m.params.first().is_some_and(|p| p.name == "self") {
+            return Err(self.reject(one_err(
+                span,
+                format!(
+                    "`{name}` takes `self`, so it is called on a value of `{param}` \
+                     rather than on `{param}` itself (Ch. 4 §1.4)"
+                ),
+            )));
+        }
+        if m.params.len() != args.len() {
+            return Err(self.reject(one_err(
+                span,
+                format!(
+                    "`{name}` takes {} argument(s), {} given",
+                    m.params.len(),
+                    args.len()
+                ),
+            )));
+        }
+        // `Self` in the declaration is the parameter: `fn new() -> Self` on a
+        // bound of `C` builds a `C`, whatever `C` turns out to be.
+        let me = SelfTy {
+            ty: ast::Ty::Name(param.to_string(), span),
+            name: param.to_string(),
+        };
+        let params: R<Vec<Ty>> = m
+            .params
+            .iter()
+            .map(|p| self.resolve(&subst_self_ty(&p.ty, &me)))
+            .collect();
+        let ret = match &m.ret {
+            None => Ok(Ty::Unit),
+            Some(t) => self.resolve(&subst_self_ty(t, &me)),
+        };
+        let (params, ret) = match (params, ret) {
+            (Ok(p), Ok(r)) => (p, r),
+            (Err(e), _) | (_, Err(e)) => {
+                self.cannot_tell();
+                return Err(e);
+            }
+        };
+        for (arg, want) in args.iter().zip(&params) {
+            self.bound_arg(arg, want)?;
+        }
+        let out = self.stand_in(&ret);
+        Ok((out, ret))
+    }
+
+    /// `f(args)` with `f` a type parameter, while a generic body is read.
+    ///
+    /// `impl Fn(A) -> R` and `F: Fn(A) -> R` both became a bound named
+    /// `Fn@key` with the written signature filed under `key`, so the signature
+    /// is here to check against — which is the one thing a parameter can be
+    /// called against, since which closure arrives is not known until the
+    /// instantiation.
+    fn param_call(
+        &mut self,
+        param: &str,
+        name: &str,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> R<(Operand, Ty)> {
+        let Some(check) = self.check else {
+            return err(
+                span,
+                format!("`{param}` is a type parameter, and this is not a generic body"),
+            );
+        };
+        let Some(bounds) = check.bounds.get(param) else {
+            self.cannot_tell();
+            return err(
+                span,
+                format!("`{param}` is a projection, and its bounds are not read yet"),
+            );
+        };
+        let key = bounds
+            .iter()
+            .find_map(|b| b.name.strip_prefix("Fn@").map(|k| k.to_string()));
+        let Some(key) = key else {
+            return Err(self.reject(one_err(
+                span,
+                format!(
+                    "`{name}` is a type parameter, and nothing it is bound by makes \
+                     it callable — that is what `Fn(…)` is for (Ch. 4 §4.3)"
+                ),
+            )));
+        };
+        let Some((_, written, ret)) = self.fn_bounds.get(&key).cloned() else {
+            self.cannot_tell();
+            return err(
+                span,
+                format!("`{param}`'s `Fn` bound has no signature filed"),
+            );
+        };
+        if written.len() != args.len() {
+            return Err(self.reject(one_err(
+                span,
+                format!(
+                    "`{name}` takes {} argument(s), {} given",
+                    written.len(),
+                    args.len()
+                ),
+            )));
+        }
+        // The signature is written in the *enclosing* function's parameters —
+        // `Fn(T) -> R` inside `fn apply<T, R>` — so resolving it under this
+        // read's environment leaves `Ty::Param`s of its own.
+        let params: R<Vec<Ty>> = written.iter().map(|t| self.resolve(t)).collect();
+        let ret = match &ret {
+            None => Ok(Ty::Unit),
+            Some(t) => self.resolve(t),
+        };
+        let (params, ret) = match (params, ret) {
+            (Ok(p), Ok(r)) => (p, r),
+            (Err(e), _) | (_, Err(e)) => {
+                self.cannot_tell();
+                return Err(e);
+            }
+        };
+        for (arg, want) in args.iter().zip(&params) {
+            self.bound_arg(arg, want)?;
+        }
+        let out = self.stand_in(&ret);
         Ok((out, ret))
     }
 
@@ -10677,6 +10938,15 @@ impl Fn<'_> {
             fields
         };
         let head = self.instantiate_head(path, fields, expected, span)?;
+
+        // `T::item(…)` where `T` is a type parameter: a body being read, and
+        // the parameter's bounds are the whole of what it has (issue/001).
+        if path.segments.len() == 2
+            && let Some(Ty::Param(p)) = self.env.get(&head).cloned()
+        {
+            let args: Vec<ast::Expr> = fields.iter().map(|(_, e)| e.clone()).collect();
+            return self.param_assoc(&p, &path.segments[1], &args, span);
+        }
 
         // `Type::NAME` — an associated constant, which is a constant under a
         // qualified name (Ch. 4 §1.7).

@@ -1968,6 +1968,140 @@ fn a_generic_body_is_read_once_against_its_bounds() {
          fn main() -> t27 { 0 }",
     );
     assert!(e.contains("takes 0 argument(s), 1 given"), "{e}");
+
+    // An argument's type is the trait's too — but only where both sides are
+    // the same type at every instantiation. `bool` against `t27` is; anything
+    // mentioning `T` is not, and is left alone.
+    let e = error(
+        "trait Scale { fn by(&self, k: t27) -> t27; } \
+         fn f<T: Scale>(x: &T) -> t27 { x.by(true) } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("expected t27"), "{e}");
+    tir_of(
+        "trait Grab { fn grab(&self, k: Self) -> t27; } \
+         fn g<T: Grab>(x: &T, y: t27) -> t27 { x.grab(y) } \
+         fn main() -> t27 { 0 }",
+    );
+
+    // A body that projects an associated type through a parameter is read.
+    // Which type `T::Item` will be is not known, and does not have to be: the
+    // same projection through the same parameter is the same type at every
+    // instantiation, which is all the rest of the body needs of it.
+    tir_of(
+        "trait Feed { type Item; fn next(&mut self) -> Self::Item; } \
+         fn drain<T: Feed>(x: &mut T) -> T::Item { x.next() } \
+         fn main() -> t27 { 0 }",
+    );
+    let e = error(
+        "trait Feed { type Item; fn next(&mut self) -> Self::Item; } \
+         fn drain<T: Feed>(x: &mut T) -> T::Item { x.no_such_method() } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("no `no_such_method`"), "{e}");
+}
+
+#[test]
+fn an_associated_function_is_reached_through_a_bound() {
+    // `T::make()` is the bound's associated function, and a bound declares one
+    // the same way it declares a method: with a signature every implementation
+    // must have. `Self` in it is the parameter (Ch. 4 §§1.4, 2.7).
+    tir_of(
+        "trait Make { fn make() -> Self; fn val(&self) -> t27; } \
+         fn build<T: Make>() -> t27 { let x = T::make(); x.val() } \
+         fn main() -> t27 { 0 }",
+    );
+
+    // A name no bound declares is not there for any implementation.
+    let e = error(
+        "trait Make { fn make() -> Self; } \
+         fn build<T: Make>() -> t27 { let x = T::nope(); 0 } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("there is no `nope` there"), "{e}");
+
+    // The arguments are checked against the declaration, on the same terms as
+    // a method's: a mismatch of two ground types is one at every instantiation.
+    let e = error(
+        "trait Make { fn make(k: t27) -> Self; } \
+         fn build<T: Make>() -> t27 { let x = T::make(true); 0 } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("expected t27"), "{e}");
+
+    // And what takes a `self` is not an associated function — there is no
+    // receiver here to be one.
+    let e = error(
+        "trait Make { fn make() -> Self; fn val(&self) -> t27; } \
+         fn build<T: Make>() -> t27 { T::val() } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("takes `self`"), "{e}");
+}
+
+#[test]
+fn an_associated_type_binding_says_what_a_projection_is() {
+    // `T: Feed<Item = t27>` constrains what the implementor chose, and every
+    // instantiation is held to it (Ch. 4 §1.7, `check_assoc_bindings`), so a
+    // read may resolve `T::Item` to `t27` and check the body in those terms.
+    let e = error(
+        "trait Feed { type Item; fn take(&self, k: Self::Item) -> t27; } \
+         fn f<T: Feed<Item = t27>>(x: &T) -> t27 { x.take(true) } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("expected t27"), "{e}");
+    tir_of(
+        "trait Feed { type Item; fn take(&self, k: Self::Item) -> t27; } \
+         fn f<T: Feed<Item = t27>>(x: &T) -> t27 { x.take(1) } \
+         fn main() -> t27 { 0 }",
+    );
+
+    // Without the binding the projection is opaque, and an argument against an
+    // opaque type is not a mismatch this read stands behind.
+    tir_of(
+        "trait Feed { type Item; fn take(&self, k: Self::Item) -> t27; } \
+         fn f<T: Feed>(x: &T) -> t27 { x.take(true) } \
+         fn main() -> t27 { 0 }",
+    );
+}
+
+#[test]
+fn a_parameter_is_called_against_its_fn_bound() {
+    // `impl Fn(A) -> R` and `F: Fn(A) -> R` are one thing by the time lowering
+    // sees them (Ch. 4 §4.3), and the signature they were written with is what
+    // a call in the body is checked against — which closure arrives is not
+    // known until the instantiation, and does not have to be.
+    tir_of(
+        "fn apply<T, R>(f: impl Fn(T) -> R, x: T) -> R { f(x) } \
+         fn main() -> t27 { 0 }",
+    );
+
+    // The arity is the bound's, and it is wrong here for every closure there
+    // could ever be.
+    let e = error(
+        "fn twice(g: impl Fn(t27) -> t27) -> t27 { g(1, 2) } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("takes 1 argument(s), 2 given"), "{e}");
+
+    // So is the argument's type.
+    let e = error(
+        "fn once(g: impl Fn(t27) -> t27) -> t27 { g(true) } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("expected t27"), "{e}");
+
+    // And a parameter no `Fn` bound covers is not callable at all — there is
+    // no instantiation that could make it one.
+    let e = error(
+        "trait Area { fn area(&self) -> t27; } \
+         fn call_it<T: Area>(f: T) -> t27 { f(1) } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(
+        e.contains("nothing it is bound by makes it callable"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -1977,11 +2111,12 @@ fn known_limit_reading_a_generic_body_is_fail_open() {
     // So the C++ failure mode Ch. 4 Appendix B claims is removed is narrowed
     // rather than closed, and these are the shapes still walking through.
     //
-    // A parameter's associated type is not projected yet, so nothing in this
-    // body is read — including the method that does not exist.
+    // A projection — `T::Item` — is a type of its own under a read, but what
+    // *it* is bound by is not read out of the trait that declared it, so a
+    // method called on one is unanswerable and the whole body goes unjudged.
     tir_of(
         "trait Feed { type Item; fn next(&mut self) -> Self::Item; } \
-         fn drain<T: Feed>(x: &mut T) -> t27 { let v = x.next(); x.no_such_method() } \
+         fn drain<T: Feed>(x: &mut T) -> t27 { let v = x.next(); v.no_such_method() } \
          fn main() -> t27 { 0 }",
     );
     // Nor is a parameter bound by a trait that takes arguments (Ch. 4 §1.7).
@@ -1990,6 +2125,20 @@ fn known_limit_reading_a_generic_body_is_fail_open() {
          fn conv<T: Into<t27>>(x: &T) -> t27 { x.no_such_method() } \
          fn main() -> t27 { 0 }",
     );
+}
+
+#[test]
+fn known_limit_shadowing_a_prelude_type_breaks_what_named_it() {
+    // Ch. 6 §3.3 says a program's item replaces the prelude's, and `merged`
+    // drops the shadowed item and the impls written on or for it — but not
+    // the prelude items that *name* it. `Iterator::take` returns `Take<Self>`,
+    // so a program that declares anything called `Take` gets an error about a
+    // type it never wrote and no way to see why (G9.138).
+    let e = error("trait Take { fn t(&self) -> t27; } fn main() -> t27 { 0 }");
+    assert!(e.contains("`Take` is not a type in scope"), "{e}");
+    // With any other name the same program is fine, which is the whole of the
+    // difference.
+    tir_of("trait Grab { fn t(&self) -> t27; } fn main() -> t27 { 0 }");
 }
 
 #[test]

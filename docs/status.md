@@ -566,8 +566,9 @@ pointed the wrong way, about a memory-safety hole.
 
 | Limit | Test |
 |---|---|
-| reading a generic body is fail-open — four shapes walk through unread | `known_limit_reading_a_generic_body_is_fail_open` |
+| reading a generic body is fail-open — two shapes walk through unread | `known_limit_reading_a_generic_body_is_fail_open` |
 | there is no `Sized` bound | `known_limit_there_is_no_sized_bound` |
+| shadowing a prelude type breaks what named it | `known_limit_shadowing_a_prelude_type_breaks_what_named_it` |
 | a returned borrow is rooted syntactically | `known_limit_a_returned_borrow_is_rooted_syntactically` |
 | a closure captures by variable, not by place | `known_limit_a_closure_captures_by_variable_not_by_place` |
 | ownership is per local, not per place | `per_local_ownership_rejects_two_programs_that_are_legal` |
@@ -576,9 +577,11 @@ pointed the wrong way, about a memory-safety hole.
 
 **These two were one thing, and half of it is done.** `Ty::Param` exists now
 and carries its bounds, so a generic body is lowered once with every parameter
-standing for itself, and a method called on a parameter is resolved from the
-bounds rather than from a concrete type. `fn never_called<T: Area>(x: &T) ->
-t27 { x.no_such_method() }` is rejected with no call site anywhere in the file.
+standing for itself, and everything a parameter can name — a method, an
+associated function, a call an `Fn` bound made callable, an associated type —
+is resolved from the bounds rather than from a concrete type. `fn
+never_called<T: Area>(x: &T) -> t27 { x.no_such_method() }` is rejected with no
+call site anywhere in the file.
 §7's claim that the absence of `Ty::Param` was load-bearing was true, and the
 way it was paid for is not what `issue/001` predicted: there is no point in
 this compiler that is after type-checking and before instantiation, because
@@ -588,14 +591,20 @@ the entire `Function` a read produces is thrown away (G9.140).
 
 What remains:
 
-- **The read is fail-open, and its coverage is 91 of 153 bodies.** A body the
+- **The read is fail-open, and its coverage is 157 of 172 bodies.** A body the
   reader does not fully understand reports nothing at all — not its verdicts
   either, since a body half-understood is a body whose rejections might be
-  consequences of the half that was not (G9.139). Four shapes walk through
-  unread: an associated type projected through a parameter, an `Fn`-bounded
-  parameter called as a function, an associated function reached through a
-  bound, and inference with no call site. Closing them is four separate pieces
-  of work.
+  consequences of the half that was not (G9.139). Two shapes walk through
+  unread: an associated function that has type parameters of its own, and
+  inference with no call site. The one thing that is *not* fail-open is an
+  argument's type where both sides are ground — no parameter, and no nominal
+  name that an instantiation could rename.
+- **Shadowing a prelude type breaks the prelude items that named it.**
+  `merged` drops the shadowed item and the impls on or for it, and keeps
+  everything that *mentions* it — so a program declaring anything called
+  `Take` is told "`Take` is not a type in scope" about a type it never wrote,
+  because `Iterator::take` returns `Take<Self>` (G9.138). The fix is a module
+  system or a rename pass, and neither is small.
 - **Ch. 4 §2.5 gives every type parameter an implicit `Sized` bound and
   `?Sized` to remove it. There is still neither**: a parameter behaves as
   `?Sized`, and the size requirement is enforced at each *use*, so the error

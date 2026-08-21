@@ -6,7 +6,7 @@
 | **Blocks** | Ch. 4 §2.5 (`Sized` / `?Sized`) |
 | **Closed** | Ch. 4 §2.2 (a generic body checked once), for the shapes §"What the read catches" lists |
 | **Contradicts** | Ch. 4 Appendix B — the scorecard claims the C++ template failure mode is removed by construction. It is removed at the call site, and now for a named method in the body. Not by construction. |
-| **Tests** | `a_generic_body_is_read_once_against_its_bounds`, `known_limit_reading_a_generic_body_is_fail_open`, `known_limit_there_is_no_sized_bound` (all `compiler/tests/frontend.rs`) |
+| **Tests** | `a_generic_body_is_read_once_against_its_bounds`, `a_parameter_is_called_against_its_fn_bound`, `an_associated_function_is_reached_through_a_bound`, `an_associated_type_binding_says_what_a_projection_is`, `known_limit_reading_a_generic_body_is_fail_open`, `known_limit_there_is_no_sized_bound` (all `compiler/tests/frontend.rs`) |
 
 ## The decision
 
@@ -122,36 +122,68 @@ size-dependent check runs again, for real, at instantiation.
 environment binding every parameter to `Ty::Param(name)`, and reports only what
 `Fn::reject` deliberately recorded:
 
-- a method called on a parameter that no bound of that parameter declares,
-- a method called with the wrong number of arguments,
-- a method called on a parameter with no `self`.
+- a method or an associated function named through a parameter that no bound of
+  that parameter declares,
+- a parameter called as a function with no `Fn` bound to make it one,
+- a method, an associated function or a call with the wrong number of
+  arguments,
+- an argument whose type is wrong on both sides' *ground* types,
+- a method called on a parameter with no `self`, and an associated function
+  called on a parameter that takes one.
 
 Everything else the read stumbles on sets `unsure`, and an unsure read reports
 nothing at all.
 
+"Ground" means built from scalars, references, arrays and tuples, with no
+parameter and no nominal name in it. A nominal name is excluded on purpose:
+`Vec<T>` is `Vec.T` under a read and `Vec.t27` under an instantiation, and
+those are the same type at exactly one of them.
+
 ## What the read still walks past
 
-Measured over the corpus after the change: 91 of 153 bodies read cleanly, 55
-failed the read and were therefore discarded, 7 were unsure. The 55 group as:
+Measured over the corpus: 157 of 172 bodies read cleanly, 6 failed the read
+and were therefore discarded, 9 were unsure. The 15 group as:
 
 | Count | Shape |
 |---|---|
-| 25 | an associated type projected through a parameter (`T::Item`) |
-| 15 | an `Fn`-bounded parameter called as a function (`p(x)`, `f(x)`) |
-| 9 | an associated *function* reached through a bound (`C::new()` in `collect`) |
+| 9 | an associated function that is itself generic (`C::from_iter` in `collect`) |
 | 5 | inference failing without a call site to unify against |
 | 1 | `Range<T>` — see below |
 
-Each is a body that is not being read, so `never_called`-shaped bugs still hide
-in bodies of those shapes. Closing them is four separate pieces of work, and
-none of them is `Sized`.
+Four groups have been closed since the read landed.
 
-There is also a hole that is not the read's: a program may declare a trait the
+- **An `Fn`-bounded parameter called as a function** (15). `param_call` reads
+  the signature out of the bound: `impl Fn(A) -> R` and `F: Fn(A) -> R` are one
+  thing by then (Ch. 4 §4.3), filed under a `Fn@key` bound, and the signature
+  they were written with is what the call is checked against — whether the
+  callee is a name or an expression, so `(self.f)(x)` counts.
+- **An associated type projected through a parameter** (25). `T::Item` is a
+  `Ty::Param("T::Item")`: opaque, and the same type at every instantiation,
+  which is all the body needs of it (G9.141). This one also raised the number
+  of bodies the read *attempts* from 154 to 172 — a signature it could not
+  resolve used to stop the read before it began.
+- **An associated function reached through a bound** (9). `param_assoc` finds
+  it the way `param_method` finds a method, and reads `Self` in its signature
+  as the parameter.
+- **A bound carrying an associated-type binding** (15). `I: Iterator<Item =
+  t27>` says which type `I::Item` is, and `check_assoc_bindings` holds every
+  instantiation to it, so the read believes it: the binding goes into the
+  environment under the key `I::Item`, and the projection resolves to `t27`
+  instead of staying opaque. A binding is not a trait *argument* and does not
+  divide the methods, so the guard that turns arguments away no longer turns
+  bindings away with them.
+
+Each remaining group is a body that is not being read, so `never_called`-shaped
+bugs still hide in bodies of those shapes. None of them is `Sized`.
+
+There is also a hole that is not the read's: a program may declare an item the
 prelude also declares (Ch. 6 §3.3), and `mod.rs`'s `merged` drops the prelude's
-*item* but keeps prelude items whose **bounds** name it — so prelude
-`HashMap<K: Key>` ends up bounded by the user's `Key`. The read treats a bound
-whose trait comes from a lower file id than the body as unanswerable rather
-than resolving against the wrong trait. Recorded in `docs/spec-gaps.md`.
+*item* but keeps prelude items that **name** it. Prelude `HashMap<K: Key>` ends
+up bounded by a program's `Key`; a program that names anything `Take` has
+`Iterator::take`'s return type point at nothing. The read treats a bound whose
+trait comes from a lower file id than the body as unanswerable rather than
+resolving against the wrong trait, and that is a workaround at the point of
+use, not a fix. G9.138.
 
 ## A finding the read produced and cannot report
 
@@ -172,8 +204,12 @@ a compiler fix.
    them.~~ Done — bounds live in `Check::bounds`, keyed by parameter name, for
    the duration of one read.
 2. ~~Method resolution from a bound rather than from a concrete type.~~ Done
-   for methods (`Fn::param_method`). **Not done for associated items** — types
-   or functions — which is 34 of the 55 unread bodies.
+   for methods (`Fn::param_method`), calls (`Fn::param_call`), associated
+   functions (`Fn::param_assoc`) and associated types (a projection is a type,
+   or the type a binding pinned it to). **Not done for a bound with arguments**,
+   for an associated function that has parameters of its own (9 of the 15
+   unread bodies), or for the bounds an associated type was declared with,
+   which is what a projection would need in order to have methods.
 3. ~~A decision, per downstream component, between handling a `Ty::Param` and
    proving it cannot arrive.~~ Done, and the answer was neither: layout and
    codegen answer one word into output that is thrown away.

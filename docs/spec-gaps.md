@@ -2621,6 +2621,32 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.141 — what `T::Item` is before there is a `T`.** Ch. 4 §1.7 says an
+associated type is the type an implementation chooses. While a generic body is
+read there is no implementation, so `T::Item` names nothing — and 25 of the
+bodies in the prelude are written in terms of one.
+
+*Decision:* a projection through a parameter is **a type of its own**, a
+`Ty::Param("T::Item")`, opaque exactly as `T` is. The justification is the
+same one `T` has: the same projection through the same parameter is the same
+type at every instantiation, so a body can be checked in terms of it without
+knowing what it will be. Two projections are equal when they are written the
+same way, and unequal otherwise — which is conservative in the direction that
+costs a read rather than in the direction that costs a rejection, since an
+inequality only ever produces an error, and an error the read did not
+deliberately record is discarded.
+
+A bound may also **say** which type the projection is — `I: Iterator<Item =
+t27>` — and the read believes it, because `check_assoc_bindings` holds every
+instantiation to exactly that. A binding is not a trait argument and does not
+divide the trait's methods, so it is read where an argument is turned away.
+
+What it does **not** buy: where there is no binding, the bounds the trait
+declared on the associated type — `type Item: Show` — are not read out, so a
+method called on a projection is unanswerable and takes the whole body down
+with it (G9.139). The projection is a type; it is not yet a type that has
+anything.
+
 **G9.140 — a size the layout engine is told, in an answer nobody reads.**
 Ch. 4 §2.2 says a generic body is checked once, against its bounds. To check
 it the compiler has to lower it, and `lower::function` type-checks and emits
@@ -2652,15 +2678,18 @@ Ch. 4 §2.2 unimplemented, which is where this was.
 
 **G9.139 — what a checker owes when it does not understand the program.**
 `check_generic_bodies` reads each generic body once with every parameter
-bound to `Ty::Param(name)`, and most of the ways that read fails today are
-the reader running out of road rather than the body being wrong: an
-associated type projected through a parameter (`T::Item`, 25 bodies), an
-`Fn`-bounded parameter called as a function (15), an associated function
-reached through a bound (9), inference with no call site to unify against
-(5).
+bound to `Ty::Param(name)`, and most of the ways that read fails are the
+reader running out of road rather than the body being wrong: an associated
+function that has type parameters of its own (`C::from_iter` in `collect`, 9
+bodies), and inference with no call site to unify against (5). Four shapes
+have since been closed: a parameter called as a function (15 bodies, read out
+of its `Fn` bound), an associated type projected through a parameter (25,
+answered as a projection type of its own), an associated function reached
+through a bound (9), and a bound carrying an associated-type binding (15,
+believed because every instantiation is held to it).
 
-If the read's own `Err` were reported, all 54 would be false rejections of
-programs that compile and run.
+If the read's own `Err` were reported, every one of those would be a false
+rejection of a program that compiles and runs.
 
 *Decision:* the read is **fail-open, and completely**. A body is either
 judged or not judged — `Fn::reject` records a deliberate verdict,
@@ -2669,11 +2698,20 @@ all**, including verdicts it had already recorded. The all-or-nothing part is
 the load-bearing part: a body half-understood is a body whose rejections
 might be consequences of the half that was not.
 
-The measured result is 91 of 153 bodies read cleanly, 55 discarded, 7 unsure
-— so `never_called`-shaped bugs still hide in bodies of the four shapes
-above. That is the honest statement of what Ch. 4 §2.2 buys today, and it is
-a statement about *coverage*, which no chapter has vocabulary for. Ch. 4 says
-a body is checked. It does not say what a compiler may do when it cannot.
+The measured result is 157 of 172 bodies read cleanly, 6 discarded, 9 unsure
+— so `never_called`-shaped bugs still hide in bodies of the two shapes
+remaining. That is the honest statement of what Ch. 4 §2.2 buys today, and it
+is a statement about *coverage*, which no chapter has vocabulary for. Ch. 4
+says a body is checked. It does not say what a compiler may do when it cannot.
+
+*One thing is not fail-open, and the line is worth stating.* An **argument's
+type**, checked against a bound's signature, is rejected outright when both
+sides are **ground** — built from scalars, references, arrays and tuples, with
+no parameter and no nominal name anywhere in them. A nominal name does not
+count as ground on purpose: `Vec<T>` is `Vec.T` under a read and `Vec.t27`
+under an instantiation, and those are the same type at exactly one of them.
+Arity is always decidable and always rejected; the type is decidable only
+sometimes, and is rejected only then.
 
 **G9.138 — a shadowed trait a prelude bound still points at.** A program may
 declare a trait the prelude declares (Ch. 6 §3.3), and `mod.rs`'s `merged`
@@ -2694,6 +2732,19 @@ naming a program trait" and nothing else. It is a workaround at the point of
 use, not a fix: `merged` should either rewrite the surviving bounds to the
 prelude's own trait or drop the items that carry them, and until it does the
 prelude's `HashMap` is bounded by a trait it was not written against.
+
+*And a bound is not the only place a name survives in.* `Iterator::take` is a
+provided method returning `Take<Self>`, so a program that declares **anything
+named `Take`** — a trait, a struct, a function — has `struct Take<I>` dropped
+out from under a signature that still names it, and is told "`Take` is not a
+type in scope" about a type it never wrote. The same holds for every other
+prelude type reached only from a provided method's signature or body.
+
+Nothing warns, and the message names neither the program's item nor the
+prelude's. Written down here rather than fixed because the fix is the same one
+as above and is not local: either `merged` renames what it keeps, or the
+prelude's own names are qualified in a way a program's cannot collide with —
+and the second is a module system, which Ch. 6 §4 has half of.
 
 **G9.137 — `Range<T>` is not generic, and only the prelude was never read.**
 `compiler/src/lang/mod.rs`'s `impl<T> Iterator for Range<T>` does `self.start
