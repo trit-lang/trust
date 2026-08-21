@@ -240,30 +240,78 @@ trap 'rm -f "$prelude" "$bundle"' EXIT
 # that is in *characters* and the library is not all ASCII (Ch. 5 §1.4).
 tail -n +2 "$bundle" | awk '/^mod [^ ]+ [0-9]+$/ { exit } { print }' > "$prelude"
 v=0
-ask() {
-    rust=$1
-    mine=$2
+tmp=$(mktemp -d)
+# Five asks, each reading the prelude twice, and all five share the same
+# input — so they run at once and the aggregate is the same.
+(
+    rust=$("$trust" file "$prelude")
+    mine=$("$trust" run bootstrap/file.tr < "$prelude")
     if [ "$rust" != "$mine" ]; then
-        echo "bootstrap: the two disagree about $3 in the library" >&2
-        diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10 >&2
+        {
+            echo "bootstrap: the two disagree about the items in the library"
+            diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10
+        } > "$tmp/0.err"
         exit 1
     fi
-    v=$((v + $(printf '%s\n' "$rust" | wc -l)))
-}
-ask "$("$trust" file "$prelude")" \
-    "$("$trust" run bootstrap/file.tr < "$prelude")" "the items"
-ask "$("$trust" symbols "$prelude")" \
-    "$("$trust" bundle "$prelude" | "$trust" run bootstrap/symbols.tr)" \
-    "the names defined"
-ask "$("$trust" uses "$prelude")" \
-    "$("$trust" bundle "$prelude" | "$trust" run bootstrap/uses.tr)" \
-    "what every use reaches"
-ask "$("$trust" layout "$prelude")" \
-    "$("$trust" bundle "$prelude" | "$trust" run bootstrap/sizes.tr)" \
-    "the layouts"
-ask "$("$trust" agree "$prelude")" \
-    "$({ printf '// agree\n'; cat "$prelude"; } | "$trust" run bootstrap/types.tr)" \
-    "which functions type-check"
+    printf '%s\n' "$rust" | wc -l > "$tmp/0.n"
+) &
+throttle
+(
+    rust=$("$trust" symbols "$prelude")
+    mine=$("$trust" bundle "$prelude" | "$trust" run bootstrap/symbols.tr)
+    if [ "$rust" != "$mine" ]; then
+        {
+            echo "bootstrap: the two disagree about the names defined in the library"
+            diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10
+        } > "$tmp/1.err"
+        exit 1
+    fi
+    printf '%s\n' "$rust" | wc -l > "$tmp/1.n"
+) &
+throttle
+(
+    rust=$("$trust" uses "$prelude")
+    mine=$("$trust" bundle "$prelude" | "$trust" run bootstrap/uses.tr)
+    if [ "$rust" != "$mine" ]; then
+        {
+            echo "bootstrap: the two disagree about what every use reaches in the library"
+            diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10
+        } > "$tmp/2.err"
+        exit 1
+    fi
+    printf '%s\n' "$rust" | wc -l > "$tmp/2.n"
+) &
+throttle
+(
+    rust=$("$trust" layout "$prelude")
+    mine=$("$trust" bundle "$prelude" | "$trust" run bootstrap/sizes.tr)
+    if [ "$rust" != "$mine" ]; then
+        {
+            echo "bootstrap: the two disagree about the layouts in the library"
+            diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10
+        } > "$tmp/3.err"
+        exit 1
+    fi
+    printf '%s\n' "$rust" | wc -l > "$tmp/3.n"
+) &
+throttle
+(
+    rust=$("$trust" agree "$prelude")
+    mine=$({ printf '// agree\n'; cat "$prelude"; } | "$trust" run bootstrap/types.tr)
+    if [ "$rust" != "$mine" ]; then
+        {
+            echo "bootstrap: the two disagree about which functions type-check in the library"
+            diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10
+        } > "$tmp/4.err"
+        exit 1
+    fi
+    printf '%s\n' "$rust" | wc -l > "$tmp/4.n"
+) &
+throttle
+wait
+report_errors "$tmp"
+v=$((v + $(sum_ns "$tmp")))
+rm -rf "$tmp"
 
 # A whole *program*, not a file. The machine has a character port and no
 # filesystem (ISA §2.2), so the driver walks the module tree and hands the
