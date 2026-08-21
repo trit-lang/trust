@@ -396,11 +396,10 @@ contradicts is the next thing to catch.
   same cell. This has caused one panic already. Bind and break instead. (Also
   in §7; it is repeated here because §9 is the section someone opens while
   debugging.)
-- There is no `Sized` bound. Ch. 4 §2.5 says every type parameter has an
-  implicit one and `?Sized` removes it; the implementation has neither, so a
-  parameter behaves as `?Sized` and the size requirement is checked at each
-  *use* instead. More permissive than Rust, equally sound, and the difference
-  shows only in where the error appears.
+- Every type parameter is `Sized` and `?Sized` removes it (Ch. 4 §2.5), asked
+  once where the argument is supplied. The old per-use size checks are still
+  there and still run — a parameter of unsized type, a `let` of one, a field
+  of one — so the two disagree only about where a program is refused.
 
 ---
 
@@ -577,8 +576,7 @@ pointed the wrong way, about a memory-safety hole.
 
 | Limit | Test |
 |---|---|
-| reading a generic body is fail-open — what an opaque type implements is not known | `known_limit_reading_a_generic_body_is_fail_open` |
-| there is no `Sized` bound | `known_limit_there_is_no_sized_bound` |
+| reading a generic body is fail-open — a body not fully understood reports nothing | `known_limit_reading_a_generic_body_is_fail_open` |
 | shadowing a prelude type breaks what named it | `known_limit_shadowing_a_prelude_type_breaks_what_named_it` |
 | a returned borrow is rooted syntactically | `known_limit_a_returned_borrow_is_rooted_syntactically` |
 | a closure captures by variable, not by place | `known_limit_a_closure_captures_by_variable_not_by_place` |
@@ -586,7 +584,8 @@ pointed the wrong way, about a memory-safety hole.
 | every owner drops exactly once | `every_owner_drops_exactly_once` (the ledger, §8.2a) |
 | diagnostics print mangled names | `known_limit_diagnostics_print_mangled_names` |
 
-**These two were one thing, and half of it is done.** `Ty::Param` exists now
+**That row and the `Sized` one were one thing, and the second is now gone.**
+`Ty::Param` exists now
 and carries its bounds, so a generic body is lowered once with every parameter
 standing for itself, and everything a parameter can name — a method, an
 associated function, a call an `Fn` bound made callable, an associated type —
@@ -620,24 +619,19 @@ What remains:
   `Take` is told "`Take` is not a type in scope" about a type it never wrote,
   because `Iterator::take` returns `Take<Self>` (G9.138). The fix is a module
   system or a rename pass, and neither is small.
-- **Ch. 4 §2.5 gives every type parameter an implicit `Sized` bound and
-  `?Sized` to remove it. There is still neither**: a parameter behaves as
-  `?Sized`, and the size requirement is enforced at each *use*, so the error
-  surfaces in the body rather than at the call. The read does not weaken this
-  — the one word it is told is discarded, and `check_sized` runs again at
-  instantiation with a real size.
 - **`Range<T>` in the prelude is not generic** — `impl<T> Iterator for
   Range<T>` does `self.start += 1` with a `t27` literal. The read finds it and
   cannot report it without failing every program (G9.137). It is the C++
   failure mode Appendix B claims is removed, in the prelude, and closing it is
   a language decision: a numeric bound, or `Range<t27>`.
 
-The `?Sized` behaviour is sound *provided the list of use sites that require
-a size is exhaustive*, and that list is the kind that grows quietly as a
-language does: parameters, `let` bindings, fields, reads through a reference
-today; return positions, array elements, tuple members, closure captures and
-enum payloads tomorrow. If you add a construct that needs a size, route it
-through the same check rather than writing a fifth one.
+**`Sized` is a bound now** (Ch. 4 §2.5, G9.144). It used to be a list of use
+sites that had to be exhaustive to be sound — parameters, `let` bindings,
+fields, reads through a reference — and return position, array element, tuple
+member and enum payload were all outside it. One predicate on the parameter,
+discharged where the argument is supplied, does not have that shape. The use
+sites still check, because keeping them costs nothing and they refuse earlier;
+but nothing rests on the list being complete any more.
 
 The rest:
 

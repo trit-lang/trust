@@ -721,6 +721,19 @@ impl Parser {
     /// (Ch. 4 §1.7). `From<t9>` is a different requirement from `From<t27>`,
     /// which is the whole reason a trait may carry parameters.
     fn bound(&mut self) -> R<Bound> {
+        // `?Sized` removes the bound every type parameter has without being
+        // written (Ch. 4 §2.5). It is the only bound that takes something
+        // away, so it is the only name a `?` may precede.
+        if self.eat_op("?") {
+            let name = self.expect_ident()?;
+            if name != "Sized" {
+                return self.err(format!(
+                    "`?{name}` is not a bound: `?` removes `Sized`, and `Sized` \
+                     is the only bound a parameter has unwritten (Ch. 4 §2.5)"
+                ));
+            }
+            return Ok(Bound::plain("?Sized"));
+        }
         let name = self.expect_ident()?;
         // `Fn(A) -> B` is the same bound `impl Fn(A) -> B` gives an anonymous
         // parameter, written where the parameter has a name (Ch. 4 §4.3).
@@ -1085,7 +1098,19 @@ impl Parser {
                 let mut bounds = Vec::new();
                 if self.eat_op(":") {
                     loop {
-                        bounds.push(self.bound()?);
+                        let b = self.bound()?;
+                        // An associated type has no implicit `Sized` to
+                        // remove: it is a type an impl chose, and what a
+                        // chosen type may be is Ch. 3 §5.1's business, not a
+                        // bound's. Refused rather than accepted and dropped,
+                        // which is what this whole form used to be (G9.142).
+                        if b.name == "?Sized" {
+                            return self.err(format!(
+                                "`type {name}: ?Sized` removes a bound an \
+                                 associated type never had (Ch. 4 §2.5)"
+                            ));
+                        }
+                        bounds.push(b);
                         if !self.eat_op("+") {
                             break;
                         }

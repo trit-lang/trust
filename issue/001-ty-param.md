@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| **Status** | Half closed. A generic body is now read once against its bounds; `Sized` is still not a bound. |
-| **Blocks** | Ch. 4 §2.5 (`Sized` / `?Sized`) |
-| **Closed** | Ch. 4 §2.2 (a generic body checked once), for the shapes §"What the read catches" lists |
+| **Status** | Closed, but for the scorecard row below, which is a spec edit and not a compiler one. |
+| **Blocks** | Nothing. |
+| **Closed** | Ch. 4 §2.2 (a generic body checked once), for the shapes §"What the read catches" lists; Ch. 4 §2.5 (`Sized` / `?Sized`) |
 | **Contradicts** | Ch. 4 Appendix B — the scorecard claims the C++ template failure mode is removed by construction. It is removed at every place a type argument is supplied (G9.143), and now for a named method in the body. Not by construction. |
-| **Tests** | `a_generic_body_is_read_once_against_its_bounds`, `a_parameter_is_called_against_its_fn_bound`, `an_associated_function_is_reached_through_a_bound`, `an_associated_type_binding_says_what_a_projection_is`, `a_bound_on_an_associated_type_holds_the_impl_to_it`, `a_projection_has_the_methods_its_declaring_trait_bound_it_with`, `known_limit_reading_a_generic_body_is_fail_open`, `known_limit_there_is_no_sized_bound` (all `compiler/tests/frontend.rs`) |
+| **Tests** | `a_generic_body_is_read_once_against_its_bounds`, `a_parameter_is_called_against_its_fn_bound`, `an_associated_function_is_reached_through_a_bound`, `an_associated_type_binding_says_what_a_projection_is`, `a_bound_on_an_associated_type_holds_the_impl_to_it`, `a_projection_has_the_methods_its_declaring_trait_bound_it_with`, `known_limit_reading_a_generic_body_is_fail_open`, `a_type_is_held_to_its_own_bounds_where_it_is_named`, `an_impls_own_bounds_are_checked_against_the_receiver`, `a_type_parameter_is_sized_unless_it_says_otherwise` (all `compiler/tests/frontend.rs`) |
 
 ## The decision
 
@@ -51,41 +51,39 @@ This used to compile. It is now rejected.
 
 ## What it costs, on the other: there is no `Sized` bound
 
-*(Still open.)*
+*(Fixed, in G9.144. Kept for the same reason as the first.)*
 
 A `Sized` bound is a predicate attached to the parameter and discharged once,
-where the parameter is bound. `Ty::Param` now exists, but nothing attaches
-`Sized` to it and there is no `?Sized` to remove it: a parameter still behaves
-as `?Sized`.
-
-The implementation checks the size at each **use** — `check_sized` — over
-parameters, locals, fields, and reads through a reference.
-
-The observable difference is that this is *more permissive* than Rust:
+where the parameter is bound. The implementation instead checked the size at
+each **use** — `check_sized` — over parameters, locals, fields, and reads
+through a reference, so
 
 ```rust
 fn twice<S: Shape>(s: &S) -> t27 { s.area() * 2 }
 let d: &dyn Shape = &c;
-twice(d)                    // Rust rejects this; here it answers 20
+twice(d)                    // Rust rejects this; here it answered 20
 ```
 
-which is correct — `S = dyn Shape` never needs its own size, only the
-reference's.
+was accepted, which is *more permissive* than Rust and not unsound — `S = dyn
+Shape` never needs its own size, only the reference's.
 
-**It is sound only while the list of use sites is exhaustive**, and that list
-is the kind that grows quietly. Any new construct that needs a size and does
-not route through `check_sized` breaks the soundness argument without breaking
-a test. Note that the read pass below does *not* weaken this: the read answers
-one word for a parameter's size and throws the answer away, and every size
-question that matters is asked again at instantiation.
+**It was sound only while the list of use sites was exhaustive**, and it was
+not: return position, array element, tuple member and enum payload were all
+outside it. That is the argument for making it a predicate rather than a list,
+and that is what it is now: `check_implicit_sized` refuses an unsized argument
+at every place an argument is supplied — a call, an instantiation of a type,
+and a method on an impl whose parameters the receiver settles — unless the
+definition wrote `?Sized`. The use-site checks were kept, so what they still
+catch they catch earlier. The program above must now write `fn twice<S: Shape +
+?Sized>`, and `examples/trust/demo.tr` does.
 
 ## Why they were one wall
 
 Both need the same capability: represent *some type known only to implement
-`Shape`*, and resolve `s.area()` from the bound alone. The first half of that
-now exists; `Sized` needs the second half of the same machinery to be pointed
-at a bound the parameter carries implicitly rather than one it was written
-with.
+`Shape`*, and resolve a question about it from the bound alone. `Sized` was the
+second half, and it was the smaller one — `check_bound_named` already answered
+`"Sized" => !ty.is_unsized()`, so a bound someone wrote by hand worked before
+any of this. What was missing was the bound nobody writes.
 
 ## What was wrong about "why it is not a small change"
 
@@ -215,7 +213,7 @@ Eight groups have been closed since the read landed.
   type has no methods, which is an answer.
 
 `never_called`-shaped bugs now hide only in the comparisons a read body passed
-over, and in shapes the corpus does not contain. Neither is `Sized`.
+over, and in shapes the corpus does not contain.
 
 There is also a hole that is not the read's: a program may declare an item the
 prelude also declares (Ch. 6 §3.3), and `mod.rs`'s `merged` drops the prelude's
@@ -256,9 +254,11 @@ a compiler fix.
 3. ~~A decision, per downstream component, between handling a `Ty::Param` and
    proving it cannot arrive.~~ Done, and the answer was neither: layout and
    codegen answer one word into output that is thrown away.
-4. `Sized` as an ordinary bound, implicit on every parameter, removable with
-   `?Sized`, with `check_sized` kept as the enforcement for the `?Sized` case.
-   **Untouched.**
+4. ~~`Sized` as an ordinary bound, implicit on every parameter, removable with
+   `?Sized`, with `check_sized` kept as the enforcement for the `?Sized`
+   case.~~ Done, and exactly that way: `check_implicit_sized` at every place an
+   argument is supplied, `?Sized` parsed as a bound name no trait can have, and
+   every `check_sized` left where it was.
 5. Ch. 4 Appendix B's scorecard row re-earned, or amended to say what is
    actually removed. **Untouched** — and the `Range<T>` finding says the honest
    amendment is the shorter path.

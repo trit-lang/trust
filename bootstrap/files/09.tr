@@ -5,6 +5,7 @@ fn first<A, B>(p: Pair<A, B>) -> A { let Pair { a, b } = p; a }
 fn bounded<T: Show + Eq, U: Ord>(x: T, y: U) -> t27 { x.show() }
 fn assoc<I: Iterator<Item = t27>>(it: I) -> t27 { 0 }
 fn counted<const N: taddr, T>(x: T) -> taddr { N }
+fn relaxed<S: Show + ?Sized, T: ?Sized>(s: &S, t: &T) -> t27 { s.show() }
 impl<A, B> Pair<A, B> {
     fn swap(self) -> Pair<B, A> {
         let Pair { a, b } = self;

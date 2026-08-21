@@ -1422,6 +1422,31 @@ pub fn lower_noting(
     }
 }
 
+/// Every type parameter is `Sized` unless it says otherwise (Ch. 4 §2.5).
+///
+/// Written as a bound the program did not write, because that is what it is:
+/// the alternative is a size check at every place a parameter is *used*, which
+/// is where this compiler had it, and which cannot be made exhaustive — return
+/// position, array element, tuple member and enum payload were all outside it.
+fn check_implicit_sized(
+    ty: &Ty,
+    bounds: &[ast::Bound],
+    callee: &str,
+    param: &str,
+    span: Span,
+) -> R<()> {
+    if !ty.is_unsized() || bounds.iter().any(|b| b.name == RELAXED_SIZED) {
+        return Ok(());
+    }
+    err(
+        span,
+        format!(
+            "`{ty}` has no size, and `{callee}` did not write `{param}: ?Sized` \
+             (Ch. 4 §2.5)"
+        ),
+    )
+}
+
 /// Each generic type's arguments against the bounds its own definition
 /// declared: `struct Holder<T: Show>` (Ch. 4 §2.2, G9.143).
 ///
@@ -1483,6 +1508,9 @@ fn check_type_bounds(w: &World, errs: &mut Vec<Error>) {
             // asks this again (G9.139).
             if ty.has_param() {
                 continue;
+            }
+            if let Err(e) = check_implicit_sized(ty, bounds, &base, name, span) {
+                errs.push(e);
             }
             for b in bounds {
                 if let Err(e) = ask.check_bound_in(ty, b, &env, &base, name, span) {
@@ -2350,6 +2378,10 @@ fn konst_addr(v: i128) -> Operand {
 /// is the whole reason `Box` is a language item.
 const ALLOC: &str = "alloc";
 const FREE: &str = "free";
+
+/// `?Sized` — the one bound that takes something away rather than asking for
+/// it, and so is stored as a name no trait can have (Ch. 4 §2.5).
+const RELAXED_SIZED: &str = "?Sized";
 
 /// The name a function is known by. A destructor is keyed by its type, since
 /// every type may have one and they would otherwise collide.
@@ -4657,6 +4689,12 @@ impl Bounds<'_> {
         param: &str,
         span: Span,
     ) -> R<()> {
+        // `?Sized` asks for nothing — it is the absence of the bound
+        // `check_implicit_sized` would otherwise apply (Ch. 4 §2.5). Answered
+        // here so that no site iterating a bound list has to know.
+        if bound.name == RELAXED_SIZED {
+            return Ok(());
+        }
         if bound.args.is_empty() {
             self.check_bound(ty, &bound.name, env, callee, param, span)?;
             return self.check_assoc_bindings(ty, bound, env, param, span);
@@ -8023,6 +8061,7 @@ impl Fn<'_> {
             // and the real call site asks this again with one. Skipping is
             // the read adding nothing rather than concluding wrongly.
             if !(ty.has_param() && self.check.is_some()) {
+                check_implicit_sized(ty, bounds, name, pname, span)?;
                 for b in bounds {
                     let ty = ty.clone();
                     self.bounds()
@@ -10172,6 +10211,7 @@ impl Fn<'_> {
             if ty.has_param() && self.check.is_some() {
                 continue;
             }
+            check_implicit_sized(ty, bounds, &base, name, span)?;
             for b in bounds {
                 self.bounds()
                     .check_bound_in(ty, b, &env, &base, name, span)?;

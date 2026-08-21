@@ -101,8 +101,10 @@ impl Shape for Rect {
     fn initial(&self) -> t9 { 82 }          // 'R'
 }
 
-// Static dispatch: one copy of this per shape it is used with.
-fn describe<S: Shape>(s: &S) {
+// Static dispatch: one copy of this per shape it is used with. `?Sized`
+// removes the size every type parameter is assumed to have, which is what
+// lets one of those copies be made for `dyn Shape` (Ch. 4 §2.5).
+fn describe<S: Shape + ?Sized>(s: &S) {
     putchar(s.initial());
     putchar(61);                            // '='
     print_decimal(s.area());

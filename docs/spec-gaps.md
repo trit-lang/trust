@@ -646,6 +646,11 @@ parameters, `let` bindings, fields, reads through a reference. That list is
 the kind that grows quietly. A new construct that needs a size must go
 through the same check rather than adding a fifth one.
 
+*Fixed*, in G9.144, once `Ty::Param` existed to hold the bound. The list above
+no longer has to be exhaustive to be sound: a parameter is `Sized` unless it
+wrote `?Sized`, asked once where the argument is supplied. The use-site checks
+were kept rather than replaced, so what they still catch they catch earlier.
+
 **G0.17 — three more drop bugs, found by giving the test suite the resource
 the language does not have.** Ch. 3 §1.5 is why the previous three (G0.16)
 were invisible: with no allocator, no file handle and no lock, dropping twice
@@ -2620,6 +2625,42 @@ runner that pretended otherwise would be lying about the language.
 The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
+
+**G9.144 — `Sized` is a bound now, and the spec's own grammar cannot write
+the one that removes it.** Ch. 4 §2.5 gives every type parameter an implicit
+`Sized` bound and `?Sized` to remove it. G4.4 recorded that the implementation
+had neither and enforced a size at each *use* instead. That is closed: a type
+argument that `is_unsized()` is refused at every place an argument is supplied
+unless the definition wrote `?Sized`, which is one predicate discharged once
+instead of a list of use sites that has to be exhaustive to be sound.
+
+The use-site checks stay. Removing them is what would need the list to be
+complete; keeping them means the two disagree only about *where* a program is
+refused, never about whether. `?Sized` is stored as the bound name `"?Sized"`,
+which no trait can be called, and `check_bound_in` answers it first and asks
+nothing — so no site that iterates a bound list has to know it is special.
+
+*The gap this opened.* §2.5 writes `?Sized` in prose; the grammar in
+[`00-syntax.md`](../spec/language/00-syntax.md) writes
+
+```
+bounds := ':' ( lifetime | ident ) ( '+' ( lifetime | ident ) )*
+```
+
+which has no `?` — and no arguments either, so the same production cannot
+write the `Iterator<Item = t27>` that Ch. 4 §1.7 relies on, or the `Fn(A) -> R`
+of §4.1. Three forms the chapters use and the grammar refuses. The
+implementation parses all three. *Not fixed:* the grammar is the user's to
+correct, and it is one production.
+
+*And one to watch.* [`05-library.md`](../spec/language/05-library.md) §2.3
+declares `struct Box<T: ?Sized>;`, while `lower.rs` runs
+`check_sized(inner, …, "a `Box`'s contents")`. Every operation the same block
+declares — `new`, `try_new`, `into_inner` — passes a `T` by value and so needs
+a size, and the language has no coercion that would produce the unsized `Box`
+the declaration allows. So the `?Sized` there says nothing today, and the
+compiler is right to refuse it; but the declaration and the compiler disagree
+in writing, which is how the previous entry's silence started.
 
 **G9.143 — a bound a *type* declared was never asked about.** Ch. 4 §2.2 says
 an instantiation that fails a bound is rejected at the call site. The compiler

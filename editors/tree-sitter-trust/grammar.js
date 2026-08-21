@@ -170,7 +170,9 @@ module.exports = grammar({
 
     bounds: ($) => seq(':', sepBy1('+', choice($.lifetime, $.bound))),
 
-    bound: ($) => seq($.identifier, optional($.type_arguments)),
+    /// The `?` is `?Sized` and nothing else (Ch. 4 §2.5), but which name may
+    /// follow it is the checker's rule rather than the grammar's.
+    bound: ($) => seq(optional('?'), $.identifier, optional($.type_arguments)),
 
     /// `where T: Bound` and `where n <= a.len()` share a clause: the second
     /// is a predicate the caller must have established (Ch. 4 §2.8), and is

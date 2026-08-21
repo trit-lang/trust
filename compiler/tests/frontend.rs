@@ -88,16 +88,20 @@ fn the_demo_runs_the_whole_way() {
 #[test]
 fn a_trait_object_satisfies_its_own_traits_bound() {
     // Ch. 4 §3.1: dispatch through an object is what its vtable is for, so
-    // `dyn Shape` is a `Shape` and a generic function may take one.
-    assert_eq!(
-        run("trait Shape { fn area(&self) -> t27; } \
-             struct C { r: t27 } \
-             impl Shape for C { fn area(&self) -> t27 { self.r * 2 } } \
-             fn twice<S: Shape>(s: &S) -> t27 { s.area() * 2 } \
-             fn main() -> t27 { let c = C { r: 5 }; let d: &dyn Shape = &c; twice(d) }")
-        .0,
-        20
-    );
+    // `dyn Shape` is a `Shape` and a generic function may take one — once it
+    // has said the parameter need not have a size (§2.5).
+    let src = |bounds: &str| {
+        format!(
+            "trait Shape {{ fn area(&self) -> t27; }} \
+             struct C {{ r: t27 }} \
+             impl Shape for C {{ fn area(&self) -> t27 {{ self.r * 2 }} }} \
+             fn twice<S: {bounds}>(s: &S) -> t27 {{ s.area() * 2 }} \
+             fn main() -> t27 {{ let c = C {{ r: 5 }}; let d: &dyn Shape = &c; twice(d) }}"
+        )
+    };
+    assert_eq!(run(&src("Shape + ?Sized")).0, 20);
+    let e = error(&src("Shape"));
+    assert!(e.contains("has no size") && e.contains("?Sized"), "{e}");
 }
 
 #[test]
@@ -2351,45 +2355,47 @@ fn known_limit_shadowing_a_prelude_type_breaks_what_named_it() {
 }
 
 #[test]
-fn known_limit_there_is_no_sized_bound() {
-    // §11: Ch. 4 §2.5 gives every type parameter an implicit `Sized` bound
-    // and `?Sized` to remove it; there is neither, so a parameter behaves as
-    // `?Sized`. Rust rejects this call; here it works.
-    assert_eq!(
-        run("trait Shape { fn area(&self) -> t27; } \
-             struct C { r: t27 } \
-             impl Shape for C { fn area(&self) -> t27 { self.r * 2 } } \
-             fn twice<S: Shape>(s: &S) -> t27 { s.area() * 2 } \
-             fn main() -> t27 { let c = C { r: 5 }; let d: &dyn Shape = &c; twice(d) }")
-        .0,
-        20
-    );
-    // Sound, because every use that needs a size is checked at that use.
+fn a_type_parameter_is_sized_unless_it_says_otherwise() {
+    // Ch. 4 §2.5: every type parameter has a `Sized` bound nobody wrote, and
+    // `?Sized` is how it is given up. The rejection names the parameter and
+    // the thing to write, rather than a use somewhere inside the body.
+    let prog = |bounds: &str, src: &str, call: &str| {
+        format!(
+            "trait Shape {{ fn area(&self) -> t27; }} struct C {{ r: t27 }} \
+             impl Shape for C {{ fn area(&self) -> t27 {{ self.r }} }} \
+             {} \
+             fn main() -> t27 {{ let c = C {{ r: 1 }}; let d: &dyn Shape = &c; {call} }}",
+            src.replace("@", bounds)
+        )
+    };
+    let by_ref = "fn f<@>(x: &S) -> t27 { x.area() }";
+    let e = error(&prog("S: Shape", by_ref, "f(d)"));
+    assert!(e.contains("has no size") && e.contains("?Sized"), "{e}");
+    assert_eq!(run(&prog("S: Shape + ?Sized", by_ref, "f(d)")).0, 1);
+    // A relaxed parameter is still not a place: what `?Sized` buys is the
+    // right to name the type, not the right to hold a value of it (Ch. 3
+    // §5.1). Those checks are unchanged and still the ones that answer.
     for (what, src, call) in [
-        ("a parameter", "fn f<T: Shape>(x: T) -> t27 { 0 }", "f(*d)"),
-        (
-            "a local",
-            "fn f<T: Shape>(x: &T) -> t27 { let y = *x; 0 }",
-            "f(d)",
-        ),
+        ("by value", "fn f<@>(x: S) -> t27 { 0 }", "f(*d)"),
+        ("a local", "fn f<@>(x: &S) -> t27 { let y = *x; 0 }", "f(d)"),
         (
             "a field",
-            "struct W<T> { v: T } \
-             fn f<T: Shape>(x: &T) -> t27 { let w: W<T> = W { v: *x }; 0 }",
+            "struct W<T: ?Sized> { v: T } \
+             fn f<@>(x: &S) -> t27 { let w: W<S> = W { v: *x }; 0 }",
             "f(d)",
         ),
     ] {
-        let e = error(&format!(
-            "trait Shape {{ fn area(&self) -> t27; }} struct C {{ r: t27 }} \
-             impl Shape for C {{ fn area(&self) -> t27 {{ self.r }} }} \
-             {src} \
-             fn main() -> t27 {{ let c = C {{ r: 1 }}; let d: &dyn Shape = &c; {call} }}"
-        ));
+        let e = error(&prog("S: Shape + ?Sized", src, call));
         assert!(
             e.contains("no size") || e.contains("cannot read"),
             "{what}: {e}"
         );
     }
+    // `?` removes exactly one bound, and only that one.
+    let e = error("fn f<T: ?Shape>(x: &T) -> t27 { 0 } fn main() -> t27 { 0 }");
+    assert!(e.contains("`?Shape` is not a bound"), "{e}");
+    let e = error("trait Holds { type Item: ?Sized; } fn main() -> t27 { 0 }");
+    assert!(e.contains("never had"), "{e}");
 }
 
 #[test]

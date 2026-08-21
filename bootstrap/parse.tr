@@ -2260,6 +2260,33 @@ fn bound_list(p: &mut Parser) -> Result<Vec<ast::Bound>, lex::Error> {
 
 /// One bound: a trait, and what it carries (Ch. 4 §1.7).
 fn one_bound(p: &mut Parser) -> Result<ast::Bound, lex::Error> {
+    // `?Sized` removes the bound every type parameter has without being
+    // written (Ch. 4 §2.5). It is the only bound that takes something away,
+    // so it is the only name a `?` may precede — and it carries nothing,
+    // which is why it returns before the arguments below.
+    let q = peek(p)?;
+    let after = q.at;
+    let relaxed = match q.tok {
+        Tok::Op(o) => o.same("?"),
+        _ => false,
+    };
+    if relaxed {
+        p.at = after;
+        let relaxes = ident(p)?;
+        if !relaxes.same("Sized") {
+            return Result::Err(lex::Error {
+                at: p.at,
+                message: "`?` removes `Sized` and nothing else".to_string(),
+            });
+        }
+        let no_args: Vec<ast::Ty> = Vec::new();
+        let no_assoc: Vec<ast::Named> = Vec::new();
+        return Result::Ok(ast::Bound {
+            name: "?Sized".to_string(),
+            args: no_args,
+            assoc: no_assoc,
+        });
+    }
     let name = ident(p)?;
     let mut args: Vec<ast::Ty> = Vec::new();
     let mut assoc: Vec<ast::Named> = Vec::new();
