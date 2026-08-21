@@ -568,7 +568,6 @@ pointed the wrong way, about a memory-safety hole.
 |---|---|
 | reading a generic body is fail-open — what an opaque type implements is not known | `known_limit_reading_a_generic_body_is_fail_open` |
 | there is no `Sized` bound | `known_limit_there_is_no_sized_bound` |
-| a bound on an associated type is parsed and thrown away | `known_limit_a_bound_on_an_associated_type_is_not_enforced` |
 | shadowing a prelude type breaks what named it | `known_limit_shadowing_a_prelude_type_breaks_what_named_it` |
 | a returned borrow is rooted syntactically | `known_limit_a_returned_borrow_is_rooted_syntactically` |
 | a closure captures by variable, not by place | `known_limit_a_closure_captures_by_variable_not_by_place` |
@@ -597,9 +596,11 @@ What remains:
   either, since a body half-understood is a body whose rejections might be
   consequences of the half that was not (G9.139). The one body left is
   `Range<T>`, which the read rejects correctly and cannot report (G9.137). The
-  question the read still cannot answer is what an **opaque** type implements —
-  a projection's bounds are not read out of the trait that declared it — and no
-  body in the corpus happens to ask it. The one thing that is *not* fail-open
+  question the read still cannot answer is what an **opaque** type implements.
+  A trait now keeps the bounds it declared on an associated type, and every
+  impl's choice is held to them (G9.142) — but nothing files them under the
+  projection's key, so `T::Item` has no methods and no body in the corpus
+  happens to ask for one. The one thing that is *not* fail-open
   is an argument's type where both sides are ground — no parameter, and no
   nominal name that an instantiation could rename.
 - **Shadowing a prelude type breaks the prelude items that named it.**

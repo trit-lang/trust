@@ -1401,6 +1401,7 @@ pub fn lower_noting(
     // at all: a body full of consequences of an earlier error says nothing
     // about itself.
     if errs.is_empty() {
+        check_assoc_bounds(file, &world, &mut errs);
         check_generic_bodies(&generic_fns, &sigs, &world, &mut errs);
     }
 
@@ -1409,6 +1410,127 @@ pub fn lower_noting(
     } else {
         Err(errs)
     }
+}
+
+/// Each impl's chosen associated type against the bounds the trait declared
+/// on it: `type Iter: Iterator;` (Ch. 4 §1.7, G9.142).
+///
+/// Not in `check_trait_impl`, which runs while the impls table is still being
+/// built and so cannot answer what any type implements. Here the table is
+/// whole.
+fn check_assoc_bounds(file: &ast::File, w: &World, errs: &mut Vec<Error>) {
+    let none = HashMap::new();
+    let ask = Bounds {
+        types: w.types,
+        impls: w.impls,
+        traits: w.traits,
+        fn_bounds: w.fn_bounds,
+        scope: &none,
+    };
+    for item in &file.items {
+        let ast::Item::Impl(imp) = item else { continue };
+        let Some(decl) = imp.trait_name.as_ref().and_then(|t| w.traits.get(t)) else {
+            continue;
+        };
+        // The impl's own parameters stand for themselves: `type Item = T` is
+        // a choice made in terms of `T`, and what `T` satisfies is what the
+        // impl wrote down about it.
+        let env: HashMap<String, Ty> = imp
+            .generics
+            .iter()
+            .map(|p| (p.name().to_string(), Ty::Param(p.name().to_string())))
+            .collect();
+        for (name, want) in &decl.assoc {
+            if want.is_empty() {
+                continue; // nothing is asked, and nothing is resolved to ask it
+            }
+            let Some((_, written)) = imp.assoc.iter().find(|(n, _)| n == name) else {
+                continue; // a missing choice is `check_trait_impl`'s error
+            };
+            let Ok(ty) = resolve_ty_env(written, w.types, &env) else {
+                continue; // a type that cannot be named is an error already
+            };
+            for b in want {
+                let e = match &ty {
+                    Ty::Param(p) => declares_bound(imp, p, b, w, &env),
+                    _ => ask.check_bound_in(&ty, b, &env, &decl.name, name, imp.span),
+                };
+                if let Err(e) = e {
+                    errs.push(e);
+                }
+            }
+        }
+    }
+}
+
+/// Whether an impl's own parameter was declared with a bound the trait asks
+/// of it, directly or through a supertrait (Ch. 4 §§1.6, 1.7).
+///
+/// A parameter is not a type, so nothing can be looked up about it. What the
+/// impl wrote is the whole of what is known — and it is enough, because every
+/// instantiation is held to it at the call site (§2.2).
+fn declares_bound(
+    imp: &ast::ImplItem,
+    param: &str,
+    want: &ast::Bound,
+    w: &World,
+    env: &HashMap<String, Ty>,
+) -> R<()> {
+    // A bound is the same requirement as another when it is the same trait
+    // with the same arguments, which is what the name an impl records itself
+    // under already says (§1.7). A bound whose arguments cannot be resolved
+    // has no key, and so matches nothing.
+    let key = |b: &ast::Bound| -> Option<String> {
+        if b.args.is_empty() {
+            return Some(b.name.clone());
+        }
+        let args: Vec<Ty> = b
+            .args
+            .iter()
+            .map(|a| resolve_ty_env(a, w.types, env))
+            .collect::<R<_>>()
+            .ok()?;
+        Some(mangle(&b.name, &args))
+    };
+    let Some(wanted) = key(want) else {
+        return err(
+            imp.span,
+            format!("`{}` cannot be resolved here (Ch. 4 §1.7)", want.name),
+        );
+    };
+    let mut chain: Vec<String> = imp
+        .generics
+        .iter()
+        .filter(|p| p.name() == param)
+        .filter_map(|p| match p {
+            ast::GenericParam::Type { bounds, .. } => Some(bounds),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(key)
+        .collect();
+    let mut i = 0;
+    while i < chain.len() {
+        if chain[i] == wanted {
+            return Ok(());
+        }
+        if let Some(t) = w.traits.get(&chain[i]) {
+            for s in &t.supertraits {
+                if !chain.contains(s) {
+                    chain.push(s.clone());
+                }
+            }
+        }
+        i += 1;
+    }
+    err(
+        imp.span,
+        format!(
+            "`{param}` is not declared `{}`, which this associated type requires \
+             (Ch. 4 §1.7)",
+            want.name
+        ),
+    )
 }
 
 /// Read each generic body once, against its bounds (Ch. 4 §2.2, issue/001).
@@ -3079,7 +3201,7 @@ fn check_trait_impl(
             );
         }
     }
-    for a in &decl.assoc {
+    for (a, _) in &decl.assoc {
         if !imp.assoc.iter().any(|(n, _)| n == a) {
             return err(
                 imp.span,
@@ -3092,7 +3214,7 @@ fn check_trait_impl(
         }
     }
     for (n, _) in &imp.assoc {
-        if !decl.assoc.contains(n) {
+        if !decl.assoc.iter().any(|(a, _)| a == n) {
             return err(
                 imp.span,
                 format!("`{}` declares no associated type `{n}`", decl.name),
@@ -4397,6 +4519,396 @@ impl Reading<'_> {
             depth: 0,
             check: None,
         }
+    }
+}
+
+/// The question "does this type satisfy this bound", and everything that
+/// answers it (Ch. 4 §2.2).
+///
+/// It is asked from inside a body being lowered, and also from a pass with no
+/// body in scope at all — an impl's chosen associated type against the bound
+/// the trait declared on it. So it holds the tables the answer needs and
+/// nothing else.
+struct Bounds<'a> {
+    types: &'a Types,
+    impls: &'a Impls,
+    traits: &'a HashMap<String, ast::TraitItem>,
+    fn_bounds: &'a HashMap<String, (ast::FnKind, Vec<ast::Ty>, Option<ast::Ty>)>,
+    /// What the surrounding function's own type parameters stand for, which a
+    /// `Fn(A) -> B` bound may name. Empty where there is no such function.
+    scope: &'a HashMap<String, Ty>,
+}
+
+impl Bounds<'_> {
+    /// Check that a type argument satisfies a bound (Ch. 4 §2.2).
+    /// Whether `ty` satisfies one bound.
+    ///
+    /// A bound with arguments — `U: From<T>` — is a different requirement for
+    /// every argument, so the arguments are resolved in the caller's
+    /// environment and appended to the trait's name, which is exactly how the
+    /// impl recorded itself.
+    fn check_bound_in(
+        &self,
+        ty: &Ty,
+        bound: &ast::Bound,
+        env: &HashMap<String, Ty>,
+        callee: &str,
+        param: &str,
+        span: Span,
+    ) -> R<()> {
+        if bound.args.is_empty() {
+            self.check_bound(ty, &bound.name, env, callee, param, span)?;
+            return self.check_assoc_bindings(ty, bound, env, param, span);
+        }
+        let args: Vec<Ty> = bound
+            .args
+            .iter()
+            .map(|a| resolve_ty_env(a, self.types, env))
+            .collect::<R<_>>()?;
+        let shown = format!(
+            "{}<{}>",
+            bound.name,
+            args.iter()
+                .map(Ty::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        // A rule that holds for every type satisfying a bound satisfies this
+        // one too, wherever its own conditions hold (Ch. 4 §5.6).
+        if !self.by_rule(ty, &bound.name, &args, 0) {
+            self.check_bound_named(
+                ty,
+                &mangle(&bound.name, &args),
+                &shown,
+                env,
+                callee,
+                param,
+                span,
+            )?;
+        }
+        self.check_assoc_bindings(ty, bound, env, param, span)
+    }
+
+    /// Whether a blanket impl gives `ty` this trait with these arguments.
+    ///
+    /// The rule's parameters are bound from the type and the arguments asked
+    /// about, and the rule's own bounds are then the question again — so this
+    /// recurses, and a depth limit stands in for the termination argument a
+    /// coherence checker would give (Ch. 4 §5.6).
+    fn by_rule(&self, ty: &Ty, trait_name: &str, args: &[Ty], depth: u32) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        for rule in &self.impls.blankets {
+            if rule.trait_name != trait_name || rule.trait_args.len() != args.len() {
+                continue;
+            }
+            let mut env: HashMap<String, Ty> = HashMap::new();
+            env.insert(rule.self_param.clone(), ty.clone());
+            for (written, got) in rule.trait_args.iter().zip(args) {
+                unify(written, got, &rule.generics, self.types, &mut env);
+            }
+            if rule.generics.iter().any(|p| !env.contains_key(p.name())) {
+                continue;
+            }
+            let holds = rule.generics.iter().all(|p| {
+                let ast::GenericParam::Type { name, bounds } = p else {
+                    return true;
+                };
+                let ty = &env[name];
+                bounds.iter().all(|b| {
+                    let Ok(bargs) = b
+                        .args
+                        .iter()
+                        .map(|a| resolve_ty_env(a, self.types, &env))
+                        .collect::<R<Vec<Ty>>>()
+                    else {
+                        return false;
+                    };
+                    self.by_rule(ty, &b.name, &bargs, depth + 1)
+                        || self
+                            .check_bound_named(
+                                ty,
+                                &mangle(&b.name, &bargs),
+                                "",
+                                &HashMap::new(),
+                                "",
+                                "",
+                                rule.span,
+                            )
+                            .is_ok()
+                })
+            });
+            if holds {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn check_bound(
+        &self,
+        ty: &Ty,
+        bound: &str,
+        env: &HashMap<String, Ty>,
+        callee: &str,
+        param: &str,
+        span: Span,
+    ) -> R<()> {
+        self.check_bound_named(ty, bound, bound, env, callee, param, span)
+    }
+
+    /// `Iterator<Item = t27>`: the implementation exists *and* chose this.
+    ///
+    /// A binding constrains what the implementor picked, where an argument
+    /// picks which implementation is meant (Ch. 4 §1.7). Nothing else about
+    /// the bound changes.
+    fn check_assoc_bindings(
+        &self,
+        ty: &Ty,
+        bound: &ast::Bound,
+        env: &HashMap<String, Ty>,
+        param: &str,
+        span: Span,
+    ) -> R<()> {
+        for (name, written) in &bound.assoc {
+            let want = resolve_ty_env(written, self.types, env)?;
+            let chose = match nominal_name(ty)
+                .and_then(|n| self.types.assoc.borrow().get(&(n, name.clone())).cloned())
+            {
+                Some(t) => Some(t),
+                None => self.types.assoc_of_instantiation(ty, name, span)?,
+            };
+            match chose {
+                Some(got) if got == want => {}
+                Some(got) => {
+                    return err(
+                        span,
+                        format!(
+                            "`{param}` is `{ty}`, whose `{}::{name}` is {got} and not {want} \
+                             (Ch. 4 §1.7)",
+                            bound.name
+                        ),
+                    );
+                }
+                None => {
+                    return err(
+                        span,
+                        format!("`{ty}` chooses no type for `{name}` (Ch. 4 §1.7)"),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The same, with the requirement spelled for a reader rather than for
+    /// the lookup: `From<t27>` names what `From.t27` finds.
+    #[allow(clippy::too_many_arguments)]
+    fn check_bound_named(
+        &self,
+        ty: &Ty,
+        bound: &str,
+        shown: &str,
+        env: &HashMap<String, Ty>,
+        callee: &str,
+        param: &str,
+        span: Span,
+    ) -> R<()> {
+        // `Copy` is structural and automatic (Ch. 4 §5.1); `Sized` is a fact
+        // about the type, not a claim about it (§2.5).
+        // `Fn@…` is the bound an `impl Fn(…)` parameter was given: satisfied
+        // by a closure whose signature is the written one (Ch. 4 §§2.2, 4.3).
+        if let Some(key) = bound.strip_prefix("Fn@") {
+            return self.check_fn_bound(ty, key, env, callee, param, span);
+        }
+        // A trait object implements its own trait, and its supertraits
+        // (Ch. 4 §3.1): dispatch through it is what the vtable is for.
+        if let Ty::Dyn(name) = ty {
+            let mut chain = vec![name.clone()];
+            let mut i = 0;
+            while i < chain.len() {
+                if let Some(decl) = self.traits.get(&chain[i]) {
+                    for s in &decl.supertraits {
+                        if !chain.contains(s) {
+                            chain.push(s.clone());
+                        }
+                    }
+                }
+                i += 1;
+            }
+            if chain.iter().any(|t| t == bound) {
+                return Ok(());
+            }
+        }
+        let ok = match bound {
+            "Copy" => self.types.is_copyable(ty),
+            "Sized" => !ty.is_unsized(),
+            // Ch. 4 §5.3 gives `==` and `<` their meaning through `Eq` and
+            // `Ord` for a *nominal* type; a primitive has both from Ch. 1
+            // §4 directly, and writing an impl for one would be writing out
+            // what the language already does. So a bound asking for them is
+            // satisfied by a primitive without one.
+            "Eq" | "Ord" if ty.is_scalar() => true,
+            // A reference's impls are keyed under its referent, which is
+            // where `impl Trait for &T` puts them too (Ch. 4 §2.1).
+            _ => match nominal_name(ty).or_else(|| match ty {
+                Ty::Ref(inner, _) => nominal_name(inner),
+                _ => None,
+            }) {
+                Some(n) => {
+                    let base = self
+                        .types
+                        .instantiations
+                        .borrow()
+                        .get(&n)
+                        .map(|(b, _)| b.clone());
+                    self.impls.pairs.contains(&(n, bound.to_string()))
+                        || base.is_some_and(|b| self.impls.pairs.contains(&(b, bound.to_string())))
+                }
+                None => false,
+            },
+        };
+        // `impl<T> Make<T> for Pair<T>` gives `Pair<X>` the trait `Make<X>`,
+        // and which arguments that is depends on the instantiation asking.
+        let ok = ok || self.parameterized_gives(ty, bound);
+        // A blanket impl gives the trait to every type meeting its bounds
+        // (Ch. 4 §5.6), and a bound is one of the places that has to know:
+        // `fn f<T: IntoIterator>` accepts an iterator because a rule says so
+        // and not because a pair was written out.
+        let ok = ok
+            || self
+                .impls
+                .blankets
+                .iter()
+                .filter(|r| r.trait_name == bound)
+                .any(|r| self.rule_applies(r, ty));
+        if ok {
+            return Ok(());
+        }
+        err(
+            span,
+            format!(
+                "`{ty}` does not implement `{shown}`, which `{callee}` requires of \
+                 `{param}` (Ch. 4 §2.2)"
+            ),
+        )
+    }
+
+    /// Whether a generic impl of a parameterized trait gives `ty` this bound.
+    ///
+    /// The impl wrote its trait arguments as its own parameters, and those
+    /// are the self type's arguments — so the answer is "resolve them for
+    /// this instantiation and see" (Ch. 4 §1.7).
+    fn parameterized_gives(&self, ty: &Ty, bound: &str) -> bool {
+        let Some(name) = nominal_name(ty) else {
+            return false;
+        };
+        let Some((base, args)) = self.types.instantiations.borrow().get(&name).cloned() else {
+            return false;
+        };
+        self.impls.parameterized.iter().any(|p| {
+            if p.base != base || p.params.len() != args.len() {
+                return false;
+            }
+            let env: HashMap<String, Ty> =
+                p.params.iter().cloned().zip(args.iter().cloned()).collect();
+            let Ok(resolved) = p
+                .args
+                .iter()
+                .map(|a| resolve_ty_env(a, self.types, &env))
+                .collect::<R<Vec<_>>>()
+            else {
+                return false;
+            };
+            mangle(&p.trait_name, &resolved) == bound
+        })
+    }
+
+    /// Whether a blanket rule's own bounds hold for this type.
+    ///
+    /// Only the self parameter's bounds are checked: the rule's other
+    /// parameters are settled by the call, and this question is asked before
+    /// there is a call (Ch. 4 §5.6).
+    fn rule_applies(&self, rule: &Blanket, ty: &Ty) -> bool {
+        rule.generics.iter().all(|g| {
+            let ast::GenericParam::Type { name, bounds } = g else {
+                return true;
+            };
+            if *name != rule.self_param {
+                return true;
+            }
+            bounds.iter().all(|b| {
+                self.check_bound_named(ty, &b.name, &b.name, &HashMap::new(), "", "", rule.span)
+                    .is_ok()
+            })
+        })
+    }
+    /// A closure satisfies `impl Fn(A) -> R` when its signature is that one
+    /// and it captures no more strongly than the bound allows (Ch. 4 §4.3).
+    fn check_fn_bound(
+        &self,
+        ty: &Ty,
+        key: &str,
+        env: &HashMap<String, Ty>,
+        callee: &str,
+        param: &str,
+        span: Span,
+    ) -> R<()> {
+        let (kind, want_params, want_ret) = self.fn_bounds[key].clone();
+        let Some(name) = nominal_name(ty) else {
+            return err(span, format!("`{ty}` is not a closure"));
+        };
+        let Some(info) = self.types.closures.borrow().get(&name).cloned() else {
+            return err(
+                span,
+                format!(
+                    "`{ty}` is not a closure, and `{callee}` wants one for `{param}`; \
+                     a named type implementing `{}` is Ch. 4 §4.3, not implemented",
+                    kind.name()
+                ),
+            );
+        };
+        // `Fn` ⊂ `FnMut` ⊂ `FnOnce`: a closure that writes a capture cannot
+        // be passed where one that only reads is wanted.
+        let rank = |k: ast::FnKind| match k {
+            ast::FnKind::Fn => 0,
+            ast::FnKind::FnMut => 1,
+            ast::FnKind::FnOnce => 2,
+        };
+        if rank(info.kind) > rank(kind) {
+            return err(
+                span,
+                format!(
+                    "this closure is `{}` because it writes a capture, and `{callee}` \
+                     wants `{}` for `{param}` (Ch. 4 §4.3)",
+                    info.kind.name(),
+                    kind.name()
+                ),
+            );
+        }
+        // Under the *call's* environment: a bound may name the call's own
+        // type parameters, and `B` in `Fn(A) -> B` is exactly one of those.
+        let mut scope = self.scope.clone();
+        scope.extend(env.iter().map(|(k, v)| (k.clone(), v.clone())));
+        let want_params: Vec<Ty> = want_params
+            .iter()
+            .map(|t| resolve_ty_env(t, self.types, &scope))
+            .collect::<R<_>>()?;
+        let want_ret = match &want_ret {
+            None => Ty::Unit,
+            Some(t) => resolve_ty_env(t, self.types, &scope)?,
+        };
+        if info.params != want_params || info.ret != want_ret {
+            return err(
+                span,
+                format!(
+                    "this closure does not have the signature `{callee}` wants for \
+                     `{param}` (Ch. 4 §4.3)"
+                ),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -7412,7 +7924,8 @@ impl Fn<'_> {
             if !(ty.has_param() && self.check.is_some()) {
                 for b in bounds {
                     let ty = ty.clone();
-                    self.check_bound_in(&ty, b, &env, name, pname, span)?;
+                    self.bounds()
+                        .check_bound_in(&ty, b, &env, name, pname, span)?;
                 }
             }
             targs.push(ty.clone());
@@ -7472,309 +7985,15 @@ impl Fn<'_> {
         Ok(key)
     }
 
-    /// Check that a type argument satisfies a bound (Ch. 4 §2.2).
-    /// Whether `ty` satisfies one bound.
-    ///
-    /// A bound with arguments — `U: From<T>` — is a different requirement for
-    /// every argument, so the arguments are resolved in the caller's
-    /// environment and appended to the trait's name, which is exactly how the
-    /// impl recorded itself.
-    fn check_bound_in(
-        &mut self,
-        ty: &Ty,
-        bound: &ast::Bound,
-        env: &HashMap<String, Ty>,
-        callee: &str,
-        param: &str,
-        span: Span,
-    ) -> R<()> {
-        if bound.args.is_empty() {
-            self.check_bound(ty, &bound.name, env, callee, param, span)?;
-            return self.check_assoc_bindings(ty, bound, env, param, span);
+    /// This body's view of what satisfies a bound (Ch. 4 §2.2).
+    fn bounds(&self) -> Bounds<'_> {
+        Bounds {
+            types: self.types,
+            impls: self.impls,
+            traits: self.traits,
+            fn_bounds: self.fn_bounds,
+            scope: &self.env,
         }
-        let args: Vec<Ty> = bound
-            .args
-            .iter()
-            .map(|a| resolve_ty_env(a, self.types, env))
-            .collect::<R<_>>()?;
-        let shown = format!(
-            "{}<{}>",
-            bound.name,
-            args.iter()
-                .map(Ty::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        // A rule that holds for every type satisfying a bound satisfies this
-        // one too, wherever its own conditions hold (Ch. 4 §5.6).
-        if !self.by_rule(ty, &bound.name, &args, 0) {
-            self.check_bound_named(
-                ty,
-                &mangle(&bound.name, &args),
-                &shown,
-                env,
-                callee,
-                param,
-                span,
-            )?;
-        }
-        self.check_assoc_bindings(ty, bound, env, param, span)
-    }
-
-    /// Whether a blanket impl gives `ty` this trait with these arguments.
-    ///
-    /// The rule's parameters are bound from the type and the arguments asked
-    /// about, and the rule's own bounds are then the question again — so this
-    /// recurses, and a depth limit stands in for the termination argument a
-    /// coherence checker would give (Ch. 4 §5.6).
-    fn by_rule(&self, ty: &Ty, trait_name: &str, args: &[Ty], depth: u32) -> bool {
-        if depth > 8 {
-            return false;
-        }
-        for rule in &self.impls.blankets {
-            if rule.trait_name != trait_name || rule.trait_args.len() != args.len() {
-                continue;
-            }
-            let mut env: HashMap<String, Ty> = HashMap::new();
-            env.insert(rule.self_param.clone(), ty.clone());
-            for (written, got) in rule.trait_args.iter().zip(args) {
-                unify(written, got, &rule.generics, self.types, &mut env);
-            }
-            if rule.generics.iter().any(|p| !env.contains_key(p.name())) {
-                continue;
-            }
-            let holds = rule.generics.iter().all(|p| {
-                let ast::GenericParam::Type { name, bounds } = p else {
-                    return true;
-                };
-                let ty = &env[name];
-                bounds.iter().all(|b| {
-                    let Ok(bargs) = b
-                        .args
-                        .iter()
-                        .map(|a| resolve_ty_env(a, self.types, &env))
-                        .collect::<R<Vec<Ty>>>()
-                    else {
-                        return false;
-                    };
-                    self.by_rule(ty, &b.name, &bargs, depth + 1)
-                        || self
-                            .check_bound_named(
-                                ty,
-                                &mangle(&b.name, &bargs),
-                                "",
-                                &HashMap::new(),
-                                "",
-                                "",
-                                rule.span,
-                            )
-                            .is_ok()
-                })
-            });
-            if holds {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn check_bound(
-        &self,
-        ty: &Ty,
-        bound: &str,
-        env: &HashMap<String, Ty>,
-        callee: &str,
-        param: &str,
-        span: Span,
-    ) -> R<()> {
-        self.check_bound_named(ty, bound, bound, env, callee, param, span)
-    }
-
-    /// `Iterator<Item = t27>`: the implementation exists *and* chose this.
-    ///
-    /// A binding constrains what the implementor picked, where an argument
-    /// picks which implementation is meant (Ch. 4 §1.7). Nothing else about
-    /// the bound changes.
-    fn check_assoc_bindings(
-        &self,
-        ty: &Ty,
-        bound: &ast::Bound,
-        env: &HashMap<String, Ty>,
-        param: &str,
-        span: Span,
-    ) -> R<()> {
-        for (name, written) in &bound.assoc {
-            let want = resolve_ty_env(written, self.types, env)?;
-            let chose = match nominal_name(ty)
-                .and_then(|n| self.types.assoc.borrow().get(&(n, name.clone())).cloned())
-            {
-                Some(t) => Some(t),
-                None => self.types.assoc_of_instantiation(ty, name, span)?,
-            };
-            match chose {
-                Some(got) if got == want => {}
-                Some(got) => {
-                    return err(
-                        span,
-                        format!(
-                            "`{param}` is `{ty}`, whose `{}::{name}` is {got} and not {want} \
-                             (Ch. 4 §1.7)",
-                            bound.name
-                        ),
-                    );
-                }
-                None => {
-                    return err(
-                        span,
-                        format!("`{ty}` chooses no type for `{name}` (Ch. 4 §1.7)"),
-                    );
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// The same, with the requirement spelled for a reader rather than for
-    /// the lookup: `From<t27>` names what `From.t27` finds.
-    #[allow(clippy::too_many_arguments)]
-    fn check_bound_named(
-        &self,
-        ty: &Ty,
-        bound: &str,
-        shown: &str,
-        env: &HashMap<String, Ty>,
-        callee: &str,
-        param: &str,
-        span: Span,
-    ) -> R<()> {
-        // `Copy` is structural and automatic (Ch. 4 §5.1); `Sized` is a fact
-        // about the type, not a claim about it (§2.5).
-        // `Fn@…` is the bound an `impl Fn(…)` parameter was given: satisfied
-        // by a closure whose signature is the written one (Ch. 4 §§2.2, 4.3).
-        if let Some(key) = bound.strip_prefix("Fn@") {
-            return self.check_fn_bound(ty, key, env, callee, param, span);
-        }
-        // A trait object implements its own trait, and its supertraits
-        // (Ch. 4 §3.1): dispatch through it is what the vtable is for.
-        if let Ty::Dyn(name) = ty {
-            let mut chain = vec![name.clone()];
-            let mut i = 0;
-            while i < chain.len() {
-                if let Some(decl) = self.traits.get(&chain[i]) {
-                    for s in &decl.supertraits {
-                        if !chain.contains(s) {
-                            chain.push(s.clone());
-                        }
-                    }
-                }
-                i += 1;
-            }
-            if chain.iter().any(|t| t == bound) {
-                return Ok(());
-            }
-        }
-        let ok = match bound {
-            "Copy" => self.types.is_copyable(ty),
-            "Sized" => !ty.is_unsized(),
-            // Ch. 4 §5.3 gives `==` and `<` their meaning through `Eq` and
-            // `Ord` for a *nominal* type; a primitive has both from Ch. 1
-            // §4 directly, and writing an impl for one would be writing out
-            // what the language already does. So a bound asking for them is
-            // satisfied by a primitive without one.
-            "Eq" | "Ord" if ty.is_scalar() => true,
-            // A reference's impls are keyed under its referent, which is
-            // where `impl Trait for &T` puts them too (Ch. 4 §2.1).
-            _ => match nominal_name(ty).or_else(|| match ty {
-                Ty::Ref(inner, _) => nominal_name(inner),
-                _ => None,
-            }) {
-                Some(n) => {
-                    let base = self
-                        .types
-                        .instantiations
-                        .borrow()
-                        .get(&n)
-                        .map(|(b, _)| b.clone());
-                    self.impls.pairs.contains(&(n, bound.to_string()))
-                        || base.is_some_and(|b| self.impls.pairs.contains(&(b, bound.to_string())))
-                }
-                None => false,
-            },
-        };
-        // `impl<T> Make<T> for Pair<T>` gives `Pair<X>` the trait `Make<X>`,
-        // and which arguments that is depends on the instantiation asking.
-        let ok = ok || self.parameterized_gives(ty, bound);
-        // A blanket impl gives the trait to every type meeting its bounds
-        // (Ch. 4 §5.6), and a bound is one of the places that has to know:
-        // `fn f<T: IntoIterator>` accepts an iterator because a rule says so
-        // and not because a pair was written out.
-        let ok = ok
-            || self
-                .impls
-                .blankets
-                .iter()
-                .filter(|r| r.trait_name == bound)
-                .any(|r| self.rule_applies(r, ty));
-        if ok {
-            return Ok(());
-        }
-        err(
-            span,
-            format!(
-                "`{ty}` does not implement `{shown}`, which `{callee}` requires of \
-                 `{param}` (Ch. 4 §2.2)"
-            ),
-        )
-    }
-
-    /// Whether a generic impl of a parameterized trait gives `ty` this bound.
-    ///
-    /// The impl wrote its trait arguments as its own parameters, and those
-    /// are the self type's arguments — so the answer is "resolve them for
-    /// this instantiation and see" (Ch. 4 §1.7).
-    fn parameterized_gives(&self, ty: &Ty, bound: &str) -> bool {
-        let Some(name) = nominal_name(ty) else {
-            return false;
-        };
-        let Some((base, args)) = self.types.instantiations.borrow().get(&name).cloned() else {
-            return false;
-        };
-        self.impls.parameterized.iter().any(|p| {
-            if p.base != base || p.params.len() != args.len() {
-                return false;
-            }
-            let env: HashMap<String, Ty> =
-                p.params.iter().cloned().zip(args.iter().cloned()).collect();
-            let Ok(resolved) = p
-                .args
-                .iter()
-                .map(|a| resolve_ty_env(a, self.types, &env))
-                .collect::<R<Vec<_>>>()
-            else {
-                return false;
-            };
-            mangle(&p.trait_name, &resolved) == bound
-        })
-    }
-
-    /// Whether a blanket rule's own bounds hold for this type.
-    ///
-    /// Only the self parameter's bounds are checked: the rule's other
-    /// parameters are settled by the call, and this question is asked before
-    /// there is a call (Ch. 4 §5.6).
-    fn rule_applies(&self, rule: &Blanket, ty: &Ty) -> bool {
-        rule.generics.iter().all(|g| {
-            let ast::GenericParam::Type { name, bounds } = g else {
-                return true;
-            };
-            if *name != rule.self_param {
-                return true;
-            }
-            bounds.iter().all(|b| {
-                self.check_bound_named(ty, &b.name, &b.name, &HashMap::new(), "", "", rule.span)
-                    .is_ok()
-            })
-        })
     }
 
     /// A call to a known key, with any number of already-evaluated leading
@@ -9116,73 +9335,6 @@ impl Fn<'_> {
         }
     }
 
-    /// A closure satisfies `impl Fn(A) -> R` when its signature is that one
-    /// and it captures no more strongly than the bound allows (Ch. 4 §4.3).
-    fn check_fn_bound(
-        &self,
-        ty: &Ty,
-        key: &str,
-        env: &HashMap<String, Ty>,
-        callee: &str,
-        param: &str,
-        span: Span,
-    ) -> R<()> {
-        let (kind, want_params, want_ret) = self.fn_bounds[key].clone();
-        let Some(name) = nominal_name(ty) else {
-            return err(span, format!("`{ty}` is not a closure"));
-        };
-        let Some(info) = self.types.closures.borrow().get(&name).cloned() else {
-            return err(
-                span,
-                format!(
-                    "`{ty}` is not a closure, and `{callee}` wants one for `{param}`; \
-                     a named type implementing `{}` is Ch. 4 §4.3, not implemented",
-                    kind.name()
-                ),
-            );
-        };
-        // `Fn` ⊂ `FnMut` ⊂ `FnOnce`: a closure that writes a capture cannot
-        // be passed where one that only reads is wanted.
-        let rank = |k: ast::FnKind| match k {
-            ast::FnKind::Fn => 0,
-            ast::FnKind::FnMut => 1,
-            ast::FnKind::FnOnce => 2,
-        };
-        if rank(info.kind) > rank(kind) {
-            return err(
-                span,
-                format!(
-                    "this closure is `{}` because it writes a capture, and `{callee}` \
-                     wants `{}` for `{param}` (Ch. 4 §4.3)",
-                    info.kind.name(),
-                    kind.name()
-                ),
-            );
-        }
-        // Under the *call's* environment: a bound may name the call's own
-        // type parameters, and `B` in `Fn(A) -> B` is exactly one of those.
-        let mut scope = self.env.clone();
-        scope.extend(env.iter().map(|(k, v)| (k.clone(), v.clone())));
-        let want_params: Vec<Ty> = want_params
-            .iter()
-            .map(|t| resolve_ty_env(t, self.types, &scope))
-            .collect::<R<_>>()?;
-        let want_ret = match &want_ret {
-            None => Ty::Unit,
-            Some(t) => resolve_ty_env(t, self.types, &scope)?,
-        };
-        if info.params != want_params || info.ret != want_ret {
-            return err(
-                span,
-                format!(
-                    "this closure does not have the signature `{callee}` wants for \
-                     `{param}` (Ch. 4 §4.3)"
-                ),
-            );
-        }
-        Ok(())
-    }
-
     /// Lower a closure expression (Ch. 4 §§4.1–4.4).
     ///
     /// It becomes two things: an anonymous struct holding one reference per
@@ -9755,7 +9907,9 @@ impl Fn<'_> {
                 };
                 let ty = env[pname].clone();
                 for b in bounds {
-                    if let Err(e) = self.check_bound_in(&ty, b, &env, &rule.trait_name, pname, span)
+                    if let Err(e) =
+                        self.bounds()
+                            .check_bound_in(&ty, b, &env, &rule.trait_name, pname, span)
                     {
                         why.push(e);
                         ok = false;

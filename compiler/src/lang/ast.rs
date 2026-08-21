@@ -247,8 +247,9 @@ pub struct TraitItem {
     pub supertraits: Vec<String>,
     /// Its methods, required (no body) or provided (with one, §1.5).
     pub methods: Vec<FnItem>,
-    /// Its associated types, by name (Ch. 4 §1.7).
-    pub assoc: Vec<String>,
+    /// Its associated types: a name, and the bounds every implementation's
+    /// choice must satisfy — `type Iter: Iterator;` (Ch. 4 §1.7).
+    pub assoc: Vec<(String, Vec<Bound>)>,
     /// Its associated constants: name and type (Ch. 4 §1.7).
     pub consts: Vec<(String, Ty)>,
     /// Whether it is visible outside the module defining it (Ch. 6 §2).

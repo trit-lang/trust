@@ -713,8 +713,13 @@ fn print_items(file: &lang::ast::File) {
                 for s in &t.supertraits {
                     out.push_str(&format!(" :{s}"));
                 }
-                for a in &t.assoc {
-                    out.push_str(&format!(" (type {a})"));
+                for (a, bounds) in &t.assoc {
+                    out.push_str(&format!(" (type {a}"));
+                    for (k, b) in bounds.iter().enumerate() {
+                        out.push(if k == 0 { ':' } else { '+' });
+                        show_bound(b, &mut out);
+                    }
+                    out.push(')');
                 }
                 for (n, ty) in &t.consts {
                     out.push_str(&format!(" (const {n}:{})", written_ty(ty)));

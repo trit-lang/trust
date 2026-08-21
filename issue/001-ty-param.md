@@ -149,13 +149,15 @@ rejected — `Range<T>`, the true positive below, which is not reported.
 
 So nothing in the corpus walks past any more. One question the read cannot
 answer remains, and no body happens to ask it: **what a projection is bound
-by**. `T::Item` is a type of its own, but the bounds an associated type was
-declared with are not read out of the trait that declared it, so a method
-called on a projection is unanswerable. Ch. 4 §1.7 allows those bounds — `type
-Iter: Iterator;` — and `parse.rs` reads one and **throws it away**, on a
-comment claiming the impl is checked directly. It is not: an impl choosing a
-type that fails the bound is accepted (G9.142). Fixing that is what would give
-a projection its bounds, and closing this is the same work.
+by**. `T::Item` is a type of its own, and a method called on it is
+unanswerable.
+
+Half of that is now done. Ch. 4 §1.7 allows an associated type bounds — `type
+Iter: Iterator;` — and `parse.rs` used to read one and throw it away, so an
+impl choosing a type that failed the bound was accepted (G9.142). The bounds
+are kept now, and `check_assoc_bounds` holds each impl to them. What remains is
+the other end: filing them under the projection's key so that `T::Item` has the
+methods `Iterator` gives it. Nothing reads them yet.
 
 Seven groups have been closed since the read landed.
 

@@ -2173,18 +2173,77 @@ fn known_limit_reading_a_generic_body_is_fail_open() {
 }
 
 #[test]
-fn known_limit_a_bound_on_an_associated_type_is_not_enforced() {
-    // Ch. 4 §1.7 says an associated type may carry bounds. The parser reads
-    // one and throws it away, on the claim that the impl is checked directly
-    // — and nothing checks it, so a bound written where the spec says to write
-    // it is worth nothing and the author cannot find out (G9.142).
-    tir_of(
+fn a_bound_on_an_associated_type_holds_the_impl_to_it() {
+    // Ch. 4 §1.7 says an associated type may carry bounds: `type Iter:
+    // Iterator;` is a requirement on every implementation's choice, and the
+    // implementation is where it is answered (G9.142).
+    let e = error(
         "trait Show { fn show(&self) -> t27; } \
          trait Holds { type Item: Show; fn get(&self) -> Self::Item; } \
          struct P { x: t27 } struct Q { y: t27 } \
          impl Holds for P { type Item = Q; fn get(&self) -> Q { Q { y: 1 } } } \
          fn main() -> t27 { 0 }",
     );
+    assert!(e.contains("`Q` does not implement `Show`"), "{e}");
+    // The same program with the impl the bound asks for.
+    tir_of(
+        "trait Show { fn show(&self) -> t27; } \
+         trait Holds { type Item: Show; fn get(&self) -> Self::Item; } \
+         struct P { x: t27 } struct Q { y: t27 } \
+         impl Show for Q { fn show(&self) -> t27 { self.y } } \
+         impl Holds for P { type Item = Q; fn get(&self) -> Q { Q { y: 1 } } } \
+         fn main() -> t27 { 0 }",
+    );
+}
+
+#[test]
+fn an_impl_choosing_its_own_parameter_answers_from_what_it_declared() {
+    // `type Item = T` chooses a type the impl cannot look anything up about.
+    // What it wrote about `T` is the whole of what is known, and it is enough:
+    // §2.2 holds every instantiation to it at the call site.
+    let e = error(
+        "trait Show { fn show(&self) -> t27; } \
+         trait Holds { type Item: Show; fn get(&self) -> Self::Item; } \
+         struct P<T> { x: T } \
+         impl<T> Holds for P<T> { type Item = T; fn get(&self) -> T { self.x } } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("`T` is not declared `Show`"), "{e}");
+    tir_of(
+        "trait Show { fn show(&self) -> t27; } \
+         trait Holds { type Item: Show; fn get(&self) -> Self::Item; } \
+         struct P<T> { x: T } \
+         impl<T: Show> Holds for P<T> { type Item = T; fn get(&self) -> T { self.x } } \
+         fn main() -> t27 { 0 }",
+    );
+}
+
+#[test]
+fn a_supertrait_of_a_declared_bound_satisfies_an_associated_type() {
+    // `Named: Show` means declaring `T: Named` declares `T: Show` too
+    // (Ch. 4 §1.6).
+    tir_of(
+        "trait Show { fn show(&self) -> t27; } \
+         trait Named: Show { fn name(&self) -> t27; } \
+         trait Holds { type Item: Show; fn get(&self) -> Self::Item; } \
+         struct P<T> { x: T } \
+         impl<T: Named> Holds for P<T> { type Item = T; fn get(&self) -> T { self.x } } \
+         fn main() -> t27 { 0 }",
+    );
+}
+
+#[test]
+fn a_bound_on_an_associated_type_is_a_traits_business() {
+    // An impl makes one choice, and saying what that choice satisfies would
+    // constrain nothing (Ch. 4 §1.7).
+    let e = error(
+        "trait Show { fn show(&self) -> t27; } \
+         trait Holds { type Item; fn get(&self) -> Self::Item; } \
+         struct P { x: t27 } struct Q { y: t27 } \
+         impl Holds for P { type Item: Show = Q; fn get(&self) -> Q { Q { y: 1 } } } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("bounds an associated type"), "{e}");
 }
 
 #[test]

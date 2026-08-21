@@ -2621,13 +2621,13 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
-**G9.142 — a bound on an associated type is parsed and thrown away.** Ch. 4
+**G9.142 — a bound on an associated type was parsed and thrown away.** Ch. 4
 §1.7 says an associated type "may carry bounds (`type Iter: Iterator;`)".
-`parse.rs` reads one, discards it, and says why in a comment: *"A bound on an
+`parse.rs` read one, discarded it, and said why in a comment: *"A bound on an
 associated type is accepted and ignored: it constrains the impl, and the impl
 is checked directly."*
 
-The second half of that sentence is false. Nothing checks it:
+The second half of that sentence was false. Nothing checked it:
 
 ```
 trait Show { fn show(&self) -> t27; }
@@ -2636,14 +2636,41 @@ struct Q { y: t27 }
 impl Holds for P { type Item = Q; fn get(&self) -> Q { … } }   // accepted
 ```
 
-`Q` implements nothing, and the program compiles. So a bound written where the
-spec says to write it is silently worth nothing — which is worse than
-rejecting the syntax, because the author has no way to find out.
+`Q` implements nothing, and the program compiled. So a bound written where the
+spec says to write it was silently worth nothing — which is worse than
+rejecting the syntax, because the author had no way to find out.
 
-*Not fixed.* It is also the last thing standing between the generic-body read
-and the question it cannot answer: what a projection is bound by (G9.141,
-issue/001). Keeping the bounds would give a projection methods, and checking
-them at the impl is the same information used at the other end.
+*Fixed.* `TraitItem::assoc` carries the bounds, and `check_assoc_bounds` holds
+each impl's choice to them. Two things about it are worth saying plainly.
+
+*Where the check runs.* Not in `check_trait_impl`, which is where the trait's
+other obligations on an impl are answered. That runs from inside
+`expand_impls`, while the table of which type implements which trait is still
+being built, so it cannot answer this question at all. The new pass runs after
+the module is built, beside the generic-body read and for the same reason. What
+made it cheap to put there was pulling the bound-satisfaction cluster —
+`check_bound_in` and the six methods under it — off `Fn` into a `Bounds` struct
+holding the four tables the answer actually needs. "Does this type satisfy this
+bound" never was a question about a function body.
+
+*What an impl's own parameter answers with.* `impl<T> Holds for P<T> { type
+Item = T; }` chooses a type nothing can be looked up about. What the impl wrote
+about `T` is the whole of what is known, so that is what is asked: `T: Show`
+declared on the impl satisfies `type Item: Show`, a supertrait of a declared
+bound satisfies it too (§1.6), and nothing else does. This is sound because
+§2.2 holds every instantiation of the impl to those same bounds at the call
+site.
+
+*Still open, and the reason this one mattered:* a projection through a
+parameter does not yet get its methods from these bounds (G9.141, issue/001).
+The information is now recorded; the other end has not been wired to it.
+
+*The bootstrap compiler cannot parse the form at all.* `parse.tr`'s trait body
+reads the name and demands `;` immediately, so `type Item: Show;` is a syntax
+error there. It rejects rather than mis-accepts, which is the safe direction,
+and no file in the corpus writes one — so the two compilers still agree on
+everything they are asked about. Closing it means giving `What::Trait` a paired
+list in place of its `Vec<String>`. *Not fixed.*
 
 **G9.141 — what `T::Item` is before there is a `T`.** Ch. 4 §1.7 says an
 associated type is the type an implementation chooses. While a generic body is

@@ -99,7 +99,7 @@ type BoundArgs = (Vec<Ty>, Vec<(String, Ty)>);
 /// either declared (`type Item;`) or chosen (`type Item = t27;`).
 type MethodBlock = (
     Vec<FnItem>,
-    Vec<(String, Option<Ty>)>,
+    Vec<(String, Vec<Bound>, Option<Ty>)>,
     Vec<(String, Ty, Option<Expr>)>,
 );
 
@@ -930,14 +930,14 @@ impl Parser {
         }
         let (methods, assoc, consts) = self.method_block("trait")?;
         let mut names = Vec::new();
-        for (n, v) in assoc {
+        for (n, bounds, v) in assoc {
             if v.is_some() {
                 return self.err(format!(
                     "`type {n} = …` chooses a type, which is an impl's business; a trait \
                      declares `type {n};` (Ch. 4 §1.7)"
                 ));
             }
-            names.push(n);
+            names.push((n, bounds));
         }
         let mut declared = Vec::new();
         for (n, ty, v) in consts {
@@ -1009,7 +1009,16 @@ impl Parser {
         }
         let (methods, assoc, consts) = self.method_block("impl")?;
         let mut chosen = Vec::new();
-        for (n, v) in assoc {
+        for (n, bounds, v) in assoc {
+            // A bound says what every implementation's choice must satisfy,
+            // which is the trait's business; an impl makes one choice, and
+            // saying what it satisfies would constrain nothing (Ch. 4 §1.7).
+            if !bounds.is_empty() {
+                return self.err(format!(
+                    "`type {n}: …` bounds an associated type, which is a trait's business; \
+                     an impl writes `type {n} = …;` (Ch. 4 §1.7)"
+                ));
+            }
             match v {
                 Some(t) => chosen.push((n, t)),
                 None => {
@@ -1073,11 +1082,10 @@ impl Parser {
             }
             if self.eat_kw("type") {
                 let name = self.expect_ident()?;
-                // A bound on an associated type is accepted and ignored: it
-                // constrains the impl, and the impl is checked directly.
+                let mut bounds = Vec::new();
                 if self.eat_op(":") {
                     loop {
-                        self.expect_ident()?;
+                        bounds.push(self.bound()?);
                         if !self.eat_op("+") {
                             break;
                         }
@@ -1089,7 +1097,7 @@ impl Parser {
                     None
                 };
                 self.expect_op(";")?;
-                assoc.push((name, value));
+                assoc.push((name, bounds, value));
                 continue;
             }
             // `const MIN: Self;` declares one, `const MIN: t27 = …;` gives
