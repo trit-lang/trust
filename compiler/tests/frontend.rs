@@ -2037,6 +2037,18 @@ fn an_associated_function_is_reached_through_a_bound() {
          fn main() -> t27 { 0 }",
     );
     assert!(e.contains("takes `self`"), "{e}");
+
+    // One with parameters of its own is settled by its arguments, and a read
+    // has no inference to settle them with — so they stand for themselves, and
+    // an argument written in terms of one is passed over. What the call
+    // *returns* is still the parameter, and still has only its bounds.
+    let src = "trait Sink { fn feed<J: Iterator<Item = t27>>(it: J) -> Self; \
+                            fn val(&self) -> t27; } \
+               fn build<T: Sink, I: Iterator<Item = t27>>(v: I) -> t27 \
+                   { let x = T::feed(v); x.";
+    tir_of(&format!("{src}val() }} fn main() -> t27 {{ 0 }}"));
+    let e = error(&format!("{src}nope() }} fn main() -> t27 {{ 0 }}"));
+    assert!(e.contains("there is no `nope` there"), "{e}");
 }
 
 #[test]
@@ -2102,6 +2114,18 @@ fn a_parameter_is_called_against_its_fn_bound() {
         e.contains("nothing it is bound by makes it callable"),
         "{e}"
     );
+
+    // A callee whose own parameter is settled by inference has nothing to
+    // settle it with under a read: `apply`'s `R` comes from the closure it is
+    // handed, and here it is handed a parameter. So `R` stands for itself, the
+    // call answers a type in terms of it, and the read goes on — which is the
+    // point, because the rejection below comes after it.
+    let e = error(
+        "fn apply<T, R>(f: impl Fn(T) -> R, x: T) -> R { f(x) } \
+         fn go<G: Fn(t27) -> t27>(g: G) -> t27 { let r = apply(g, 1); g.nope() } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("there is no `nope` there"), "{e}");
 }
 
 #[test]
@@ -2109,11 +2133,14 @@ fn known_limit_reading_a_generic_body_is_fail_open() {
     // The read only ever *adds* rejections: a body it cannot get through is
     // not judged at all, and every check an instantiation did it still does.
     // So the C++ failure mode Ch. 4 Appendix B claims is removed is narrowed
-    // rather than closed, and these are the shapes still walking through.
+    // rather than closed, and what still walks through is one question: what
+    // does a type the read knows only as *opaque* implement?
     //
     // A projection — `T::Item` — is a type of its own under a read, but what
     // *it* is bound by is not read out of the trait that declared it, so a
     // method called on one is unanswerable and the whole body goes unjudged.
+    // A parameter a callee's inference would have settled is the same, from
+    // the other side: it has no declaration to read bounds off at all.
     tir_of(
         "trait Feed { type Item; fn next(&mut self) -> Self::Item; } \
          fn drain<T: Feed>(x: &mut T) -> t27 { let v = x.next(); v.no_such_method() } \

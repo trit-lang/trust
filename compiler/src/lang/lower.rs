@@ -235,6 +235,25 @@ impl Ty {
         }
     }
 
+    /// Whether a type parameter appears anywhere in this type, so that no
+    /// question about which traits it implements can be answered yet
+    /// (issue/001).
+    ///
+    /// A nominal name is not looked inside: `Vec<T>` is the single name
+    /// `Vec.T` by the time it is a `Ty`, and nothing in the name says which
+    /// segment was a parameter. A bound on one is asked and fails, which is
+    /// the read running out of road and is already handled as that.
+    fn has_param(&self) -> bool {
+        match self {
+            Ty::Param(_) => true,
+            Ty::Array(t, _) | Ty::Ref(t, _) | Ty::Boxed(t) | Ty::RawOf(t) | Ty::Slice(t) => {
+                t.has_param()
+            }
+            Ty::Tuple(ts) => ts.iter().any(Ty::has_param),
+            _ => false,
+        }
+    }
+
     /// The layout-engine spelling of this type.
     fn layout_ty(&self) -> layout::Ty {
         match self {
@@ -4770,6 +4789,12 @@ impl Fn<'_> {
     /// a mismatch between two *ground* types is a rejection this read stands
     /// behind. A mismatch where either side is a parameter or a nominal name
     /// built from one is not: the instantiation may make them equal.
+    ///
+    /// An undecidable argument is passed over rather than treated as the read
+    /// breaking down. Nothing was misunderstood — the argument lowered, and
+    /// two types were declined a comparison — and the types the rest of the
+    /// body works in are the declared ones either way, so the reasons for
+    /// `cannot_tell` do not apply.
     fn bound_arg(&mut self, arg: &ast::Expr, want: &Ty) -> R<()> {
         let (_, got) = self.expr(arg, Some(want))?;
         let Err(e) = self.check(&got, want, arg.span(), "argument") else {
@@ -4778,8 +4803,7 @@ impl Fn<'_> {
         if got.is_ground() && want.is_ground() {
             return Err(self.reject(e));
         }
-        self.cannot_tell();
-        Err(e)
+        Ok(())
     }
 
     // ------------------------------------------------------- block building
@@ -7339,6 +7363,17 @@ impl Fn<'_> {
             {
                 env.insert(pname.clone(), t);
             }
+            // Inference is what a *call site* does, and a body being read has
+            // none: `Map::next` settles its `B` out of the closure `F` was
+            // handed, and under a read `F` is a parameter with no closure
+            // behind it. So the callee's parameter stands for itself too
+            // (issue/001), which makes what the call returns a type in terms
+            // of it — opaque, the same at every instantiation, and enough to
+            // read the rest of the body in. The instantiation this queues is
+            // never lowered: the read runs after `pending` has drained.
+            if !env.contains_key(pname) && self.check.is_some() {
+                env.insert(pname.clone(), Ty::Param(pname.clone()));
+            }
             let Some(ty) = env.get(pname) else {
                 return err(
                     span,
@@ -7350,9 +7385,16 @@ impl Fn<'_> {
             };
             // §2.2: an instantiation that fails a bound is rejected here, at
             // the call site, and not inside the body.
-            for b in bounds {
-                let ty = ty.clone();
-                self.check_bound_in(&ty, b, &env, name, pname, span)?;
+            //
+            // Unless this is a read, and the argument is a parameter: which
+            // traits it implements is not known until there is a type there,
+            // and the real call site asks this again with one. Skipping is
+            // the read adding nothing rather than concluding wrongly.
+            if !(ty.has_param() && self.check.is_some()) {
+                for b in bounds {
+                    let ty = ty.clone();
+                    self.check_bound_in(&ty, b, &env, name, pname, span)?;
+                }
             }
             targs.push(ty.clone());
         }
@@ -10366,6 +10408,21 @@ impl Fn<'_> {
             ty: ast::Ty::Name(param.to_string(), span),
             name: param.to_string(),
         };
+        // `fn from_iter<J: Iterator>(it: J) -> Self` has parameters of its
+        // own, settled by the arguments rather than by the bound. A read has
+        // no inference to settle them with, so they stand for themselves too
+        // — which makes every argument written in terms of one undecidable,
+        // and `bound_arg` leaves those alone.
+        let held: Vec<(String, Option<Ty>)> = m
+            .generics
+            .iter()
+            .filter(|p| matches!(p, ast::GenericParam::Type { .. }))
+            .map(|p| {
+                let n = p.name().to_string();
+                let was = self.env.insert(n.clone(), Ty::Param(n.clone()));
+                (n, was)
+            })
+            .collect();
         let params: R<Vec<Ty>> = m
             .params
             .iter()
@@ -10375,6 +10432,12 @@ impl Fn<'_> {
             None => Ok(Ty::Unit),
             Some(t) => self.resolve(&subst_self_ty(t, &me)),
         };
+        for (n, was) in held {
+            match was {
+                Some(t) => self.env.insert(n, t),
+                None => self.env.remove(&n),
+            };
+        }
         let (params, ret) = match (params, ret) {
             (Ok(p), Ok(r)) => (p, r),
             (Err(e), _) | (_, Err(e)) => {

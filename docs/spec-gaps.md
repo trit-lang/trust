@@ -2678,15 +2678,23 @@ Ch. 4 §2.2 unimplemented, which is where this was.
 
 **G9.139 — what a checker owes when it does not understand the program.**
 `check_generic_bodies` reads each generic body once with every parameter
-bound to `Ty::Param(name)`, and most of the ways that read fails are the
-reader running out of road rather than the body being wrong: an associated
-function that has type parameters of its own (`C::from_iter` in `collect`, 9
-bodies), and inference with no call site to unify against (5). Four shapes
-have since been closed: a parameter called as a function (15 bodies, read out
+bound to `Ty::Param(name)`, and the ways that read fails are mostly the reader
+running out of road rather than the body being wrong. Six shapes have been
+closed since it landed: a parameter called as a function (15 bodies, read out
 of its `Fn` bound), an associated type projected through a parameter (25,
 answered as a projection type of its own), an associated function reached
-through a bound (9), and a bound carrying an associated-type binding (15,
-believed because every instantiation is held to it).
+through a bound (9), a bound carrying an associated-type binding (15, believed
+because every instantiation is held to it), an associated function with type
+parameters of its own (9, which stand for themselves because a read has no
+arguments to infer them from), and a callee whose own parameter is settled by
+inference (5, which stand for themselves for the same reason, and whose bounds
+are therefore left to the real call site to check).
+
+What is left is one shape, and it is the one the read is furthest from: **a
+question about what an opaque type implements**. A projection's bounds are not
+read out of the trait that declared it, and a parameter a callee's inference
+would have settled has none to read at all — so a method named on either is
+unanswerable.
 
 If the read's own `Err` were reported, every one of those would be a false
 rejection of a program that compiles and runs.
@@ -2698,11 +2706,28 @@ all**, including verdicts it had already recorded. The all-or-nothing part is
 the load-bearing part: a body half-understood is a body whose rejections
 might be consequences of the half that was not.
 
-The measured result is 157 of 172 bodies read cleanly, 6 discarded, 9 unsure
-— so `never_called`-shaped bugs still hide in bodies of the two shapes
-remaining. That is the honest statement of what Ch. 4 §2.2 buys today, and it
-is a statement about *coverage*, which no chapter has vocabulary for. Ch. 4
-says a body is checked. It does not say what a compiler may do when it cannot.
+*What `unsure` is not for.* An **undecidable comparison** is not the read
+breaking down. When an argument's type cannot be compared with what a bound
+asks for — either side being a parameter — the argument lowered fine and two
+types were simply declined a comparison, and the types the rest of the body
+works in are the declared ones either way. So it is passed over, and the body
+is read on. `unsure` is for a question the reader could not *answer*: what a
+projection's bounds are, what a trait with arguments declares.
+
+*Nor is a bound the read declines to check.* `instantiate_fn` checks a
+callee's bounds at the call site, and under a read the type argument may be a
+parameter — which implements nothing yet, and would fail every bound it was
+asked about. The read skips the check rather than failing it. Nothing is lost:
+the read emits no code, and the call sites that do emit code ask the same
+question with a real type in hand.
+
+The measured result is 167 of 172 bodies read cleanly, 4 unsure, and 1
+rejected — that one being `Range<T>`, the true positive of G9.137. So
+`never_called`-shaped bugs still hide in the four, and in the parts of a read
+body that were passed over. That is the honest statement of what Ch. 4 §2.2
+buys today, and it is a statement about
+*coverage*, which no chapter has vocabulary for. Ch. 4 says a body is checked.
+It does not say what a compiler may do when it cannot.
 
 *One thing is not fail-open, and the line is worth stating.* An **argument's
 type**, checked against a bound's signature, is rejected outright when both
@@ -2754,7 +2779,7 @@ which is precisely the C++ template failure mode Ch. 4 Appendix B's scorecard
 claims is removed by construction, sitting in the prelude, accepted for as
 long as it has existed because nothing looked inside a generic body.
 
-The read looks. It finds it. It is the one true positive among the 55 bodies
+The read looks. It finds it. It is the one true positive among the six bodies
 the read rejects, and it is **not reported**, because reporting it fails the
 prelude and therefore every program.
 

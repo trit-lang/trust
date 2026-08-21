@@ -131,8 +131,11 @@ environment binding every parameter to `Ty::Param(name)`, and reports only what
 - a method called on a parameter with no `self`, and an associated function
   called on a parameter that takes one.
 
-Everything else the read stumbles on sets `unsure`, and an unsure read reports
-nothing at all.
+A question the reader cannot *answer* — what a projection's bounds are, what a
+trait with arguments declares — sets `unsure`, and an unsure read reports
+nothing at all. A comparison it cannot *decide* is not that: an argument whose
+type cannot be told apart from what the bound asks for is passed over, and the
+body is read on.
 
 "Ground" means built from scalars, references, arrays and tuples, with no
 parameter and no nominal name in it. A nominal name is excluded on purpose:
@@ -141,16 +144,17 @@ those are the same type at exactly one of them.
 
 ## What the read still walks past
 
-Measured over the corpus: 157 of 172 bodies read cleanly, 6 failed the read
-and were therefore discarded, 9 were unsure. The 15 group as:
+Measured over the corpus: 167 of 172 bodies read cleanly, 4 were unsure and
+therefore say nothing, and 1 was rejected — `Range<T>`, the true positive
+below, which is not reported either.
 
-| Count | Shape |
-|---|---|
-| 9 | an associated function that is itself generic (`C::from_iter` in `collect`) |
-| 5 | inference failing without a call site to unify against |
-| 1 | `Range<T>` — see below |
+The 4 are all one shape: a method named on a type the read knows only as
+opaque. `Map.all`, `Map.any`, `Map.for_each` and `Map.position` work in
+`Map`'s `B`, which is the closure's result type and has nothing to be read out
+of. A projection is the same shape from the other side — `T::Item` is a type,
+but what *it* is bound by is not read out of the trait that declared it.
 
-Four groups have been closed since the read landed.
+Six groups have been closed since the read landed.
 
 - **An `Fn`-bounded parameter called as a function** (15). `param_call` reads
   the signature out of the bound: `impl Fn(A) -> R` and `F: Fn(A) -> R` are one
@@ -172,9 +176,22 @@ Four groups have been closed since the read landed.
   instead of staying opaque. A binding is not a trait *argument* and does not
   divide the methods, so the guard that turns arguments away no longer turns
   bindings away with them.
+- **An associated function with type parameters of its own** (9). `fn
+  from_iter<J: Iterator>(it: J) -> Self` is settled by its arguments, and a
+  read has none to settle it with, so `J` stands for itself. That makes every
+  argument written in terms of it undecidable, and an undecidable argument is
+  now passed over rather than treated as the read breaking down — what the
+  call returns is still `Self`, which is still the parameter.
+- **A callee whose own parameter is settled by inference** (5). `Map::next`
+  learns its `B` from the closure `F` was handed, and under a read `F` is a
+  parameter with no closure behind it. So `B` stands for itself as well, and
+  the bounds the call site would have checked it against are skipped rather
+  than failed — a parameter implements nothing yet, and the call sites that
+  emit code ask the same question with a real type in hand. The instantiation
+  this queues is never lowered: the read runs after `pending` has drained.
 
-Each remaining group is a body that is not being read, so `never_called`-shaped
-bugs still hide in bodies of those shapes. None of them is `Sized`.
+`never_called`-shaped bugs still hide in the four bodies that are unsure — and
+in the comparisons a read body passed over. Neither is `Sized`.
 
 There is also a hole that is not the read's: a program may declare an item the
 prelude also declares (Ch. 6 §3.3), and `mod.rs`'s `merged` drops the prelude's
@@ -205,11 +222,12 @@ a compiler fix.
    the duration of one read.
 2. ~~Method resolution from a bound rather than from a concrete type.~~ Done
    for methods (`Fn::param_method`), calls (`Fn::param_call`), associated
-   functions (`Fn::param_assoc`) and associated types (a projection is a type,
-   or the type a binding pinned it to). **Not done for a bound with arguments**,
-   for an associated function that has parameters of its own (9 of the 15
-   unread bodies), or for the bounds an associated type was declared with,
-   which is what a projection would need in order to have methods.
+   functions (`Fn::param_assoc`, including ones with parameters of their own)
+   and associated types (a projection is a type, or the type a binding pinned
+   it to). **Not done for a bound with arguments**, nor for anything a type
+   the read knows only as opaque might implement — the bounds an associated
+   type was declared with, and a parameter a callee's inference would have
+   settled. That is the one thing that still makes a read unsure.
 3. ~~A decision, per downstream component, between handling a `Ty::Param` and
    proving it cannot arrive.~~ Done, and the answer was neither: layout and
    codegen answer one word into output that is thrown away.
