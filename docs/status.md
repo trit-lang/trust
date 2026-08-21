@@ -206,14 +206,23 @@ a rule whose self type is anything but a bare parameter.
 
 ## 7. Architecture you must know before changing anything
 
-**A type parameter is not a kind of type.** There is no `Ty::Param`. A generic
-parameter is a name that an *environment* (`HashMap<String, Ty>`) maps to a
-concrete type, so lowering a generic body is lowering the same AST under a
+**A type parameter is a name in an environment, and only sometimes a type.** A
+generic parameter is a name that an *environment* (`HashMap<String, Ty>`) maps
+to a concrete type, so lowering a generic body is lowering the same AST under a
 different environment and **no AST is ever rewritten** for generics. A generic
 struct or enum becomes an ordinary nominal type under a mangled name the first
 time it is applied. Consequence: the layout engine, the drop machinery, the
 borrow checker and codegen never learn that generics exist, and **no generic
-construct reaches TIR** — asserted by a test.
+construct reaches emitted TIR** — asserted by a test.
+
+`Ty::Param(String)` exists for exactly one purpose and is reachable from
+exactly one place: `check_generic_bodies`, which lowers each generic body once
+more with every parameter bound to itself, so that Ch. 4 §2.2's "checked once
+against its bounds" means something. **The TIR that read produces is thrown
+away**, which is what lets the layout engine and `Ty::tir` answer *one word*
+for a parameter rather than refusing. Nothing that survives lowering holds a
+`Ty::Param`. If you are adding a case for it, ask first whether you are on the
+read path; if you are not, you have found a bug rather than a missing case.
 
 **Everything is desugared into things that already worked.**
 
@@ -557,7 +566,7 @@ pointed the wrong way, about a memory-safety hole.
 
 | Limit | Test |
 |---|---|
-| a generic body is checked at instantiation, not once against its bounds | `known_limit_a_generic_body_is_checked_at_instantiation` |
+| reading a generic body is fail-open — four shapes walk through unread | `known_limit_reading_a_generic_body_is_fail_open` |
 | there is no `Sized` bound | `known_limit_there_is_no_sized_bound` |
 | a returned borrow is rooted syntactically | `known_limit_a_returned_borrow_is_rooted_syntactically` |
 | a closure captures by variable, not by place | `known_limit_a_closure_captures_by_variable_not_by_place` |
@@ -565,29 +574,39 @@ pointed the wrong way, about a memory-safety hole.
 | every owner drops exactly once | `every_owner_drops_exactly_once` (the ledger, §8.2a) |
 | diagnostics print mangled names | `known_limit_diagnostics_print_mangled_names` |
 
-**Two of these are one thing.** *A generic body is checked at instantiation*
-and *there is no `Sized` bound* have the same root, and it is §7's first
-decision:
+**These two were one thing, and half of it is done.** `Ty::Param` exists now
+and carries its bounds, so a generic body is lowered once with every parameter
+standing for itself, and a method called on a parameter is resolved from the
+bounds rather than from a concrete type. `fn never_called<T: Area>(x: &T) ->
+t27 { x.no_such_method() }` is rejected with no call site anywhere in the file.
+§7's claim that the absence of `Ty::Param` was load-bearing was true, and the
+way it was paid for is not what `issue/001` predicted: there is no point in
+this compiler that is after type-checking and before instantiation, because
+`lower::function` does both in one walk. **101 of 178 generic bodies reach the
+layout engine.** So layout and `Ty::tir` answer one word for a parameter, and
+the entire `Function` a read produces is thrown away (G9.140).
 
-- The bound half of Ch. 4 §2.2 holds — a failed bound is reported at the call
-  site, naming the call, the parameter and the trait — but a generic function
-  that is never called is never checked at all. This is the C++ failure mode
-  Ch. 4's Appendix B claims is removed by construction, and it is removed at
-  the call site only.
-- Ch. 4 §2.5 gives every type parameter an implicit `Sized` bound and `?Sized`
-  to remove it. There is neither: a parameter behaves as `?Sized`, and the
-  size requirement is enforced at each *use*, so the error surfaces in the
-  body rather than at the call — **which is the same failure mode again.**
+What remains:
 
-Both need the same thing: the ability to represent "some type known only to
-implement `Shape`", and to resolve `s.area()` from the bound alone. That is
-`Ty::Param`, and **§7 explains that its absence is load-bearing**: it is what
-keeps the layout engine, the drop machinery, the borrow checker and code
-generation ignorant of generics, and a test asserts that no generic construct
-reaches TIR. Adding it is not adding an enum variant; it is four downstream
-components meeting a kind of type they were designed never to see. Do not
-attempt either limit in isolation — you will reach the same wall from two
-directions.
+- **The read is fail-open, and its coverage is 91 of 153 bodies.** A body the
+  reader does not fully understand reports nothing at all — not its verdicts
+  either, since a body half-understood is a body whose rejections might be
+  consequences of the half that was not (G9.139). Four shapes walk through
+  unread: an associated type projected through a parameter, an `Fn`-bounded
+  parameter called as a function, an associated function reached through a
+  bound, and inference with no call site. Closing them is four separate pieces
+  of work.
+- **Ch. 4 §2.5 gives every type parameter an implicit `Sized` bound and
+  `?Sized` to remove it. There is still neither**: a parameter behaves as
+  `?Sized`, and the size requirement is enforced at each *use*, so the error
+  surfaces in the body rather than at the call. The read does not weaken this
+  — the one word it is told is discarded, and `check_sized` runs again at
+  instantiation with a real size.
+- **`Range<T>` in the prelude is not generic** — `impl<T> Iterator for
+  Range<T>` does `self.start += 1` with a `t27` literal. The read finds it and
+  cannot report it without failing every program (G9.137). It is the C++
+  failure mode Appendix B claims is removed, in the prelude, and closing it is
+  a language decision: a numeric bound, or `Range<t27>`.
 
 The `?Sized` behaviour is sound *provided the list of use sites that require
 a size is exhaustive*, and that list is the kind that grows quietly as a

@@ -86,11 +86,14 @@ pub enum Ty {
     /// The type of an expression that never produces a value: `break`,
     /// `continue`, `return`.
     Never,
-    /// A **type parameter**, carried by name. Written for the day when a
-    /// generic body is checked once against its bounds — Ch. 4 §2.2 and Ch. 4
-    /// §2.5's `?Sized` are the same wall (issue/001), and the wall begins
-    /// here. Today no code path constructs one: every match below panics if
-    /// it arrives, so a stray `Param` is loud rather than silently wrong.
+    /// A **type parameter**, carried by name (Ch. 4 §2.2, issue/001).
+    ///
+    /// One of these exists only while `check_generic_bodies` reads a generic
+    /// body — the body lowered under an environment binding each parameter to
+    /// itself rather than to a call site's argument. No instantiation ever
+    /// holds one, and the TIR a read produces is thrown away, which is what
+    /// lets the layout engine and codegen answer *one word* below for a size
+    /// and a width that have no answer.
     Param(String),
 }
 
@@ -149,12 +152,12 @@ impl Ty {
             | Ty::Ref(..)
             | Ty::RawOf(_)
             | Ty::Slice(_) => Type::Ptr,
-            // TIR has no spelling for a type parameter. This branch is the
-            // fourth of the four §7 says the absence of `Ty::Param` is
-            // load-bearing for (issue/001); it panics rather than pick a
-            // width, so a `Param` reaching codegen is a bug and not a
-            // silently-wrong `t27`.
-            Ty::Param(_) => unreachable!("Ty::Param reached codegen"),
+            // TIR has no spelling for a type parameter, and one word is the
+            // answer that lets the body be *read* (issue/001). It is not the
+            // answer for any instantiation, and it never has to be: a `Param`
+            // exists only while `check_generic_bodies` reads a body, and the
+            // TIR that reading produces is thrown away unexamined.
+            Ty::Param(_) => Type::Int(27),
         }
     }
 
@@ -245,10 +248,13 @@ impl Ty {
             // reference to one does, and both are two words (Ch. 3 §5.2,
             // Ch. 4 §3.2).
             Ty::Slice(_) | Ty::Dyn(_) => layout::Ty::Unit,
-            // The layout engine is the first of the four §7 names (issue/001);
-            // asking for a `Ty::Param`'s size or alignment is the question it
-            // was written never to be asked.
-            Ty::Param(_) => unreachable!("Ty::Param reached layout"),
+            // A parameter's size is the question the layout engine cannot be
+            // asked, so it is told one word and the answer is never used for
+            // anything an instantiation depends on (see `tir`). Every check
+            // that would be wrong under a guessed size — `check_sized` above
+            // all — is left to run again at instantiation, where the size is
+            // real.
+            Ty::Param(_) => layout::Ty::Int(layout::IntTy::TAddr),
         }
     }
 }
@@ -1247,7 +1253,7 @@ pub fn lower_noting(
             // A function without a body is a declaration, and lowers to TIR's
             // own declaration form — one mechanism, spelled twice.
             None => module.decls.push(signature),
-            Some(body) => match function(f, signature, body, &key, HashMap::new(), 0, &world) {
+            Some(body) => match function(f, signature, body, &key, Reading::plain(), &world) {
                 Ok(func) => module.funcs.push(func),
                 Err(e) => errs.push(e),
             },
@@ -1265,7 +1271,7 @@ pub fn lower_noting(
             let key = f.name.clone();
             let signature = signature_of(&f, &key, &sigs);
             let body = f.body.clone().expect("a closure has a body");
-            match function(&f, signature, &body, &key, HashMap::new(), 0, &world) {
+            match function(&f, signature, &body, &key, Reading::plain(), &world) {
                 Ok(func) => module.funcs.push(func),
                 Err(e) => errs.push(e),
             }
@@ -1283,7 +1289,12 @@ pub fn lower_noting(
         };
         let body = def.body.clone().expect("a generic function has a body");
         let signature = signature_of(&def, &job.key, &sigs);
-        match function(&def, signature, &body, &job.key, job.env, job.depth, &world) {
+        let r = Reading {
+            env: job.env,
+            depth: job.depth,
+            check: None,
+        };
+        match function(&def, signature, &body, &job.key, r, &world) {
             Ok(func) => module.funcs.push(func),
             Err(e) => errs.push(e),
         }
@@ -1293,8 +1304,8 @@ pub fn lower_noting(
     // coercion that needs one has been seen (Ch. 4 §3.3).
     module
         .globals
-        .extend(vtables.into_inner().into_iter().map(|(_, _, g)| g));
-    module.globals.extend(data.into_inner());
+        .extend(vtables.take().into_iter().map(|(_, _, g)| g));
+    module.globals.extend(data.take());
 
     // The allocator, declared where something calls it (Ch. 5 §2.1). It is
     // TIR rather than Trust because it returns a *pointer*, and Trust has no
@@ -1320,10 +1331,100 @@ pub fn lower_noting(
         });
     }
 
+    // Last, because reading a generic body writes into the same tables the
+    // emitted module was built from — instantiations it discovers, layouts it
+    // asks for, closures it makes — and everything written after this point
+    // is dropped on the floor. Only a program that is otherwise whole is read
+    // at all: a body full of consequences of an earlier error says nothing
+    // about itself.
+    if errs.is_empty() {
+        check_generic_bodies(&generic_fns, &sigs, &world, &mut errs);
+    }
+
     if errs.is_empty() {
         Ok(module)
     } else {
         Err(errs)
+    }
+}
+
+/// Read each generic body once, against its bounds (Ch. 4 §2.2, issue/001).
+///
+/// The body is lowered under an environment binding every parameter to a
+/// `Ty::Param` — the same source read under a different environment, which is
+/// how a generic body has always been lowered — and the TIR that comes out is
+/// discarded. What is kept is the diagnosis.
+///
+/// **The read only ever adds rejections.** A body it cannot read through is
+/// not judged at all, and every check an instantiation used to do it still
+/// does, at the instantiation, where the types are concrete. So the worst a
+/// gap here costs is the limit that was already there.
+fn check_generic_bodies(
+    generic_fns: &HashMap<String, ast::FnItem>,
+    sigs: &RefCell<HashMap<String, (Vec<Ty>, Ty)>>,
+    world: &World,
+    errs: &mut Vec<Error>,
+) {
+    let mut names: Vec<&String> = generic_fns.keys().collect();
+    names.sort();
+    for name in names {
+        let def = &generic_fns[name];
+        let Some(body) = &def.body else { continue };
+        // A const parameter is a value, not a type, and has no `Ty::Param`
+        // to stand for it (Ch. 4 §2.4).
+        if def
+            .generics
+            .iter()
+            .any(|p| !matches!(p, ast::GenericParam::Type { .. }))
+        {
+            continue;
+        }
+        let env: HashMap<String, Ty> = def
+            .generics
+            .iter()
+            .map(|p| (p.name().to_string(), Ty::Param(p.name().to_string())))
+            .collect();
+
+        // A key no source can spell, so nothing calls what this leaves behind.
+        let key = format!("{name}$read");
+        let sig = {
+            let params: Result<Vec<Ty>, Error> = def
+                .params
+                .iter()
+                .map(|p| resolve_ty_env(&p.ty, world.types, &env))
+                .collect();
+            let ret = match &def.ret {
+                None => Ok(Ty::Unit),
+                Some(t) => resolve_ty_env(t, world.types, &env),
+            };
+            match (params, ret) {
+                (Ok(p), Ok(r)) => (p, r),
+                // A signature that cannot even be written under parameters is
+                // the read failing before it began.
+                _ => continue,
+            }
+        };
+        sigs.borrow_mut().insert(key.clone(), sig);
+        let signature = signature_of(def, &key, sigs);
+
+        let check = Check::new(&def.generics);
+        // The read's own error is not a verdict. Most of the ways reading a
+        // body fails today are this checker running out of road — an
+        // associated type projected through a parameter, a parameter called
+        // as a function — and none of those is the body's fault. Only what
+        // the checker deliberately rejected is reported.
+        let r = Reading {
+            env,
+            depth: 0,
+            check: Some(&check),
+        };
+        let _ = function(def, signature, body, &key, r, world);
+        if check.unsure.get() {
+            continue;
+        }
+        if let Some(e) = check.verdict.borrow().clone() {
+            errs.push(e);
+        }
     }
 }
 
@@ -4137,7 +4238,75 @@ fn const_item(c: &ast::ConstItem, module: &mut Module, types: &Types) -> R<Globa
 
 // --------------------------------------------------------------- lowering
 
+/// What reading a generic body needs and lowering an instantiation does not
+/// (issue/001).
+///
+/// Reading a body is lowering it under an environment of `Ty::Param`s, and it
+/// stops being lowering in exactly two places: a type parameter has bounds
+/// rather than members, and there are questions about a parameter this
+/// compiler cannot yet answer at all. Both live here.
+struct Check {
+    /// The bounds each parameter in scope was declared with. A parameter's
+    /// bounds are what it has instead of a definition: `s.area()` resolves
+    /// through `S: Area`, or does not resolve.
+    bounds: HashMap<String, Vec<ast::Bound>>,
+    /// Set where the read meets something it cannot answer under a parameter.
+    ///
+    /// A body that sets this is not judged at all. A partial verdict is worse
+    /// than none here: the parts that could not be read are exactly the parts
+    /// a wrong rejection would come out of, and a wrong rejection is a
+    /// program the compiler refuses for no reason the author can see.
+    unsure: std::cell::Cell<bool>,
+    /// The one rejection this checker is prepared to stand behind, if it made
+    /// one. Errors it did not deliberately produce are not verdicts about the
+    /// body; they are the read failing, and are discarded.
+    verdict: RefCell<Option<Error>>,
+}
+
+impl Check {
+    fn new(generics: &[ast::GenericParam]) -> Check {
+        let mut bounds = HashMap::new();
+        for p in generics {
+            if let ast::GenericParam::Type { name, bounds: bs } = p {
+                bounds.insert(name.clone(), bs.clone());
+            }
+        }
+        Check {
+            bounds,
+            unsure: std::cell::Cell::new(false),
+            verdict: RefCell::new(None),
+        }
+    }
+}
+
+/// What a body is lowered *in*.
+///
+/// A generic body is lowered by reading the same source under a different
+/// environment, and these three say which reading this is: what the type
+/// parameters stand for, how deep the chain of instantiations that asked for
+/// it runs, and whether the answer is going to be kept.
+struct Reading<'a> {
+    env: HashMap<String, Ty>,
+    depth: u32,
+    check: Option<&'a Check>,
+}
+
+impl Reading<'_> {
+    /// A body with no type parameters, lowered because the file asked for it.
+    fn plain() -> Reading<'static> {
+        Reading {
+            env: HashMap::new(),
+            depth: 0,
+            check: None,
+        }
+    }
+}
+
 struct Fn<'a> {
+    /// Set while reading a generic body rather than lowering an instantiation
+    /// of one (issue/001). `None` for every function the file wrote and every
+    /// instantiation, which is what keeps the emitted TIR untouched by this.
+    check: Option<&'a Check>,
     /// Where to record the type of each expression, if anyone asked.
     noted: Option<&'a RefCell<Noted>>,
     /// Signatures, shared and mutable: instantiating a generic function adds
@@ -4359,10 +4528,10 @@ fn function(
     sig: Signature,
     body: &ast::Block,
     key: &str,
-    env: HashMap<String, Ty>,
-    depth: u32,
+    r: Reading,
     w: &World,
 ) -> R<Function> {
+    let Reading { env, depth, check } = r;
     let World {
         record,
         noted,
@@ -4388,6 +4557,7 @@ fn function(
     let (param_tys, ret) = sigs.borrow().get(key).cloned().unwrap();
     let destructor_of = key.strip_prefix("drop.").map(|t| t.to_string());
     let mut fx = Fn {
+        check,
         noted,
         dest: None,
         traits,
@@ -4512,6 +4682,28 @@ fn function(
 }
 
 impl Fn<'_> {
+    // ------------------------------------------------- reading a generic body
+
+    /// Say that this read met something it cannot answer under a parameter,
+    /// so that nothing it goes on to conclude is reported (issue/001).
+    fn cannot_tell(&self) {
+        if let Some(c) = self.check {
+            c.unsure.set(true);
+        }
+    }
+
+    /// A rejection this checker stands behind: the body cannot compile for
+    /// any instantiation, and saying so is the whole point of reading it.
+    fn reject(&self, e: Error) -> Error {
+        if let Some(c) = self.check {
+            let mut v = c.verdict.borrow_mut();
+            if v.is_none() {
+                *v = Some(e.clone());
+            }
+        }
+        e
+    }
+
     // ------------------------------------------------------- block building
 
     fn fresh(&mut self, what: &str) -> String {
@@ -9706,6 +9898,14 @@ impl Fn<'_> {
         // already that reference: there is nothing to dereference and nothing
         // to borrow, because the fat pointer *is* the value (Ch. 5 §1.3).
         let by_reference = matches!(&base, Ty::Ref(inner, _) if inner.is_unsized());
+        // A type parameter has bounds where a type has members, so a method
+        // on one is resolved from what the parameter was *declared* to
+        // implement rather than from what some argument turned out to be
+        // (Ch. 4 §2.2, issue/001). Only a body being read has one of these.
+        if let Ty::Param(p) = &base {
+            let p = p.clone();
+            return self.param_method(&p, recv, name, args, derefs, span);
+        }
         let Some(type_name) = nominal_name(&base).or_else(|| match &base {
             Ty::Ref(inner, _) => nominal_name(inner),
             _ => None,
@@ -9847,6 +10047,163 @@ impl Fn<'_> {
         };
         self.reserving = held;
         out
+    }
+
+    /// A method called on a type parameter, resolved from its bounds.
+    ///
+    /// The trait declares the signature every implementation must have, so
+    /// the call can be checked against it without knowing which one will run
+    /// — which is the resolution path issue/001 says both of Ch. 4's generic
+    /// limits were waiting on. Nothing is emitted for the call itself: this
+    /// runs only while a generic body is being read, and that reading's TIR
+    /// is thrown away. The receiver and the arguments *are* lowered, because
+    /// the moves and borrows they make are part of what is being checked.
+    fn param_method(
+        &mut self,
+        param: &str,
+        recv: &ast::Expr,
+        name: &str,
+        args: &[ast::Expr],
+        derefs: usize,
+        span: Span,
+    ) -> R<(Operand, Ty)> {
+        let Some(check) = self.check else {
+            return err(
+                span,
+                format!("`{param}` is a type parameter, and this is not a generic body"),
+            );
+        };
+        let bounds = check.bounds.get(param).cloned().unwrap_or_default();
+
+        // A trait with arguments — `T: From<U>` — declares a different
+        // signature per argument, and picking the right one is Ch. 4 §1.7
+        // work this read does not do yet.
+        if bounds
+            .iter()
+            .any(|b| !b.args.is_empty() || !b.assoc.is_empty())
+        {
+            self.cannot_tell();
+            return err(
+                span,
+                format!("`{param}` is bound by a trait with arguments"),
+            );
+        }
+        // A program's item shadows a prelude item of the same name (Ch. 6
+        // §3.3), and the prelude items that *named* the shadowed one are
+        // kept — so a bound written in the prelude can end up resolved
+        // against a trait the program wrote, which has different methods
+        // (the bound half of G9.34). Without a module system there is no way
+        // to ask for the one the author meant, so a read that meets it says
+        // nothing. The prelude's file id is one past the program's.
+        if bounds.iter().any(|b| {
+            self.traits
+                .get(&b.name)
+                .is_some_and(|t| t.span.file < span.file)
+        }) {
+            self.cannot_tell();
+            return err(
+                span,
+                format!("`{param}`'s bound names a trait this program shadowed"),
+            );
+        }
+
+        let mut found = None;
+        for b in &bounds {
+            if let Some(m) = object_methods(self.traits, &b.name, &mut Vec::new())
+                .into_iter()
+                .find(|m| m.name == name)
+            {
+                found = Some(m);
+                break;
+            }
+        }
+        let Some(m) = found else {
+            let bound_list = bounds
+                .iter()
+                .map(|b| format!("`{}`", b.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let by = if bounds.is_empty() {
+                "and it is bound by nothing".to_string()
+            } else {
+                format!("and none of {bound_list} declares one")
+            };
+            return Err(self.reject(one_err(
+                span,
+                format!(
+                    "`{param}` is a type parameter, so its methods are its bounds' — \
+                     there is no `{name}` there {by} (Ch. 4 §2.2)"
+                ),
+            )));
+        };
+
+        // The signature, with `Self` read as the parameter itself.
+        let me = SelfTy {
+            ty: ast::Ty::Name(param.to_string(), span),
+            name: param.to_string(),
+        };
+        let written: Vec<ast::Ty> = m.params.iter().map(|p| subst_self_ty(&p.ty, &me)).collect();
+        let Some(receiver_ty) = written.first() else {
+            return Err(self.reject(one_err(
+                span,
+                format!(
+                    "`{name}` takes no `self`, so it is not called on a receiver \
+                     (Ch. 4 §1.4)"
+                ),
+            )));
+        };
+        if written.len() - 1 != args.len() {
+            return Err(self.reject(one_err(
+                span,
+                format!(
+                    "`{name}` takes {} argument(s), {} given",
+                    written.len() - 1,
+                    args.len()
+                ),
+            )));
+        }
+        // An associated type in the signature is a projection through the
+        // parameter, and there is nothing yet that resolves one.
+        let (params, ret) = {
+            let resolved: R<Vec<Ty>> = written.iter().map(|t| self.resolve(t)).collect();
+            let ret = match &m.ret {
+                None => Ok(Ty::Unit),
+                Some(t) => self.resolve(&subst_self_ty(t, &me)),
+            };
+            match (resolved, ret) {
+                (Ok(p), Ok(r)) => (p, r),
+                (Err(e), _) | (_, Err(e)) => {
+                    self.cannot_tell();
+                    return Err(e);
+                }
+            }
+        };
+
+        // Lower the receiver in the form the method asks for, so that the
+        // borrow it takes is checked like any other.
+        let mut receiver = recv.clone();
+        for _ in 0..derefs {
+            receiver = ast::Expr::Deref(Box::new(receiver), span);
+        }
+        if let ast::Ty::Ref(_, mutable, _) = receiver_ty {
+            receiver = ast::Expr::Borrow(Box::new(receiver), *mutable, span);
+        }
+        self.expr(&receiver, params.first())?;
+        for (arg, want) in args.iter().zip(&params[1..]) {
+            let (_, got) = self.expr(arg, Some(want))?;
+            self.check(&got, want, arg.span(), "argument")?;
+        }
+
+        // A value of the right type, standing where the call's result would
+        // be. It is not the result of anything, and nothing reads it.
+        let out = if ret == Ty::Unit {
+            unit()
+        } else if ret.is_aggregate() {
+            Operand::Value(self.temp_slot(&ret))
+        } else {
+            Operand::Const(ret.tir(), Bt::ZERO)
+        };
+        Ok((out, ret))
     }
 
     /// The address of a place, and its type (Ch. 3 §1.3). A place is a local,

@@ -1923,9 +1923,9 @@ fn an_enum_payload_is_dropped_by_variant() {
 // here and forces §11 to be updated.
 
 #[test]
-fn known_limit_a_generic_body_is_checked_at_instantiation() {
-    // §11: the bound half of Ch. 4 §2.2 holds — a failed bound is reported
-    // at the call site…
+fn a_generic_body_is_read_once_against_its_bounds() {
+    // Ch. 4 §2.2 has two halves. The bound half is reported at the call site,
+    // naming the call, the parameter and the trait.
     let e = error(
         "trait Area { fn area(&self) -> t27; } struct S { x: t27 } \
          fn m<T: Area>(x: &T) -> t27 { 0 } \
@@ -1933,11 +1933,61 @@ fn known_limit_a_generic_body_is_checked_at_instantiation() {
     );
     assert!(e.contains("does not implement `Area`"), "{e}");
 
-    // …but a generic function that is never called is never checked, so a
-    // body that could not compile for any instantiation compiles.
-    tir_of(
+    // The body half is reported at the definition, without a call: a method
+    // no bound declares cannot exist for any instantiation, so waiting for
+    // one to say so is waiting for nothing (issue/001).
+    let e = error(
         "trait Area { fn area(&self) -> t27; } \
          fn never_called<T: Area>(x: &T) -> t27 { x.no_such_method() } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("no `no_such_method`"), "{e}");
+    assert!(e.contains("`Area`"), "the bounds it did look in: {e}");
+
+    // And the method the bound *does* declare resolves, from the bound alone
+    // and with no instantiation in the file at all.
+    tir_of(
+        "trait Area { fn area(&self) -> t27; } \
+         fn twice<T: Area>(x: &T) -> t27 { x.area() * 2 } \
+         fn main() -> t27 { 0 }",
+    );
+
+    // A supertrait's methods are the parameter's too (Ch. 4 §1.6).
+    tir_of(
+        "trait Named { fn id(&self) -> t27; } \
+         trait Area: Named { fn area(&self) -> t27; } \
+         fn both<T: Area>(x: &T) -> t27 { x.area() + x.id() } \
+         fn main() -> t27 { 0 }",
+    );
+
+    // The arity is the trait's, and it is wrong here for every impl there
+    // could ever be.
+    let e = error(
+        "trait Area { fn area(&self) -> t27; } \
+         fn f<T: Area>(x: &T) -> t27 { x.area(1) } \
+         fn main() -> t27 { 0 }",
+    );
+    assert!(e.contains("takes 0 argument(s), 1 given"), "{e}");
+}
+
+#[test]
+fn known_limit_reading_a_generic_body_is_fail_open() {
+    // The read only ever *adds* rejections: a body it cannot get through is
+    // not judged at all, and every check an instantiation did it still does.
+    // So the C++ failure mode Ch. 4 Appendix B claims is removed is narrowed
+    // rather than closed, and these are the shapes still walking through.
+    //
+    // A parameter's associated type is not projected yet, so nothing in this
+    // body is read — including the method that does not exist.
+    tir_of(
+        "trait Feed { type Item; fn next(&mut self) -> Self::Item; } \
+         fn drain<T: Feed>(x: &mut T) -> t27 { let v = x.next(); x.no_such_method() } \
+         fn main() -> t27 { 0 }",
+    );
+    // Nor is a parameter bound by a trait that takes arguments (Ch. 4 §1.7).
+    tir_of(
+        "trait Into<T> { fn into(&self) -> T; } \
+         fn conv<T: Into<t27>>(x: &T) -> t27 { x.no_such_method() } \
          fn main() -> t27 { 0 }",
     );
 }

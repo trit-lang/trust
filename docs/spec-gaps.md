@@ -2621,6 +2621,99 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.140 — a size the layout engine is told, in an answer nobody reads.**
+Ch. 4 §2.2 says a generic body is checked once, against its bounds. To check
+it the compiler has to lower it, and `lower::function` type-checks and emits
+TIR in one walk — so lowering a body with `T` still in it puts a `Ty::Param`
+in front of the layout engine and in front of `Ty::tir`, both of which are
+asked a question that has no answer: how wide is `T`.
+
+`issue/001` guessed this would not happen — that layout, drops, the borrow
+checker and codegen all run *after* instantiation and a parameter could be
+proven not to reach them. Measured: **101 of 178 generic bodies reach layout
+or `tir()` on the first attempt.** There is no point in the pass that is
+after type-checking and before instantiation, because those are the same
+pass. The guess was not wrong about the four components; it was wrong that
+this compiler has a place to stand.
+
+*Decision:* both answer **one word** — `layout::Ty::Int(TAddr)` and
+`Type::Int(27)`. Both answers are wrong for every real type, and neither is
+ever read: the `Function` a read produces is dropped, and no instantiation
+holds a `Ty::Param`. What makes this sound is not a proof about
+reachability, it is that **the read only ever adds rejections** (G9.139), and
+that every size-dependent check — `check_sized` above all — runs again, for
+real, at instantiation. A guessed size cannot cause an acceptance because
+nothing the read computes survives it.
+
+The spec should say this, and does not: a checker that lowers to check needs
+a licence to answer questions whose answers it will discard. Without one, the
+only alternatives are a separate check phase (a second front end) or leaving
+Ch. 4 §2.2 unimplemented, which is where this was.
+
+**G9.139 — what a checker owes when it does not understand the program.**
+`check_generic_bodies` reads each generic body once with every parameter
+bound to `Ty::Param(name)`, and most of the ways that read fails today are
+the reader running out of road rather than the body being wrong: an
+associated type projected through a parameter (`T::Item`, 25 bodies), an
+`Fn`-bounded parameter called as a function (15), an associated function
+reached through a bound (9), inference with no call site to unify against
+(5).
+
+If the read's own `Err` were reported, all 54 would be false rejections of
+programs that compile and run.
+
+*Decision:* the read is **fail-open, and completely**. A body is either
+judged or not judged — `Fn::reject` records a deliberate verdict,
+`Fn::cannot_tell` sets `unsure`, and an unsure read reports **nothing at
+all**, including verdicts it had already recorded. The all-or-nothing part is
+the load-bearing part: a body half-understood is a body whose rejections
+might be consequences of the half that was not.
+
+The measured result is 91 of 153 bodies read cleanly, 55 discarded, 7 unsure
+— so `never_called`-shaped bugs still hide in bodies of the four shapes
+above. That is the honest statement of what Ch. 4 §2.2 buys today, and it is
+a statement about *coverage*, which no chapter has vocabulary for. Ch. 4 says
+a body is checked. It does not say what a compiler may do when it cannot.
+
+**G9.138 — a shadowed trait a prelude bound still points at.** A program may
+declare a trait the prelude declares (Ch. 6 §3.3), and `mod.rs`'s `merged`
+drops the prelude's *item* and the prelude's impls on or for that name —
+which is G9.34, and correct as far as it goes. It keeps prelude items whose
+**bounds** name it. So a program with its own `trait Key` leaves prelude
+`HashMap<K: Key>` bounded by the *user's* `Key`, and `impl Key for t27` was
+dropped along with the prelude's trait.
+
+Nothing noticed until a checker read `K.hash()` and asked which trait `Key`
+is. It resolved to the user's, found no `hash`, and rejected a program that
+compiles.
+
+*Decision, for now:* the read treats a bound whose trait comes from a **lower
+file id than the body** as unanswerable and gives up on the body. Prelude
+file ids are one past the program's, so this is exactly "a prelude bound
+naming a program trait" and nothing else. It is a workaround at the point of
+use, not a fix: `merged` should either rewrite the surviving bounds to the
+prelude's own trait or drop the items that carry them, and until it does the
+prelude's `HashMap` is bounded by a trait it was not written against.
+
+**G9.137 — `Range<T>` is not generic, and only the prelude was never read.**
+`compiler/src/lang/mod.rs`'s `impl<T> Iterator for Range<T>` does `self.start
++= 1` with a `t27` literal. `Range<T>` therefore compiles for `T = t27` and
+for nothing else — a body whose declared generality its own code contradicts,
+which is precisely the C++ template failure mode Ch. 4 Appendix B's scorecard
+claims is removed by construction, sitting in the prelude, accepted for as
+long as it has existed because nothing looked inside a generic body.
+
+The read looks. It finds it. It is the one true positive among the 55 bodies
+the read rejects, and it is **not reported**, because reporting it fails the
+prelude and therefore every program.
+
+*Not decided.* Two ways out and both are the user's: a numeric bound in the
+language, so `Range<T: Num>` can be written and the body checked against it,
+or a prelude that says `Range<t27>` and gives up the pretence. Appendix B's
+row cannot be re-earned until one of them happens — and the shorter honest
+path is to amend the row, since what is removed is the call-site half and now
+the named-method half, not the failure mode.
+
 **G9.136 — `x = <aggregate>`, and the drop a whole local owes.**
 
 Ch. 3 §1.1's rule — that a value being written over is given exactly one
