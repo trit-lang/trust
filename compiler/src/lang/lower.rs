@@ -86,6 +86,12 @@ pub enum Ty {
     /// The type of an expression that never produces a value: `break`,
     /// `continue`, `return`.
     Never,
+    /// A **type parameter**, carried by name. Written for the day when a
+    /// generic body is checked once against its bounds — Ch. 4 §2.2 and Ch. 4
+    /// §2.5's `?Sized` are the same wall (issue/001), and the wall begins
+    /// here. Today no code path constructs one: every match below panics if
+    /// it arrives, so a stray `Param` is loud rather than silently wrong.
+    Param(String),
 }
 
 impl std::fmt::Display for Ty {
@@ -114,6 +120,7 @@ impl std::fmt::Display for Ty {
             Ty::Slice(t) if **t == Ty::Char => f.write_str("str"),
             Ty::Slice(t) => write!(f, "[{t}]"),
             Ty::Never => f.write_str("!"),
+            Ty::Param(n) => f.write_str(n),
         }
     }
 }
@@ -142,6 +149,12 @@ impl Ty {
             | Ty::Ref(..)
             | Ty::RawOf(_)
             | Ty::Slice(_) => Type::Ptr,
+            // TIR has no spelling for a type parameter. This branch is the
+            // fourth of the four §7 says the absence of `Ty::Param` is
+            // load-bearing for (issue/001); it panics rather than pick a
+            // width, so a `Param` reaching codegen is a bug and not a
+            // silently-wrong `t27`.
+            Ty::Param(_) => unreachable!("Ty::Param reached codegen"),
         }
     }
 
@@ -232,6 +245,10 @@ impl Ty {
             // reference to one does, and both are two words (Ch. 3 §5.2,
             // Ch. 4 §3.2).
             Ty::Slice(_) | Ty::Dyn(_) => layout::Ty::Unit,
+            // The layout engine is the first of the four §7 names (issue/001);
+            // asking for a `Ty::Param`'s size or alignment is the question it
+            // was written never to be asked.
+            Ty::Param(_) => unreachable!("Ty::Param reached layout"),
         }
     }
 }
