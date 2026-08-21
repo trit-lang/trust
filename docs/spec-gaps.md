@@ -2626,6 +2626,36 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.146 — `Raw<T>::read` moves a `T` out, and nothing says where it lands
+when a `T` is an aggregate.** Ch. 5 §2.7 gives `read` one sentence: the `i`-th,
+moved out. Where `T` is a scalar that sentence is a `load` and there is nothing
+else it could be. Where `T` is an aggregate there is no value to load (TIR §3),
+so the move is a **copy** — and a copy needs somewhere to go, which the chapter
+does not name.
+
+It cannot be the position. `read` leaves a position that is not a `T` any more,
+and every caller in the library writes over it immediately — `Vec::remove`
+reads the element and then shifts the tail over the hole one line later. What
+the caller was handed has to survive that, so `read` puts the `T` in storage of
+its own. `bootstrap/lower.tr`'s `raw_method` does that now (`copy_between` into
+a fresh temporary) where it used to refuse the whole shape, and `write` is its
+mirror: `copy_between` into the address `raw_position` worked out, rather than
+a `store` of a value that does not exist.
+
+The temporary is the part nothing forces. `fn get(&self, at) -> T {
+self.held.read(at) }` at `T = Pair` could copy the position straight into
+`%sret` and be done; `trustc` copies it into a temporary and then copies the
+temporary into `%sret`, twice the work, because `read` answers with a value
+like any other expression and the tail copies whatever it is given. Both are
+correct and only one is what the corpus says, so the second implementation
+reproduces `trustc`'s — which is the *only* reason it is written down here.
+
+`bootstrap/programs/heap/main.tr` is the corpus case: `wide`, `wide_room` and
+`wide_argument` read a `Pair` out of a `Raw<Pair>` into a `let`, through a
+generic method, and into a call's argument. What is still refused is an element
+type that owns a destructor — `Vec<Vec<t27>>`, `Vec<String>`, a struct holding
+a `Vec` — which is a different gap and not this one.
+
 **G9.145 — a method in tail position answers into `%sret`, and nothing says
 whether its receiver may take that storage first.** TIR §3: an aggregate has
 no value, it *is* its storage, and a function that answers with one is given

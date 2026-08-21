@@ -322,6 +322,51 @@ fn borrowed(n: taddr) -> taddr {
     looked_at(&held)
 }
 
+// A position that holds an **aggregate**, which has no value to load or
+// store (TIR §3) and so is *copied* — field by field, out of the position
+// and into storage of its own.
+//
+// Storage of its own is the part worth saying. `read` **moves** the `T`
+// out, so what the caller is given has to survive the position being
+// written over — `Vec::remove` writes it one line after reading it — and
+// answering with the position's address would hand back a view of storage
+// the next write changes. So `read` puts it in a temporary, and where a
+// binding is what asked, the binding adopts that temporary rather than
+// copying out of it.
+//
+// Until this round both were refused, and what they refused with them was
+// every `Vec` of anything that is not a scalar.
+fn wide(n: taddr) -> taddr {
+    let mut r: Raw<Pair> = Raw::alloc(n);
+    r.write(0, Pair { a: 1, b: 2 });
+    let held = r.read(0);
+    held.a + held.b
+}
+
+// The same through a **family**, where the key is an aggregate: `Room.Pair`
+// is `Room` read at a type that is itself storage, so `put` and `get` are
+// the copy above with the element type coming from the key (Ch. 4 §2.5).
+fn wide_room() -> taddr {
+    let mut r: Room<Pair> = Room::keep(2);
+    r.put(0, Pair { a: 3, b: 4 });
+    r.bump();
+    let held = r.get(0);
+    held.a + held.b + r.len()
+}
+
+// And a position read straight into a call's argument, where nothing binds
+// it — the temporary is the whole of its life, and it is dropped by nobody
+// because a `Pair` owns nothing.
+fn summed(p: Pair) -> taddr {
+    p.a + p.b
+}
+
+fn wide_argument(n: taddr) -> taddr {
+    let mut r: Raw<Pair> = Raw::alloc(n);
+    r.write(0, Pair { a: 5, b: 6 });
+    summed(r.read(0))
+}
+
 fn main() -> t27 {
     (empty() + words(4) + trytes(9) + both(2)) as t27
         + stored(2) + (narrow(1) as t27) + pointed(1) + computed(3, 1)
@@ -330,4 +375,5 @@ fn main() -> t27 {
         + (regrown() as t27) + (counted() as t27) + (replaced() as t27)
         + (wrapped(2) as t27) + (held_on(2) as t27)
         + (either_way(2) as t27) + (borrowed(2) as t27)
+        + (wide(2) as t27) + (wide_room() as t27) + (wide_argument(1) as t27)
 }
