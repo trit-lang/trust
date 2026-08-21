@@ -1194,6 +1194,67 @@ fn a_bound_is_checked_at_the_call_site() {
 }
 
 #[test]
+fn a_type_is_held_to_its_own_bounds_where_it_is_named() {
+    // Ch. 4 §2.2 is not only about functions: `struct Holder<T: Show>` says
+    // what every `Holder<X>` requires of `X`, and the place to say so is
+    // where the program wrote `Holder<X>` (G9.143).
+    let prefix = "trait Show { fn show(&self) -> t27; } \
+                  struct C { r: t27 } \
+                  impl Show for C { fn show(&self) -> t27 { self.r } } ";
+    assert_eq!(
+        run(&format!(
+            "{prefix} struct Holder<T: Show> {{ v: T }} \
+             fn main() -> t27 {{ let h = Holder {{ v: C {{ r: 6 }} }}; h.v.show() }}"
+        ))
+        .0,
+        6
+    );
+    let e = error(&format!(
+        "{prefix} struct Holder<T: Show> {{ v: T }} \
+         fn main() -> t27 {{ let h = Holder {{ v: 7 }}; h.v }}"
+    ));
+    assert!(e.contains("does not implement `Show`"), "{e}");
+    // An enum says it the same way.
+    let e = error(&format!(
+        "{prefix} enum One<T: Show> {{ It(T) }} \
+         fn main() -> t27 {{ let o = One::It(7); 0 }}"
+    ));
+    assert!(e.contains("does not implement `Show`"), "{e}");
+}
+
+#[test]
+fn an_impls_own_bounds_are_checked_against_the_receiver() {
+    // An impl's parameters are matched to the self type by position, so no
+    // call site supplies them and nothing used to ask. The receiver is the
+    // call site (Ch. 4 §2.2, G9.143).
+    let prefix = "trait Show { fn show(&self) -> t27; } \
+                  struct C { r: t27 } \
+                  impl Show for C { fn show(&self) -> t27 { self.r } } \
+                  struct Holder<T> { v: T } ";
+    assert_eq!(
+        run(&format!(
+            "{prefix} impl<T: Show> Holder<T> {{ fn get(&self) -> t27 {{ self.v.show() }} }} \
+             fn main() -> t27 {{ let h = Holder {{ v: C {{ r: 9 }} }}; h.get() }}"
+        ))
+        .0,
+        9
+    );
+    let e = error(&format!(
+        "{prefix} impl<T: Show> Holder<T> {{ fn get(&self) -> t27 {{ 3 }} }} \
+         fn main() -> t27 {{ let h = Holder {{ v: 7 }}; h.get() }}"
+    ));
+    assert!(e.contains("does not implement `Show`"), "{e}");
+    // A trait impl's parameters are the same parameters.
+    let e = error(&format!(
+        "{prefix} impl<T: Show> Iterator for Holder<T> {{ type Item = t27; \
+           fn next(&mut self) -> Option<t27> {{ Option::None }} }} \
+         fn main() -> t27 {{ let mut h = Holder {{ v: 7 }}; \
+           match h.next() {{ Option::Some(x) => x, Option::None => 0 }} }}"
+    ));
+    assert!(e.contains("does not implement `Show`"), "{e}");
+}
+
+#[test]
 fn a_where_clause_is_the_same_bound_written_later() {
     assert_eq!(
         run("trait Area { fn area(&self) -> t27; } \

@@ -5,7 +5,7 @@
 | **Status** | Half closed. A generic body is now read once against its bounds; `Sized` is still not a bound. |
 | **Blocks** | Ch. 4 §2.5 (`Sized` / `?Sized`) |
 | **Closed** | Ch. 4 §2.2 (a generic body checked once), for the shapes §"What the read catches" lists |
-| **Contradicts** | Ch. 4 Appendix B — the scorecard claims the C++ template failure mode is removed by construction. It is removed at the call site, and now for a named method in the body. Not by construction. |
+| **Contradicts** | Ch. 4 Appendix B — the scorecard claims the C++ template failure mode is removed by construction. It is removed at every place a type argument is supplied (G9.143), and now for a named method in the body. Not by construction. |
 | **Tests** | `a_generic_body_is_read_once_against_its_bounds`, `a_parameter_is_called_against_its_fn_bound`, `an_associated_function_is_reached_through_a_bound`, `an_associated_type_binding_says_what_a_projection_is`, `a_bound_on_an_associated_type_holds_the_impl_to_it`, `a_projection_has_the_methods_its_declaring_trait_bound_it_with`, `known_limit_reading_a_generic_body_is_fail_open`, `known_limit_there_is_no_sized_bound` (all `compiler/tests/frontend.rs`) |
 
 ## The decision

@@ -2621,6 +2621,48 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.143 — a bound a *type* declared was never asked about.** Ch. 4 §2.2 says
+an instantiation that fails a bound is rejected at the call site. The compiler
+did that for a generic **function** and for nothing else:
+
+```
+trait Show { fn show(&self) -> t27; }
+struct Holder<T: Show> { v: T }
+fn main() -> t27 { let h = Holder { v: 7 }; h.v }   // accepted
+```
+
+`t27` implements nothing. Write a method against the bound and the program is
+still accepted until the method is *called*, and then the message is about the
+method's body — "`t27` has no method `show`" — naming a line the author did not
+write and not the line that chose `t27`. That is the failure mode §2.2 exists
+to prevent, in the compiler that claims to prevent it.
+
+Two holes, and they are separate.
+
+*A type's own parameters.* `Types::instantiate` is where the argument arrives.
+It cannot ask: it has no impls table, and it runs while one is still being
+built. So the question is asked afterwards, by `check_type_bounds`, of every
+instantiation that was recorded — which is every one the program reached,
+because a mangled name is registered before anything is done with it. What that
+needed was a span, since `instantiations` records what a name was made of and
+not where. A second map, `instantiated_at`, keeps the first place each was
+asked for; every reader of the first map destructures the pair, and widening it
+would have been a change to fifteen call sites for one.
+
+*An impl's own parameters.* `impl<T: Show> Holder<T>` declares a bound that no
+call site supplies an argument for — the parameters are matched to the self
+type by position, from the receiver. So the receiver is the call site, and
+`method_key` is where it is. The check has to run *after* the loop that settles
+the parameters the self type did not name: `impl<I, B, F: Fn(I::Item) -> B>`
+writes a bound in terms of `B`, and `B` is what that loop works out from the
+closure. Asking first says "`B` is not a type in scope" about the prelude.
+
+Neither found anything. Nothing in this repository declares a bound on a
+generic type or on an inherent impl — which is the whole of the argument for
+fixing it rather than leaving it: the shapes with no user are exactly the ones
+where a silence is never discovered. *Fixed.* The bootstrap compiler does not
+have either check, the same divergence in what is refused that G9.142 records.
+
 **G9.142 — a bound on an associated type was parsed and thrown away.** Ch. 4
 §1.7 says an associated type "may carry bounds (`type Iter: Iterator;`)".
 `parse.rs` read one, discarded it, and said why in a comment: *"A bound on an

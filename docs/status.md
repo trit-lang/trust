@@ -198,6 +198,17 @@ are ordinary generic functions and applying the rule is binding its parameters.
 A trait a rule covers is closed to hand implementation, which is what keeps
 §1.8's coherence rule a comparison of names rather than an overlap search.
 
+**Ch. 4 §2.2 now covers all three places a type argument is supplied**, and
+until recently covered one. A generic *function* checked its bounds at the
+call site; a generic *type* — `struct Holder<T: Show>` — checked nothing, and
+an *impl*'s own parameters, which no call site supplies because the receiver
+settles them, checked nothing either. Both are asked now: the first after the
+module is built, of every instantiation that was recorded, and the second in
+`method_key`, where the receiver's arguments meet the impl's parameters
+(G9.143). Neither found anything in this repository, which declares no such
+bound anywhere — the point being that a bound with no user is exactly the one
+whose silence never gets discovered.
+
 What remains unbuilt is small and each part says so: a bound on a trait's own
 parameter, a method with type parameters of its own inside a blanket impl, and
 a rule whose self type is anything but a bare parameter.

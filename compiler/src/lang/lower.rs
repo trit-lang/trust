@@ -445,6 +445,11 @@ pub struct Types {
     /// What each mangled name was an instantiation of. A mangled name is not
     /// parseable back into its arguments, and a generic impl needs them.
     instantiations: RefCell<HashMap<String, (String, Vec<Ty>)>>,
+    /// Where each one was first asked for, which is the only place a bound the
+    /// definition declared can be reported against (§2.2). Kept apart from
+    /// `instantiations` because nothing else wants it, and every reader of
+    /// that map destructures the pair.
+    instantiated_at: RefCell<HashMap<String, Span>>,
     /// What a *generic* impl chooses for an associated type, as written, with
     /// the impl's parameter names. `impl<I> Iterator for Map<I>` may choose
     /// `I::Item`, and what that is depends on the instantiation, so the
@@ -800,6 +805,10 @@ impl Types {
             .borrow_mut()
             .entry(mangled.clone())
             .or_insert_with(|| (name.to_string(), args.to_vec()));
+        self.instantiated_at
+            .borrow_mut()
+            .entry(mangled.clone())
+            .or_insert(span);
         if self.structs.borrow().contains_key(&mangled) {
             return Ok(Ty::Struct(mangled));
         }
@@ -1401,6 +1410,7 @@ pub fn lower_noting(
     // at all: a body full of consequences of an earlier error says nothing
     // about itself.
     if errs.is_empty() {
+        check_type_bounds(&world, &mut errs);
         check_assoc_bounds(file, &world, &mut errs);
         check_generic_bodies(&generic_fns, &sigs, &world, &mut errs);
     }
@@ -1409,6 +1419,77 @@ pub fn lower_noting(
         Ok(module)
     } else {
         Err(errs)
+    }
+}
+
+/// Each generic type's arguments against the bounds its own definition
+/// declared: `struct Holder<T: Show>` (Ch. 4 §2.2, G9.143).
+///
+/// `Types::instantiate` is where the argument arrives and cannot ask: it holds
+/// no impls table, and it runs while one is still being built. So the question
+/// is asked afterwards, of every instantiation that was recorded — which is
+/// every one the program reached, since a mangled name is registered before
+/// anything is done with it.
+fn check_type_bounds(w: &World, errs: &mut Vec<Error>) {
+    let none = HashMap::new();
+    let ask = Bounds {
+        types: w.types,
+        impls: w.impls,
+        traits: w.traits,
+        fn_bounds: w.fn_bounds,
+        scope: &none,
+    };
+    let mut made: Vec<(String, String, Vec<Ty>)> = w
+        .types
+        .instantiations
+        .borrow()
+        .iter()
+        .map(|(m, (base, args))| (m.clone(), base.clone(), args.clone()))
+        .collect();
+    // A map has no order and an error list has one, so give it the only order
+    // that does not depend on how the program was hashed.
+    made.sort_by(|a, b| a.0.cmp(&b.0));
+    for (mangled, base, args) in made {
+        let params = match (
+            w.types.generic_structs.get(&base),
+            w.types.generic_enums.get(&base),
+        ) {
+            (Some(s), _) => &s.generics,
+            (_, Some(e)) => &e.generics,
+            _ => continue,
+        };
+        if params.len() != args.len() {
+            continue; // the arity error was reported where it was written
+        }
+        let span = w
+            .types
+            .instantiated_at
+            .borrow()
+            .get(&mangled)
+            .copied()
+            .unwrap_or(Span::NONE);
+        let env: HashMap<String, Ty> = params
+            .iter()
+            .map(|p| p.name().to_string())
+            .zip(args.iter().cloned())
+            .collect();
+        for (p, ty) in params.iter().zip(&args) {
+            let ast::GenericParam::Type { name, bounds } = p else {
+                continue;
+            };
+            // An argument still standing for itself is a body being read, not
+            // a program naming a type: what a parameter implements is not
+            // known until there is one, and the call site that supplies it
+            // asks this again (G9.139).
+            if ty.has_param() {
+                continue;
+            }
+            for b in bounds {
+                if let Err(e) = ask.check_bound_in(ty, b, &env, &base, name, span) {
+                    errs.push(e);
+                }
+            }
+        }
     }
 }
 
@@ -3916,6 +3997,7 @@ fn build_types(file: &ast::File) -> R<Types> {
             })
             .collect(),
         instantiations: RefCell::new(HashMap::new()),
+        instantiated_at: RefCell::new(HashMap::new()),
     };
 
     // Integer constants first of all: a type may need one for an array's
@@ -10072,6 +10154,28 @@ impl Fn<'_> {
                 continue;
             }
             own.push(p.clone());
+        }
+        // The impl's own bounds, against what the receiver settled them to.
+        // Nothing else asks: an impl's parameters are matched to the self
+        // type by position rather than supplied at a call site, so this is
+        // the call site for them (Ch. 4 §2.2, G9.143). Asked after the loop
+        // above, because a bound may name a parameter the self type did not —
+        // `F: Fn(I::Item) -> B` — and `B` is settled there. What is left in
+        // `own` belongs to the method, and `instantiate_fn` checks it where
+        // the call is written.
+        for (p, ty) in def.generics.iter().zip(&args) {
+            let ast::GenericParam::Type { name, bounds } = p else {
+                continue;
+            };
+            // A parameter standing for itself is a body being read; the
+            // receiver a real call has is what answers this (G9.139).
+            if ty.has_param() && self.check.is_some() {
+                continue;
+            }
+            for b in bounds {
+                self.bounds()
+                    .check_bound_in(ty, b, &env, &base, name, span)?;
+            }
         }
         if own.is_empty() {
             return self.instantiate_with(&generic, env, span);
