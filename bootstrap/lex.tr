@@ -317,7 +317,11 @@ fn slice(s: &str, from: taddr, to: taddr) -> String {
 }
 
 /// Past whitespace and comments (§1.2), which are the same thing.
-fn skip(s: &str, from: taddr) -> Result<taddr, Error> {
+///
+/// Public because where a token *starts* is a question the token stream
+/// cannot answer: `next` hands back where the one after it does. Anything
+/// asking which character is wrong has to ask this instead.
+pub fn skip(s: &str, from: taddr) -> Result<taddr, Error> {
     let mut i = from;
     while i < s.len() {
         if is_space(s[i]) {

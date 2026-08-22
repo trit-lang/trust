@@ -16,10 +16,25 @@ fn main() -> t27 {
     let src = input::read_all();
     let mut p = parse::Parser { src: src, at: 0, no_struct: false, counter: 0 };
     match parse::expr(&mut p) {
+        // The whole of the input or none of it. `trust ast` reads the
+        // expression inside a function it writes around it, so text left over
+        // is a statement that did not end — and it refuses at the character
+        // the leftover begins at, which is a question the token stream cannot
+        // be asked: `next` says where the one *after* it starts.
         Result::Ok(e) => {
-            let mut out: String = Vec::new();
-            ast::show(&e, &mut out);
-            println(&out);
+            let rest = match lex::skip(&p.src, p.at) {
+                Result::Ok(at) => at,
+                Result::Err(err) => err.at,
+            };
+            if rest < p.src.len() {
+                print("error ");
+                print_int(rest as t27);
+                println("");
+            } else {
+                let mut out: String = Vec::new();
+                ast::show(&e, &mut out);
+                println(&out);
+            }
             0
         }
         // Where, not why — the same rule the lexers are compared under.

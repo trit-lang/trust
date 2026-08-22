@@ -2626,6 +2626,24 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.152 — the expression corpus could agree on a prefix.** `bootstrap/tree.tr`
+parsed an expression off stdin and printed it, and never asked whether it had
+read all of the input. `trust ast` does ask, because it does not parse an
+expression at all: it writes `fn e() -> t27 { … }` around the text and parses
+a file, so anything left over is a statement that did not end.
+
+So `1 + 2 3` printed `(+ 1 2)` on one side and `error 6` on the other, and
+`a b` printed `a` against `error 2`. Neither is a language question — Ch. 0
+§2 is not silent about anything here — but the pass that compares the two
+parsers was reading only a prefix of what it was handed, which means it could
+have agreed while they disagreed. A harness with a hole in it is worse than a
+missing one, because it reports green.
+
+It now refuses at the character the leftover begins at, which needed
+`lex::skip` to be public: where a token *starts* is the one thing a token
+stream cannot be asked, since `next` answers with where the following one
+does. `bootstrap/exprs/24` and `25` are the two cases.
+
 **G9.151 — a closure argument is evaluated before the arguments written
 before it, and nothing says so.** Ch. 4 §4.3 says a `Fn` bound settles the
 parameters its signature names, and Ch. 4 §2.7 says a generic is one function
