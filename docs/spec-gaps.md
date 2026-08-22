@@ -2626,6 +2626,19 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.159 — an arm that cannot answer is lowered anyway.** Ch. 0 §5.4
+types a `match` by what its arms answer, and G9.157 settles what a block
+ending in a block-shaped statement answers when nothing is wanted. Where
+something *is* wanted the arm has no answer, and §5.4 says nothing about
+that. One compiler fills the silence on its own: the Rust lowering
+accepts the program, the arm stores nothing, the join's slot is never
+written on that path, and the `load` after it answers with whatever was
+in the trytes before — a value the program never computed. The bootstrap
+refuses the same program, which is what G9.156's note said the right
+reading was. §5.1 wants its other half: a block that must answer may not
+end in a block-shaped statement, and the refusal has to be the
+language's answer rather than a fact about which compiler was asked.
+
 **G9.158 — a loop whose body already left has no edge back to the head.**
 Ch. 0 §5.5 says the head is where an iteration goes back to, and nothing
 about the case where nothing arrives: `loop { break; }` lowered to three
@@ -7564,3 +7577,14 @@ Specified well enough to build, simply not built yet:
   function-pointer chapter exists.
 - **Concurrency** — AM §2.4 reserves it explicitly; the interpreter is the
   single-threaded, sequentially consistent machine that section defines.
+- **Literal patterns (Ch. 0 §5.4) in the bootstrap's lowering.** Arms are
+  decided by tag test alone — variant names and `_` — so
+  `match k { 0 => …, _ => … }` is refused outright, in value position
+  and in statement position, where the Rust compiler lowers the chain of
+  comparisons the chapter's own example is made of. Coverage, not a
+  question.
+- **A borrowed scrutinee (Ch. 0 §5.4) in the same.** `match &c { … }`,
+  with the borrow written at the `match` instead of carried by a name, is
+  refused in every position; the Rust compiler lowers it. Written
+  `let r = &c; match r { … }` it is the same program to both — which is
+  the spelling `bootstrap/programs/boxed`'s `signed` uses.
