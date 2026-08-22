@@ -204,7 +204,7 @@ rm -rf "$tmp"
 # that exists. It is the slow part of this script and it is the point of it.
 b=0
 tmp=$(mktemp -d)
-i=0
+idx=0
 for f in bootstrap/*.tr; do
     (
         rust=$("$trust" file "$f")
@@ -213,12 +213,12 @@ for f in bootstrap/*.tr; do
             {
                 echo "bootstrap: the two parsers disagree on the parser's own $f"
                 diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10
-            } > "$tmp/$i.err"
+            } > "$tmp/$idx.err"
             exit 1
         fi
-        printf '%s\n' "$rust" | wc -l > "$tmp/$i.n"
+        printf '%s\n' "$rust" | wc -l > "$tmp/$idx.n"
     ) &
-    i=$((i + 1))
+    idx=$((idx + 1))
     throttle
 done
 wait
@@ -515,7 +515,7 @@ rm -rf "$tmp"
 # arithmetic of Ch. 1, calls, `return` and a tail.
 g=0
 tmp=$(mktemp -d)
-i=0
+idx=0
 for f in bootstrap/lowered/*.tr; do
     (
         rust=$("$trustc" tir "$f")
@@ -524,12 +524,12 @@ for f in bootstrap/lowered/*.tr; do
             {
                 echo "bootstrap: the two lower $f differently"
                 diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10
-            } > "$tmp/$i.err"
+            } > "$tmp/$idx.err"
             exit 1
         fi
-        printf '%s\n' "$rust" | wc -l > "$tmp/$i.n"
+        printf '%s\n' "$rust" | wc -l > "$tmp/$idx.n"
     ) &
-    i=$((i + 1))
+    idx=$((idx + 1))
     throttle
 done
 wait
@@ -548,7 +548,7 @@ rm -rf "$tmp"
 # handle — it was written to be *used*.
 q=0
 tmp=$(mktemp -d)
-i=0
+idx=0
 for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
             bootstrap/programs/methods/main.tr \
             bootstrap/programs/generic/main.tr \
@@ -557,6 +557,7 @@ for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
             bootstrap/programs/chars/main.tr \
             bootstrap/programs/heap/main.tr \
             bootstrap/programs/vector/main.tr \
+            bootstrap/programs/ranges/main.tr \
             bootstrap/programs/scopes/main.tr \
             bootstrap/programs/loops/main.tr \
             bootstrap/programs/failing/main.tr \
@@ -575,12 +576,12 @@ for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
             {
                 echo "bootstrap: the two lower the program at $root differently"
                 diff <(printf '%s\n' "$rust") <(printf '%s\n' "$mine") | head -10
-            } > "$tmp/$i.err"
+            } > "$tmp/$idx.err"
             exit 1
         fi
-        printf '%s\n' "$rust" | wc -l > "$tmp/$i.n"
+        printf '%s\n' "$rust" | wc -l > "$tmp/$idx.n"
     ) &
-    i=$((i + 1))
+    idx=$((idx + 1))
     throttle
 done
 wait

@@ -2626,6 +2626,25 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.150 — `a..b` has a precedence and no associativity.** Ch. 0 §5.5 says
+`..` binds looser than every operator but assignment, so `0..n + 1` is
+`0..(n + 1)` and the question of *precedence* is answered outright. It says
+nothing about `a..b..c`, and there are three readings — left, right, and
+none — of which only the last is any use, because a range of ranges is not a
+type the library has.
+
+Both implementations refuse it, and neither had to be told to: the right
+side is read at the level *below* the range, so a second `..` is left
+unconsumed for whoever asked, and every caller of an expression wants a `;`
+or a `)` next. Non-associativity here is a consequence of the shape rather
+than a rule, which is exactly the kind of agreement that holds by accident
+until one of them is rewritten. Ch. 0 §5.5 should say it.
+
+Nothing else about the range was silent, which is worth recording too: the
+desugaring to `Range { start, end }`, the precedence, and `..=` being
+reserved are all in §5.5, and `bootstrap/parse.tr` was written from it
+without a decision left over.
+
 **G9.149 — a program with no `main` and a program whose `main` was refused
 print the same module, and only one of them should print anything.** Pruning
 roots at `main`, and where there is no `main` it roots at every function

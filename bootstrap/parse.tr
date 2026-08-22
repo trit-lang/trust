@@ -46,7 +46,7 @@ pub fn bump(p: &mut Parser) -> Result<Tok, lex::Error> {
 /// A whole expression: assignment, which is §2.1's loosest level and is
 /// right-associative.
 pub fn expr(p: &mut Parser) -> Result<Expr, lex::Error> {
-    let left = binary(p, 1)?;
+    let left = range(p)?;
     let t = peek(p)?;
     let next = t.at;
     let op = match t.tok {
@@ -59,6 +59,51 @@ pub fn expr(p: &mut Parser) -> Result<Expr, lex::Error> {
     p.at = next;
     let right = expr(p)?;
     Result::Ok(Expr::Assign(op, Box::new(left), Box::new(right)))
+}
+
+/// `a..b` — the half-open range, and the loosest thing that is not an
+/// assignment (Ch. 0 §5.6).
+///
+/// Sugar and nothing else: it is `Range { start: a, end: b }`, an aggregate
+/// of a type the library wrote, so a `for` over one is a `for` over an
+/// ordinary iterator and the range is not a language feature — only its
+/// spelling is.
+///
+/// Non-associative, which costs nothing to say: the right side is read at
+/// the level *below* this one, so a second `..` is left for whoever asked
+/// and refused there.
+///
+/// `..=` is reserved. An inclusive range can express neither an empty one
+/// nor one that reaches the top of its type, and which of the two to give
+/// up is not a question a parser answers.
+pub fn range(p: &mut Parser) -> Result<Expr, lex::Error> {
+    let left = binary(p, 1)?;
+    let t = peek(p)?;
+    let next = t.at;
+    let op = match t.tok {
+        Tok::Op(o) => o,
+        _ => return Result::Ok(left),
+    };
+    if op.same("..=") {
+        // Where the token *starts*, which `peek` does not say — it answers
+        // with where the next one does. Subtracting its length is the whole
+        // of the difference, and it matters because a refusal is compared on
+        // which character is wrong.
+        let starts = next - (op.len() as taddr);
+        return Result::Err(lex::Error {
+            at: starts,
+            message: "`..=` is reserved; write `a..b + 1`".to_string(),
+        });
+    }
+    if !op.same("..") {
+        return Result::Ok(left);
+    }
+    p.at = next;
+    let right = binary(p, 1)?;
+    let mut fields: Vec<ast::Field> = Vec::new();
+    fields.push(ast::Field { name: "start".to_string(), value: left });
+    fields.push(ast::Field { name: "end".to_string(), value: right });
+    Result::Ok(Expr::Aggregate("Range".to_string(), fields))
 }
 
 /// The left-associative levels, loosest first.

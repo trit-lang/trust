@@ -1,0 +1,35 @@
+// `a..b` — the half-open range, which is not a language feature. Only its
+// spelling is: the parser turns it into `Range { start: a, end: b }` and
+// everything below sees an ordinary aggregate of a type the library wrote
+// (Ch. 0 §5.6, Ch. 5 §3.4).
+//
+// So what is compared here is mostly not written here. `Range`, its
+// `Iterator`, and the `sum` and `product` that walk it are the prelude's own
+// Trust, and both implementations lower that source rather than agreeing
+// about a construct either of them special-cased.
+
+fn counted() -> t27 {
+    sum(0..5)
+}
+
+fn multiplied() -> t27 {
+    product(1..4)
+}
+
+// The two fields, read by name — because they are fields, and a range that
+// is only an aggregate is a range nothing had to be taught about.
+fn ends() -> t27 {
+    let r = 2..9;
+    r.end - r.start
+}
+
+// Written where a `+` binds tighter, which is the whole of the precedence:
+// `..` is looser than everything that is not an assignment, so this is one
+// range and not two.
+fn looser(n: t27) -> t27 {
+    sum(n + 1..n + 4)
+}
+
+fn main() -> t27 {
+    counted() + multiplied() + ends() + looser(0)
+}
