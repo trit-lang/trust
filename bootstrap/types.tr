@@ -654,7 +654,18 @@ pub fn type_of(w: &mut World, e: &ast::Expr) -> ast::Ty {
         }
         ast::Expr::Aggregate(path, fields) => aggregate_type(w, path, fields),
         ast::Expr::Nested(b) => block_type(w, b),
-        ast::Expr::If(c, t, o) => block_type(w, t),
+        // An `if` with no `else` is `()` wherever a value is read from it:
+        // the arm that is not written answers nothing (§5.3).
+        ast::Expr::If(c, t, o) => match o {
+            Option::None => ast::Ty::Unit,
+            Option::Some(x) => block_type(w, t),
+        },
+        // A `while` answers with nothing wherever it is written — it is a
+        // statement, and where a block must answer that is the refusal the
+        // other implementation words as a type that does not match
+        // (§5.5, G9.159).
+        ast::Expr::While(c, b) => ast::Ty::Unit,
+        ast::Expr::Loop(b) => loop_type(w, b),
         ast::Expr::Match(s, arms) => {
             if arms.len() == 0 {
                 return unknown();
@@ -662,6 +673,160 @@ pub fn type_of(w: &mut World, e: &ast::Expr) -> ast::Ty {
             type_of(w, &arms[0].body)
         }
         _ => unknown(),
+    }
+}
+
+/// What a `loop` answers with (§5.5): the type a `break` carries where
+/// one does, `()` where nothing is carried — so that an arm asking the
+/// loop for an answer and getting none is the same refusal a wrong type
+/// is (G9.159) — and what this checker says wherever nothing leaves:
+/// such a loop never ends, and what it would answer is never asked.
+fn loop_type(w: &mut World, b: &ast::Block) -> ast::Ty {
+    let mut any = false;
+    let mut value: Option<ast::Ty> = Option::None;
+    scan_block(w, b, &mut any, &mut value);
+    match value {
+        Option::Some(t) => t,
+        Option::None => {
+            if any {
+                ast::Ty::Unit
+            } else {
+                unknown()
+            }
+        }
+    }
+}
+
+/// The `break`s a loop body holds, told as `any` and the first value one
+/// carries. A `break` inside a `while`, another loop or a closure leaves
+/// *that* construct and says nothing here.
+fn scan_block(
+    w: &mut World,
+    b: &ast::Block,
+    any: &mut bool,
+    value: &mut Option<ast::Ty>,
+) {
+    let mut i: taddr = 0;
+    while i < b.stmts.len() {
+        match &b.stmts[i] {
+            ast::Stmt::Let(m, name, written, v) => scan_expr(w, v, any, value),
+            ast::Stmt::LetPattern(name, pat, v) => scan_expr(w, v, any, value),
+            ast::Stmt::Do(e) => scan_expr(w, e, any, value),
+            _ => {}
+        }
+        i += 1;
+    }
+    match &b.tail {
+        Option::Some(e) => scan_expr(w, e, any, value),
+        Option::None => {}
+    }
+}
+
+fn scan_expr(
+    w: &mut World,
+    e: &ast::Expr,
+    any: &mut bool,
+    value: &mut Option<ast::Ty>,
+) {
+    match e {
+        ast::Expr::Break(v) => {
+            *any = true;
+            match v {
+                Option::Some(x) => {
+                    match value {
+                        Option::Some(t) => {}
+                        Option::None => *value = Option::Some(type_of(w, x)),
+                    }
+                }
+                Option::None => {}
+            }
+        }
+        ast::Expr::While(c, b) => {}
+        ast::Expr::Loop(b) => {}
+        ast::Expr::For(n, it, b) => scan_expr(w, it, any, value),
+        ast::Expr::Closure(params, answer, body) => {}
+        ast::Expr::Nested(b) => scan_block(w, b, any, value),
+        ast::Expr::If(c, t, o) => {
+            scan_expr(w, c, any, value);
+            scan_block(w, t, any, value);
+            match o {
+                Option::Some(x) => scan_expr(w, x, any, value),
+                Option::None => {}
+            }
+        }
+        ast::Expr::Match(s, arms) => {
+            scan_expr(w, s, any, value);
+            let mut i: taddr = 0;
+            while i < arms.len() {
+                match &arms[i].guard {
+                    Option::Some(g) => scan_expr(w, g, any, value),
+                    Option::None => {}
+                }
+                scan_expr(w, &arms[i].body, any, value);
+                i += 1;
+            }
+        }
+        ast::Expr::Group(a) => scan_expr(w, a, any, value),
+        ast::Expr::Try(a) => scan_expr(w, a, any, value),
+        ast::Expr::Unary(op, a) => scan_expr(w, a, any, value),
+        ast::Expr::Borrow(a, m) => scan_expr(w, a, any, value),
+        ast::Expr::Deref(a) => scan_expr(w, a, any, value),
+        ast::Expr::Field(a, name) => scan_expr(w, a, any, value),
+        ast::Expr::Cast(a, t) => scan_expr(w, a, any, value),
+        ast::Expr::Binary(op, a, b) => {
+            scan_expr(w, a, any, value);
+            scan_expr(w, b, any, value);
+        }
+        ast::Expr::Assign(op, a, b) => {
+            scan_expr(w, a, any, value);
+            scan_expr(w, b, any, value);
+        }
+        ast::Expr::Index(a, i) => {
+            scan_expr(w, a, any, value);
+            scan_expr(w, i, any, value);
+        }
+        ast::Expr::Call(name, args) => scan_all(w, args, any, value),
+        ast::Expr::CallExpr(f, args) => {
+            scan_expr(w, f, any, value);
+            scan_all(w, args, any, value);
+        }
+        ast::Expr::Method(r, name, args) => {
+            scan_expr(w, r, any, value);
+            scan_all(w, args, any, value);
+        }
+        ast::Expr::Array(parts) => scan_all(w, parts, any, value),
+        ast::Expr::Tuple(parts) => scan_all(w, parts, any, value),
+        ast::Expr::Repeat(a, n) => {
+            scan_expr(w, a, any, value);
+            scan_expr(w, n, any, value);
+        }
+        ast::Expr::Aggregate(path, fields) => {
+            let mut i: taddr = 0;
+            while i < fields.len() {
+                scan_expr(w, &fields[i].value, any, value);
+                i += 1;
+            }
+        }
+        ast::Expr::Return(v) => {
+            match v {
+                Option::Some(x) => scan_expr(w, x, any, value),
+                Option::None => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+fn scan_all(
+    w: &mut World,
+    args: &Vec<ast::Expr>,
+    any: &mut bool,
+    value: &mut Option<ast::Ty>,
+) {
+    let mut i: taddr = 0;
+    while i < args.len() {
+        scan_expr(w, &args[i], any, value);
+        i += 1;
     }
 }
 

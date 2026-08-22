@@ -6893,7 +6893,21 @@ impl Fn<'_> {
                     (Some(_), None) => {
                         return err(*span, "this loop's `break` cannot carry a value");
                     }
-                    (None, _) => {}
+                    // A loop that was asked for an answer owes one, and
+                    // this `break` is where it would come from: leaving
+                    // without it leaves the answer's slot written on no
+                    // path, which is the same refusal as an arm of a
+                    // `match` that cannot answer (G9.159).
+                    (None, Some((_, ty))) => {
+                        return err(
+                            *span,
+                            format!(
+                                "this `break` answers with (), expected {ty} \
+                                 (there are no implicit conversions)"
+                            ),
+                        );
+                    }
+                    (None, None) => {}
                 }
                 // The scopes between here and the loop are being left, and
                 // what they own dies with them (Ch. 3 §1.1). Emitted rather
@@ -12100,6 +12114,7 @@ impl Fn<'_> {
         check_exhaustive(&ty, arms, span)?;
 
         let join = self.fresh("match.join");
+        let mut answer: Option<Ty> = None;
         let mut result: Option<(String, Ty)> = None;
 
         // A trit scrutinee whose arms are the three trit literals is exactly
@@ -12118,7 +12133,7 @@ impl Fn<'_> {
             for (arm, label) in arms.iter().zip(&labels) {
                 self.owned = before.clone();
                 self.start(label.clone());
-                self.arm_body(arm, expected, &mut result, &join, span, None, &dest)?;
+                self.arm_body(arm, expected, &mut answer, &mut result, &join, span, None, &dest)?;
                 merged = self.join_arm(merged, span)?;
             }
             if let Some(m) = merged {
@@ -12141,7 +12156,7 @@ impl Fn<'_> {
             self.owned = before.clone();
             let unconditional = self.arm_test(arm, &v, &ty, &body, &next, span)?;
             self.start(body);
-            self.arm_body(arm, expected, &mut result, &join, span, None, &dest)?;
+            self.arm_body(arm, expected, &mut answer, &mut result, &join, span, None, &dest)?;
             merged = self.join_arm(merged, span)?;
             if unconditional {
                 // A wildcard or binding matches everything, so no later arm
@@ -12306,6 +12321,7 @@ impl Fn<'_> {
 
         let (tag, tag_ty) = self.read_tag(addr.clone(), &e);
         let join = self.fresh("match.join");
+        let mut answer: Option<Ty> = None;
         let mut result: Option<(String, Ty)> = None;
 
         // The trit-shaped case: one `br3`, no comparison at all.
@@ -12330,6 +12346,7 @@ impl Fn<'_> {
                     selects[i],
                     &addr,
                     expected,
+                    &mut answer,
                     &mut result,
                     &join,
                     borrowed,
@@ -12400,6 +12417,7 @@ impl Fn<'_> {
                 Some(variant),
                 &addr,
                 expected,
+                &mut answer,
                 &mut result,
                 &join,
                 borrowed,
@@ -12426,6 +12444,7 @@ impl Fn<'_> {
                     variant,
                     &addr,
                     expected,
+                    &mut answer,
                     &mut result,
                     &join,
                     borrowed,
@@ -12466,6 +12485,7 @@ impl Fn<'_> {
         variant: Option<usize>,
         addr: &Operand,
         expected: Option<&Ty>,
+        answer: &mut Option<Ty>,
         result: &mut Option<(String, Ty)>,
         join: &str,
         borrowed: bool,
@@ -12536,7 +12556,7 @@ impl Fn<'_> {
             }
         }
 
-        let r = self.arm_body(arm, expected, result, join, span, Some(depth), dest);
+        let r = self.arm_body(arm, expected, answer, result, join, span, Some(depth), dest);
         self.scopes.pop();
         r
     }
@@ -12814,6 +12834,7 @@ impl Fn<'_> {
         &mut self,
         arm: &ast::Arm,
         expected: Option<&Ty>,
+        answer: &mut Option<Ty>,
         result: &mut Option<(String, Ty)>,
         join: &str,
         span: Span,
@@ -12824,6 +12845,21 @@ impl Fn<'_> {
         let out = self.arm_value(&arm.body, expected);
         self.dest = None;
         let (v, ty) = out?;
+        // Every arm that reaches answers with the same thing — including
+        // the ones answering with **nothing**, where another arm answers
+        // at all: a block ending in a block-shaped statement has no value
+        // to give the `match` (G9.159). An arm of `!` is no answer and no
+        // path, so it is not asked — and neither is one that already left
+        // by `return`, `break` or `continue`.
+        if ty != Ty::Never && !self.done {
+            match answer {
+                None => *answer = Some(ty.clone()),
+                Some(want) => {
+                    let want = want.clone();
+                    self.check(&ty, &want, span, "match arm")?;
+                }
+            }
+        }
         if ty != Ty::Never && ty != Ty::Unit {
             if result.is_none() {
                 let slot = match dest {

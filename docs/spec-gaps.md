@@ -2626,18 +2626,22 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
-**G9.159 — an arm that cannot answer is lowered anyway.** Ch. 0 §5.4
-types a `match` by what its arms answer, and G9.157 settles what a block
-ending in a block-shaped statement answers when nothing is wanted. Where
-something *is* wanted the arm has no answer, and §5.4 says nothing about
-that. One compiler fills the silence on its own: the Rust lowering
-accepts the program, the arm stores nothing, the join's slot is never
-written on that path, and the `load` after it answers with whatever was
-in the trytes before — a value the program never computed. The bootstrap
-refuses the same program, which is what G9.156's note said the right
-reading was. §5.1 wants its other half: a block that must answer may not
-end in a block-shaped statement, and the refusal has to be the
-language's answer rather than a fact about which compiler was asked.
+**G9.159 — an arm that cannot answer is refused, not lowered.** Ch. 0
+§5.4 types a `match` by what its arms answer, and G9.157 settles what a
+block ending in a block-shaped statement answers when nothing is wanted.
+Where something *is* wanted the arm has no answer, and one compiler had
+been filling the silence on its own: the Rust lowering accepted the
+program, the arm stored nothing, the join's slot was never written on
+that path, and the `load` after it answered with whatever was in the
+trytes before. That is a **type** refusal, the same one a wrong arm
+type is: every arm that reaches answers with the same thing, an arm of
+`!` — or one that left by `return`, `break` or `continue` — is not
+asked, and a `break` in a loop that was asked for an answer must carry
+it, since the loop's answer comes from whatever its `break`s carry. The
+second checker could not say so until its block-shaped tails stopped
+answering `#unknown` and started answering `()`: the arm was
+unrefusable for exactly the reason G9.155 names, and the old machinery
+needed no new sentence once the two spellings were told apart.
 
 **G9.158 — a loop whose body already left has no edge back to the head.**
 Ch. 0 §5.5 says the head is where an iteration goes back to, and nothing

@@ -1,0 +1,64 @@
+// A block that must answer may not end in a block-shaped statement
+// (G9.159): the arm has nothing to answer with, and the `match` has no
+// value on that path — wherever the path goes, the type the other arms
+// answer with is the one it disagrees with. What an arm that *leaves*
+// answers with is never asked.
+enum Choice { A, B }
+
+fn arm_right(c: &Choice) -> t27 {
+    match c {
+        Choice::A => 1,
+        Choice::B => 2,
+    }
+}
+
+fn arm_leave_right(c: &Choice) -> t27 {
+    match c {
+        Choice::A => 1,
+        Choice::B => {
+            return 2;
+        }
+    }
+}
+
+fn arm_while_wrong(c: &Choice) -> t27 {
+    match c {
+        Choice::A => {
+            let mut k = 1;
+            while k > 0 {
+                k -= 1;
+            }
+        }
+        Choice::B => 2,
+    }
+}
+
+fn arm_block_wrong(c: &Choice, out: &mut String) -> t27 {
+    let m = match c {
+        Choice::A => {
+            out.push('a');
+        }
+        Choice::B => 2,
+    };
+    m
+}
+
+fn loop_right(k: t27) -> t27 {
+    if k > 0 {
+        loop {
+            break 3;
+        }
+    } else {
+        7
+    }
+}
+
+fn loop_wrong(k: t27) -> t27 {
+    if k > 0 {
+        loop {
+            break;
+        }
+    } else {
+        7
+    }
+}
