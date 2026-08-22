@@ -2626,6 +2626,42 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.153 — a `Fn` bound reads in two directions and only one of them is
+written down.** Ch. 4 §4.3 says a `Fn` bound settles the parameters its
+signature names, and gives `Map`'s `B` as the case: given the closure, the
+bound says what `B` is, because a closure has one signature. That direction is
+unambiguous and both implementations now do it —
+`fn applied<B, F: Fn(t27) -> B>(f: F, x: t27) -> B` is settled by the closure
+and by nothing else, since `B` appears in no parameter's type.
+
+The other direction is the one nobody wrote. `fn both<A, B, F: Fn(A) -> B>`
+has a signature naming `A`, and `A` is decided by whatever was written at
+`x: A` — so `both(5, |a| a + a)` could hand `t27` *into* the closure and let
+§4.1's omission stand. Whether it can depends on whether `A` was settled
+before the closure was read, and nothing says when that is: G9.151 already
+records that a closure argument is lowered before the arguments written
+before it. trustc read its arguments in written order and so settled `A` in
+`both(5, |a| a + a)` and not in `both(|a| a + a, 5)` — one call reordered,
+two answers — while the bootstrap reads every closure first and settled it in
+neither.
+
+**Decided: the bound is silent about the family's own parameters.** A closure
+written for `Fn(A)` writes its own types or is refused, whichever side of the
+call it sits on. The alternative buys one spelling and pays for it with a rule
+whose answer depends on the order a compiler happens to read arguments in,
+which is the kind of thing a program should never be able to see. §4.3 wants
+a sentence saying so; what it says now reads as though the settling ran both
+ways.
+
+Falling out of it, and worth recording separately: trustc used to *hard-error*
+on the bound itself — ``` `A` is not a type in scope ``` — for
+`both(|a: t27| a + a, 5)`, a call whose closure wrote its own types and needed
+the bound to say nothing at all. It resolved every bound argument before
+asking whether anyone wanted the answer. A well-formed bound was rejected for
+a reason that had nothing to do with the call, and it agreed with the
+bootstrap only because the bootstrap was refusing the same program for an
+unrelated reason.
+
 **G9.152 — the expression corpus could agree on a prefix.** `bootstrap/tree.tr`
 parsed an expression off stdin and printed it, and never asked whether it had
 read all of the input. `trust ast` does ask, because it does not parse an

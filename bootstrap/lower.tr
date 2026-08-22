@@ -53,6 +53,11 @@ pub struct Family {
     /// the bound settles the signature its parameter names, and one signature
     /// is all a closure has (Ch. 4 §4.1, §4.3). Spelled `A,B>R`, and `>R` for
     /// a bound that names no arguments.
+    ///
+    /// Written as it stands, with the family's own parameters left in it. A
+    /// closure cannot be handed one of those as a type — `Fn(A) -> B` says
+    /// nothing about what `B` is — but the *call* reads them the other way
+    /// round: the closure it lowered is what says (`from_fn_bound`).
     pub fnsigs: Vec<String>,
 }
 
@@ -9822,7 +9827,6 @@ fn subst_through(tyvars: &Vec<String>, key: &Vec<String>, name: &str) -> String 
 
 pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
     let mut out: Vec<Family> = Vec::new();
-    let none: Vec<String> = Vec::new();
     let mut i: taddr = 0;
     while i < items.len() {
         match &items[i].what {
@@ -9839,7 +9843,7 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                         // instantiated, and until then this is all there
                         // is to say (Ch. 4 §2.5).
                         ret: family_answer(&f.ret),
-                        fnsigs: tyvar_fnsigs(f, &none),
+                        fnsigs: tyvar_fnsigs(f, 0),
                     });
                 }
             }
@@ -9876,7 +9880,7 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                                 from_self: outer.len() as taddr,
                                 params: written_params(&fns[k]),
                                 ret: family_answer(&fns[k].ret),
-                                fnsigs: tyvar_fnsigs(&fns[k], &outer),
+                                fnsigs: tyvar_fnsigs(&fns[k], outer.len() as taddr),
                             });
                         }
                         k += 1;
@@ -10091,27 +10095,20 @@ pub fn all_tyvars(f: &ast::Fn) -> Vec<String> {
 /// order `all_tyvars` gives them and with one empty entry in front per
 /// parameter the receiver decides.
 ///
-/// `outer` is those parameters by name and not merely by count, because a
-/// bound may be written in terms of them — `impl<T> Holder<T>` with a method
-/// taking an `impl Fn(T)` asks for whatever `T` turned out to be, which is
-/// the call's answer and not something to hand a closure.
+/// The signature is kept as written, the family's own parameters and all: a
+/// closure cannot be *handed* one of those (`fnsig_hint` is what drops them),
+/// but a call that has already lowered the closure reads them the other way
+/// round and learns what they are.
 ///
 /// The two spellings meet here. `f: impl Fn(A) -> R` invented the name `#F0`
 /// and `F: Fn(A) -> R` was given one, and Ch. 4 §4.3 says nothing after the
 /// grammar can tell them apart — so nothing here does either.
-fn tyvar_fnsigs(f: &ast::Fn, outer: &Vec<String>) -> Vec<String> {
+fn tyvar_fnsigs(f: &ast::Fn, outer: taddr) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let mut mine = ast::copy_names(outer);
     let mut o: taddr = 0;
-    while o < outer.len() {
+    while o < outer {
         out.push("".to_string());
         o += 1;
-    }
-    let own = generic_names(&f.generics);
-    let mut q: taddr = 0;
-    while q < own.len() {
-        mine.push(own[q].to_string());
-        q += 1;
     }
     let mut g: taddr = 0;
     while g < f.generics.len() {
@@ -10121,7 +10118,7 @@ fn tyvar_fnsigs(f: &ast::Fn, outer: &Vec<String>) -> Vec<String> {
                 let mut b: taddr = 0;
                 while b < bounds.len() {
                     if is_fn_bound(&bounds[b].name) {
-                        held = bound_fnsig(&mine, &bounds[b]);
+                        held = bound_fnsig(&bounds[b]);
                     }
                     b += 1;
                 }
@@ -10140,7 +10137,7 @@ fn tyvar_fnsigs(f: &ast::Fn, outer: &Vec<String>) -> Vec<String> {
                     Option::Some(r) => answer = Option::Some(ast::copy_ty(&*r)),
                     Option::None => {}
                 }
-                let held = fnsig_of(&mine, args, &answer);
+                let held = fnsig_of(args, &answer);
                 out.push(held);
             }
             _ => {}
@@ -10150,6 +10147,43 @@ fn tyvar_fnsigs(f: &ast::Fn, outer: &Vec<String>) -> Vec<String> {
     out
 }
 
+/// The same signature with the family's own parameters taken out of it, which
+/// is what a closure can be told.
+///
+/// One of those says nothing, whether another argument settled it or not. The
+/// bound reads one way given the closure — `fn map<B, F: Fn(A) -> B>` learns
+/// `B` from it — and the other way given an argument written at `A`, and which
+/// of the two a call has would depend on where among the arguments the closure
+/// was written. So it is neither: the closure writes its own types there or is
+/// refused (G9.153).
+///
+/// An *argument* that is one takes the whole signature with it, because a
+/// closure's parameters are settled together or not at all.
+fn fnsig_hint(names: &Vec<String>, sig: &str) -> String {
+    if sig.len() == 0 {
+        return "".to_string();
+    }
+    let mut all: String = Vec::new();
+    let asked = fnsig_args(sig);
+    let mut i: taddr = 0;
+    while i < asked.len() {
+        if holds_name(names, &asked[i]) {
+            return "".to_string();
+        }
+        if i > 0 {
+            all.push(',');
+        }
+        all.push_str(&asked[i]);
+        i += 1;
+    }
+    all.push('>');
+    let answer = fnsig_answer(sig);
+    if !holds_name(names, &answer) {
+        all.push_str(&answer);
+    }
+    all
+}
+
 /// Whether a bound is one of Ch. 4 §4.3's three.
 fn is_fn_bound(name: &str) -> bool {
     name.same("Fn") || name.same("FnMut") || name.same("FnOnce")
@@ -10157,7 +10191,7 @@ fn is_fn_bound(name: &str) -> bool {
 
 /// A `Fn(A) -> R` written on a name, which is the same signature with the
 /// answer under the `Output` §4.3 gives it.
-fn bound_fnsig(names: &Vec<String>, b: &ast::Bound) -> String {
+fn bound_fnsig(b: &ast::Bound) -> String {
     let mut answer: Option<ast::Ty> = Option::None;
     let mut i: taddr = 0;
     while i < b.assoc.len() {
@@ -10166,23 +10200,21 @@ fn bound_fnsig(names: &Vec<String>, b: &ast::Bound) -> String {
         }
         i += 1;
     }
-    fnsig_of(names, &b.args, &answer)
+    fnsig_of(&b.args, &answer)
 }
 
 /// One signature, written `A,B>R`.
 ///
-/// Nothing at all where an argument is not a plain name or is one of the
-/// function's own parameters: what those settle to is what the *call* settles,
-/// and the call cannot settle it without lowering the closure that is asking.
-/// The answer is dropped alone under the same rule — `fn map<B, F: Fn(A) -> B>`
-/// says only that `B` is whatever the closure gives back, so the body decides
-/// and the hint says nothing.
-fn fnsig_of(names: &Vec<String>, args: &Vec<ast::Ty>, ret: &Option<ast::Ty>) -> String {
+/// Nothing at all where an argument is not a plain name: a `&T` and a `Vec<T>`
+/// are not their heads, and a signature that dropped the difference would name
+/// a type nobody wrote. An *answer* that is not one is left off by itself
+/// instead, since a closure told what it takes reads the rest off its body.
+fn fnsig_of(args: &Vec<ast::Ty>, ret: &Option<ast::Ty>) -> String {
     let mut all: String = Vec::new();
     let mut i: taddr = 0;
     while i < args.len() {
         let each = name_head(&args[i]);
-        if each.len() == 0 || holds_name(names, &each) {
+        if each.len() == 0 {
             return "".to_string();
         }
         if i > 0 {
@@ -10195,9 +10227,7 @@ fn fnsig_of(names: &Vec<String>, args: &Vec<ast::Ty>, ret: &Option<ast::Ty>) -> 
     match ret {
         Option::Some(r) => {
             let each = name_head(r);
-            if each.len() > 0 && !holds_name(names, &each) {
-                all.push_str(&each);
-            }
+            all.push_str(&each);
         }
         Option::None => {}
     }
@@ -10392,7 +10422,8 @@ fn generic_call(
                 if closure {
                     let at = name_at(&e.families[fam].tyvars, &declared[i]);
                     if at >= 0 && at < e.families[fam].fnsigs.len() {
-                        hint = e.families[fam].fnsigs[at].to_string();
+                        let sig = e.families[fam].fnsigs[at].to_string();
+                        hint = fnsig_hint(&e.families[fam].tyvars, &sig);
                     }
                 }
                 e.fn_want = hint;
@@ -10455,6 +10486,12 @@ fn generic_call(
                 }
             }
             k += 1;
+        }
+        // A parameter no argument was written at may still be settled by
+        // another's `Fn` bound, and by now there is a closure behind it to
+        // ask (Ch. 4 §4.3).
+        if found.len() == 0 {
+            found = from_fn_bound(e, fam, &declared, &kinds, &each);
         }
         // A type argument TIR spells, or one the program defines: a
         // `sum<T: Area>(x: T)` is instantiated at `Sq` as much as at `t27`,
@@ -10521,6 +10558,79 @@ fn generic_call(
         return Value { text: into, ty: answer };
     }
     Value { text: name, ty: ret }
+}
+
+/// What a closure already lowered says one of the family's type parameters is.
+///
+/// `F: Fn(A) -> B` with a closure written where `F` was named says what `B`
+/// is: one signature is all a closure has (Ch. 4 §4.3), and it was written
+/// down when the closure was found. This is the only way `B` can be known —
+/// it appears in no parameter's type, so there is no argument to read it off.
+///
+/// Nothing where the closure is not one this lowering made. A type parameter
+/// with a `Fn` bound can be given a `fn` item or another family's parameter,
+/// and neither has a signature recorded here to read.
+fn from_fn_bound(
+    e: &Emit,
+    fam: taddr,
+    declared: &Vec<String>,
+    kinds: &Vec<String>,
+    want: &str,
+) -> String {
+    let mut p: taddr = 0;
+    while p < e.families[fam].fnsigs.len() {
+        if e.families[fam].fnsigs[p].len() > 0 {
+            let named = e.families[fam].tyvars[p].to_string();
+            let sig = e.families[fam].fnsigs[p].to_string();
+            let mut k: taddr = 0;
+            while k < declared.len() {
+                if declared[k].same(&named) {
+                    let at = closed_at(&e.closed, &kinds[k]);
+                    if at >= 0 {
+                        let held = closed_says(&e.closed[at], &sig, want);
+                        if held.len() > 0 {
+                            return held;
+                        }
+                    }
+                }
+                k += 1;
+            }
+        }
+        p += 1;
+    }
+    "".to_string()
+}
+
+/// Which closure is the type called this, or −1.
+fn closed_at(closed: &Vec<Closed>, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < closed.len() {
+        if closed[i].name.same(name) {
+            return i;
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
+/// The one place in a closure's signature a name was written, read back as
+/// the type that closure turned out to have there.
+fn closed_says(c: &Closed, sig: &str, want: &str) -> String {
+    if fnsig_answer(sig).same(want) {
+        match &c.ret {
+            Option::Some(r) => return name_head(r),
+            Option::None => return "".to_string(),
+        }
+    }
+    let asked = fnsig_args(sig);
+    let mut i: taddr = 0;
+    while i < asked.len() {
+        if asked[i].same(want) && i < c.params.len() {
+            return name_head(&c.params[i].ty);
+        }
+        i += 1;
+    }
+    "".to_string()
 }
 
 /// A call to a closure: what it calls is the `call` of whatever type the

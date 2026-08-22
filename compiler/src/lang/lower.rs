@@ -9501,6 +9501,23 @@ impl Fn<'_> {
             return Ok(None);
         };
         let (_, ps, r) = self.fn_bounds[key].clone();
+        // A bound argument that is one of the family's own parameters says
+        // nothing, settled or not. `fn both<A, B, F: Fn(A) -> B>` reads one
+        // way given the closure and the other way given `x: A`, and which of
+        // the two a call has depends on where the closure was written among
+        // the arguments — so what a program may omit would otherwise depend
+        // on the order a compiler reads them in. It does not: the bound is
+        // silent about its own, and the closure writes its types or is
+        // refused (G9.153).
+        //
+        // The whole hint goes rather than that one position, because a
+        // closure's parameters are settled together or not at all.
+        if ps.iter().any(|t| match t {
+            ast::Ty::Name(n, _) => def.generics.iter().any(|g| g.name() == n),
+            _ => false,
+        }) {
+            return Ok(None);
+        }
         // Under the call's environment, not the caller's: a specialized
         // method's bound is written in the impl's parameters, and those live
         // in what the specialization settled (Ch. 4 §4.3).

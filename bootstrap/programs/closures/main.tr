@@ -53,6 +53,29 @@ fn summed() -> t27 {
     fold(0..5, 0, |a, b| a + b)
 }
 
+// A type parameter the arguments say nothing about. `B` is written in no
+// parameter's type, so there is no argument to read it off — the closure is
+// what says, because one signature is all a closure has (§4.3).
+fn applied<B, F: Fn(t27) -> B>(f: F, x: t27) -> B {
+    f(x)
+}
+
+// The same, anonymously: `impl Fn(t27) -> B` is `#F0` with the bound written
+// on it, and the parameter it settles is `B` either way.
+fn opaque<B>(f: impl Fn(t27) -> B, x: t27) -> B {
+    f(x)
+}
+
+fn asked_of() -> t27 {
+    applied(|a| a + 6, 2)
+}
+
+// And a `B` that is not the type of anything the call was handed, which is
+// the whole point: nothing but the closure's own body decides it.
+fn narrowed() -> t27 {
+    if opaque(|a| a > 2, 3) { 4 } else { 0 }
+}
+
 fn main() -> t27 {
-    added() + doubled() + given() + held() + summed()
+    added() + doubled() + given() + held() + summed() + asked_of() + narrowed()
 }
