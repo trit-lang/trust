@@ -2626,6 +2626,32 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.158 — a loop whose body already left has no edge back to the head.**
+Ch. 0 §5.5 says the head is where an iteration goes back to, and nothing
+about the case where nothing arrives: `loop { break; }` lowered to three
+blocks and a fourth instruction — the `break` wrote the jump to the loop's
+end, and then the loop wrote its jump back to the head, off the end of a
+block nobody falls into. Nothing executes such a jump, but TIR is compared
+character for character, so dead text is still text, and the two compilers
+disagreed by one `br` whenever a loop's or a `while`'s body *ended* in
+`break`, `continue` or `return` — a position the corpus had simply never
+written, since every `break` it knew sat inside an `if`. The fix is not to
+execute the dead jump; it is not to write it. A jump back is emitted only
+where an edge reaches it, which is all §5.5 ever said.
+
+**G9.157 — a block can end in any block-shaped statement, and wanting
+nothing is spelled two ways.** G9.156 fixed the arm that ends in a `while`,
+and an arm ending in an `if`, a `match` or a `loop` is the same sentence
+of Ch. 0 §5.1 — refused, or lowered a jump too many, because the bootstrap
+was deciding the sentence one shape at a time, which is exactly what the
+entry said a compiler should not have to do. A tail whose block wants
+nothing is a statement, whichever shape it has. Nor does it matter *how*
+nothing was wanted: a nested block written as a statement wants nothing
+with no `()` to say so — the empty string of G9.155, here of a whole
+block — and even `{ f(x); }` in statement position was refused for wanting
+a value it could not name. Both spellings now read a block's ending the
+same way.
+
 **G9.156 — a block-shaped expression written last in a block is where the
 parser puts it, not what the block answers with.** Ch. 0 §5.1 lets a
 statement be a block-shaped expression with no semicolon after it, and both

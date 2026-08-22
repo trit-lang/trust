@@ -3940,18 +3940,28 @@ fn branch_block(e: &mut Emit, b: &ast::Block, want: &str) -> Value {
     }
     let held = match &b.tail {
         Option::Some(x) => {
-            // `while c { … }` written last in a block is a **statement**,
-            // and the parser leaves it where a tail goes because that is
-            // where it was written (§5.1). It answers with nothing, so
-            // where nothing was wanted the two readings agree and only
-            // this one is lowered — a loop body already reads its own tail
-            // that way, and an arm of a `match` had nobody doing it. Where
-            // something *was* wanted a `while` cannot answer it, and the
-            // refusal `value` gives is the right one (G9.156).
+            // A block-shaped expression written last in a block is a
+            // **statement**, and the parser leaves it where a tail goes
+            // because that is where it was written (§5.1). It answers with
+            // nothing, so where nothing was wanted the two readings agree
+            // and only this one is lowered — a loop body already reads its
+            // own tail that way, and an arm of a `match` had nobody doing
+            // it (G9.156). Which block-shape it is does not matter: a
+            // `while` first, and then an `if`, a `match` and a `loop` the
+            // same way, since §5.1 draws no line between them (G9.157).
+            // And "nothing wanted" is spelled two ways here: `()`, which
+            // is a type, and the empty string, which is none — a nested
+            // block written as a statement wants in the second spelling,
+            // and its ending is a statement under either (G9.155).
+            // Where something *was* wanted none of them can answer it, and
+            // the refusal `value` gives is the right one.
             let mut deferred = false;
-            if answers_nothing(want) {
+            if want.len() == 0 || answers_nothing(want) {
                 match x {
                     ast::Expr::While(c, wb) => deferred = true,
+                    ast::Expr::If(c, wb, ob) => deferred = true,
+                    ast::Expr::Match(s, arms) => deferred = true,
+                    ast::Expr::Loop(wb) => deferred = true,
                     _ => {}
                 }
             }
@@ -3966,9 +3976,10 @@ fn branch_block(e: &mut Emit, b: &ast::Block, want: &str) -> Value {
         // A block with no tail has no value — unless it already **left**,
         // in which case there is nothing after it to want one, or unless
         // nothing was wanted of it at all, which is what an arm of a
-        // `match` written as a statement is (§5.1).
+        // `match` written as a statement is, and what a nested block
+        // written as a statement is in the other spelling (§5.1, G9.157).
         Option::None => {
-            if !e.done && !answers_nothing(want) {
+            if !e.done && !answers_nothing(want) && want.len() > 0 {
                 e.stuck = true;
             }
             Value { text: "".to_string(), ty: "".to_string() }
@@ -4416,7 +4427,12 @@ fn loop_expr(e: &mut Emit, b: &ast::Block, want: &str, ret: &str) -> Value {
         e.stuck = true;
         return unknown_value();
     }
-    jump(e, &head);
+    // A body whose last word already **left** — a `break`, a `continue`, a
+    // `return` — has no edge back to the head: the jump would hang off a
+    // block nobody falls into, and dead text is still text (G9.158).
+    if !e.done {
+        jump(e, &head);
+    }
     if !broke {
         return Value { text: "".to_string(), ty: "".to_string() };
     }
@@ -5792,7 +5808,13 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                         e.stuck = true;
                         return;
                     }
-                    jump(e, &head);
+                    // A body whose last word already **left** has no edge
+                    // back to the head: the jump would hang off a block
+                    // nobody falls into, and dead text is still text
+                    // (G9.158).
+                    if !e.done {
+                        jump(e, &head);
+                    }
                     start(e, &head);
                     let cond = value(e, c, "t1");
                     if e.stuck {

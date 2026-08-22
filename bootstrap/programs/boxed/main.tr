@@ -106,11 +106,95 @@ fn show(t: &Tree, out: &mut String) {
     }
 }
 
+// And an arm can end in an `if` or a `match` the same way: §5.1 draws no
+// line between the block-shapes, so their being statements where nothing
+// is wanted is not a decision to be taken one shape at a time (G9.157).
+fn signed(t: &Tree, out: &mut String) {
+    match t {
+        Tree::Leaf(v) => {
+            if v > 0 {
+                out.push('+');
+            } else {
+                out.push('0');
+            }
+        }
+        Tree::Pair(a, b) => {
+            let sub = &*a;
+            match sub {
+                Tree::Leaf(l) => out.push('l'),
+                Tree::Pair(x, y) => out.push('p'),
+            }
+        }
+    }
+}
+
+// Nor between the loops. `drained` ends an arm in a `loop` whose `break`
+// is not its last word, so the jump back to the head has an edge to take;
+// `halt` ends one in a `loop` whose body *is* its last word, and there is
+// nowhere to jump back from — the jump would hang off a block nobody falls
+// into, and dead text is still text. The text is what is compared
+// (G9.158).
+fn drained(t: &Tree, out: &mut String) {
+    match t {
+        Tree::Leaf(v) => out.push('.'),
+        Tree::Pair(a, b) => {
+            let mut k = 1;
+            loop {
+                if k > 1 {
+                    break;
+                }
+                k += 1;
+            }
+        }
+    }
+}
+
+fn halt(t: &Tree, out: &mut String) {
+    match t {
+        Tree::Leaf(v) => out.push('.'),
+        Tree::Pair(a, b) => {
+            loop {
+                break;
+            }
+        }
+    }
+}
+
+// The same economy in statement position: a `while` body ending in
+// `break`, a `loop` whose body is one, and a nested block written as a
+// statement — which wants nothing in the *other* spelling, with no `()`
+// to say so, and answers with nothing either way (G9.158, G9.155).
+fn settled(out: &mut String) {
+    let mut k = 0;
+    while k > 0 {
+        out.push('w');
+        break;
+    }
+    loop {
+        break;
+    }
+    {
+        out.push('a');
+    }
+    {
+        if k > 0 {
+            out.push('i');
+        } else {
+            out.push('n');
+        }
+    }
+    out.push('d');
+}
+
 fn walked(n: t27) -> t27 {
     let t = pair(n);
     let mut out: String = Vec::new();
     tag(&t, &mut out);
     show(&t, &mut out);
+    signed(&t, &mut out);
+    drained(&t, &mut out);
+    halt(&t, &mut out);
+    settled(&mut out);
     out.len() as t27
 }
 
