@@ -558,6 +558,7 @@ for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
             bootstrap/programs/heap/main.tr \
             bootstrap/programs/vector/main.tr \
             bootstrap/programs/ranges/main.tr \
+            bootstrap/programs/closures/main.tr \
             bootstrap/programs/scopes/main.tr \
             bootstrap/programs/loops/main.tr \
             bootstrap/programs/failing/main.tr \

@@ -46,6 +46,14 @@ pub struct Family {
     pub params: String,
     /// The written head of what it answers with.
     pub ret: String,
+    /// What a `Fn` bound asks of each type parameter, in `tyvars` order and
+    /// empty for the ones that have none — which is most of them.
+    ///
+    /// A closure written for such a parameter need not write its own types:
+    /// the bound settles the signature its parameter names, and one signature
+    /// is all a closure has (Ch. 4 §4.1, §4.3). Spelled `A,B>R`, and `>R` for
+    /// a bound that names no arguments.
+    pub fnsigs: Vec<String>,
 }
 
 /// One instantiation waiting to be emitted: the family it comes from and
@@ -335,6 +343,10 @@ pub struct Emit {
     /// `=` it is on, which is why this is a flag around one call rather than
     /// an argument threaded through every arm.
     pub writing: bool,
+    /// The signature the parameter a closure is being written for asks of it,
+    /// or nothing. Set around one argument and taken by the closure that
+    /// reads it, because the next closure is a different question.
+    pub fn_want: String,
 }
 
 /// A value in TIR: either a name or a constant, as it is written.
@@ -1040,6 +1052,7 @@ pub fn function(
         strings: ast::copy_names(&work.strings),
         glue: copy_insts(&work.glue),
         writing: false,
+        fn_want: Vec::new(),
     };
     // What a closure found before this was lowered is a type like any
     // other: its storage is a field per capture, holding an address.
@@ -5266,6 +5279,7 @@ pub fn destructor(
         strings: ast::copy_names(&work.strings),
         glue: copy_insts(&work.glue),
         writing: false,
+        fn_want: Vec::new(),
     };
     remake(&mut e, &work.instances);
     settle(&mut e);
@@ -6321,6 +6335,11 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
         // from around it (Ch. 4 §4.4); the body becomes a function of its
         // own, which the driver emits after this one.
         ast::Expr::Closure(params, ret, body) => {
+            // What the parameter this is written for asks of it, taken here
+            // and only here: a closure inside this one is written for
+            // something else, and would read an answer that is not its own.
+            let want = e.fn_want.to_string();
+            e.fn_want = Vec::new();
             let mut bound: Vec<String> = Vec::new();
             let mut i: taddr = 0;
             while i < params.len() {
@@ -6347,15 +6366,23 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             name.push_str(&e.owner_name);
             name.push_str(".closure");
             push_int(&mut name, e.closures_made);
+            // Written, or asked for. A parameter with neither is one nothing
+            // can name a type for, and is refused where it is used.
+            let asked = fnsig_args(&want);
             let mut ps: Vec<ast::Named> = Vec::new();
             let mut j: taddr = 0;
             while j < params.len() {
+                let mut held = ast::copy_ty(&params[j].ty);
+                if wrote_nothing(&params[j].ty) && j < asked.len() {
+                    held = ast::Ty::Name(one_name(&asked[j]));
+                }
                 ps.push(ast::Named {
                     name: params[j].name.to_string(),
-                    ty: ast::copy_ty(&params[j].ty),
+                    ty: held,
                 });
                 j += 1;
             }
+            let told = fnsig_answer(&want);
             let mut answer: Option<ast::Ty> = Option::None;
             match ret {
                 Option::Some(r) => answer = Option::Some(ast::copy_ty(r)),
@@ -6363,24 +6390,33 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 // body with the parameters in scope (Ch. 4 §4.1). They are
                 // put there as *names* and no storage: nothing is emitted
                 // for a question.
+                //
+                // Unless the bound said, which is the one thing that is not a
+                // guess. A bound that leaves its answer a parameter of its own
+                // said nothing — `fn map<B, F: Fn(A) -> B>` promises only that
+                // `B` is whatever comes back — so that lands here too.
                 Option::None => {
-                    let mark = e.locals.len();
-                    let mut m: taddr = 0;
-                    while m < params.len() {
-                        e.locals.push(Slot {
-                            name: params[m].name.to_string(),
-                            slot: "".to_string(),
-                            ty: tir_ty(&params[m].ty),
-                        });
-                        m += 1;
+                    if told.len() > 0 {
+                        answer = Option::Some(ast::Ty::Name(one_name(&told)));
+                    } else {
+                        let mark = e.locals.len();
+                        let mut m: taddr = 0;
+                        while m < ps.len() {
+                            e.locals.push(Slot {
+                                name: ps[m].name.to_string(),
+                                slot: "".to_string(),
+                                ty: tir_ty(&ps[m].ty),
+                            });
+                            m += 1;
+                        }
+                        let guessed = guess_ty(e, &*body);
+                        forget(e, mark);
+                        if guessed.len() == 0 {
+                            e.stuck = true;
+                            return unknown_value();
+                        }
+                        answer = Option::Some(ast::Ty::Name(one_name(&guessed)));
                     }
-                    let guessed = guess_ty(e, &*body);
-                    forget(e, mark);
-                    if guessed.len() == 0 {
-                        e.stuck = true;
-                        return unknown_value();
-                    }
-                    answer = Option::Some(ast::Ty::Name(one_name(&guessed)));
                 }
             }
             let made = Closed {
@@ -9786,6 +9822,7 @@ fn subst_through(tyvars: &Vec<String>, key: &Vec<String>, name: &str) -> String 
 
 pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
     let mut out: Vec<Family> = Vec::new();
+    let none: Vec<String> = Vec::new();
     let mut i: taddr = 0;
     while i < items.len() {
         match &items[i].what {
@@ -9802,6 +9839,7 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                         // instantiated, and until then this is all there
                         // is to say (Ch. 4 §2.5).
                         ret: family_answer(&f.ret),
+                        fnsigs: tyvar_fnsigs(f, &none),
                     });
                 }
             }
@@ -9838,6 +9876,7 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                                 from_self: outer.len() as taddr,
                                 params: written_params(&fns[k]),
                                 ret: family_answer(&fns[k].ret),
+                                fnsigs: tyvar_fnsigs(&fns[k], &outer),
                             });
                         }
                         k += 1;
@@ -10048,6 +10087,185 @@ pub fn all_tyvars(f: &ast::Fn) -> Vec<String> {
     out
 }
 
+/// What a `Fn` bound asks of each of a function's type parameters, in the
+/// order `all_tyvars` gives them and with one empty entry in front per
+/// parameter the receiver decides.
+///
+/// `outer` is those parameters by name and not merely by count, because a
+/// bound may be written in terms of them — `impl<T> Holder<T>` with a method
+/// taking an `impl Fn(T)` asks for whatever `T` turned out to be, which is
+/// the call's answer and not something to hand a closure.
+///
+/// The two spellings meet here. `f: impl Fn(A) -> R` invented the name `#F0`
+/// and `F: Fn(A) -> R` was given one, and Ch. 4 §4.3 says nothing after the
+/// grammar can tell them apart — so nothing here does either.
+fn tyvar_fnsigs(f: &ast::Fn, outer: &Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut mine = ast::copy_names(outer);
+    let mut o: taddr = 0;
+    while o < outer.len() {
+        out.push("".to_string());
+        o += 1;
+    }
+    let own = generic_names(&f.generics);
+    let mut q: taddr = 0;
+    while q < own.len() {
+        mine.push(own[q].to_string());
+        q += 1;
+    }
+    let mut g: taddr = 0;
+    while g < f.generics.len() {
+        match &f.generics[g] {
+            ast::Generic::Type(n, bounds) => {
+                let mut held: String = Vec::new();
+                let mut b: taddr = 0;
+                while b < bounds.len() {
+                    if is_fn_bound(&bounds[b].name) {
+                        held = bound_fnsig(&mine, &bounds[b]);
+                    }
+                    b += 1;
+                }
+                out.push(held);
+            }
+            ast::Generic::Const(n, ty) => out.push("".to_string()),
+        }
+        g += 1;
+    }
+    let mut i: taddr = 0;
+    while i < f.params.len() {
+        match &f.params[i].ty {
+            ast::Ty::ImplFn(kind, args, ret) => {
+                let mut answer: Option<ast::Ty> = Option::None;
+                match ret {
+                    Option::Some(r) => answer = Option::Some(ast::copy_ty(&*r)),
+                    Option::None => {}
+                }
+                let held = fnsig_of(&mine, args, &answer);
+                out.push(held);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Whether a bound is one of Ch. 4 §4.3's three.
+fn is_fn_bound(name: &str) -> bool {
+    name.same("Fn") || name.same("FnMut") || name.same("FnOnce")
+}
+
+/// A `Fn(A) -> R` written on a name, which is the same signature with the
+/// answer under the `Output` §4.3 gives it.
+fn bound_fnsig(names: &Vec<String>, b: &ast::Bound) -> String {
+    let mut answer: Option<ast::Ty> = Option::None;
+    let mut i: taddr = 0;
+    while i < b.assoc.len() {
+        if b.assoc[i].name.same("Output") {
+            answer = Option::Some(ast::copy_ty(&b.assoc[i].ty));
+        }
+        i += 1;
+    }
+    fnsig_of(names, &b.args, &answer)
+}
+
+/// One signature, written `A,B>R`.
+///
+/// Nothing at all where an argument is not a plain name or is one of the
+/// function's own parameters: what those settle to is what the *call* settles,
+/// and the call cannot settle it without lowering the closure that is asking.
+/// The answer is dropped alone under the same rule — `fn map<B, F: Fn(A) -> B>`
+/// says only that `B` is whatever the closure gives back, so the body decides
+/// and the hint says nothing.
+fn fnsig_of(names: &Vec<String>, args: &Vec<ast::Ty>, ret: &Option<ast::Ty>) -> String {
+    let mut all: String = Vec::new();
+    let mut i: taddr = 0;
+    while i < args.len() {
+        let each = name_head(&args[i]);
+        if each.len() == 0 || holds_name(names, &each) {
+            return "".to_string();
+        }
+        if i > 0 {
+            all.push(',');
+        }
+        all.push_str(&each);
+        i += 1;
+    }
+    all.push('>');
+    match ret {
+        Option::Some(r) => {
+            let each = name_head(r);
+            if each.len() > 0 && !holds_name(names, &each) {
+                all.push_str(&each);
+            }
+        }
+        Option::None => {}
+    }
+    all
+}
+
+/// The arguments of a signature, and what it answers with — the two halves of
+/// `A,B>R`, read back.
+fn fnsig_args(sig: &str) -> Vec<String> {
+    let mut all: String = Vec::new();
+    let mut i: taddr = 0;
+    while i < sig.len() {
+        if sig[i] == '>' {
+            return split_types(&all);
+        }
+        all.push(sig[i]);
+        i += 1;
+    }
+    split_types(&all)
+}
+
+fn fnsig_answer(sig: &str) -> String {
+    let mut out: String = Vec::new();
+    let mut seen = false;
+    let mut i: taddr = 0;
+    while i < sig.len() {
+        if seen {
+            out.push(sig[i]);
+        }
+        if sig[i] == '>' {
+            seen = true;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Whether a closure's parameter had no type written on it. `Unit` is what
+/// the parser puts there for one, which is also what `()` is — and a closure
+/// taking a `()` is not something worth telling the two apart for.
+fn wrote_nothing(t: &ast::Ty) -> bool {
+    match t {
+        ast::Ty::Unit => true,
+        _ => false,
+    }
+}
+
+/// Whether an argument is a closure written out, which is the only argument
+/// that can be told anything by the parameter it is written for.
+fn is_closure(e: &ast::Expr) -> bool {
+    match e {
+        ast::Expr::Closure(params, ret, body) => true,
+        _ => false,
+    }
+}
+
+/// Which of these names this is, or −1.
+fn name_at(names: &Vec<String>, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < names.len() {
+        if names[i].same(name) {
+            return i;
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
 /// The names a function's generic parameters were written with, in
 /// declaration order.
 pub fn generic_names(gs: &Vec<ast::Generic>) -> Vec<String> {
@@ -10139,25 +10357,79 @@ fn generic_call(
             into = slot_for(e, "tmp", &answer);
         }
     }
+    // Twice over the arguments, closures first.
+    //
+    // A closure has no type until it is lowered, so a call cannot say what
+    // the parameter it settles is without lowering it — and what is lowered
+    // first takes its storage first. The order is therefore not a choice: it
+    // is what the inference needs, and it is text either way (docs/ddc.md
+    // §3.1).
+    let mut htext: Vec<String> = Vec::new();
+    let mut hkind: Vec<String> = Vec::new();
+    let mut ttext: Vec<String> = Vec::new();
+    let mut tkind: Vec<String> = Vec::new();
+    let mut pass: taddr = 0;
+    while pass < 2 {
+        let mut i: taddr = 0;
+        while i < args.len() {
+            let closure = is_closure(&args[i]);
+            let now = if closure { pass == 0 } else { pass == 1 };
+            if now {
+                // A parameter the receiver already decided is written for at
+                // that type, so a literal there takes its width from it and
+                // not from §5.2's default.
+                let told = subst(&front, given, &declared[i]);
+                let each = if told.same(&declared[i]) {
+                    param_type(e, callee, i + skip)
+                } else {
+                    told
+                };
+                // And a closure written where a `Fn` bound is asking takes
+                // its types from the bound (Ch. 4 §4.3). Only where the
+                // argument *is* one: a closure further in is written for
+                // something else, and a flag left set would reach it.
+                let mut hint: String = Vec::new();
+                if closure {
+                    let at = name_at(&e.families[fam].tyvars, &declared[i]);
+                    if at >= 0 && at < e.families[fam].fnsigs.len() {
+                        hint = e.families[fam].fnsigs[at].to_string();
+                    }
+                }
+                e.fn_want = hint;
+                let v = value(e, &args[i], &each);
+                e.fn_want = Vec::new();
+                if e.stuck {
+                    return unknown_value();
+                }
+                if closure {
+                    htext.push(v.text);
+                    hkind.push(v.ty);
+                } else {
+                    ttext.push(v.text);
+                    tkind.push(v.ty);
+                }
+            }
+            i += 1;
+        }
+        pass += 1;
+    }
+    // And back into the order they were written in, which is the order the
+    // call passes them in and the order the key is read from.
     let mut texts: Vec<String> = Vec::new();
     let mut kinds: Vec<String> = Vec::new();
+    let mut hn: taddr = 0;
+    let mut tn: taddr = 0;
     let mut i: taddr = 0;
     while i < args.len() {
-        // A parameter the receiver already decided is written for at that
-        // type, so a literal there takes its width from it and not from
-        // §5.2's default.
-        let told = subst(&front, given, &declared[i]);
-        let each = if told.same(&declared[i]) {
-            param_type(e, callee, i + skip)
+        if is_closure(&args[i]) {
+            texts.push(htext[hn].to_string());
+            kinds.push(hkind[hn].to_string());
+            hn += 1;
         } else {
-            told
-        };
-        let v = value(e, &args[i], &each);
-        if e.stuck {
-            return unknown_value();
+            texts.push(ttext[tn].to_string());
+            kinds.push(tkind[tn].to_string());
+            tn += 1;
         }
-        texts.push(v.text);
-        kinds.push(v.ty);
         i += 1;
     }
     // The key: each type parameter, in declaration order, is whatever the
@@ -10840,6 +11112,7 @@ fn drop_glue(
         strings: ast::copy_names(&work.strings),
         glue: copy_insts(&work.glue),
         writing: false,
+        fn_want: Vec::new(),
     };
     remake(&mut e, &work.instances);
     settle(&mut e);

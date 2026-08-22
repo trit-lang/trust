@@ -2626,6 +2626,28 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.151 — a closure argument is evaluated before the arguments written
+before it, and nothing says so.** Ch. 4 §4.3 says a `Fn` bound settles the
+parameters its signature names, and Ch. 4 §2.7 says a generic is one function
+per instantiation. Put together, a call that hands a closure to a bounded
+parameter cannot know which instantiation it *is* until the closure has a
+type, and a closure has no type until it is lowered. So `fold(0..5, 0, |a, b|
+a + b)` lowers its third argument first, takes storage for it first, and the
+range that was written first gets the second slot.
+
+That is an evaluation order a program can see. Ch. 0 §2 gives operands left
+to right; nothing gives arguments any order at all, and this is the first
+construct where the order is forced rather than chosen. It is not a free
+choice either — the inference needs it — so what §4.3 is missing is a
+sentence saying that the parameters a `Fn` bound settles are settled *before*
+the call's other arguments are evaluated, which is the only order that can
+work.
+
+Both implementations do it now and `bootstrap/programs/closures` is where
+they are held to it. They did not before: the same call was 112 lines on both
+and disagreed about two slot numbers, which is what an order nobody wrote
+down looks like when it is discovered by accident.
+
 **G9.150 — `a..b` has a precedence and no associativity.** Ch. 0 §5.5 says
 `..` binds looser than every operator but assignment, so `0..n + 1` is
 `0..(n + 1)` and the question of *precedence* is answered outright. It says
