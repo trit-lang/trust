@@ -2626,6 +2626,56 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.156 — a block-shaped expression written last in a block is where the
+parser puts it, not what the block answers with.** Ch. 0 §5.1 lets a
+statement be a block-shaped expression with no semicolon after it, and both
+parsers act on that by leaving `while c { … }` in a block's *tail* slot when
+it is written last. A tail is what a block answers with, so a reader of the
+tree cannot tell the two apart — and a `while` answers with nothing, so
+there is nothing to tell apart where nothing was wanted.
+
+Everywhere but one, the bootstrap already knew: a loop body re-reads its own
+tail as a statement, in as many words. A `match` arm did not, so
+
+```
+match e { E::Int(v) => { let mut k = v; while k > 0 { … } } … }
+```
+
+was refused for the arm's *last* statement, and adding one line after the
+loop made the same program compile. §5.1 should say plainly that a block
+whose tail is block-shaped and answers with nothing has no value, so that a
+compiler need not decide it one construct at a time.
+
+**G9.155 — `()` is a type, and an empty string is not.** Ch. 0 §5.1 says a
+function that answers nothing answers `()`, and TIR §3.7 writes such a call
+with no result to name. The bootstrap carries a value's type as text, and a
+value with *no* type is the empty string — so the two spellings of "nothing"
+are different strings, and a `match` arm that tested the wrong one made a
+temporary for the answer of a call that has none.
+
+Written `E::Int(v) => out.push('1')` the arm was refused; written
+`E::Int(v) => { out.push('1'); }` it was fine, because a block with no tail
+says nothing with the empty string. The chapters never distinguish the two —
+they are the same program — and nothing in them warns that "answers `()`"
+and "answers nothing" might be represented apart. Recorded because any
+implementation carrying types as text will meet it.
+
+**G9.154 — `*r` and reaching through `r` are the same load and not the same
+name.** Ch. 3 §2.1 says a name holding a reference is read as the address it
+is; §2.2 says `*r` is what it points at. Both are one `load ptr` of the
+name's slot, and G9.94 already fixed which prefix each takes: `%v` for the
+reference read as the value it is, `%p` for a step on the way to a place.
+
+Written `*r` is the first — the program asked for the reference — and
+reaching through one nobody wrote, `r.x` or `r[i]`, is the second. The
+bootstrap collapsed both into the second, so `show(&*a)` on a payload bound
+through a reference emitted the same instruction under the wrong name, and
+the two compilers disagreed on one word of one line. No chapter says which
+is which, because no chapter names TIR values at all; TIR §2 leaves them to
+the emitter and the bootstrap contract then makes the emitter's choice
+normative. That is worth a sentence somewhere: the names are text, and the
+text is the contract.
+
 **G9.153 — a `Fn` bound reads in two directions and only one of them is
 written down.** Ch. 4 §4.3 says a `Fn` bound settles the parameters its
 signature names, and gives `Map`'s `B` as the case: given the closure, the

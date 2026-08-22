@@ -64,6 +64,56 @@ fn structured(n: t27) -> t27 {
     (*h).a + (*h).b
 }
 
+// And **walking** one, which is what a recursive type is for and what the
+// three lines above stop short of.
+//
+// `&*a` is the box read as the address it already is: one load, and the
+// name it takes says `%v`, because the program asked for the reference
+// itself. Reaching through one nobody wrote — `a.n`, `a[i]` — is a step on
+// the way to a place and takes `%p`. The instruction is the same either way
+// and the name is not, and the name is what is compared (G9.154).
+//
+// Every arm here answers with nothing, written both ways: `out.push('l')`
+// is a call whose type is `()`, and `{ … }` with no tail has no type at
+// all. They mean the same thing, and an implementation carrying a type as
+// text has to be told so (G9.155).
+fn tag(t: &Tree, out: &mut String) {
+    match t {
+        Tree::Leaf(v) => out.push('l'),
+        Tree::Pair(a, b) => out.push('p'),
+    }
+}
+
+// One arm ends in a `while`. A block-shaped expression written last in a
+// block is where the parser puts it — the tail — and is still a statement,
+// which is the reading a loop body already gives its own tail (G9.156).
+fn show(t: &Tree, out: &mut String) {
+    match t {
+        Tree::Leaf(v) => {
+            let mut k = v;
+            while k > 0 {
+                out.push('1');
+                k -= 1;
+            }
+        }
+        Tree::Pair(a, b) => {
+            out.push('(');
+            show(&*a, out);
+            out.push('+');
+            show(&*b, out);
+            out.push(')');
+        }
+    }
+}
+
+fn walked(n: t27) -> t27 {
+    let t = pair(n);
+    let mut out: String = Vec::new();
+    tag(&t, &mut out);
+    show(&t, &mut out);
+    out.len() as t27
+}
+
 fn main() -> t27 {
-    built(1) + plain(2) + structured(3)
+    built(1) + plain(2) + structured(3) + walked(1)
 }

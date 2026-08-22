@@ -3312,7 +3312,15 @@ fn match_place(
                     // An arm that has already left has nothing to store and
                     // nowhere to store it: `trap()` is the arm `unwrap`
                     // writes for `None` (Ch. 5 §4).
-                    if !e.done && v.ty.len() > 0 {
+                    //
+                    // Nor has an arm that **answers nothing**. `()` is a type
+                    // and an empty string is not, so a call that answers with
+                    // it arrives here looking like an arm with a value, and a
+                    // temporary for one is a slot no width fits and a store of
+                    // a name nobody made. Written `{ f(x); }` the block says
+                    // so by answering nothing at all, and the two spellings
+                    // mean the same thing (G9.155).
+                    if !e.done && v.ty.len() > 0 && !answers_nothing(&v.ty) {
                         if held.len() == 0 {
                             ty = v.ty.to_string();
                             held = slot_for(e, "tmp", &ty);
@@ -3931,7 +3939,30 @@ fn branch_block(e: &mut Emit, b: &ast::Block, want: &str) -> Value {
         i += 1;
     }
     let held = match &b.tail {
-        Option::Some(x) => value(e, x, want),
+        Option::Some(x) => {
+            // `while c { … }` written last in a block is a **statement**,
+            // and the parser leaves it where a tail goes because that is
+            // where it was written (§5.1). It answers with nothing, so
+            // where nothing was wanted the two readings agree and only
+            // this one is lowered — a loop body already reads its own tail
+            // that way, and an arm of a `match` had nobody doing it. Where
+            // something *was* wanted a `while` cannot answer it, and the
+            // refusal `value` gives is the right one (G9.156).
+            let mut deferred = false;
+            if answers_nothing(want) {
+                match x {
+                    ast::Expr::While(c, wb) => deferred = true,
+                    _ => {}
+                }
+            }
+            if deferred {
+                let held = ast::Stmt::Do(ast::copy_expr(x));
+                stmt(e, &held, want);
+                Value { text: "".to_string(), ty: "".to_string() }
+            } else {
+                value(e, x, want)
+            }
+        }
         // A block with no tail has no value — unless it already **left**,
         // in which case there is nothing after it to want one, or unless
         // nothing was wanted of it at all, which is what an arm of a
@@ -7275,10 +7306,35 @@ fn place(e: &mut Emit, x: &ast::Expr) -> Value {
         ast::Expr::Group(inner) => place(e, &*inner),
         // `*b` — what a `Box` points at is a **place**, and getting there
         // is one load: the box is one word and reading it is walking to the
-        // value rather than reading one (Ch. 5 §2.3). A *reference* needs
-        // no case here, because a name holding one is read through where it
-        // is named and `*r` has already happened by the time this is asked.
+        // value rather than reading one (Ch. 5 §2.3).
         ast::Expr::Deref(a) => {
+            // `*r` on a name holding a reference is the same load either
+            // way, and not the same *name*: written down it is a **read**
+            // of the reference, so `%v`, where reaching through one nobody
+            // wrote — `r.x`, `r[i]` — is a step on the way to a place and
+            // takes `%p`. Only the name says which of the two was asked
+            // for, and the name is the text (G9.154).
+            match a {
+                ast::Expr::Name(n) => {
+                    let at = local_at(e, n);
+                    if at >= 0 {
+                        let owner = e.locals[at].ty.to_string();
+                        let points_at = referent_name(&owner);
+                        if points_at.len() > 0 {
+                            let slot = e.locals[at].slot.to_string();
+                            let v = fresh(e, "v");
+                            let mut line: String = Vec::new();
+                            line.push_str("    ");
+                            line.push_str(&v);
+                            line.push_str(" = load ptr ");
+                            line.push_str(&slot);
+                            e.insts.push(line);
+                            return Value { text: v, ty: points_at };
+                        }
+                    }
+                }
+                _ => {}
+            }
             let held = place(e, &*a);
             if e.stuck {
                 return unknown_value();
