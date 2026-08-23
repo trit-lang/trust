@@ -2567,6 +2567,7 @@ fn through_reference(e: &Emit, x: &ast::Expr) -> bool {
         }
         ast::Expr::Borrow(inner, m) => true,
         ast::Expr::Deref(inner) => true,
+        ast::Expr::Group(inner) => through_reference(e, &*inner),
         ast::Expr::Field(base, name) => through_reference(e, &*base),
         ast::Expr::Index(base, at) => through_reference(e, &*base),
         _ => false,
@@ -2908,6 +2909,16 @@ fn match_expr(
     // Matching *through a reference* moves nothing — the bindings name
     // storage the referent still owns — and neither does it need saying
     // here, because there is nothing to say it about.
+    //
+    // Parentheses group and say nothing (§2.1), so what is matched over
+    // is what they group.
+    let mut scrutinee = scrutinee;
+    loop {
+        match scrutinee {
+            ast::Expr::Group(g) => scrutinee = &*g,
+            _ => break,
+        }
+    }
     let through = through_reference(e, scrutinee);
     match scrutinee {
         ast::Expr::Name(n) => {
@@ -2964,6 +2975,46 @@ fn match_expr(
                     direct = false;
                 }
             }
+        }
+        // A borrow written at the `match` is no value at all: it says the
+        // arms look at what it points at and move nothing out, which is
+        // what `through` already answered above — so the scrutinee's
+        // place is the referent's own, and there is nothing to emit.
+        // `let r = &c; match r` lowers the reference as a value instead,
+        // which is a different program to both implementations (Ch. 0
+        // §5.4, Ch. 3 §2.3).
+        ast::Expr::Borrow(inner, m) => {
+            // Borrowing a name that itself *holds* a reference reads the
+            // reference on the way to what it names, and the program wrote
+            // the reference, so the load is `%v` — the same read as `*r`
+            // (G9.154). A name holding anything else *is* the place.
+            let mut named = false;
+            match &*inner {
+                ast::Expr::Name(n) => {
+                    let at = local_at(e, n);
+                    if at >= 0 {
+                        let owner = e.locals[at].ty.to_string();
+                        let points = referent_name(&owner);
+                        if points.len() > 0 {
+                            let slot = e.locals[at].slot.to_string();
+                            let v = fresh(e, "v");
+                            let mut line: String = Vec::new();
+                            line.push_str("    ");
+                            line.push_str(&v);
+                            line.push_str(" = load ptr ");
+                            line.push_str(&slot);
+                            e.insts.push(line);
+                            held = Value { text: v, ty: points };
+                            named = true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if !named {
+                held = place(e, &*inner);
+            }
+            direct = false;
         }
         _ => {}
     }

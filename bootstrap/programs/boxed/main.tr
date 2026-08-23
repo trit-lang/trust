@@ -186,6 +186,24 @@ fn settled(out: &mut String) {
     out.push('d');
 }
 
+// And the borrow does not have to be named first: `match &c` says at the
+// `match` what `let r = &c; match r` says in two steps — the arms look at
+// what it points at and move nothing, so the scrutinee's place is the
+// referent's own and there is no reference lowered as a value anywhere
+// (Ch. 0 §5.4, Ch. 3 §2.3).
+fn peeked(t: &Tree, out: &mut String) {
+    match t {
+        Tree::Leaf(v) => out.push('.'),
+        Tree::Pair(a, b) => {
+            let c = leaf(0);
+            match &c {
+                Tree::Leaf(l) => out.push('l'),
+                Tree::Pair(x, y) => out.push('p'),
+            }
+        }
+    }
+}
+
 fn walked(n: t27) -> t27 {
     let t = pair(n);
     let mut out: String = Vec::new();
@@ -195,6 +213,7 @@ fn walked(n: t27) -> t27 {
     drained(&t, &mut out);
     halt(&t, &mut out);
     settled(&mut out);
+    peeked(&t, &mut out);
     out.len() as t27
 }
 

@@ -2626,6 +2626,33 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.161 — a deref scrutinee moves only when what it derefs owns, and
+the bootstrap moves never.** `match *c { … }` with `c: &Tree` is refused
+by the Rust compiler in as many words — *cannot move out of a
+reference: reading a Tree moves it* — and lowered by the Trust one,
+whose `through_reference` answers `true` for any `Deref` and therefore
+moves nothing whatever the `*` reaches through. The same sentence read
+from the other end: `match *b { … }` with `b: Box<Tree>` *moves*, as
+only an owning pointer can be moved out of, and the Rust compiler
+lowers it — which the Trust one refuses, because moving out of what a
+box points at is machinery it does not have. One gap with two faces:
+who a `*` scrutinee belongs to is a question the lowering never asks.
+
+**G9.160 — a borrow written at the `match` is no value at all.**
+`match &c { … }` lowers no reference: the `&` says about the *arms* —
+they look at what it points at and move nothing out — and about nothing
+else, so the scrutinee's place is the referent's own and there is no
+instruction to emit. The Trust lowering refused it in every position,
+and the workaround it did accept was not the same program: `let r = &c;
+match r { … }` lowers the reference as a value, which is a slot, a store
+and a load that the spelling at the `match` never had — the two differ
+by three instructions to both compilers. The answer was already known
+beside the refusal: `through_reference` had said a `Borrow` matches
+through since matching through a reference was built, and what was
+missing was the one sentence that walks to the place — which is the
+referent's, exactly as `.` reads (Ch. 3 §2.3). `boxed`'s `peeked` writes
+it, next to the named spelling it used to need.
+
 **G9.159 — an arm that cannot answer is refused, not lowered.** Ch. 0
 §5.4 types a `match` by what its arms answer, and G9.157 settles what a
 block ending in a block-shaped statement answers when nothing is wanted.
@@ -7587,8 +7614,3 @@ Specified well enough to build, simply not built yet:
   and in statement position, where the Rust compiler lowers the chain of
   comparisons the chapter's own example is made of. Coverage, not a
   question.
-- **A borrowed scrutinee (Ch. 0 §5.4) in the same.** `match &c { … }`,
-  with the borrow written at the `match` instead of carried by a name, is
-  refused in every position; the Rust compiler lowers it. Written
-  `let r = &c; match r { … }` it is the same program to both — which is
-  the spelling `bootstrap/programs/boxed`'s `signed` uses.
