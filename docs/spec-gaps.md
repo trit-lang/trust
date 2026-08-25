@@ -2626,6 +2626,24 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.170 — two `&mut` in one expression are one too many, and only one
+checker hears it.** `taken(&mut o) + taken(&mut o)` is refused by the Rust
+one — the second borrow begins while the first is still live (Ch. 3 §2.2)
+— and lowered by the Trust one, whose walk of a binary expression visits
+both sides without asking who is borrowed where. The two borrows are not
+yet sequenced anywhere in the second checker: each of `f(&mut o); f(&mut
+o);` written as two statements is refused, which is exactly where the one
+inside the operator gets away.
+
+**G9.169 — a move out of a reference is heard at the `match` and nowhere
+else, in the second checker.** `*c` where the whole body is the move —
+`fn plain(c: &Tree) -> Tree { *c }` — is the same refusal as `match *c`'s
+to the Rust compiler, for the same reason (Ch. 3 §1.2). G9.161 gave the
+second checker the rule at the one place it was asked for, and the rest
+of the language's move sites — a return, a call's by-value argument, a
+`let`'s right-hand side — are still to come: they are the same sentence
+in more positions, and positions are what a move tracker is made of.
+
 **G9.168 — `&&T` binds nowhere.** `let rr = &r` is refused by the Trust
 lowering in as many words — *a reference to a reference is two loads and
 one name, and this does not reach it* — where the Rust compiler binds the
@@ -2716,17 +2734,21 @@ call's answer, a field's word, a `Box` moved. `patterns` writes the
 family: door numbers, the three ways a reference spells the same read,
 or-arms, and the dispatch that is one instruction.
 
-**G9.161 — a deref scrutinee moves only when what it derefs owns, and
-the bootstrap moves never.** `match *c { … }` with `c: &Tree` is refused
-by the Rust compiler in as many words — *cannot move out of a
-reference: reading a Tree moves it* — and lowered by the Trust one,
-whose `through_reference` answers `true` for any `Deref` and therefore
-moves nothing whatever the `*` reaches through. The same sentence read
-from the other end: `match *b { … }` with `b: Box<Tree>` *moves*, as
-only an owning pointer can be moved out of, and the Rust compiler
-lowers it — which the Trust one refuses, because moving out of what a
-box points at is machinery it does not have. One gap with two faces:
-who a `*` scrutinee belongs to is a question the lowering never asks.
+**G9.161 — whose the star matches: a `Box` owns, a reference lends, and
+`match *x` moves only out of an owner.** `match *c { … }` with `c: &Tree`
+— shared or exclusive — is refused in the words Ch. 3 §1.2 gives, and
+the second checker now says them: the referent is still its owner's to
+drop, and a match over it moves where a match through it moves nothing
+(G9.160). `match *b { … }` with `b: Box<Tree>` is the other face and the
+one the box is for: the word is moved into the match, the arms' bindings
+receive what it held — a payload that owns takes the flag an owned local
+takes and is dropped where the arm ends — and the word behind the moved
+word is nobody's to free, which is the program both compilers now write.
+That the question was never asked before is visible in the one line that
+asked it: `through_reference` answered `true` for any `Deref`, and the
+place the star makes was the question's whole answer. `mismatch/07.tr`
+hears a refusal in each spelling, and `boxed`'s `taken` moves a
+`Box<Tree>` out and drops both halves.
 
 **G9.160 — a borrow written at the `match` is no value at all.**
 `match &c { … }` lowers no reference: the `&` says about the *arms* —

@@ -204,6 +204,19 @@ fn peeked(t: &Tree, out: &mut String) {
     }
 }
 
+fn taken(n: t27, out: &mut String) {
+    let b: Box<Tree> = Box::new(pair(n));
+    // `match *b` is the move the box is for: what the word names moves
+    // into the arms, the box moves with it, and the word behind it is
+    // nobody's to free. `match *c` for a `c` that only lends is the
+    // refusal Ch. 3 §1.2 words, which `mismatch/07.tr` hears both
+    // checkers give (G9.161).
+    match *b {
+        Tree::Leaf(l) => out.push('l'),
+        Tree::Pair(x, y) => out.push('p'),
+    }
+}
+
 fn walked(n: t27) -> t27 {
     let t = pair(n);
     let mut out: String = Vec::new();
@@ -214,6 +227,7 @@ fn walked(n: t27) -> t27 {
     halt(&t, &mut out);
     settled(&mut out);
     peeked(&t, &mut out);
+    taken(n, &mut out);
     out.len() as t27
 }
 

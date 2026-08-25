@@ -1,0 +1,38 @@
+// Whose the star matches: `match *x` moves out of what `x` names, and
+// whether that is a move at all is decided by whose the pointer is
+// (G9.161). A `Box` owns — the match is the move the box is for. A
+// reference only lends, shared or exclusive, and what it points at is
+// still somebody else's to drop (Ch. 3 §1.2) — the refusal is the one
+// the other implementation words as moving out of a reference.
+enum Tree { Leaf(t27), Pair(Box<Tree>, Box<Tree>) }
+
+fn tree(n: t27) -> Tree { Tree::Leaf(n) }
+
+fn through_box_right(out: &mut String) {
+    let b: Box<Tree> = Box::new(tree(1));
+    match *b {
+        Tree::Leaf(l) => out.push('l'),
+        Tree::Pair(x, y) => out.push('p'),
+    }
+}
+
+fn through_ref_wrong(c: &Tree, out: &mut String) {
+    match *c {
+        Tree::Leaf(l) => out.push('l'),
+        Tree::Pair(x, y) => out.push('p'),
+    }
+}
+
+fn through_mut_wrong(c: &mut Tree, out: &mut String) {
+    match *c {
+        Tree::Leaf(l) => out.push('l'),
+        Tree::Pair(x, y) => out.push('p'),
+    }
+}
+
+fn value_right(c: Tree, out: &mut String) {
+    match c {
+        Tree::Leaf(l) => out.push('l'),
+        Tree::Pair(x, y) => out.push('p'),
+    }
+}

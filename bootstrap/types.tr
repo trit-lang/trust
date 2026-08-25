@@ -429,6 +429,25 @@ fn walk_expr(w: &mut World, what: &str, e: &ast::Expr) {
         }
         ast::Expr::Match(s, arms) => {
             walk_expr(w, what, s);
+            // `match *c` asks the arms to move out of what `c` points at.
+            // A `Box` owns what is at the other end of its word, and the
+            // move is the point of one; a reference only *lends*, and what
+            // it points at is still its owner's to drop (Ch. 3 §1.2) — a
+            // refusal the other implementation words as moving out of a
+            // reference rather than as a type that does not match, which
+            // is the `other` of the two.
+            match &*s {
+                ast::Expr::Deref(a) => {
+                    let inner = type_of(w, &*a);
+                    match &inner {
+                        ast::Ty::Ref(r, m) => {
+                            w.other = true;
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
             let mut i: taddr = 0;
             while i < arms.len() {
                 match &arms[i].guard {

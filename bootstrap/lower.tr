@@ -2919,7 +2919,7 @@ fn match_expr(
             _ => break,
         }
     }
-    let through = through_reference(e, scrutinee);
+    let mut through = through_reference(e, scrutinee);
     // A scalar asks and answers *before* anything is moved: what is
     // matched over decides who answers, and a scalar is a **value**, read
     // where the scrutinee left it — `match k { 0 => …, _ => … }` is
@@ -2960,6 +2960,61 @@ fn match_expr(
         }
         _ => {}
     }
+    // `*x` underneath the `match` is one question — whose the pointer is:
+    // a `Box` **owns** what it names, so `match *b` moves the tree out of
+    // its word and the arms' bindings receive what it held, exactly as if
+    // it had been a local all along; the box is moved with it, and the
+    // word behind it is nobody's to free. A reference only *lends*: the
+    // referent is still its owner's, and matching moves out of a place
+    // somebody is still holding — which is the refusal Ch. 3 §1.2 gives
+    // in as many words (G9.161).
+    let mut deref_held = unknown_value();
+    let mut have_deref = false;
+    match scrutinee {
+        ast::Expr::Deref(a) => {
+            match &*a {
+                ast::Expr::Name(n) => {
+                    let at = local_at(e, n);
+                    if at < 0 {
+                        e.stuck = true;
+                        return unknown_value();
+                    }
+                    let owner = e.locals[at].ty.to_string();
+                    if is_boxed(&owner) {
+                        let elem = raw_element(e, &owner);
+                        if elem.len() == 0 || def_at(&e.defs, &elem) < 0 {
+                            e.stuck = true;
+                            return unknown_value();
+                        }
+                        let mine = n.to_string();
+                        move_out(e, &mine);
+                        if e.stuck {
+                            return unknown_value();
+                        }
+                        let slot = e.locals[at].slot.to_string();
+                        let v = fresh(e, "v");
+                        let mut line: String = Vec::new();
+                        line.push_str("    ");
+                        line.push_str(&v);
+                        line.push_str(" = load ptr ");
+                        line.push_str(&slot);
+                        e.insts.push(line);
+                        deref_held = Value { text: v, ty: elem };
+                        have_deref = true;
+                        through = false;
+                    } else {
+                        e.stuck = true;
+                        return unknown_value();
+                    }
+                }
+                _ => {
+                    e.stuck = true;
+                    return unknown_value();
+                }
+            }
+        }
+        _ => {}
+    }
     // What is matched over is a **place**: a name is one, and so is
     // anything that answers with an aggregate, because an aggregate *is*
     // its storage (TIR §3).
@@ -2968,8 +3023,8 @@ fn match_expr(
     // address — and then matched through, which is what `%v` says and `%p`
     // would not: walking to a place loads a step on the way to the object,
     // and this is the object itself (Ch. 3 §2.1, G9.94).
-    let mut held = unknown_value();
-    let mut direct = true;
+    let mut held = deref_held;
+    let mut direct = !have_deref;
     match scrutinee {
         ast::Expr::Name(n) => {
             let at = local_at(e, n);
@@ -5068,6 +5123,42 @@ fn bind_payload(
             kind.push_str(&ty);
             let slot = slot_for(e, &name, &kind);
             store_into(e, "ptr", &src, &slot);
+            i += 1;
+            continue;
+        }
+        // A `Box` read out of **owned** storage is the box moved: the
+        // binding owns the word and everything at its other end, which is
+        // the same fact a `let` of one states (Ch. 5 §2.3) — so it takes
+        // the flag an owned local takes, and the arm's end is where both
+        // are dropped.
+        if is_boxed(&ty) {
+            let got = fresh(e, "v");
+            let mut take: String = Vec::new();
+            take.push_str("    ");
+            take.push_str(&got);
+            take.push_str(" = load ptr ");
+            take.push_str(&src);
+            e.insts.push(take);
+            let slot = slot_for(e, &name, &ty);
+            let mut prefix: String = Vec::new();
+            prefix.push_str(&name);
+            prefix.push_str(".owns");
+            let flag = fresh(e, &prefix);
+            let mut made: String = Vec::new();
+            made.push_str("    ");
+            made.push_str(&flag);
+            made.push_str(" = slot tryte[1]");
+            e.slots.push(made);
+            store_into(e, "t1", "const t1 1", &flag);
+            store_into(e, "ptr", &got, &slot);
+            e.owned.push(Owned {
+                name: name.to_string(),
+                slot: slot.to_string(),
+                ty: ty.to_string(),
+                flag: flag.to_string(),
+                owns: Owns::Yes,
+                moved: Vec::new(),
+            });
             i += 1;
             continue;
         }
