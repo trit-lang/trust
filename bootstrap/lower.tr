@@ -2920,6 +2920,20 @@ fn match_expr(
         }
     }
     let through = through_reference(e, scrutinee);
+    // A scalar asks and answers *before* anything is moved: what is
+    // matched over decides who answers, and a scalar is a **value**, read
+    // where the scrutinee left it — `match k { 0 => …, _ => … }` is
+    // `match_scalar`'s, and whatever moves out of the way there is the
+    // read itself. The walk below is `match_place`'s (Ch. 2 §5, TIR §3).
+    // Nothing here is emitted: the walk happens once to ask and once to
+    // lower.
+    let scalar = match_scalar_ty(e, scrutinee);
+    if e.stuck {
+        return unknown_value();
+    }
+    if scalar.len() > 0 {
+        return match_scalar(e, scrutinee, &scalar, arms, want, dest, answer);
+    }
     match scrutinee {
         ast::Expr::Name(n) => {
             let at = local_at(e, n);
@@ -3169,6 +3183,748 @@ fn same_failure(e: &Emit, a: &str, b: &str) -> bool {
         i += 1;
     }
     e.instances[one].key.len() == e.instances[two].key.len()
+}
+
+/// What the number a literal pattern stands for is, or a refusal when the
+/// literal is not one the scrutinee's type answers (§4, Ch. 1 §5): `0t` is
+/// a `trit` and `0` is not, whatever either would fit.
+fn pattern_scalar_value(e: &mut Emit, p: &ast::Pattern, ty: &str) -> t27 {
+    match p {
+        ast::Pattern::Int(v) => {
+            if ty.same("t27") || ty.same("taddr") || ty.same("t9") {
+                v
+            } else {
+                e.stuck = true;
+                0
+            }
+        }
+        ast::Pattern::Trit(v) => {
+            if ty.same("trit") {
+                v
+            } else {
+                e.stuck = true;
+                0
+            }
+        }
+        ast::Pattern::Char(v) => {
+            if ty.same("char") {
+                v
+            } else {
+                e.stuck = true;
+                0
+            }
+        }
+        ast::Pattern::Bool(b) => {
+            if ty.same("bool") {
+                if b { 1 } else { 0 }
+            } else {
+                e.stuck = true;
+                0
+            }
+        }
+        _ => {
+            e.stuck = true;
+            0
+        }
+    }
+}
+
+/// Whether this arm is the one that takes whatever falls past the tests.
+///
+/// A binding is one here for the same reason `_` is: there is nothing a
+/// scalar is compared *against* in it, and nothing it names is made — a
+/// name in a scalar arm binds nothing, because what would be bound was
+/// already in hand where the scrutinee was read (Ch. 2 §5).
+fn scalar_catches_all(arm: &ast::Arm) -> bool {
+    let mut i: taddr = 0;
+    while i < arm.patterns.len() {
+        match &arm.patterns[i] {
+            ast::Pattern::Wild => return true,
+            ast::Pattern::Bind(n) => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// If the arms are exactly the three trit literals, in some order, the arm
+/// that handles each of −1, 0 and +1 — which is *one* branch instruction
+/// and not three tests (Ch. 1 §5).
+///
+/// The answer is three arm numbers, or none where any arm guards, any
+/// pattern is not a trit literal, one value is named twice, or one is
+/// missing.
+fn trit_scalar_dispatch(arms: &Vec<ast::Arm>) -> Vec<taddr> {
+    let mut out: Vec<taddr> = Vec::new();
+    let mut i: taddr = 0;
+    while i < 3 {
+        out.push(0 - 1);
+        i += 1;
+    }
+    let mut a: taddr = 0;
+    while a < arms.len() {
+        match &arms[a].guard {
+            Option::Some(g) => {
+                let empty: Vec<taddr> = Vec::new();
+                return empty;
+            }
+            Option::None => {}
+        }
+        let mut j: taddr = 0;
+        while j < arms[a].patterns.len() {
+            match &arms[a].patterns[j] {
+                ast::Pattern::Trit(v) => {
+                    let s27 = v + 1;
+                    if s27 < 0 || s27 > 2 {
+                        let empty: Vec<taddr> = Vec::new();
+                        return empty;
+                    }
+                    let slot = s27 as taddr;
+                    if out[slot] >= 0 {
+                        let empty: Vec<taddr> = Vec::new();
+                        return empty;
+                    }
+                    out[slot] = a;
+                }
+                _ => {
+                    let empty: Vec<taddr> = Vec::new();
+                    return empty;
+                }
+            }
+            j += 1;
+        }
+        a += 1;
+    }
+    if out[0] < 0 || out[1] < 0 || out[2] < 0 {
+        let empty: Vec<taddr> = Vec::new();
+        return empty;
+    }
+    out
+}
+
+/// The scalar a `match` on this scrutinee dispatches over, or `""` where
+/// what is matched is not a scalar — an aggregate is its own question and
+/// `match_place` already answers it.
+///
+/// This is the type a reference chain *ends* at: `k`, `*r` and `&k` agree
+/// that the answer for `k: t27` is `t27`, because a reference chain is a
+/// way of writing the object and not an object of its own (Ch. 3 §2.1).
+/// Nothing is emitted here: the walk happens twice, once to decide and
+/// once to lower, because deciding by lowering would already have moved
+/// an aggregate.
+fn match_scalar_ty(e: &mut Emit, x: &ast::Expr) -> String {
+    match x {
+        ast::Expr::Group(inner) => match_scalar_ty(e, &*inner),
+        ast::Expr::Name(n) => {
+            let at = local_at(e, n);
+            if at < 0 {
+                return "".to_string();
+            }
+            let mut ty = e.locals[at].ty.to_string();
+            loop {
+                let inner = referent_name(&ty);
+                if inner.len() > 0 {
+                    ty = inner;
+                    continue;
+                }
+                if is_boxed(&ty) {
+                    let el = raw_element(e, &ty);
+                    if el.len() > 0 {
+                        ty = el;
+                        continue;
+                    }
+                }
+                break;
+            }
+            if scalar_named(&ty).same("?") {
+                "".to_string()
+            } else {
+                ty
+            }
+        }
+        ast::Expr::Borrow(inner, m) => match_scalar_ty(e, &*inner),
+        ast::Expr::Deref(a) => match_scalar_ty(e, &*a),
+        ast::Expr::Field(base, field) => {
+            let owner = match_scalar_ty_owner(e, &*base);
+            if owner.len() == 0 {
+                return "".to_string();
+            }
+            let which = def_at(&e.defs, &owner);
+            if which < 0 {
+                return "".to_string();
+            }
+            let index = field_at(e, which, field);
+            if index < 0 {
+                return "".to_string();
+            }
+            let written = ast::copy_ty(&e.defs[which].fields[index]);
+            // A field written `&T` is a scalar one load further on, which
+            // `nominal` has no name for — a reference is not a type family.
+            let mut ty = nominal(e, &written);
+            if ty.len() == 0 {
+                ty = ref_name(&written);
+            }
+            loop {
+                let inner = referent_name(&ty);
+                if inner.len() > 0 {
+                    ty = inner;
+                    continue;
+                }
+                break;
+            }
+            if scalar_named(&ty).same("?") {
+                "".to_string()
+            } else {
+                ty
+            }
+        }
+        ast::Expr::Call(name, args) => {
+            // `call_type`'s answer is for a caller that already knows the
+            // call answers a value it can name — asked for an aggregate it
+            // refuses, and this is the question asked *before* that is
+            // known, so the sig is read here the way it lies.
+            let mut found = "".to_string();
+            let mut i: taddr = 0;
+            while i < e.sigs.len() {
+                if e.sigs[i].name.same(name) {
+                    found = e.sigs[i].ret.to_string();
+                    break;
+                }
+                i += 1;
+            }
+            if found.len() == 0 || found.same("?") {
+                return "".to_string();
+            }
+            let mut ty = found;
+            loop {
+                let inner = referent_name(&ty);
+                if inner.len() > 0 {
+                    ty = inner;
+                    continue;
+                }
+                break;
+            }
+            if scalar_named(&ty).same("?") {
+                "".to_string()
+            } else {
+                ty
+            }
+        }
+        _ => "".to_string(),
+    }
+}
+
+/// The type of the place a field's base names, for `match_scalar_ty`'s one
+/// question about it — a name, or what a chain of references to one ends
+/// at. Aggregates answer with themselves; anything else is not asked here.
+fn match_scalar_ty_owner(e: &mut Emit, x: &ast::Expr) -> String {
+    match x {
+        ast::Expr::Group(inner) => match_scalar_ty_owner(e, &*inner),
+        ast::Expr::Name(n) => {
+            let at = local_at(e, n);
+            if at < 0 {
+                return "".to_string();
+            }
+            let mut ty = e.locals[at].ty.to_string();
+            loop {
+                let inner = referent_name(&ty);
+                if inner.len() > 0 {
+                    ty = inner;
+                    continue;
+                }
+                break;
+            }
+            ty
+        }
+        ast::Expr::Borrow(inner, m) => match_scalar_ty_owner(e, &*inner),
+        ast::Expr::Deref(a) => match_scalar_ty_owner(e, &*a),
+        ast::Expr::Field(base, field) => {
+            let owner = match_scalar_ty_owner(e, &*base);
+            if owner.len() == 0 {
+                return "".to_string();
+            }
+            let which = def_at(&e.defs, &owner);
+            if which < 0 {
+                return "".to_string();
+            }
+            let index = field_at(e, which, field);
+            if index < 0 {
+                return "".to_string();
+            }
+            let written = ast::copy_ty(&e.defs[which].fields[index]);
+            nominal(e, &written)
+        }
+        _ => "".to_string(),
+    }
+}
+
+/// The `match` over a scalar — `match k { 0 => …, _ => … }`.
+///
+/// What is matched over is a **value** here and not a place: a scalar is
+/// too small to be storage and is read where the scrutinee put it. Which
+/// reading that is follows the one already given for any other read: a
+/// name is loaded where it stands, a reference chain is walked a load at
+/// a time, and `&k` reads `k` itself — the borrow is no instruction,
+/// because a place already is an address (Ch. 3 §2.1).
+///
+/// Arms are *tested in the order they are written* — the discriminant of
+/// an enum is the one thing with an order a niche laid down; nothing else
+/// about the arms is. A literal is one `cmp` against the value, an
+/// alternative is one more, and the arm that catches the rest is the
+/// block the last test falls to (§4, Ch. 2 §5).
+fn match_scalar(
+    e: &mut Emit,
+    scrutinee: &ast::Expr,
+    scalar: &str,
+    arms: &Vec<ast::Arm>,
+    want: &str,
+    dest: &str,
+    answer: &str,
+) -> Value {
+    // The scrutinee as a value. A borrow written at the `match` says what
+    // the aggregate spelling already said (G9.160): the arms look at what
+    // it points at, and a name that itself *holds* a reference is read on
+    // the way — the program wrote the reference, so the load is `%v`.
+    let mut held = unknown_value();
+    let mut have = false;
+    match scrutinee {
+        ast::Expr::Borrow(inner, m) => {
+            match &*inner {
+                ast::Expr::Name(n) => {
+                    let at = local_at(e, n);
+                    if at < 0 {
+                        e.stuck = true;
+                        return unknown_value();
+                    }
+                    let owner = e.locals[at].ty.to_string();
+                    if referent_name(&owner).len() > 0 {
+                        let slot = e.locals[at].slot.to_string();
+                        let v = fresh(e, "v");
+                        let mut line: String = Vec::new();
+                        line.push_str("    ");
+                        line.push_str(&v);
+                        line.push_str(" = load ptr ");
+                        line.push_str(&slot);
+                        e.insts.push(line);
+                        held = Value { text: v, ty: owner };
+                    } else {
+                        let at_p = place(e, &*inner);
+                        if e.stuck {
+                            return unknown_value();
+                        }
+                        let v = loaded(e, &at_p.ty, &at_p.text);
+                        held = Value { text: v, ty: at_p.ty };
+                    }
+                    have = true;
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    if !have {
+        held = value(e, scrutinee, "");
+        if e.stuck {
+            return unknown_value();
+        }
+    }
+    // Walk the references down to the object, one load a step: every step
+    // is a word — the chain was shown to end at a scalar before any of it
+    // was emitted.
+    let mut ty = held.ty.to_string();
+    loop {
+        let mut inner = referent_name(&ty);
+        if inner.len() == 0 && is_boxed(&ty) {
+            inner = raw_element(e, &ty);
+        }
+        if inner.len() == 0 {
+            break;
+        }
+        if def_at(&e.defs, &inner) >= 0 {
+            e.stuck = true;
+            return unknown_value();
+        }
+        // Every step reads a reference the program wrote — even one whose
+        // own width is an address — so every load here is `%v` (G9.154),
+        // and `loaded`'s `%p` for an address would say otherwise.
+        let v = fresh(e, "v");
+        let mut line: String = Vec::new();
+        line.push_str("    ");
+        line.push_str(&v);
+        line.push_str(" = load ");
+        let shown = tir_of(&inner);
+        line.push_str(&shown);
+        line.push_str(" ");
+        line.push_str(&held.text);
+        e.insts.push(line);
+        held = Value { text: v, ty: inner.to_string() };
+        ty = inner;
+    }
+    if !ty.same(scalar) {
+        e.stuck = true;
+        return unknown_value();
+    }
+
+    // A `match` must be exhaustive (Ch. 2 §5): over a `trit` that is the
+    // three values, over a `bool` two, and over a number an arm that
+    // catches the rest, because no list of them is all of them. A guarded
+    // arm never counts (§5.4). The arm that catches is the end of the
+    // scan: what is written after it was never going to be asked.
+    let width = tir_of(&ty);
+    let mut covered = false;
+    let mut seen: Vec<t27> = Vec::new();
+    let mut i: taddr = 0;
+    while i < arms.len() && !covered {
+        match &arms[i].guard {
+            Option::Some(g) => {
+                i += 1;
+                continue;
+            }
+            Option::None => {}
+        }
+        let mut j: taddr = 0;
+        while j < arms[i].patterns.len() && !covered {
+            match &arms[i].patterns[j] {
+                ast::Pattern::Wild => covered = true,
+                ast::Pattern::Bind(n) => covered = true,
+                _ => {
+                    let v = pattern_scalar_value(e, &arms[i].patterns[j], &ty);
+                    if e.stuck {
+                        return unknown_value();
+                    }
+                    let mut have_it = false;
+                    let mut k: taddr = 0;
+                    while k < seen.len() {
+                        if seen[k] == v {
+                            have_it = true;
+                            break;
+                        }
+                        k += 1;
+                    }
+                    if !have_it {
+                        seen.push(v);
+                    }
+                }
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    if !covered {
+        let mut needed: taddr = 0;
+        let mut finite = false;
+        if ty.same("trit") {
+            needed = 3;
+            finite = true;
+        }
+        if ty.same("bool") {
+            needed = 2;
+            finite = true;
+        }
+        // No list of cases is every number, so for one the scan above is
+        // the whole of the question and it has already said no.
+        if !finite {
+            e.stuck = true;
+            return unknown_value();
+        }
+        if seen.len() < needed {
+            e.stuck = true;
+            return unknown_value();
+        }
+    }
+
+    let join = label(e, "match.join");
+
+    // The three trit values are *one* branch — a three-way dispatch is
+    // what the instruction is for (Ch. 1 §5).
+    if ty.same("trit") {
+        let order = trit_scalar_dispatch(arms);
+        if order.len() == 3 {
+            let mut ats: Vec<String> = Vec::new();
+            let mut i: taddr = 0;
+            while i < arms.len() {
+                ats.push(label(e, "arm"));
+                i += 1;
+            }
+            let neg = ats[order[0]].to_string();
+            let mut zero = ats[order[1]].to_string();
+            let mut pos = ats[order[2]].to_string();
+            let mut line: String = Vec::new();
+            if neg.same(&zero) {
+                // The two-way case prints as `br2` (TIR §3.6) — the values
+                // that agree on an arm are not told apart because there is
+                // nothing to tell them apart with.
+                line.push_str("    br2 ");
+                line.push_str(&held.text);
+                line.push_str(", ");
+                line.push_str(&pos);
+                line.push_str(", ");
+                line.push_str(&neg);
+            } else {
+                line.push_str("    br3 ");
+                line.push_str(&held.text);
+                line.push_str(", ");
+                line.push_str(&neg);
+                line.push_str(", ");
+                line.push_str(&zero);
+                line.push_str(", ");
+                line.push_str(&pos);
+            }
+            e.insts.push(line);
+
+            let was = owns_now(e);
+            let mut agreed: Vec<Owns> = Vec::new();
+            let mut reaches = false;
+            let mut held_a: String = Vec::new();
+            let mut ty_a: String = Vec::new();
+            let mut n: taddr = 0;
+            while n < arms.len() {
+                owns_back(e, &was);
+                let here = ats[n].to_string();
+                start(e, &here);
+                let reached = scalar_arm_body(e, &arms[n], want, dest, answer,
+                    &mut held_a, &mut ty_a, &join);
+                if e.stuck {
+                    return unknown_value();
+                }
+                if reached {
+                    reaches = true;
+                }
+                let after = owns_now(e);
+                if n == 0 {
+                    agreed = after;
+                } else {
+                    agreed = join_owns(&agreed, &after);
+                }
+                n += 1;
+            }
+            owns_back(e, &agreed);
+            // Every arm may have left, in which case there is no join and
+            // asking for the answer would already have been refused.
+            if !reaches {
+                e.done = true;
+                return Value { text: "".to_string(), ty: "".to_string() };
+            }
+            start(e, &join);
+            return match_scalar_result(e, want, dest, answer, &held_a, &ty_a);
+        }
+    }
+
+    // Otherwise each arm is a test, and the tests are the arms in order.
+    let was = owns_now(e);
+    let mut agreed: Vec<Owns> = Vec::new();
+    let mut n: taddr = 0;
+    let mut fell_through = true;
+    let mut reaches = false;
+    let mut held_a: String = Vec::new();
+    let mut ty_a: String = Vec::new();
+    while n < arms.len() {
+        let next_at = label(e, "arm.next");
+        let arm_at = label(e, "arm");
+        owns_back(e, &was);
+        let arm = &arms[n];
+        match &arm.guard {
+            Option::Some(g) => {
+                e.stuck = true;
+                return unknown_value();
+            }
+            Option::None => {}
+        }
+        let mut unconditional = false;
+        if scalar_catches_all(arm) {
+            jump(e, &arm_at);
+            unconditional = true;
+        } else {
+            let mut j: taddr = 0;
+            while j < arm.patterns.len() {
+                let v = pattern_scalar_value(e, &arm.patterns[j], &ty);
+                if e.stuck {
+                    return unknown_value();
+                }
+                let c = fresh(e, "c");
+                let mut test: String = Vec::new();
+                test.push_str("    ");
+                test.push_str(&c);
+                test.push_str(" = cmp ");
+                test.push_str(&width);
+                test.push_str(" ");
+                test.push_str(&held.text);
+                test.push_str(", const ");
+                test.push_str(&width);
+                test.push_str(" ");
+                push_int(&mut test, v);
+                e.insts.push(test);
+                let fail = if j + 1 >= arm.patterns.len() {
+                    next_at.to_string()
+                } else {
+                    label(e, "alt")
+                };
+                let mut br: String = Vec::new();
+                br.push_str("    br3 ");
+                br.push_str(&c);
+                br.push_str(", ");
+                br.push_str(&fail);
+                br.push_str(", ");
+                br.push_str(&arm_at);
+                br.push_str(", ");
+                br.push_str(&fail);
+                e.insts.push(br);
+                // The last test's failure is the next arm's block, which
+                // the loop below opens when it gets there — opening it
+                // here would leave an empty label behind it.
+                if j + 1 < arm.patterns.len() {
+                    start(e, &fail);
+                }
+                j += 1;
+            }
+        }
+        start(e, &arm_at);
+        let reached = scalar_arm_body(e, arm, want, dest, answer,
+            &mut held_a, &mut ty_a, &join);
+        if e.stuck {
+            return unknown_value();
+        }
+        if reached {
+            reaches = true;
+        }
+        let after = owns_now(e);
+        if n == 0 {
+            agreed = after;
+        } else {
+            agreed = join_owns(&agreed, &after);
+        }
+        if unconditional {
+            fell_through = false;
+            break;
+        }
+        start(e, &next_at);
+        n += 1;
+    }
+    owns_back(e, &agreed);
+    // Exhaustiveness was checked, so control cannot arrive at the end of
+    // the last test in a well-typed program — but TIR wants a terminator.
+    if fell_through {
+        e.insts.push("    trap F_TRAP".to_string());
+        e.done = true;
+    } else if !reaches {
+        e.done = true;
+    }
+    if !reaches && !fell_through {
+        return Value { text: "".to_string(), ty: "".to_string() };
+    }
+    start(e, &join);
+    match_scalar_result(e, want, dest, answer, &held_a, &ty_a)
+}
+
+/// Where the arms' agreement meets: the slot each answering arm stored
+/// into, read once — or nothing, where nothing was wanted, where the
+/// answer is going somewhere, or where what the arms hand over is a place
+/// already (TIR §3).
+fn match_scalar_result(
+    e: &mut Emit,
+    want: &str,
+    dest: &str,
+    answer: &str,
+    held: &str,
+    ty: &str,
+) -> Value {
+    if dest.len() > 0 {
+        return Value { text: dest.to_string(), ty: answer.to_string() };
+    }
+    if held.len() == 0 {
+        return Value { text: "".to_string(), ty: "".to_string() };
+    }
+    if def_at(&e.defs, ty) >= 0 {
+        return Value { text: held.to_string(), ty: ty.to_string() };
+    }
+    let name = fresh(e, "v");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&name);
+    line.push_str(" = load ");
+    let shown = tir_of(ty);
+    line.push_str(&shown);
+    line.push_str(" ");
+    line.push_str(held);
+    e.insts.push(line);
+    Value { text: name, ty: ty.to_string() }
+}
+
+/// One arm's body in a scalar `match` — the same outline the enum's arms
+/// already follow, with no payload to bind: what a binding names here is
+/// the scrutinee itself, and it was read where the match began.
+///
+/// Answers whether control leaves the arm for the join — an arm that
+/// *leaves* (`return`, `break`, `trap()`) has nothing to store and
+/// nowhere to store it (G9.155), and a join nobody reaches is not
+/// started.
+fn scalar_arm_body(
+    e: &mut Emit,
+    arm: &ast::Arm,
+    want: &str,
+    dest: &str,
+    answer: &str,
+    held: &mut String,
+    ty: &mut String,
+    join: &str,
+) -> bool {
+    let mark = e.locals.len();
+    let owned_mark = e.owned.len();
+    if dest.len() > 0 {
+        aggregate_tail(e, &arm.body, dest, answer);
+    } else {
+        let v = value(e, &arm.body, want);
+        if e.stuck {
+            return false;
+        }
+        // An arm that has already left has nothing to store and nowhere
+        // to store it. Nor has an arm that **answers nothing**: `()` is
+        // a type and an empty string is not (G9.155).
+        if !e.done && v.ty.len() > 0 && !answers_nothing(&v.ty) {
+            if held.len() == 0 {
+                *ty = v.ty.to_string();
+                let made = ty.to_string();
+                *held = slot_for(e, "tmp", &made);
+            }
+            // An arm whose value is an aggregate has nothing to store: it
+            // **is** its storage, so what the arms agree to leave the
+            // answer in is copied into and not written to (TIR §3).
+            let ty_now = ty.to_string();
+            let here = held.to_string();
+            if def_at(&e.defs, &ty_now) >= 0 {
+                copy_between(e, &v.text, &here, &ty_now);
+            } else {
+                store_into(e, &ty_now, &v.text, &here);
+            }
+        }
+    }
+    if e.stuck {
+        return false;
+    }
+    let reaches = !e.done;
+    leave(e, owned_mark);
+    if e.stuck {
+        return false;
+    }
+    if !e.done {
+        jump(e, join);
+    }
+    forget(e, mark);
+    reaches
+}
+
+/// What two arms that both leave the same names in the same state agreed
+/// about, pairwise — the join of the two lists in the shape every other
+/// branch already uses.
+fn join_owns(a: &Vec<Owns>, b: &Vec<Owns>) -> Vec<Owns> {
+    let mut j: taddr = 0;
+    let mut both: Vec<Owns> = Vec::new();
+    while j < a.len() && j < b.len() {
+        both.push(joined_owns(&a[j], &b[j]));
+        j += 1;
+    }
+    both
 }
 
 /// The same, over a place that has already been found.
@@ -8986,6 +9742,8 @@ fn copy_pattern_here(p: &ast::Pattern) -> ast::Pattern {
         ast::Pattern::Wild => ast::Pattern::Wild,
         ast::Pattern::Bind(n) => ast::Pattern::Bind(n.to_string()),
         ast::Pattern::Int(v) => ast::Pattern::Int(v),
+        ast::Pattern::Trit(v) => ast::Pattern::Trit(v),
+        ast::Pattern::Char(v) => ast::Pattern::Char(v),
         ast::Pattern::Bool(b) => ast::Pattern::Bool(b),
         ast::Pattern::Tuple(items) => ast::Pattern::Tuple(copy_patterns_here(items)),
         ast::Pattern::Aggregate(path, fields) => {

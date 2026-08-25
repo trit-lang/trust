@@ -566,6 +566,7 @@ for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
             bootstrap/programs/named/main.tr \
             bootstrap/programs/boxed/main.tr \
             bootstrap/programs/reassign/main.tr \
+            bootstrap/programs/patterns/main.tr \
             bootstrap/main.tr; do
     # The one that uses the library is handed the library, which is what
     # `--prelude` is for (Ch. 6 §3.3) — and asking for it where there is

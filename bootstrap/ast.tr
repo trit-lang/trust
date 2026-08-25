@@ -240,8 +240,14 @@ pub enum Pattern {
     Wild,
     /// A name, which binds.
     Bind(String),
-    /// A literal, as its value; a `trit` and a `char` are numbers here.
+    /// A number written as a number.
     Int(t27),
+    /// `1t`, `0t` and `-1t` — a trit literal, which is not a number that
+    /// happens to fit: `0` against a `trit` is refused, and `0t` is the way
+    /// to write the case (§1.4).
+    Trit(t27),
+    /// `'a'` — a character, which is likewise not a number.
+    Char(t27),
     /// `true` and `false`.
     Bool(bool),
     /// `Kind::Rect(a, b)`, `Span { lo, hi }`, `Kind::Dot` — one shape, as in
@@ -733,6 +739,10 @@ pub fn show_pattern(p: &Pattern, out: &mut String) {
         Pattern::Wild => out.push_str("_"),
         Pattern::Bind(n) => out.push_str(n),
         Pattern::Int(v) => push_int(out, v),
+        // A trit and a character show as their values here: the tree this
+        // prints is for *shape*, and what token wrote them is not shape.
+        Pattern::Trit(v) => push_int(out, v),
+        Pattern::Char(v) => push_int(out, v),
         Pattern::Bool(b) => {
             if b {
                 out.push_str("true");
@@ -1331,6 +1341,8 @@ fn copy_pattern(p: &Pattern) -> Pattern {
         Pattern::Wild => Pattern::Wild,
         Pattern::Bind(n) => Pattern::Bind(n.to_string()),
         Pattern::Int(v) => Pattern::Int(v),
+        Pattern::Trit(v) => Pattern::Trit(v),
+        Pattern::Char(v) => Pattern::Char(v),
         Pattern::Bool(b) => Pattern::Bool(b),
         Pattern::Tuple(items) => Pattern::Tuple(copy_patterns(items)),
         Pattern::Aggregate(path, fields) => {

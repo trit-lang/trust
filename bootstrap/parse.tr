@@ -1913,11 +1913,11 @@ fn pattern(p: &mut Parser) -> Result<ast::Pattern, lex::Error> {
         }
         Tok::TritLit(v) => {
             p.at = next;
-            Result::Ok(ast::Pattern::Int(v))
+            Result::Ok(ast::Pattern::Trit(v))
         }
         Tok::CharLit(v) => {
             p.at = next;
-            Result::Ok(ast::Pattern::Int(v))
+            Result::Ok(ast::Pattern::Char(v))
         }
         Tok::Kw(k) => {
             if k.same("true") {
@@ -1944,7 +1944,7 @@ fn pattern(p: &mut Parser) -> Result<ast::Pattern, lex::Error> {
                 let after = bump(p)?;
                 match after {
                     Tok::Int(v) => Result::Ok(ast::Pattern::Int(0 - v)),
-                    Tok::TritLit(v) => Result::Ok(ast::Pattern::Int(0 - v)),
+                    Tok::TritLit(v) => Result::Ok(ast::Pattern::Trit(0 - v)),
                     _ => Result::Err(lex::Error {
                         at: p.at,
                         message: "expected a literal after `-`".to_string(),

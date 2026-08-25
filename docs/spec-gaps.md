@@ -2626,6 +2626,96 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.168 — `&&T` binds nowhere.** `let rr = &r` is refused by the Trust
+lowering in as many words — *a reference to a reference is two loads and
+one name, and this does not reach it* — where the Rust compiler binds the
+pair happily. The boundary is written in the borrow's own code rather
+than discovered here; what is new is the finding that nothing else has
+walked into it: `match &r` reaches the referent in two `%v` loads with
+the reference read on the way, exactly as G9.154 says a written reference
+is read. A place behind two references — a struct's field that is itself
+a reference, say `match p.r` — is lowered by both, the field read and
+then what it points at.
+
+**G9.167 — a `Box<T>` handed to a function by value has no definition to
+copy into.** `fn f(b: Box<t27>)` is refused by the Trust lowering at the
+signature: a parameter that is not a scalar and not a reference arrives as
+a pointer and is copied into storage of its own, field by field — which
+asks for the *definition* of what it is, and a box has none, because it is
+not an aggregate (Ch. 5 §2.3). The Rust compiler lowers the same
+signature as one `ptr` parameter, flag and all. Nothing about `match` is
+involved; it was found while probing box scrutinees, and a `Box` built
+inside the function — which is how `boxed` builds every one — is
+unaffected.
+
+**G9.166 — an enum match whose arms all leave still finishes in a join,
+and the join is junk.** `match c { Choice::A => return 1, Choice::B =>
+return 2 }` as a function's tail: both checkers answer `ok` — an arm that
+leaves is never asked what it answers (G9.159) — and the Rust lowering
+emits the two arms and nothing after them. The Trust one still opens the
+join, and what follows an exhausted `match` in its book is `trap` and a
+bare `ret` with no value after it: text nothing executes, but TIR is
+compared character for character, so dead text is still text. The scalar
+shape of the same program does not share the flaw — `match_scalar` was
+written with the question "does anybody reach the join" in it (G9.162) —
+and neither does a tail where even one arm answers.
+
+**G9.165 — the second checker has not heard G9.159 for scalars.** A
+wildcard arm that leaves is still an arm that answers nothing, so
+`match k { 0 => return 1, _ => return 2 }` as a function's tail is a body
+of `()` where `t27` was promised: the first checker says `mismatch`, the
+second says `ok`. The rule — the answer comes from the arms that reach —
+is the same over an enum, where the second checker does apply it; what a
+scalar asks it to see is a scrutinee with no variants, which the old
+machinery never walked into.
+
+**G9.164 — a bare name in an enum arm binds in one compiler and nothing
+in the other.** `match c { x => … }` with `c: Choice`: the Rust compiler
+binds `x` to the value itself — the arm catches all, so what it catches
+is the scrutinee — and lowers it. The Trust one binds nothing, and then
+cannot find the body's `x`, and refuses the function. Which pattern a
+name against an enum *is* is G9.164's question; §4 writes patterns as
+binding names without saying an arm of one name against one enum is the
+catch-all with a handle.
+
+**G9.163 — the second resolver scopes a binding the first refuses, in a
+scalar arm.** `match k { 0 | 1 | 2 => 7, x => x + 1 }` over `k: t27`: the
+first compiler answers `x is not in scope` — a name in a scalar arm binds
+nothing, because what would be bound was already in hand where the
+scrutinee was read (G9.162) — and the second accepts, because its
+rewriter scopes every `Bind` it rewrites without asking what is being
+matched. The *programs* cannot diverge: the second compiler's lowering
+refuses the same body, the name having no slot. What diverges is the
+checkers' verdicts, which is what `agree` is for.
+
+**G9.162 — a literal in an arm is a comparison, and `0t` is not `0`.**
+Ch. 0 §5.4's own example is `match k { 0 => …, _ => … }`, and what a
+literal *is* comes from what it tests rather than how it is written: `0`
+is a number, `0t` is a trit and `'a'` is a character, and none of them
+matches a scalar that is not its own. The fold the two parsers shared —
+every literal into `Pattern::Int`, with the comment that a trit and a
+char are numbers here — made `match t { 0 => … }` a program lowering
+accepted and the chapter refused, so the tree gained `Pattern::Trit` and
+`Pattern::Char`, which is also where the parsers' `-1t` and `'a'` had
+been waiting to be told apart.
+
+The lowering is the one Ch. 1 §5 writes: arms are tested in the order
+they are written, one `cmp` a literal, one more block an alternative; the
+three values of a `trit` are not comparisons at all but one three-way
+branch, and where two of them answer in one arm the `br2` sugar of TIR
+§3.6 is what the instruction prints. A `match` is exhaustive (Ch. 2 §5):
+three values for a `trit`, two for a `bool`, and for a number an arm that
+catches the rest, because no list of cases is every number — and the arm
+that catches *ends the question*: a wrong literal written after it is
+never asked, because the arm in front of it already answered for
+everything. A name in a scalar arm binds nothing. And what is matched
+over is a **value**, read where the scrutinee left it: a name loaded
+where it stands, a reference walked a load at a time (G9.154's naming,
+which the program wrote), a borrow no instruction at all (G9.160), a
+call's answer, a field's word, a `Box` moved. `patterns` writes the
+family: door numbers, the three ways a reference spells the same read,
+or-arms, and the dispatch that is one instruction.
+
 **G9.161 — a deref scrutinee moves only when what it derefs owns, and
 the bootstrap moves never.** `match *c { … }` with `c: &Tree` is refused
 by the Rust compiler in as many words — *cannot move out of a
@@ -7608,9 +7698,5 @@ Specified well enough to build, simply not built yet:
   function-pointer chapter exists.
 - **Concurrency** — AM §2.4 reserves it explicitly; the interpreter is the
   single-threaded, sequentially consistent machine that section defines.
-- **Literal patterns (Ch. 0 §5.4) in the bootstrap's lowering.** Arms are
-  decided by tag test alone — variant names and `_` — so
-  `match k { 0 => …, _ => … }` is refused outright, in value position
-  and in statement position, where the Rust compiler lowers the chain of
-  comparisons the chapter's own example is made of. Coverage, not a
-  question.
+- **Literal patterns are built** (G9.162) — nothing of Ch. 0 §5.4's
+  `match` remains on this list.

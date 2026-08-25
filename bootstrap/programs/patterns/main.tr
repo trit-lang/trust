@@ -1,0 +1,178 @@
+// A program that chooses by *what a number is*, which is where match arms
+// meet the scalars of Ch. 1 — Ch. 2 §5's arms over `t27`, `trit`, `bool`
+// and `char`, with §5.4's one rule about who counts.
+//
+// A literal in an arm is a comparison, in the order the arms are written,
+// and the three values of a `trit` are not comparisons at all but one
+// three-way branch (Ch. 1 §5). `0` is a number and `0t` is a trit, and
+// only one of them matches a `trit` — the same literal spelled two ways
+// is two different programs, which `ast::Pattern::Trit` is for. The arm
+// that catches the rest is the block the last test falls to, and a name
+// written where it is caught binds nothing, because what would be bound
+// was already in hand where the scrutinee was read.
+//
+// What is matched over decides who answers: a scalar is a *value*, read
+// where the scrutinee left it — a name where it stands, a reference
+// walked a load at a time, a borrow no instruction at all, a call's
+// answer, a field's word, a `Box` moved. What does not appear here is a
+// `ptr`, which is not a scalar the language matches on, and the
+// all-leaving tail the checker already knows to refuse.
+
+fn zeroed(k: t27) -> t27 {
+    match k {
+        0 => 1,
+        _ => 2,
+    }
+}
+
+fn door(k: t27) -> t27 {
+    match k {
+        0 => 10,
+        1 => 11,
+        -30 => 12,
+        _ => 99,
+    }
+}
+
+fn hand(k: t27) -> t27 {
+    match k {
+        0 | 1 | 2 => 7,
+        x => 42,
+    }
+}
+
+fn pointed(t: trit) -> t27 {
+    match t {
+        1t => 11,
+        -1t => 12,
+        0t => 13,
+    }
+}
+
+fn sided(t: trit) -> t27 {
+    match t {
+        -1t | 0t => 5,
+        1t => 6,
+    }
+}
+
+fn folded(t: trit) -> t27 {
+    match t {
+        0t | 1t | -1t => 1,
+    }
+}
+
+fn flagged(b: bool) -> t27 {
+    match b {
+        false => 20,
+        true => 21,
+    }
+}
+
+fn lettered(c: char) -> t27 {
+    match c {
+        'a' => 1,
+        'z' => 26,
+        _ => 0,
+    }
+}
+
+// The same match written three ways: the reference, the borrow, and the
+// deref of one all read what `r` points at — one load and then one more,
+// whichever spelling (Ch. 3 §2.1).
+fn behind(r: &t27) -> t27 {
+    let a = match r {
+        0 => 1,
+        _ => 2,
+    };
+    let b = match &r {
+        0 => 10,
+        _ => 20,
+    };
+    let d = match *r {
+        0 => 100,
+        _ => 200,
+    };
+    a + b + d
+}
+
+struct Pair { a: t27, b: t27 }
+
+fn dotted(p: Pair) -> t27 {
+    match p.a {
+        0 => p.b,
+        _ => p.b - 1,
+    }
+}
+
+fn answer(n: t27) -> t27 {
+    n - 19
+}
+
+fn called(n: t27) -> t27 {
+    match answer(n) {
+        0 => n,
+        _ => n + 1,
+    }
+}
+
+fn held(n: t27) -> t27 {
+    let b: Box<t27> = Box::new(n);
+    match b {
+        0 => 1,
+        _ => 2,
+    }
+}
+
+fn grouped(k: t27) -> t27 {
+    match (k) {
+        1 => 5,
+        _ => 6,
+    }
+}
+
+fn chosen(k: t27) -> t27 {
+    let mut out = 0;
+    match k {
+        0 => {
+            out = 1;
+        }
+        1 => {
+            out = 2;
+        }
+        _ => {
+            out = 3;
+        }
+    }
+    match out {
+        1 => 10,
+        _ => 20,
+    }
+}
+
+fn left(t: trit) -> t27 {
+    match t {
+        -1t => return 1,
+        0t => return 2,
+        1t => return 3,
+    }
+}
+
+fn main() -> t27 {
+    let s = 7;
+    zeroed(0) + zeroed(5)
+        + door(0) + door(1) + door(-30) + door(8)
+        + hand(2) + hand(9)
+        + pointed(1t) + pointed(-1t) + pointed(0t)
+        + sided(-1t) + sided(0t) + sided(1t)
+        + folded(1t)
+        + flagged(false) + flagged(true)
+        + lettered('a') + lettered('q')
+        + behind(&s)
+        + dotted(Pair { a: 0, b: 5 })
+        + called(19) + called(4)
+        + held(0) + held(3)
+        + grouped(0) + grouped(2)
+        + chosen(0) + chosen(1) + chosen(8)
+        + left(-1t)
+}
