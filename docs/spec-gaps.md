@@ -2666,17 +2666,37 @@ involved; it was found while probing box scrutinees, and a `Box` built
 inside the function — which is how `boxed` builds every one — is
 unaffected.
 
-**G9.166 — an enum match whose arms all leave still finishes in a join,
-and the join is junk.** `match c { Choice::A => return 1, Choice::B =>
-return 2 }` as a function's tail: both checkers answer `ok` — an arm that
-leaves is never asked what it answers (G9.159) — and the Rust lowering
-emits the two arms and nothing after them. The Trust one still opens the
-join, and what follows an exhausted `match` in its book is `trap` and a
-bare `ret` with no value after it: text nothing executes, but TIR is
-compared character for character, so dead text is still text. The scalar
-shape of the same program does not share the flaw — `match_scalar` was
-written with the question "does anybody reach the join" in it (G9.162) —
-and neither does a tail where even one arm answers.
+**G9.171 — the first checker reads a type out of dead code and the
+second does not.** A block whose last word already left still has a
+**tail**, and the first checker reads the block's type from that tail:
+`if k > 0 { return 1; k } else { 2 }` types the arm `t27` even though
+the `k` is never lowered, and accepts it where a value is wanted;
+`if k > 0 { return 1; } else { 2 }` types the arm `()` and is refused in
+as many words, and so is a `let m = if …` in the one spelling the
+refusal *other* calls binding a `()`. G9.159's "an arm that leaves is
+never asked" lives beside this rather than instead of it: the tail
+answers the question, it is simply never reached. The second checker
+takes the block as having left and answers Never for all of them —
+`ok` in all three — and which of the two a program gets is currently
+a matter of which compiler reads it first.
+
+**G9.166 — an instruction after the block left is not text, and a name
+is.** `match c { A => return 1, B => return 2 }` as a function's tail
+has no join to start: nobody arrives. Settling it took finding where
+the boundary between text and not-text runs, and it is precise: a
+**name** is text — a dead `k` still takes its value number, and a dead
+`let` still takes its slot, because both print in the entry block — and
+an **instruction** is not, so what follows a `return` never appears.
+One gate at the push says the whole of it, where a guard at every
+writer would have said it a hundred times and gotten every number
+wrong: the writers all still run, only the push stays closed (`G9.158`'s
+"dead text is still text" read from the other side — the text must be
+the *same*). The block is still checked, because dead code is still
+code (G9.171 is the part the second checker has not heard). The match
+whose arms all leave, the statement after `return`, the `if` that half
+of a compiler is written in, and the arm whose answer storage names a
+slot the store never reaches all lower identically now; `scope`'s
+`gone` and `turning` write the two.
 
 **G9.165 — the second checker has not heard G9.159 for scalars.** A
 wildcard arm that leaves is still an arm that answers nothing, so

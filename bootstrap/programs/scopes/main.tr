@@ -193,6 +193,32 @@ fn both_ways(n: taddr) -> taddr {
     k
 }
 
+// A statement that already **left** has no next one: the `return` is the
+// end of the block and what is written after it is code nobody can reach.
+// Nothing of it is lowered — an instruction is not text there — while the
+// *name* it would have taken still takes its number, exactly as a slot in
+// dead code is visible in the entry where the store into it is not
+// (G9.166). The block is still checked, because dead code is still code;
+// it is the lowering that stops.
+fn gone(n: taddr) -> taddr {
+    let r: Raw<t27> = Raw::alloc(n);
+    return r.room();
+    n + 1
+}
+
+enum Turn { Left, Right }
+
+// An arm that leaves is never asked what it answers with (G9.159), and a
+// match whose *every* arm left has no join to gather at: control never
+// arrives, so there is no join to start and nothing after the match at
+// all (G9.166).
+fn turning(t: Turn) -> taddr {
+    match t {
+        Turn::Left => return 1,
+        Turn::Right => return 2,
+    }
+}
+
 fn main() -> t27 {
     nothing(1);
     two(2);
@@ -200,5 +226,6 @@ fn main() -> t27 {
     (early(1) + early_value(1) + each(2) + armed(1) + armed_statement(1)
         + p.a + p.b + picked(Pick::One, 1) + nested(1) + holds(1)
         + hands_over(1) + given_away(1) + maybe_gone(1) + maybe_valued(1)
-        + maybe_picked(Pick::Two, 1) + both_ways(1)) as t27
+        + maybe_picked(Pick::Two, 1) + both_ways(1)
+        + gone(1) + turning(Turn::Left)) as t27
 }

@@ -903,13 +903,18 @@ fn label(e: &mut Emit, prefix: &str) -> String {
 
 /// End the block being emitted and start another.
 fn start(e: &mut Emit, name: &str) {
+    // A block with nothing in it is a block nobody opened: a bare label
+    // is not a thing TIR prints, because every other block closes with a
+    // terminator and the empty one asked for nothing (G9.166, G9.158).
     let mut held: Vec<String> = Vec::new();
     let mut i: taddr = 0;
     while i < e.insts.len() {
         held.push(e.insts[i].to_string());
         i += 1;
     }
-    e.blocks.push(Chunk { label: e.label.to_string(), insts: held });
+    if held.len() > 0 {
+        e.blocks.push(Chunk { label: e.label.to_string(), insts: held });
+    }
     e.insts = Vec::new();
     let mut open: String = Vec::new();
     open.push_str(name);
@@ -918,12 +923,24 @@ fn start(e: &mut Emit, name: &str) {
     e.done = false;
 }
 
+/// One instruction into the block being emitted — and none where the
+/// block already **left**. What follows a `return` is code nobody can
+/// reach, and sinking it here rather than at every writer is what makes
+/// the *names* still line up: a dead `k` still takes its number, and a
+/// dead `let` still takes its slot, because those are text the entry
+/// block prints and the other implementation prints them too (G9.166).
+fn emit(e: &mut Emit, line: String) {
+    if !e.done {
+        e.insts.push(line);
+    }
+}
+
 /// `br ^somewhere`.
 fn jump(e: &mut Emit, to: &str) {
     let mut line: String = Vec::new();
     line.push_str("    br ");
     line.push_str(to);
-    e.insts.push(line);
+    emit(e, line);
     e.done = true;
 }
 
@@ -1177,7 +1194,7 @@ pub fn function(
                 store.push_str(&wide);
                 store.push_str(" %self, ");
                 store.push_str(&slot);
-                e.insts.push(store);
+                emit(&mut e, store);
                 i += 1;
                 continue;
             }
@@ -1215,7 +1232,7 @@ pub fn function(
             let mut store: String = Vec::new();
             store.push_str("    store ptr %self, ");
             store.push_str(&slot);
-            e.insts.push(store);
+            emit(&mut e, store);
             i += 1;
             continue;
         }
@@ -1261,7 +1278,7 @@ pub fn function(
                 store.push_str(&name);
                 store.push_str(", ");
                 store.push_str(&slot);
-                e.insts.push(store);
+                emit(&mut e, store);
                 i += 1;
                 continue;
             }
@@ -1300,7 +1317,7 @@ pub fn function(
         store.push_str(&name);
         store.push_str(", ");
         store.push_str(&slot);
-        e.insts.push(store);
+        emit(&mut e, store);
         i += 1;
     }
     header.push_str(")");
@@ -1464,7 +1481,7 @@ fn offset_of(e: &mut Emit, base: &str, at: taddr) -> String {
     line.push_str(base);
     line.push_str(", const t27 ");
     push_int(&mut line, at as t27);
-    e.insts.push(line);
+    emit(e, line);
     name
 }
 
@@ -1614,7 +1631,7 @@ fn str_len(e: &mut Emit, slot: &str) -> Value {
     load.push_str(&v);
     load.push_str(" = load t27 ");
     load.push_str(&src);
-    e.insts.push(load);
+    emit(e, load);
     Value { text: v, ty: "taddr".to_string() }
 }
 
@@ -1735,10 +1752,10 @@ fn raw_position(e: &mut Emit, slot: &str, elem: &str, i: &str) -> String {
     line.push_str(i);
     line.push_str(", ");
     line.push_str(&room);
-    e.insts.push(line);
+    emit(e, line);
     three_ways(e, &c, &lo, &bad, &bad);
     start(e, &bad);
-    e.insts.push("    trap F_TRAP".to_string());
+    emit(e, "    trap F_TRAP".to_string());
     e.done = true;
     start(e, &lo);
     let c = fresh(e, "c");
@@ -1748,13 +1765,13 @@ fn raw_position(e: &mut Emit, slot: &str, elem: &str, i: &str) -> String {
     line.push_str(" = cmp t27 ");
     line.push_str(i);
     line.push_str(", const t27 0");
-    e.insts.push(line);
+    emit(e, line);
     // The fourth label is made *after* the second comparison, which is what
     // decides its number.
     let neg = label(e, "ins.neg");
     three_ways(e, &c, &neg, &ok, &ok);
     start(e, &neg);
-    e.insts.push("    trap F_TRAP".to_string());
+    emit(e, "    trap F_TRAP".to_string());
     e.done = true;
     start(e, &ok);
     let base = loaded(e, "ptr", slot);
@@ -1766,7 +1783,7 @@ fn raw_position(e: &mut Emit, slot: &str, elem: &str, i: &str) -> String {
     line.push_str(i);
     line.push_str(", const t27 ");
     push_int(&mut line, l.size as t27);
-    e.insts.push(line);
+    emit(e, line);
     let at = fresh(e, "e");
     let mut line: String = Vec::new();
     line.push_str("    ");
@@ -1775,7 +1792,7 @@ fn raw_position(e: &mut Emit, slot: &str, elem: &str, i: &str) -> String {
     line.push_str(&base);
     line.push_str(", ");
     line.push_str(&off);
-    e.insts.push(line);
+    emit(e, line);
     at
 }
 
@@ -1839,7 +1856,7 @@ fn box_new(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
     line.push_str(", const t27 ");
     push_int(&mut line, l.align as t27);
     line.push_str(") -> ptr");
-    e.insts.push(line);
+    emit(e, line);
     let ok = label(e, "box.ok");
     let bad = label(e, "box.no");
     let join = label(e, "box.join");
@@ -1851,7 +1868,7 @@ fn box_new(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
     line.push_str(" = cmp t27 ");
     line.push_str(&number);
     line.push_str(", const t27 0");
-    e.insts.push(line);
+    emit(e, line);
     three_ways(e, &c, &bad, &bad, &ok);
 
     start(e, &ok);
@@ -1866,7 +1883,7 @@ fn box_new(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
     jump(e, &join);
 
     start(e, &bad);
-    e.insts.push("    trap F_TRAP".to_string());
+    emit(e, "    trap F_TRAP".to_string());
     e.done = true;
 
     start(e, &join);
@@ -1912,7 +1929,7 @@ fn raw_alloc(e: &mut Emit, want: &str, count: &ast::Expr) -> Value {
     line.push_str(&n.text);
     line.push_str(", const t27 ");
     push_int(&mut line, l.size as t27);
-    e.insts.push(line);
+    emit(e, line);
     let got = fresh(e, "raw");
     let mut line: String = Vec::new();
     line.push_str("    ");
@@ -1922,7 +1939,7 @@ fn raw_alloc(e: &mut Emit, want: &str, count: &ast::Expr) -> Value {
     line.push_str(", const t27 ");
     push_int(&mut line, l.align as t27);
     line.push_str(") -> ptr");
-    e.insts.push(line);
+    emit(e, line);
     let held = as_number(e, &got);
     let c = fresh(e, "c");
     let mut line: String = Vec::new();
@@ -1931,7 +1948,7 @@ fn raw_alloc(e: &mut Emit, want: &str, count: &ast::Expr) -> Value {
     line.push_str(" = cmp t27 ");
     line.push_str(&held);
     line.push_str(", const t27 0");
-    e.insts.push(line);
+    emit(e, line);
     let ok = label(e, "raw.ok");
     let bad = label(e, "raw.no");
     let join = label(e, "raw.join");
@@ -1945,7 +1962,7 @@ fn raw_alloc(e: &mut Emit, want: &str, count: &ast::Expr) -> Value {
     jump(e, &join);
 
     start(e, &bad);
-    e.insts.push("    trap F_TRAP".to_string());
+    emit(e, "    trap F_TRAP".to_string());
     e.done = true;
 
     start(e, &join);
@@ -1961,7 +1978,7 @@ fn as_number(e: &mut Emit, p: &str) -> String {
     line.push_str(p);
     line.push_str(", ");
     line.push_str(&cell);
-    e.insts.push(line);
+    emit(e, line);
     loaded(e, "taddr", &cell)
 }
 
@@ -1992,7 +2009,7 @@ fn drop_raw(e: &mut Emit, slot: &str, owner: &str) {
     line.push_str(&room);
     line.push_str(", const t27 ");
     push_int(&mut line, l.size as t27);
-    e.insts.push(line);
+    emit(e, line);
     let at = loaded(e, "ptr", slot);
     let yes = label(e, "free.yes");
     let no = label(e, "free.no");
@@ -2004,7 +2021,7 @@ fn drop_raw(e: &mut Emit, slot: &str, owner: &str) {
     line.push_str(" = cmp t27 ");
     line.push_str(&held);
     line.push_str(", const t27 0");
-    e.insts.push(line);
+    emit(e, line);
     three_ways(e, &c, &no, &no, &yes);
 
     start(e, &yes);
@@ -2016,7 +2033,7 @@ fn drop_raw(e: &mut Emit, slot: &str, owner: &str) {
     line.push_str(", const t27 ");
     push_int(&mut line, l.align as t27);
     line.push_str(")");
-    e.insts.push(line);
+    emit(e, line);
     jump(e, &no);
 
     start(e, &no);
@@ -2117,7 +2134,7 @@ fn against(e: &mut Emit, v: &str, bound: t27) -> String {
     line.push_str(v);
     line.push_str(", const t27 ");
     push_int(&mut line, bound);
-    e.insts.push(line);
+    emit(e, line);
     c
 }
 
@@ -2142,7 +2159,7 @@ fn three_ways(e: &mut Emit, c: &str, neg: &str, zero: &str, pos: &str) {
         line.push_str(", ");
         line.push_str(pos);
     }
-    e.insts.push(line);
+    emit(e, line);
     e.done = true;
 }
 
@@ -2289,7 +2306,7 @@ fn index_place(e: &mut Emit, base: &ast::Expr, at: &ast::Expr) -> Value {
         line.push_str(&data);
         line.push_str(" = load ptr ");
         line.push_str(&held.text);
-        e.insts.push(line);
+        emit(e, line);
         let ending = offset_of(e, &held.text, l.offsets[1]);
         count = fresh(e, "v");
         let mut line: String = Vec::new();
@@ -2297,7 +2314,7 @@ fn index_place(e: &mut Emit, base: &ast::Expr, at: &ast::Expr) -> Value {
         line.push_str(&count);
         line.push_str(" = load t27 ");
         line.push_str(&ending);
-        e.insts.push(line);
+        emit(e, line);
         elem = "char".to_string();
     } else {
         // An array. Both answers are in the *type* — how many elements
@@ -2333,7 +2350,7 @@ fn index_place(e: &mut Emit, base: &ast::Expr, at: &ast::Expr) -> Value {
     line.push_str(" = cmp t27 ");
     line.push_str(&idx.text);
     line.push_str(", const t27 0");
-    e.insts.push(line);
+    emit(e, line);
     let lo = label(e, "idx.lo");
     let bad = label(e, "idx.fault");
     let mut line: String = Vec::new();
@@ -2345,9 +2362,9 @@ fn index_place(e: &mut Emit, base: &ast::Expr, at: &ast::Expr) -> Value {
     line.push_str(&lo);
     line.push_str(", ");
     line.push_str(&lo);
-    e.insts.push(line);
+    emit(e, line);
     start(e, &bad);
-    e.insts.push("    trap F_TRAP".to_string());
+    emit(e, "    trap F_TRAP".to_string());
     start(e, &lo);
     let high = fresh(e, "c");
     let mut line: String = Vec::new();
@@ -2357,7 +2374,7 @@ fn index_place(e: &mut Emit, base: &ast::Expr, at: &ast::Expr) -> Value {
     line.push_str(&idx.text);
     line.push_str(", ");
     line.push_str(&count);
-    e.insts.push(line);
+    emit(e, line);
     let ok = label(e, "idx.ok");
     let mut line: String = Vec::new();
     line.push_str("    br3 ");
@@ -2368,7 +2385,7 @@ fn index_place(e: &mut Emit, base: &ast::Expr, at: &ast::Expr) -> Value {
     line.push_str(&bad);
     line.push_str(", ");
     line.push_str(&bad);
-    e.insts.push(line);
+    emit(e, line);
     start(e, &ok);
     let scaled = fresh(e, "a");
     let mut line: String = Vec::new();
@@ -2378,7 +2395,7 @@ fn index_place(e: &mut Emit, base: &ast::Expr, at: &ast::Expr) -> Value {
     line.push_str(&idx.text);
     line.push_str(", const t27 ");
     push_int(&mut line, step);
-    e.insts.push(line);
+    emit(e, line);
     let there = fresh(e, "p");
     let mut line: String = Vec::new();
     line.push_str("    ");
@@ -2387,7 +2404,7 @@ fn index_place(e: &mut Emit, base: &ast::Expr, at: &ast::Expr) -> Value {
     line.push_str(&data);
     line.push_str(", ");
     line.push_str(&scaled);
-    e.insts.push(line);
+    emit(e, line);
     Value { text: there, ty: elem }
 }
 
@@ -2628,7 +2645,7 @@ fn index_value(e: &mut Emit, base: &ast::Expr, at: &ast::Expr) -> Value {
     line.push_str(&wide);
     line.push_str(" ");
     line.push_str(&held.text);
-    e.insts.push(line);
+    emit(e, line);
     Value { text: v, ty: held.ty }
 }
 
@@ -2885,7 +2902,7 @@ fn aggregate_body(e: &mut Emit, b: &ast::Block, owner: &str) {
     if e.done {
         return;
     }
-    e.insts.push("    ret".to_string());
+    emit(e, "    ret".to_string());
 }
 
 
@@ -2998,7 +3015,7 @@ fn match_expr(
                         line.push_str(&v);
                         line.push_str(" = load ptr ");
                         line.push_str(&slot);
-                        e.insts.push(line);
+                        emit(e, line);
                         deref_held = Value { text: v, ty: elem };
                         have_deref = true;
                         through = false;
@@ -3039,7 +3056,7 @@ fn match_expr(
                     line.push_str(&v);
                     line.push_str(" = load ptr ");
                     line.push_str(&slot);
-                    e.insts.push(line);
+                    emit(e, line);
                     held = Value { text: v, ty: points };
                     direct = false;
                 }
@@ -3072,7 +3089,7 @@ fn match_expr(
                             line.push_str(&v);
                             line.push_str(" = load ptr ");
                             line.push_str(&slot);
-                            e.insts.push(line);
+                            emit(e, line);
                             held = Value { text: v, ty: points };
                             named = true;
                         }
@@ -3561,7 +3578,7 @@ fn match_scalar(
                         line.push_str(&v);
                         line.push_str(" = load ptr ");
                         line.push_str(&slot);
-                        e.insts.push(line);
+                        emit(e, line);
                         held = Value { text: v, ty: owner };
                     } else {
                         let at_p = place(e, &*inner);
@@ -3612,7 +3629,7 @@ fn match_scalar(
         line.push_str(&shown);
         line.push_str(" ");
         line.push_str(&held.text);
-        e.insts.push(line);
+        emit(e, line);
         held = Value { text: v, ty: inner.to_string() };
         ty = inner;
     }
@@ -3726,7 +3743,7 @@ fn match_scalar(
                 line.push_str(", ");
                 line.push_str(&pos);
             }
-            e.insts.push(line);
+            emit(e, line);
 
             let was = owns_now(e);
             let mut agreed: Vec<Owns> = Vec::new();
@@ -3809,7 +3826,7 @@ fn match_scalar(
                 test.push_str(&width);
                 test.push_str(" ");
                 push_int(&mut test, v);
-                e.insts.push(test);
+                emit(e, test);
                 let fail = if j + 1 >= arm.patterns.len() {
                     next_at.to_string()
                 } else {
@@ -3824,7 +3841,7 @@ fn match_scalar(
                 br.push_str(&arm_at);
                 br.push_str(", ");
                 br.push_str(&fail);
-                e.insts.push(br);
+                emit(e, br);
                 // The last test's failure is the next arm's block, which
                 // the loop below opens when it gets there — opening it
                 // here would leave an empty label behind it.
@@ -3860,7 +3877,7 @@ fn match_scalar(
     // Exhaustiveness was checked, so control cannot arrive at the end of
     // the last test in a well-typed program — but TIR wants a terminator.
     if fell_through {
-        e.insts.push("    trap F_TRAP".to_string());
+        emit(e, "    trap F_TRAP".to_string());
         e.done = true;
     } else if !reaches {
         e.done = true;
@@ -3902,7 +3919,7 @@ fn match_scalar_result(
     line.push_str(&shown);
     line.push_str(" ");
     line.push_str(held);
-    e.insts.push(line);
+    emit(e, line);
     Value { text: name, ty: ty.to_string() }
 }
 
@@ -3933,10 +3950,12 @@ fn scalar_arm_body(
         if e.stuck {
             return false;
         }
-        // An arm that has already left has nothing to store and nowhere
-        // to store it. Nor has an arm that **answers nothing**: `()` is
-        // a type and an empty string is not (G9.155).
-        if !e.done && v.ty.len() > 0 && !answers_nothing(&v.ty) {
+        // An arm that has already left has its answer's storage made
+        // all the same — its name is text, and the store itself sinks
+        // like every other instruction after one (G9.166). Nor has an
+        // arm that **answers nothing**: `()` is a type and an empty
+        // string is not (G9.155).
+        if v.ty.len() > 0 && !answers_nothing(&v.ty) {
             if held.len() == 0 {
                 *ty = v.ty.to_string();
                 let made = ty.to_string();
@@ -4053,7 +4072,7 @@ fn match_place(
             read.push_str(&tag);
             read.push_str(" ");
             read.push_str(&from);
-            e.insts.push(read);
+            emit(e, read);
             let join = label(e, "match.join");
 
             // The arm that carries a niche's payload is not *tested*: it is
@@ -4109,6 +4128,11 @@ fn match_place(
             // of them agreed about (Ch. 3 §1.2).
             let was = owns_now(e);
             let mut agreed: Vec<Owns> = Vec::new();
+            // Whether any arm arrives for the join: one whose body left
+            // (`return`, `break`, `trap()`) has nothing to store and
+            // nowhere to store it (G9.155), and a join nobody reaches is
+            // not started (G9.166).
+            let mut reaches = false;
             let mut n: taddr = 0;
             while n < order.len() {
                 let a = order[n];
@@ -4145,7 +4169,7 @@ fn match_place(
                         layout::niche_value(&spot, k)
                     };
                     push_int(&mut test, written);
-                    e.insts.push(test);
+                    emit(e, test);
                     let mut br: String = Vec::new();
                     br.push_str("    br3 ");
                     br.push_str(&c);
@@ -4155,7 +4179,7 @@ fn match_place(
                     br.push_str(&arm_at);
                     br.push_str(", ");
                     br.push_str(&next_at);
-                    e.insts.push(br);
+                    emit(e, br);
                     start(e, &arm_at);
                 }
                 let mark = e.locals.len();
@@ -4181,8 +4205,11 @@ fn match_place(
                     // temporary for one is a slot no width fits and a store of
                     // a name nobody made. Written `{ f(x); }` the block says
                     // so by answering nothing at all, and the two spellings
-                    // mean the same thing (G9.155).
-                    if !e.done && v.ty.len() > 0 && !answers_nothing(&v.ty) {
+                    // mean the same thing (G9.155). (And an arm that already
+                    // left has its storage made all the same: its name is
+                    // text, and the store sinks like every other instruction
+                    // after one — G9.166.)
+                    if v.ty.len() > 0 && !answers_nothing(&v.ty) {
                         if held.len() == 0 {
                             ty = v.ty.to_string();
                             held = slot_for(e, "tmp", &ty);
@@ -4209,6 +4236,7 @@ fn match_place(
                     return unknown_value();
                 }
                 if !e.done {
+                    reaches = true;
                     jump(e, &join);
                 }
                 let after = owns_now(e);
@@ -4235,10 +4263,15 @@ fn match_place(
             // no such block: the variant nothing ruled out is the last arm
             // and it has already left.
             if carrier < 0 && wild < 0 {
-                e.insts.push("    trap F_TRAP".to_string());
+                emit(e, "    trap F_TRAP".to_string());
                 e.done = true;
             }
-
+            // Every arm may have left: there is then no join to start, and
+            // nothing after the match asks what it answered.
+            if !reaches {
+                e.done = true;
+                return Value { text: "".to_string(), ty: "".to_string() };
+            }
             start(e, &join);
             if dest.len() > 0 {
                 return Value { text: dest.to_string(), ty: answer.to_string() };
@@ -4260,7 +4293,7 @@ fn match_place(
             line.push_str(&shown);
             line.push_str(" ");
             line.push_str(&held);
-            e.insts.push(line);
+            emit(e, line);
             Value { text: name, ty: ty }
 }
 
@@ -4293,7 +4326,7 @@ fn if_expr(
             br.push_str(&then_at);
             br.push_str(", ");
             br.push_str(&else_at);
-            e.insts.push(br);
+            emit(e, br);
 
             // What each arm did to ownership. The second is lowered from
             // what was known *before* the first: two arms are alternatives
@@ -4367,7 +4400,7 @@ fn if_expr(
             line.push_str(&shown);
             line.push_str(" ");
             line.push_str(&held);
-            e.insts.push(line);
+            emit(e, line);
             Value { text: name, ty: ty }
 }
 
@@ -4742,7 +4775,7 @@ fn copy_fields(e: &mut Emit, from: &str, to: &str, owner: &str) -> bool {
             load.push_str(&shown);
             load.push_str(" ");
             load.push_str(&src);
-            e.insts.push(load);
+            emit(e, load);
             let dst = offset_of(e, to, at_off);
             store_into(e, &ty, &v, &dst);
             let wide = tir_of(&ty);
@@ -4784,7 +4817,7 @@ fn copy_fields(e: &mut Emit, from: &str, to: &str, owner: &str) -> bool {
         load.push_str(&shown);
         load.push_str(" ");
         load.push_str(&src);
-        e.insts.push(load);
+        emit(e, load);
         store_into(e, &ty, &v, &dst);
         i += 1;
     }
@@ -4887,7 +4920,7 @@ fn if_statement(
     br.push_str(&then_at);
     br.push_str(", ");
     br.push_str(&else_at);
-    e.insts.push(br);
+    emit(e, br);
 
     // What each arm did to ownership, so that what comes after the join
     // knows what the two of them agreed about (Ch. 3 §1.2). The second arm
@@ -5165,7 +5198,7 @@ fn bind_payload(
                 line.push_str(&at);
                 line.push_str(" = load ptr ");
                 line.push_str(&src);
-                e.insts.push(line);
+                emit(e, line);
                 kind.push('&');
                 kind.push_str(&inner);
                 let slot = slot_for(e, &name, &kind);
@@ -5192,7 +5225,7 @@ fn bind_payload(
             take.push_str(&got);
             take.push_str(" = load ptr ");
             take.push_str(&src);
-            e.insts.push(take);
+            emit(e, take);
             let slot = slot_for(e, &name, &ty);
             let mut prefix: String = Vec::new();
             prefix.push_str(&name);
@@ -5264,7 +5297,7 @@ fn bind_payload(
         load.push_str(&shown);
         load.push_str(" ");
         load.push_str(&src);
-        e.insts.push(load);
+        emit(e, load);
         let slot = slot_for(e, &name, &ty);
         store_into(e, &ty, &got, &slot);
         i += 1;
@@ -5490,7 +5523,7 @@ fn drop_maybe(e: &mut Emit, slot: &str, owner: &str, flag: &str) {
     br.push_str(&yes);
     br.push_str(", ");
     br.push_str(&join_at);
-    e.insts.push(br);
+    emit(e, br);
     start(e, &yes);
     drop_one(e, slot, owner);
     if e.stuck {
@@ -5733,7 +5766,7 @@ fn drop_one(e: &mut Emit, slot: &str, owner: &str) {
     line.push_str("(");
     line.push_str(slot);
     line.push_str(")");
-    e.insts.push(line);
+    emit(e, line);
 }
 
 /// A `Box`'s destructor, which is written out here rather than called: like
@@ -5774,7 +5807,7 @@ fn drop_box(e: &mut Emit, slot: &str, owner: &str) {
     line.push_str(", const t27 ");
     push_int(&mut line, l.align as t27);
     line.push_str(")");
-    e.insts.push(line);
+    emit(e, line);
 }
 
 /// Record that a destructor was asked for, and what its type was made from.
@@ -5944,7 +5977,7 @@ fn drop_variants(e: &mut Emit, slot: &str, owner: &str) {
     read.push_str(&tag);
     read.push_str(" ");
     read.push_str(slot);
-    e.insts.push(read);
+    emit(e, read);
     let join = label(e, "drop.join");
     let drops = ast::copy_names(&e.drops);
     let mut first: taddr = 0;
@@ -5980,7 +6013,7 @@ fn drop_variants(e: &mut Emit, slot: &str, owner: &str) {
         test.push_str(&tag);
         test.push_str(" ");
         push_int(&mut test, l.discriminants[v]);
-        e.insts.push(test);
+        emit(e, test);
         let mut br: String = Vec::new();
         br.push_str("    br3 ");
         br.push_str(&c);
@@ -5990,7 +6023,7 @@ fn drop_variants(e: &mut Emit, slot: &str, owner: &str) {
         br.push_str(&arm);
         br.push_str(", ");
         br.push_str(&next_at);
-        e.insts.push(br);
+        emit(e, br);
         start(e, &arm);
         let mut k: taddr = 0;
         while k < e.defs[which].counts[v] {
@@ -6190,7 +6223,7 @@ fn store_into(e: &mut Emit, ty: &str, what: &str, where_: &str) {
     line.push_str(what);
     line.push_str(", ");
     line.push_str(where_);
-    e.insts.push(line);
+    emit(e, line);
 }
 
 /// The statements of a written destructor, which answers with nothing.
@@ -6337,7 +6370,7 @@ pub fn destructor(
     // A written destructor's body runs and *then* what it held goes with
     // it: `drop.T` is the complete glue for a `T` (Ch. 3 §1.2).
     drop_fields(&mut e, &slot, owner);
-    e.insts.push("    ret".to_string());
+    emit(&mut e, "    ret".to_string());
     if e.stuck {
         return false;
     }
@@ -6429,7 +6462,7 @@ fn block(e: &mut Emit, b: &ast::Block, ret: &str, unit: bool) {
                     if e.stuck {
                         return;
                     }
-                    e.insts.push("    ret".to_string());
+                    emit(e, "    ret".to_string());
                 }
                 return;
             }
@@ -6449,7 +6482,7 @@ fn block(e: &mut Emit, b: &ast::Block, ret: &str, unit: bool) {
             let mut line: String = Vec::new();
             line.push_str("    ret ");
             line.push_str(&v.text);
-            e.insts.push(line);
+            emit(e, line);
         }
         Option::None => {
             // A block that already left does not leave twice.
@@ -6458,7 +6491,7 @@ fn block(e: &mut Emit, b: &ast::Block, ret: &str, unit: bool) {
                 if e.stuck {
                     return;
                 }
-                e.insts.push("    ret".to_string());
+                emit(e, "    ret".to_string());
             }
         }
     }
@@ -6645,7 +6678,7 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
             line.push_str(&val.text);
             line.push_str(", ");
             line.push_str(&slot);
-            e.insts.push(line);
+            emit(e, line);
         }
         // `let (a, b) = e;` is `let #patN = e;` and then one `let` per
         // element reading a field of it (§5.2). The whole is bound first,
@@ -6779,7 +6812,7 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                     br.push_str(&body);
                     br.push_str(", ");
                     br.push_str(&done);
-                    e.insts.push(br);
+                    emit(e, br);
                     start(e, &done);
                 }
                 // `if c { … }` as a statement: the same three blocks a
@@ -6839,7 +6872,7 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                                 if e.stuck {
                                     return;
                                 }
-                                e.insts.push("    ret".to_string());
+                                emit(e, "    ret".to_string());
                                 e.done = true;
                                 return;
                             }
@@ -6859,7 +6892,7 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                             let mut line: String = Vec::new();
                             line.push_str("    ret ");
                             line.push_str(&val.text);
-                            e.insts.push(line);
+                            emit(e, line);
                             e.done = true;
                         }
                         Option::None => {
@@ -6867,7 +6900,7 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                             if e.stuck {
                                 return;
                             }
-                            e.insts.push("    ret".to_string());
+                            emit(e, "    ret".to_string());
                             e.done = true;
                         }
                     }
@@ -6968,7 +7001,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             line.push_str(&from.text);
             line.push_str(" -> ");
             line.push_str(&to_wide);
-            e.insts.push(line);
+            emit(e, line);
             Value { text: name, ty: to }
         }
         // `-x` is one instruction and needs no flavor: the range is
@@ -6990,7 +7023,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 line.push_str(&shown);
                 line.push_str(" ");
                 line.push_str(&inner.text);
-                e.insts.push(line);
+                emit(e, line);
                 return Value { text: held, ty: inner.ty };
             }
             // `!b` is `1 - b` at one trit wide, and wrapping because there
@@ -7009,7 +7042,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             line.push_str(&name);
             line.push_str(" = sub.wrap t1 const t1 1, ");
             line.push_str(&inner.text);
-            e.insts.push(line);
+            emit(e, line);
             Value { text: name, ty: "bool".to_string() }
         }
         ast::Expr::Name(n) => {
@@ -7049,7 +7082,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             line.push_str(&shown);
             line.push_str(" ");
             line.push_str(&slot);
-            e.insts.push(line);
+            emit(e, line);
             Value { text: name, ty: ty }
         }
         // A `loop` in value position: what it answers with is what a
@@ -7109,7 +7142,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 line.push_str(&left.text);
                 line.push_str(", ");
                 line.push_str(&right.text);
-                e.insts.push(line);
+                emit(e, line);
                 if op.same("<=>") {
                     return Value { text: c, ty: "trit".to_string() };
                 }
@@ -7125,7 +7158,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 pick.push(arms[1]);
                 pick.push_str(", const t1 ");
                 pick.push(arms[2]);
-                e.insts.push(pick);
+                emit(e, pick);
                 return Value { text: b, ty: "bool".to_string() };
             }
             let word = arith(op);
@@ -7147,7 +7180,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             line.push_str(&left.text);
             line.push_str(", ");
             line.push_str(&right.text);
-            e.insts.push(line);
+            emit(e, line);
             Value { text: name, ty: ty }
         }
         // `if c { … } else { … }` — the condition, a two-way branch, and a
@@ -7214,7 +7247,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             load.push_str(&shown);
             load.push_str(" ");
             load.push_str(&src);
-            e.insts.push(load);
+            emit(e, load);
             Value { text: v, ty: answers }
         }
         // `*r` — what the reference points at (Ch. 3 §2.2). TIR spells
@@ -7334,7 +7367,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             load.push_str(&shown);
             load.push_str(" ");
             load.push_str(&held.text);
-            e.insts.push(load);
+            emit(e, load);
             Value { text: v, ty: inner }
         }
         // An aggregate with nowhere to go is built in a temporary, which a
@@ -7667,7 +7700,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                         line.push_str(&was);
                         line.push_str(", ");
                         line.push_str(&got.text);
-                        e.insts.push(line);
+                        emit(e, line);
                         held
                     };
                     if e.stuck {
@@ -7795,7 +7828,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             // come back (Ch. 5 §4). Nothing follows it in its block, and it
             // answers with nothing because there is nothing to answer to.
             if callee.same("trap") && args.len() == 0 {
-                e.insts.push("    trap F_TRAP".to_string());
+                emit(e, "    trap F_TRAP".to_string());
                 e.done = true;
                 return Value { text: "".to_string(), ty: "".to_string() };
             }
@@ -7865,7 +7898,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 let shown = tir_of(&ty);
                 line.push_str(&shown);
             }
-            e.insts.push(line);
+            emit(e, line);
             Value { text: name, ty: ty }
         }
         _ => {
@@ -7958,7 +7991,7 @@ fn method_value(
         line.push_str(&held);
         line.push_str(" = load ptr ");
         line.push_str(&slot);
-        e.insts.push(line);
+        emit(e, line);
         slot = held;
     }
     // A method through a trait object is the one call in this language that
@@ -8177,7 +8210,7 @@ fn method_value(
         let shown = tir_of(&ty);
         line.push_str(&shown);
     }
-    e.insts.push(line);
+    emit(e, line);
     Value { text: out, ty: ty }
 }
 
@@ -8216,7 +8249,7 @@ fn place(e: &mut Emit, x: &ast::Expr) -> Value {
                 line.push_str(&p);
                 line.push_str(" = load ptr ");
                 line.push_str(&slot);
-                e.insts.push(line);
+                emit(e, line);
                 slot = p;
             }
             Value { text: slot, ty: owner }
@@ -8302,7 +8335,7 @@ fn place(e: &mut Emit, x: &ast::Expr) -> Value {
                             line.push_str(&v);
                             line.push_str(" = load ptr ");
                             line.push_str(&slot);
-                            e.insts.push(line);
+                            emit(e, line);
                             return Value { text: v, ty: points_at };
                         }
                     }
@@ -8327,7 +8360,7 @@ fn place(e: &mut Emit, x: &ast::Expr) -> Value {
             line.push_str(&p);
             line.push_str(" = load ptr ");
             line.push_str(&held.text);
-            e.insts.push(line);
+            emit(e, line);
             Value { text: p, ty: inner }
         }
         _ => {
@@ -8449,7 +8482,7 @@ fn dyn_call(
     line.push_str(&data);
     line.push_str(" = load ptr ");
     line.push_str(slot);
-    e.insts.push(line);
+    emit(e, line);
     let held = offset_of(e, slot, l.offsets[1]);
     let vtable = fresh(e, "p");
     let mut line: String = Vec::new();
@@ -8457,7 +8490,7 @@ fn dyn_call(
     line.push_str(&vtable);
     line.push_str(" = load ptr ");
     line.push_str(&held);
-    e.insts.push(line);
+    emit(e, line);
     let entry = offset_of(e, &vtable, 9 + 3 * index);
     let what = fresh(e, "p");
     let mut line: String = Vec::new();
@@ -8465,7 +8498,7 @@ fn dyn_call(
     line.push_str(&what);
     line.push_str(" = load ptr ");
     line.push_str(&entry);
-    e.insts.push(line);
+    emit(e, line);
     let mut texts: Vec<String> = Vec::new();
     let mut i: taddr = 0;
     while i < args.len() {
@@ -8494,7 +8527,7 @@ fn dyn_call(
     line.push_str(") -> ");
     let shown = tir_of(&ty);
     line.push_str(&shown);
-    e.insts.push(line);
+    emit(e, line);
     Value { text: out, ty: ty }
 }
 
@@ -10791,7 +10824,7 @@ fn loaded(e: &mut Emit, ty: &str, from: &str) -> String {
     line.push_str(&shown);
     line.push_str(" ");
     line.push_str(from);
-    e.insts.push(line);
+    emit(e, line);
     held
 }
 
@@ -11585,7 +11618,7 @@ fn generic_call(
         let shown = tir_of(&ret);
         line.push_str(&shown);
     }
-    e.insts.push(line);
+    emit(e, line);
     if answer.len() > 0 {
         return Value { text: into, ty: answer };
     }
@@ -11716,7 +11749,7 @@ fn closure_call(e: &mut Emit, at: taddr, args: &Vec<ast::Expr>) -> Value {
     line.push_str(") -> ");
     let shown = tir_of(&ty);
     line.push_str(&shown);
-    e.insts.push(line);
+    emit(e, line);
     Value { text: name, ty: ty }
 }
 
@@ -11761,7 +11794,7 @@ fn aggregate_call(
         k += 1;
     }
     line.push_str(")");
-    e.insts.push(line);
+    emit(e, line);
     Value { text: held.to_string(), ty: owner.to_string() }
 }
 
@@ -12322,7 +12355,7 @@ fn drop_glue(
         }
     }
     drop_fields(&mut e, &slot, owner);
-    e.insts.push("    ret".to_string());
+    emit(&mut e, "    ret".to_string());
     if e.stuck {
         return false;
     }
@@ -12966,7 +12999,7 @@ fn short_circuit(e: &mut Emit, op: &str, a: &ast::Expr, b: &ast::Expr) -> Value 
                 br.push_str(", ");
                 br.push_str(&rhs);
             }
-            e.insts.push(br);
+            emit(e, br);
             start(e, &short);
             jump(e, &join);
             start(e, &rhs);
@@ -12983,7 +13016,7 @@ fn short_circuit(e: &mut Emit, op: &str, a: &ast::Expr, b: &ast::Expr) -> Value 
             line.push_str(&name);
             line.push_str(" = load t1 ");
             line.push_str(&held);
-            e.insts.push(line);
+            emit(e, line);
             return Value { text: name, ty: "bool".to_string() };
 }
 
