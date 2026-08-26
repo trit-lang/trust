@@ -5009,6 +5009,9 @@ fn catches_all(arm: &ast::Arm) -> bool {
     }
     match &arm.patterns[0] {
         ast::Pattern::Wild => true,
+        // A bare name is the same arm with a handle: there is nothing it
+        // tests, so whatever it catches it binds (Ch. 0 §4, G9.164).
+        ast::Pattern::Bind(n) => true,
         _ => false,
     }
 }
@@ -5029,6 +5032,47 @@ fn last_segment(path: &str) -> String {
     out
 }
 
+/// The whole of what is matched, bound to a bare name.
+///
+/// Matching a **value** moved it, so the name is the value's new one: the
+/// storage is copied and the binding takes the flag an owned local takes
+/// when what it holds can be dropped (Ch. 3 §1.2). Matching **through a
+/// reference** moves nothing, so the binding is a copy the referent still
+/// owns and there is nothing of the copy to drop (G9.164).
+fn bind_whole(e: &mut Emit, which: taddr, base: &str, name: &str, borrowed: bool) {
+    let ty = e.defs[which].name.to_string();
+    let slot = slot_for(e, name, &ty);
+    if !borrowed {
+        let owns = is_raw(&ty)
+            || holds_name(&e.drops, &ty)
+            || owns_drop(&e.defs, &e.drops, &ty, 0);
+        if owns {
+            let mut prefix: String = Vec::new();
+            prefix.push_str(name);
+            prefix.push_str(".owns");
+            let flag = fresh(e, &prefix);
+            let mut line: String = Vec::new();
+            line.push_str("    ");
+            line.push_str(&flag);
+            line.push_str(" = slot tryte[1]");
+            e.slots.push(line);
+            store_into(e, "t1", "const t1 1", &flag);
+            e.owned.push(Owned {
+                name: name.to_string(),
+                slot: slot.to_string(),
+                ty: ty.to_string(),
+                flag: flag.to_string(),
+                owns: Owns::Yes,
+                moved: Vec::new(),
+            });
+        }
+    }
+    copy_between(e, base, &slot, &ty);
+    if e.stuck {
+        return;
+    }
+}
+
 /// What an arm's pattern binds: a copy of each payload field, in storage of
 /// its own, which is what an arm's binding is when the scrutinee is a place
 /// it does not own (Ch. 3 §1.3).
@@ -5041,6 +5085,16 @@ fn bind_payload(
     arm: &ast::Arm,
     borrowed: bool,
 ) {
+    // A bare name where the pattern stands binds the **whole** of what is
+    // matched (Ch. 0 §4): `match c { x => … }` — there is no variant the
+    // arm selects and nothing it tests.
+    match &arm.patterns[0] {
+        ast::Pattern::Bind(n) => {
+            bind_whole(e, which, base, n, borrowed);
+            return;
+        }
+        _ => {}
+    }
     let fields = match &arm.patterns[0] {
         ast::Pattern::Aggregate(path, fs) => fs,
         _ => return,

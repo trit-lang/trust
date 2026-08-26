@@ -217,6 +217,27 @@ fn taken(n: t27, out: &mut String) {
     }
 }
 
+// A bare name where the pattern stands is the catch-all with a handle:
+// nothing to test and no variant to select, so the name binds the whole
+// of what is matched (Ch. 0 §4). Through a reference the name is a copy
+// the referent still owns — and nothing of the copy is dropped — and it
+// is a copy still, one word and then the next (G9.164).
+fn caught(n: t27, out: &mut String) {
+    let t = pair(n);
+    match &t {
+        x => {
+            tag(&x, out);
+            depth(&x);
+        }
+    }
+    match t {
+        x => {
+            tag(&x, out);
+            depth(&x);
+        }
+    }
+}
+
 fn walked(n: t27) -> t27 {
     let t = pair(n);
     let mut out: String = Vec::new();
@@ -228,6 +249,7 @@ fn walked(n: t27) -> t27 {
     settled(&mut out);
     peeked(&t, &mut out);
     taken(n, &mut out);
+    caught(n, &mut out);
     out.len() as t27
 }
 

@@ -2687,14 +2687,22 @@ is the same over an enum, where the second checker does apply it; what a
 scalar asks it to see is a scrutinee with no variants, which the old
 machinery never walked into.
 
-**G9.164 — a bare name in an enum arm binds in one compiler and nothing
-in the other.** `match c { x => … }` with `c: Choice`: the Rust compiler
-binds `x` to the value itself — the arm catches all, so what it catches
-is the scrutinee — and lowers it. The Trust one binds nothing, and then
-cannot find the body's `x`, and refuses the function. Which pattern a
-name against an enum *is* is G9.164's question; §4 writes patterns as
-binding names without saying an arm of one name against one enum is the
-catch-all with a handle.
+**G9.164 — a bare name in an arm is the catch-all with a handle, and it
+binds the whole of what is matched.** `match c { x => … }` selects no
+variant and tests nothing, so what the name catches is the scrutinee
+itself (Ch. 0 §4). Matching a **value** moved it: the name is the
+value's new one, a copy of the storage — word a word, the way an enum is
+always copied since it has no one set of fields — and the flag an owned
+local takes when what it holds can be dropped, so the arm's end drops it.
+Matching **through a reference** moves nothing: the name is a copy the
+referent still owns, and nothing of the copy is dropped (Ch. 3 §1.2 —
+the same sentence the payload bindings were written from, and the reason
+the two spellings of one value differ in exactly one flag). An arm that
+is an aggregate *or* a bare name is neither of them to either compiler —
+`Choice::A | x` is refused on both sides, since one pattern cannot be two
+selections. `boxed`'s `caught` writes both faces over one tree, and the
+same match over the prelude's own `Option<t27>` — an instantiated enum
+as scrutinee, named *value* or *reference* — agrees in full.
 
 **G9.163 — the second resolver scopes a binding the first refuses, in a
 scalar arm.** `match k { 0 | 1 | 2 => 7, x => x + 1 }` over `k: t27`: the
