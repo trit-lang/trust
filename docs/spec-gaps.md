@@ -2666,19 +2666,17 @@ involved; it was found while probing box scrutinees, and a `Box` built
 inside the function — which is how `boxed` builds every one — is
 unaffected.
 
-**G9.171 — the first checker reads a type out of dead code and the
-second does not.** A block whose last word already left still has a
-**tail**, and the first checker reads the block's type from that tail:
-`if k > 0 { return 1; k } else { 2 }` types the arm `t27` even though
-the `k` is never lowered, and accepts it where a value is wanted;
-`if k > 0 { return 1; } else { 2 }` types the arm `()` and is refused in
-as many words, and so is a `let m = if …` in the one spelling the
-refusal *other* calls binding a `()`. G9.159's "an arm that leaves is
-never asked" lives beside this rather than instead of it: the tail
-answers the question, it is simply never reached. The second checker
-takes the block as having left and answers Never for all of them —
-`ok` in all three — and which of the two a program gets is currently
-a matter of which compiler reads it first.
+**G9.171 — dead code is still code, and its type is read out of the
+tail it never reaches.** A block that already left has a type, and the
+tail names it: `if k > 0 { return 1; k } else { 2 }` is `t27` where a
+value is wanted, because the `k` is dead only to the lowering. With no
+tail at all the block is `()`, a `let m = if …` binding one is a
+refusal in the *other* spelling — a `()` binds nowhere, whatever type
+was written over it — and an arm asked for a `()` is an arm's own
+mismatch. G9.159's "an arm that leaves is never asked" and this read
+the same way from the two ends: the second checker now types the tail
+it never lowers, exactly as G9.166's gate leaves the naming to the
+entry and sinks the instruction.
 
 **G9.166 — an instruction after the block left is not text, and a name
 is.** `match c { A => return 1, B => return 2 }` as a function's tail
@@ -2698,14 +2696,17 @@ of a compiler is written in, and the arm whose answer storage names a
 slot the store never reaches all lower identically now; `scope`'s
 `gone` and `turning` write the two.
 
-**G9.165 — the second checker has not heard G9.159 for scalars.** A
-wildcard arm that leaves is still an arm that answers nothing, so
-`match k { 0 => return 1, _ => return 2 }` as a function's tail is a body
-of `()` where `t27` was promised: the first checker says `mismatch`, the
-second says `ok`. The rule — the answer comes from the arms that reach —
-is the same over an enum, where the second checker does apply it; what a
-scalar asks it to see is a scrutinee with no variants, which the old
-machinery never walked into.
+**G9.165 — a scalar match whose arms all left answers `()`; an enum's
+or a trit's answers nothing.** `match k { 0 => return 1, _ => return 2 }`
+as a function's tail is a body of `()` where `t27` was promised, and the
+second checker now says the mismatch: the answer comes from the arms that
+answer, and where there are none the chain of tests completes as `()`
+while the three doors of a trit and the variants of an enum were never
+about a value at all. What settled it is the same rule at every door: an
+arm is asked only when it answers, which is what `contributor` says below
+— and an arm whose block *completes* answering nothing, written
+`{ g(); }`, is a mismatch beside any arm that answers, in both compilers
+and in both directions (the probes t66–t68).
 
 **G9.164 — a bare name in an arm is the catch-all with a handle, and it
 binds the whole of what is matched.** `match c { x => … }` selects no
@@ -2724,15 +2725,14 @@ selections. `boxed`'s `caught` writes both faces over one tree, and the
 same match over the prelude's own `Option<t27>` — an instantiated enum
 as scrutinee, named *value* or *reference* — agrees in full.
 
-**G9.163 — the second resolver scopes a binding the first refuses, in a
-scalar arm.** `match k { 0 | 1 | 2 => 7, x => x + 1 }` over `k: t27`: the
-first compiler answers `x is not in scope` — a name in a scalar arm binds
-nothing, because what would be bound was already in hand where the
-scrutinee was read (G9.162) — and the second accepts, because its
-rewriter scopes every `Bind` it rewrites without asking what is being
-matched. The *programs* cannot diverge: the second compiler's lowering
-refuses the same body, the name having no slot. What diverges is the
-checkers' verdicts, which is what `agree` is for.
+**G9.163 — a bare name in a scalar arm binds nothing, and the second
+checker hears the ask for it.** `match k { 0 | 1 | 2 => 7, x => x + 1 }`
+over `k: t27` is `other` in both compilers now: what would be bound was
+already in hand where the scrutinee was read (G9.162), so the arm's `x`
+enters no scope, and naming it in the body is not-in-scope. The refusal
+is asked of the body's own walk — names the body itself declares shadow
+it, as they do everywhere — because the second checker's resolve keeps
+the pattern's business to the lowering, where it has always been.
 
 **G9.162 — a literal in an arm is a comparison, and `0t` is not `0`.**
 Ch. 0 §5.4's own example is `match k { 0 => …, _ => … }`, and what a

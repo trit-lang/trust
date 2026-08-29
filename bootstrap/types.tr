@@ -294,21 +294,23 @@ fn walk_block(w: &mut World, what: &str, b: &ast::Block) {
             ast::Stmt::Let(mutable, name, written, value) => {
                 // A written type is the answer; inference is for the `let`
                 // that does not say (§5.2).
+                let from = type_of(w, value);
+                // And neither type lets a `()` be *bound*: there is nothing
+                // to hold, and the other implementation's word for it is
+                // `other`, not a mismatch (G9.171).
+                if is_unit_ty(&from) {
+                    w.other = true;
+                }
                 let t = match written {
-                    Option::Some(x) => expand(w, x),
-                    Option::None => type_of(w, value),
-                };
-                // A written type is the answer *and* a claim about the
-                // value, which is the first place this has to say no.
-                match written {
                     Option::Some(x) => {
-                        let got = type_of(w, value);
-                        if !agrees(&t, &got) {
+                        let want = expand(w, x);
+                        if !agrees(&want, &from) {
                             w.refused = true;
                         }
+                        want
                     }
-                    Option::None => {}
-                }
+                    Option::None => from,
+                };
                 if !w.agreeing {
                     print(what);
                     print(" ");
@@ -338,17 +340,6 @@ fn walk_block(w: &mut World, what: &str, b: &ast::Block) {
         Option::None => {}
     }
     unbind(w, mark);
-}
-
-/// Whether a block leaves by another door than its end.
-fn ends_by_leaving(b: &ast::Block) -> bool {
-    if b.stmts.len() == 0 {
-        return false;
-    }
-    match &b.stmts[b.stmts.len() - 1] {
-        ast::Stmt::Do(e) => diverges(e),
-        _ => false,
-    }
 }
 
 /// Whether an expression never gives a value back to what follows it.
@@ -457,18 +448,60 @@ fn walk_expr(w: &mut World, what: &str, e: &ast::Expr) {
                 walk_expr(w, what, &arms[i].body);
                 i += 1;
             }
-            // Every arm answers the same thing, for the same reason both
-            // branches of an `if` do (§5.4).
-            if arms.len() > 0 {
-                let first = type_of(w, &arms[0].body);
-                let mut k: taddr = 1;
-                while k < arms.len() {
-                    let here = type_of(w, &arms[k].body);
-                    if !agrees(&first, &here) && !agrees(&here, &first) {
-                        w.refused = true;
+            // A bare name in a scalar arm binds nothing (G9.163): asking
+            // for it in the body is the name the lowering has not got,
+            // and the other implementation answers with not-in-scope.
+            let whole = type_of(w, s);
+            let bare = strip(&whole);
+            if scalar_named_ty(&bare) {
+                i = 0;
+                while i < arms.len() {
+                    let mut j: taddr = 0;
+                    while j < arms[i].patterns.len() {
+                        match &arms[i].patterns[j] {
+                            ast::Pattern::Bind(n) => {
+                                if arm_body_uses(w, &arms[i].body, n) {
+                                    w.other = true;
+                                }
+                            }
+                            _ => {}
+                        }
+                        j += 1;
                     }
-                    k += 1;
+                    i += 1;
                 }
+            }
+            // An arm that answers is asked what it answers by every other
+            // arm that answers; an arm that left, and one whose block
+            // leaves it, is never asked (§5.4, G9.159, G9.165). An arm
+            // whose block *completes* answering nothing — written `{ g(); }`
+            // — is a mismatch beside an arm that answers, whichever
+            // direction (G9.166's probes say both).
+            let mut answer = unknown();
+            let mut answered = false;
+            let mut unit_arm = false;
+            let mut m: taddr = 0;
+            while m < arms.len() {
+                let here = type_of(w, &arms[m].body);
+                m += 1;
+                if is_unknown(&here) {
+                    continue;
+                }
+                if is_unit_ty(&here) {
+                    if !arm_body_leaves(&arms[m - 1].body) {
+                        unit_arm = true;
+                    }
+                    continue;
+                }
+                if !answered {
+                    answer = here;
+                    answered = true;
+                } else if !agrees(&answer, &here) && !agrees(&here, &answer) {
+                    w.refused = true;
+                }
+            }
+            if answered && unit_arm {
+                w.refused = true;
             }
         }
         ast::Expr::Binary(op, a, b) => {
@@ -674,11 +707,28 @@ pub fn type_of(w: &mut World, e: &ast::Expr) -> ast::Ty {
         ast::Expr::Aggregate(path, fields) => aggregate_type(w, path, fields),
         ast::Expr::Nested(b) => block_type(w, b),
         // An `if` with no `else` is `()` wherever a value is read from it:
-        // the arm that is not written answers nothing (§5.3).
-        ast::Expr::If(c, t, o) => match o {
-            Option::None => ast::Ty::Unit,
-            Option::Some(x) => block_type(w, t),
-        },
+        // the arm that is not written answers nothing (§5.3). An arm whose
+        // last word already left does not answer either; where neither arm
+        // answers the `if` answers `()` — the same refusal the other
+        // implementation words as a type that does not match (G9.171).
+        ast::Expr::If(c, t, o) => {
+            let tt = block_type(w, t);
+            if !is_unknown(&tt) && !is_unit_ty(&tt) {
+                match o {
+                    Option::Some(x) => {
+                        let et = type_of(w, x);
+                        if !is_unknown(&et) && !is_unit_ty(&et)
+                            && !agrees(&tt, &et) && !agrees(&et, &tt)
+                        {
+                            w.refused = true;
+                        }
+                    }
+                    Option::None => {}
+                }
+                return tt;
+            }
+            ast::Ty::Unit
+        }
         // A `while` answers with nothing wherever it is written — it is a
         // statement, and where a block must answer that is the refusal the
         // other implementation words as a type that does not match
@@ -689,7 +739,31 @@ pub fn type_of(w: &mut World, e: &ast::Expr) -> ast::Ty {
             if arms.len() == 0 {
                 return unknown();
             }
-            type_of(w, &arms[0].body)
+            // What the arms that answer bring: the first one, and an arm
+            // that left or whose block completed with nothing is never
+            // asked (§5.4, G9.165).
+            let mut i: taddr = 0;
+            while i < arms.len() {
+                let here = type_of(w, &arms[i].body);
+                if !is_unknown(&here) && !is_unit_ty(&here) {
+                    return here;
+                }
+                i += 1;
+            }
+            // Every arm left: what the match answers is `()` where a
+            // scalar's chain of tests is done — a refusal wherever a value
+            // was wanted, which is G9.165 — and nothing at all where an
+            // enum's variants or a trit's three doors were the question,
+            // because asking what those answer is already answered.
+            let whole = type_of(w, s);
+            let bare = strip(&whole);
+            if enum_named_ty(w, &bare) {
+                return unknown();
+            }
+            if trit_dispatch_ty(&bare, arms) {
+                return unknown();
+            }
+            ast::Ty::Unit
         }
         _ => unknown(),
     }
@@ -700,6 +774,277 @@ pub fn type_of(w: &mut World, e: &ast::Expr) -> ast::Ty {
 /// loop for an answer and getting none is the same refusal a wrong type
 /// is (G9.159) — and what this checker says wherever nothing leaves:
 /// such a loop never ends, and what it would answer is never asked.
+/// The `()` of a block that completed with nothing — told from the
+/// checker saying it does not know, which is a different sentence: one it
+/// may not refuse, and one it must (G9.171).
+fn is_unit_ty(t: &ast::Ty) -> bool {
+    match t {
+        ast::Ty::Unit => true,
+        _ => false,
+    }
+}
+
+/// Whether this is one of the scalars a `match` dispatches over by test —
+/// the scrutinee is stripped of references first, as everywhere else here.
+fn scalar_named_ty(t: &ast::Ty) -> bool {
+    match t {
+        ast::Ty::Name(segments) => {
+            let head = joined(segments);
+            head.same("t27") || head.same("taddr") || head.same("t9")
+                || head.same("bool") || head.same("trit") || head.same("char")
+        }
+        _ => false,
+    }
+}
+
+/// Whether the name is one a program defined variants for — which is what
+/// asks the match's question where a scalar asks with tests.
+fn enum_named_ty(w: &World, t: &ast::Ty) -> bool {
+    match t {
+        ast::Ty::Name(segments) => {
+            let head = joined(segments);
+            let mut i: taddr = 0;
+            while i < w.variants.len() {
+                if w.variants[i].owner.same(&head) {
+                    return true;
+                }
+                i += 1;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// The trit literal's own dispatch: arms of nothing but trit literals,
+/// naming each of the three values exactly once (Ch. 1 §5).
+fn trit_dispatch_ty(t: &ast::Ty, arms: &Vec<ast::Arm>) -> bool {
+    let is_trit = match t {
+        ast::Ty::Name(segments) => joined(segments).same("trit"),
+        _ => false,
+    };
+    if !is_trit {
+        return false;
+    }
+    let mut seen: Vec<t27> = Vec::new();
+    let mut i: taddr = 0;
+    while i < arms.len() {
+        match &arms[i].guard {
+            Option::Some(g) => return false,
+            Option::None => {}
+        }
+        let mut j: taddr = 0;
+        while j < arms[i].patterns.len() {
+            match &arms[i].patterns[j] {
+                ast::Pattern::Trit(v) => {
+                    let mut k: taddr = 0;
+                    while k < seen.len() {
+                        if seen[k] == v {
+                            return false;
+                        }
+                        k += 1;
+                    }
+                    seen.push(v);
+                }
+                _ => return false,
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    seen.len() == 3
+}
+
+/// Whether an arm's body ends leaving — which is what a bare `return` and
+/// a block that never reaches its end have in common, and what a
+/// completed `{ g(); }` does not.
+fn arm_body_leaves(body: &ast::Expr) -> bool {
+    match body {
+        ast::Expr::Nested(b) => {
+            if b.stmts.len() == 0 {
+                return false;
+            }
+            match &b.stmts[b.stmts.len() - 1] {
+                ast::Stmt::Do(e) => diverges(e),
+                _ => false,
+            }
+        }
+        _ => true,
+    }
+}
+
+/// Whether the arm's body *names* this pattern bind — which a bare name
+/// in a scalar arm never introduced, so the ask is not-in-scope wherever
+/// it happens (G9.163). Names the body itself declares shadow it, as they
+/// do everywhere.
+fn arm_body_uses(w: &mut World, body: &ast::Expr, name: &str) -> bool {
+    let mut declared: Vec<String> = Vec::new();
+    expr_names(body, name, &mut declared)
+}
+
+fn block_names(b: &ast::Block, name: &str, declared: &mut Vec<String>) -> bool {
+    let mut i: taddr = 0;
+    while i < b.stmts.len() {
+        match &b.stmts[i] {
+            ast::Stmt::Let(m, n, written, v) => {
+                if expr_names(v, name, declared) {
+                    return true;
+                }
+                declared.push(n.to_string());
+            }
+            ast::Stmt::LetPattern(n, p, v) => {
+                if expr_names(v, name, declared) {
+                    return true;
+                }
+            }
+            ast::Stmt::Do(e) => {
+                if expr_names(e, name, declared) {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    match &b.tail {
+        Option::Some(e) => expr_names(e, name, declared),
+        Option::None => false,
+    }
+}
+
+fn jump_names(v: &Option<Box<ast::Expr>>, name: &str, declared: &mut Vec<String>) -> bool {
+    match v {
+        Option::Some(x) => expr_names(&*x, name, declared),
+        Option::None => false,
+    }
+}
+
+fn call_args_names(args: &Vec<ast::Expr>, name: &str, declared: &mut Vec<String>) -> bool {
+    item_names(args, name, declared)
+}
+
+fn item_names(items: &Vec<ast::Expr>, name: &str, declared: &mut Vec<String>) -> bool {
+    let mut i: taddr = 0;
+    while i < items.len() {
+        if expr_names(&items[i], name, declared) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn expr_names(e: &ast::Expr, name: &str, declared: &mut Vec<String>) -> bool {
+    match e {
+        ast::Expr::Name(n) => {
+            if !n.same(name) {
+                return false;
+            }
+            let mut i: taddr = 0;
+            while i < declared.len() {
+                if declared[i].same(name) {
+                    return false;
+                }
+                i += 1;
+            }
+            true
+        }
+        ast::Expr::Nested(b) => block_names(b, name, declared),
+        ast::Expr::Group(a) => expr_names(&*a, name, declared),
+        ast::Expr::Try(a) => expr_names(&*a, name, declared),
+        ast::Expr::Borrow(a, m) => expr_names(&*a, name, declared),
+        ast::Expr::Deref(a) => expr_names(&*a, name, declared),
+        ast::Expr::Cast(a, t) => expr_names(&*a, name, declared),
+        ast::Expr::Field(a, f) => expr_names(&*a, name, declared),
+        ast::Expr::Unary(op, a) => expr_names(&*a, name, declared),
+        ast::Expr::Binary(op, a, b) => {
+            expr_names(&*a, name, declared) || expr_names(&*b, name, declared)
+        }
+        ast::Expr::Assign(op, a, b) => {
+            expr_names(&*a, name, declared) || expr_names(&*b, name, declared)
+        }
+        ast::Expr::Repeat(a, b) => {
+            expr_names(&*a, name, declared) || expr_names(&*b, name, declared)
+        }
+        ast::Expr::Index(a, b) => {
+            expr_names(&*a, name, declared) || expr_names(&*b, name, declared)
+        }
+        ast::Expr::Call(n, args) => call_args_names(args, name, declared),
+        ast::Expr::CallExpr(n, args) => call_args_names(args, name, declared),
+        ast::Expr::Method(r, n, args) => {
+            if expr_names(&*r, name, declared) {
+                return true;
+            }
+            let mut i: taddr = 0;
+            while i < args.len() {
+                if expr_names(&args[i], name, declared) {
+                    return true;
+                }
+                i += 1;
+            }
+            false
+        }
+        ast::Expr::Aggregate(p, fields) => {
+            let mut i: taddr = 0;
+            while i < fields.len() {
+                if expr_names(&fields[i].value, name, declared) {
+                    return true;
+                }
+                i += 1;
+            }
+            false
+        }
+        ast::Expr::Array(items) => item_names(items, name, declared),
+        ast::Expr::Tuple(items) => item_names(items, name, declared),
+        ast::Expr::If(c, t, o) => {
+            if expr_names(c, name, declared) || block_names(t, name, declared) {
+                return true;
+            }
+            match o {
+                Option::Some(x) => expr_names(&*x, name, declared),
+                Option::None => false,
+            }
+        }
+        ast::Expr::While(c, b) => {
+            expr_names(c, name, declared) || block_names(b, name, declared)
+        }
+        ast::Expr::Loop(b) => block_names(b, name, declared),
+        ast::Expr::Match(s, arms) => {
+            if expr_names(&*s, name, declared) {
+                return true;
+            }
+            let mut i: taddr = 0;
+            while i < arms.len() {
+                match &arms[i].guard {
+                    Option::Some(g) => {
+                        if expr_names(g, name, declared) {
+                            return true;
+                        }
+                    }
+                    Option::None => {}
+                }
+                if expr_names(&arms[i].body, name, declared) {
+                    return true;
+                }
+                i += 1;
+            }
+            false
+        }
+        ast::Expr::Closure(params, ret, body) => {
+            let mut i: taddr = 0;
+            while i < params.len() {
+                if params[i].name.same(name) {
+                    declared.push(name.to_string());
+                }
+                i += 1;
+            }
+            expr_names(&*body, name, declared)
+        }
+        ast::Expr::Break(v) => jump_names(v, name, declared),
+        ast::Expr::Return(v) => jump_names(v, name, declared),
+        _ => false,
+    }
+}
+
 fn loop_type(w: &mut World, b: &ast::Block) -> ast::Ty {
     let mut any = false;
     let mut value: Option<ast::Ty> = Option::None;
@@ -1106,17 +1451,11 @@ fn block_type(w: &mut World, b: &ast::Block) -> ast::Ty {
     }
     let out = match &b.tail {
         Option::Some(e) => type_of(w, e),
-        // A block with no tail is `()` — unless it never reaches its end,
-        // in which case it claims nothing about anything (§5.1). A function
-        // whose body is a `loop` that only leaves by `return` is the case
-        // this is here for.
-        Option::None => {
-            if ends_by_leaving(b) {
-                unknown()
-            } else {
-                ast::Ty::Unit
-            }
-        }
+        // A block with no tail is `()`, and leaving does not change that —
+        // dead code is still code, and a type is not a complaint: the tail
+        // that was never reached says the same thing either way (G9.166,
+        // G9.171).
+        Option::None => ast::Ty::Unit
     };
     unbind(w, mark);
     out

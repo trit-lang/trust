@@ -1,0 +1,100 @@
+// Dead code is still code (G9.166, G9.171): a block that already left
+// still has a type, and the tail names it even though the tail is never
+// reached. Where the tail says nothing — no tail at all, or a `()` — the
+// block says `()`, and `()` beside an answer is a mismatch; where the
+// arms all left, a scalar match answers `()` and an enum's or a trit's
+// answers nothing, because the question was never about the value. A
+// name in a scalar arm binds nothing, and a `()` binds nowhere — those
+// two are `other`, not a type that does not match.
+enum Turn { Left, Right }
+
+fn nothing() {
+}
+
+fn tail_answer_right(k: t27) -> t27 {
+    if k > 0 {
+        return 1;
+        k
+    } else {
+        2
+    }
+}
+
+fn tail_left_wrong(k: t27) -> t27 {
+    if k > 0 {
+        return 1;
+    } else {
+        2
+    }
+}
+
+fn tail_both_wrong(k: t27) -> t27 {
+    if k > 0 {
+        return 1;
+    } else {
+        return 2;
+    }
+}
+
+fn scalar_left_wrong(k: t27) -> t27 {
+    match k {
+        0 => return 1,
+        _ => return 2,
+    }
+}
+
+fn trit_left_right(t: trit) -> t27 {
+    match t {
+        -1t => return 1,
+        0t => return 2,
+        1t => return 3,
+    }
+}
+
+fn enum_left_right(c: Turn) -> t27 {
+    match c {
+        Turn::Left => return 1,
+        Turn::Right => return 2,
+    }
+}
+
+fn unit_arm_wrong(c: Turn) -> t27 {
+    match c {
+        Turn::Left => {
+            nothing();
+        }
+        Turn::Right => 1,
+    };
+    2
+}
+
+fn unit_left_right(c: Turn) -> t27 {
+    match c {
+        Turn::Left => {
+            return 0;
+        }
+        Turn::Right => {
+            nothing();
+        }
+    };
+    2
+}
+
+fn bind_unit_other() -> t27 {
+    let m = nothing();
+    1
+}
+
+fn scalar_bind_other(k: t27) -> t27 {
+    match k {
+        0 | 1 | 2 => 7,
+        x => x + 1,
+    }
+}
+
+fn scalar_bind_right(k: t27) -> t27 {
+    match k {
+        0 | 1 | 2 => 7,
+        x => 42,
+    }
+}
