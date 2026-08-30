@@ -7320,12 +7320,10 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 return unknown_value();
             }
             let owner = e.locals[at].ty.to_string();
-            // A reference to a reference is two loads and one name, and this
-            // does not reach it.
-            if owner.same("ptr") || referent_name(&owner).len() > 0 {
-                e.stuck = true;
-                return unknown_value();
-            }
+            // `&r` where `r` is itself a reference: `&&T` binds to the
+            // address of `r`'s slot, which is no instruction either — a
+            // place is an address, and the type says so twice (G9.168).
+            // What the two stars do with it is the deref's question below.
             // `&a` where a `&dyn Trait` is wanted is not one address but
             // two: where the object is, and where the table of its type's
             // methods is (Ch. 4 §3.2). The borrow is still no instruction —
@@ -7396,6 +7394,20 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             // address is the value and there is nothing to load (TIR §3).
             if def_at(&e.defs, &inner) >= 0 {
                 return Value { text: held.text, ty: inner };
+            }
+            // A reference at the other end is one word further away:
+            // `**rr` reads the inner reference like any other read of a
+            // word the program wrote — one load, still `%v` (G9.154,
+            // G9.168).
+            if referent_name(&inner).len() > 0 {
+                let v = fresh(e, "v");
+                let mut line: String = Vec::new();
+                line.push_str("    ");
+                line.push_str(&v);
+                line.push_str(" = load ptr ");
+                line.push_str(&held.text);
+                emit(e, line);
+                return Value { text: v, ty: inner };
             }
             if scalar_named(&inner).same("?") {
                 e.stuck = true;

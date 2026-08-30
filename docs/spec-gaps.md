@@ -2644,16 +2644,16 @@ of the language's move sites — a return, a call's by-value argument, a
 `let`'s right-hand side — are still to come: they are the same sentence
 in more positions, and positions are what a move tracker is made of.
 
-**G9.168 — `&&T` binds nowhere.** `let rr = &r` is refused by the Trust
-lowering in as many words — *a reference to a reference is two loads and
-one name, and this does not reach it* — where the Rust compiler binds the
-pair happily. The boundary is written in the borrow's own code rather
-than discovered here; what is new is the finding that nothing else has
-walked into it: `match &r` reaches the referent in two `%v` loads with
-the reference read on the way, exactly as G9.154 says a written reference
-is read. A place behind two references — a struct's field that is itself
-a reference, say `match p.r` — is lowered by both, the field read and
-then what it points at.
+**G9.168 — `&&T` binds to an address, and an address is what a place
+already is.** `let rr = &r` is no instruction at all: the reference's
+slot is its address, written into the new binding like any word, and the
+type says so twice — `&&T`. The two stars on the way out are the deref's
+own reading: the inner reference is one more word the program wrote, so
+it is loaded `%v` like every other one, one load a step (G9.154). The
+"two loads and one name" refusal was the sentence arriving before the
+walk was written; what it describes is exactly what `match rr` and
+`**rr` both are, and `patterns`' `behind` writes the fourth spelling of
+the one read beside the first three.
 
 **G9.167 — a `Box` is one word, so a parameter of one is one word.**
 `fn f(b: Box<T>)` arrives as the pointer itself — stored like a scalar's

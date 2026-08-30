@@ -77,9 +77,11 @@ fn lettered(c: char) -> t27 {
     }
 }
 
-// The same match written three ways: the reference, the borrow, and the
-// deref of one all read what `r` points at — one load and then one more,
-// whichever spelling (Ch. 3 §2.1).
+// The same match written four ways: the reference, the borrow, and the
+// deref of one all read what `r` points at, and `&r` has an address the
+// way every place does — so a reference to a reference binds, is read
+// two loads on the way out, and matches the same value (Ch. 3 §2.1,
+// G9.168).
 fn behind(r: &t27) -> t27 {
     let a = match r {
         0 => 1,
@@ -93,7 +95,12 @@ fn behind(r: &t27) -> t27 {
         0 => 100,
         _ => 200,
     };
-    a + b + d
+    let rr = &r;
+    let e = match rr {
+        0 => 1000,
+        _ => 2000,
+    };
+    a + b + d + e
 }
 
 struct Pair { a: t27, b: t27 }
