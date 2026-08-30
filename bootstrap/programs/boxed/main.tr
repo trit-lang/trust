@@ -204,17 +204,23 @@ fn peeked(t: &Tree, out: &mut String) {
     }
 }
 
-fn taken(n: t27, out: &mut String) {
-    let b: Box<Tree> = Box::new(pair(n));
-    // `match *b` is the move the box is for: what the word names moves
-    // into the arms, the box moves with it, and the word behind it is
-    // nobody's to free. `match *c` for a `c` that only lends is the
-    // refusal Ch. 3 §1.2 words, which `mismatch/07.tr` hears both
-    // checkers give (G9.161).
+// A `Box` can be **handed over**: one word is the parameter, stored like
+// a scalar's at the door, and what it owns travels with it — the flag an
+// owned local takes is what the end of the scope reads (Ch. 5 §2.3,
+// G9.167). The match over the word is the move the box is for (G9.161).
+fn taken(b: Box<Tree>, out: &mut String) {
     match *b {
         Tree::Leaf(l) => out.push('l'),
         Tree::Pair(x, y) => out.push('p'),
     }
+}
+
+// And one that is never opened at all: the flag is still `1` where the
+// scope ends, so the word and the tree behind it are dropped there —
+// the box's own freedom nobody else had to ask for.
+fn spared(n: t27) -> t27 {
+    let b: Box<Tree> = Box::new(pair(n));
+    n
 }
 
 // A bare name where the pattern stands is the catch-all with a handle:
@@ -248,9 +254,10 @@ fn walked(n: t27) -> t27 {
     halt(&t, &mut out);
     settled(&mut out);
     peeked(&t, &mut out);
-    taken(n, &mut out);
+    taken(Box::new(pair(n)), &mut out);
+    let c = spared(n);
     caught(n, &mut out);
-    out.len() as t27
+    c + out.len() as t27
 }
 
 fn main() -> t27 {

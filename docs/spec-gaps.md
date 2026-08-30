@@ -2655,16 +2655,16 @@ is read. A place behind two references — a struct's field that is itself
 a reference, say `match p.r` — is lowered by both, the field read and
 then what it points at.
 
-**G9.167 — a `Box<T>` handed to a function by value has no definition to
-copy into.** `fn f(b: Box<t27>)` is refused by the Trust lowering at the
-signature: a parameter that is not a scalar and not a reference arrives as
-a pointer and is copied into storage of its own, field by field — which
-asks for the *definition* of what it is, and a box has none, because it is
-not an aggregate (Ch. 5 §2.3). The Rust compiler lowers the same
-signature as one `ptr` parameter, flag and all. Nothing about `match` is
-involved; it was found while probing box scrutinees, and a `Box` built
-inside the function — which is how `boxed` builds every one — is
-unaffected.
+**G9.167 — a `Box` is one word, so a parameter of one is one word.**
+`fn f(b: Box<T>)` arrives as the pointer itself — stored like a scalar's
+rather than copied field by field, because there is no definition to copy
+into and none is needed (Ch. 5 §2.3) — and what is at the other end
+travels with it: the flag an owned local takes is written at the door,
+so the end of the scope drops the word and what it points at the way it
+always has (Ch. 3 §1.4). The caller's side asked nothing, since the move
+across the call is the same `store` any parameter's is; `spared` in
+`boxed` writes the drop nobody made a move for, and `taken` hands one to
+the match the box is for.
 
 **G9.171 — dead code is still code, and its type is read out of the
 tail it never reaches.** A block that already left has a type, and the

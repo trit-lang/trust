@@ -1284,6 +1284,49 @@ pub fn function(
             }
         }
         if ty.same("?") {
+            // A `Box` is one word rather than two, and alongside an
+            // aggregate that changes nothing about how it is handed over:
+            // the pointer *is* the parameter, stored like a scalar's, and
+            // what it owns travels with it — so it takes the flag an owned
+            // local takes, which is what the end of the scope reads to
+            // drop the word and what is at the other end of it (Ch. 5
+            // §2.3, Ch. 3 §1.4).
+            let written = subst_ty(&mut e, &tyvars, &key, &written_param);
+            let owner = nominal(&mut e, &written);
+            if is_boxed(&owner) {
+                header.push_str("%");
+                header.push_str(&name);
+                header.push_str(": ptr");
+                let slot = slot_for(&mut e, &name, &owner);
+                let mut prefix: String = Vec::new();
+                prefix.push_str(&name);
+                prefix.push_str(".owns");
+                let flag = fresh(&mut e, &prefix);
+                let mut made: String = Vec::new();
+                made.push_str("    ");
+                made.push_str(&flag);
+                made.push_str(" = slot tryte[1]");
+                e.slots.push(made);
+                store_into(&mut e, "t1", "const t1 1", &flag);
+                e.owned.push(Owned {
+                    name: name.to_string(),
+                    slot: slot.to_string(),
+                    ty: owner.to_string(),
+                    flag: flag.to_string(),
+                    owns: Owns::Yes,
+                    moved: Vec::new(),
+                });
+                let mut store: String = Vec::new();
+                store.push_str("    store ptr %");
+                store.push_str(&name);
+                store.push_str(", ");
+                store.push_str(&slot);
+                emit(&mut e, store);
+                i += 1;
+                continue;
+            }
+        }
+        if ty.same("?") {
             // An aggregate arrives as a pointer and is copied into storage
             // of its own on entry, field by field: what a function is given
             // is the caller's and what it holds is its own (Ch. 3 §1.1).
