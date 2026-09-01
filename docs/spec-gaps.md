@@ -2626,14 +2626,19 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
-**G9.170 — two `&mut` in one expression are one too many, and only one
-checker hears it.** `taken(&mut o) + taken(&mut o)` is refused by the Rust
-one — the second borrow begins while the first is still live (Ch. 3 §2.2)
-— and lowered by the Trust one, whose walk of a binary expression visits
-both sides without asking who is borrowed where. The two borrows are not
-yet sequenced anywhere in the second checker: each of `f(&mut o); f(&mut
-o);` written as two statements is refused, which is exactly where the one
-inside the operator gets away.
+**G9.170 — one `&mut` at a time over one place, however many `&` you
+like sharing it.** A borrow owes its place for the rest of the
+**statement** it is made in — every holder in one expression is used in
+that expression — and two loans conflict when one place is the other or
+a prefix of it: so `bump(&mut o) + bump(&mut o)` is the same refusal as
+`bump(&mut o.a) + bump(&mut o.a)`, whichever came first and whichever
+mode the second asked for, and `bump(&mut o.a) + bump(&mut o.b)` is none
+at all. The second checker keeps the statement's borrows beside it, and
+the statement's end is where all of them die, which is also Ch. 3 §4.2's
+rule: `bump(&mut o); bump(&mut o);` is two statements and two uses, and
+`let a = &mut o; bump(a); bump(&mut o);` is fine because what `a` owed
+died at its own last use. A reborrow spelled without the `&` is no new
+loan, which is what a reference handed on as itself always has been.
 
 **G9.169 — a reference only *lends*, and nowhere is a value that owns
 read out of one.** The rule is the one sentence said at every move site

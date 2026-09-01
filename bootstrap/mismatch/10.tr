@@ -1,0 +1,62 @@
+// One `&mut` at a time over one place, and however many `&` you like
+// sharing it (Ch. 3 §2.2) — a borrow owes its place for the rest of the
+// *statement*, since that is where every holder in one expression is
+// used, and it is dead after use: two statements are two uses
+// (Ch. 3 §4.2, G9.170). Two loans conflict when one place is the other
+// or a prefix of it; `o.a` and `o.b` are not the same.
+struct Pair { a: t27, b: t27 }
+
+fn bump(o: &mut t27) -> t27 {
+    1
+}
+
+fn peek(o: &t27) -> t27 {
+    2
+}
+
+fn twice_same_other() -> t27 {
+    let mut o = 7;
+    bump(&mut o) + bump(&mut o)
+}
+
+fn fields_right() -> t27 {
+    let mut o = Pair { a: 1, b: 2 };
+    bump(&mut o.a) + bump(&mut o.b)
+}
+
+fn same_field_other() -> t27 {
+    let mut o = Pair { a: 1, b: 2 };
+    bump(&mut o.a) + bump(&mut o.a)
+}
+
+fn shared_then_owning_other() -> t27 {
+    let mut o = 7;
+    peek(&o) + bump(&mut o)
+}
+
+fn owning_then_shared_other() -> t27 {
+    let mut o = 7;
+    bump(&mut o) + peek(&o)
+}
+
+fn statements_right() -> t27 {
+    let mut o = 7;
+    let mut k = bump(&mut o);
+    k += bump(&mut o);
+    k
+}
+
+fn dead_after_use_right() -> t27 {
+    let mut o = 7;
+    let a = &mut o;
+    bump(a);
+    bump(&mut o)
+}
+
+fn reborrow_right(o: &mut t27) -> t27 {
+    bump(o) + bump(o)
+}
+
+fn param_field_other(o: &mut Pair) -> t27 {
+    bump(&mut o.a) + bump(&mut o.a)
+}

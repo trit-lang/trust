@@ -92,6 +92,18 @@ pub struct World {
     pub methods: Vec<Method>,
     pub variants: Vec<Variant>,
     pub locals: Vec<Binding>,
+    /// The borrows still owed by the **statement being lowered**, older
+    /// first. A borrow is dead after its holder's last use — and every
+    /// holder in one expression is used in that expression — so the
+    /// statement's end is where all of them die (Ch. 3 §4.2, G9.170).
+    pub loans: Vec<Loan>,
+}
+
+/// One borrow, owed: the *place* it is made on, and whether it is
+/// exclusive (Ch. 3 §2.2).
+pub struct Loan {
+    pub place: String,
+    pub exclusive: bool,
 }
 
 fn main() -> t27 {
@@ -113,6 +125,7 @@ fn main() -> t27 {
                 methods: Vec::new(),
                 variants: Vec::new(),
                 locals: Vec::new(),
+                loans: Vec::new(),
             };
             prelude(&mut w);
             // Aliases first: one may be written after what uses it, and
@@ -303,6 +316,11 @@ fn walk_block(w: &mut World, what: &str, b: &ast::Block) {
     let mark = w.locals.len();
     let mut i: taddr = 0;
     while i < b.stmts.len() {
+        // A new statement is a new use: what a borrow reached to is the
+        // last statement's boundary, which is where non-lexical ends
+        // (Ch. 3 §4.2).
+        let drop_loans: Vec<Loan> = Vec::new();
+        w.loans = drop_loans;
         match &b.stmts[i] {
             ast::Stmt::Let(mutable, name, written, value) => {
                 // A written type is the answer; inference is for the `let`
@@ -570,7 +588,26 @@ fn walk_expr(w: &mut World, what: &str, e: &ast::Expr) {
                 }
             }
         }
-        ast::Expr::Borrow(a, m) => walk_expr(w, what, a),
+        ast::Expr::Borrow(a, m) => {
+            walk_expr(w, what, a);
+            // A borrow owes its place for the rest of the statement:
+            // another borrow of the same place before the statement is
+            // through is one borrow too many, whichever of the two came
+            // first (Ch. 3 §2.2).
+            let place = place_of(a);
+            if place.len() > 0 {
+                let mut i: taddr = 0;
+                while i < w.loans.len() {
+                    if places_conflict(&w.loans[i].place, &place) {
+                        if w.loans[i].exclusive || m {
+                            w.other = true;
+                        }
+                    }
+                    i += 1;
+                }
+                w.loans.push(Loan { place: place, exclusive: m });
+            }
+        }
         ast::Expr::Deref(a) => walk_expr(w, what, a),
         ast::Expr::Try(a) => walk_expr(w, what, a),
         ast::Expr::Cast(a, t) => walk_expr(w, what, a),
@@ -811,6 +848,56 @@ fn takes_value_method(w: &World, t: &ast::Ty, name: &str) -> bool {
             return w.methods[i].receives_value;
         }
         i += 1;
+    }
+    false
+}
+
+/// The *place* a borrow is made on, spelled like a diagnostic: the name
+/// it is rooted at with the fields walked after it (Ch. 3 §2.2). A deref
+/// of a reference asks the reference's own place, since that is what a
+/// borrow of the referent borrows.
+fn place_of(e: &ast::Expr) -> String {
+    match e {
+        ast::Expr::Name(n) => n.to_string(),
+        ast::Expr::Field(a, f) => {
+            let mut out = place_of(a);
+            if out.len() > 0 {
+                out.push_str(".");
+                out.push_str(f);
+            }
+            out
+        }
+        ast::Expr::Deref(a) => place_of(a),
+        ast::Expr::Group(a) => place_of(a),
+        _ => "".to_string(),
+    }
+}
+
+/// Whether two borrowed places share storage: one is the other or a
+/// prefix of it (Ch. 3 §2.2).
+fn places_conflict(a: &str, b: &str) -> bool {
+    if a.same(b) {
+        return true;
+    }
+    if a.len() < b.len() && b[a.len()] == '.' {
+        let mut i: taddr = 0;
+        while i < a.len() {
+            if a[i] != b[i] {
+                return false;
+            }
+            i += 1;
+        }
+        return true;
+    }
+    if b.len() < a.len() && a[b.len()] == '.' {
+        let mut i: taddr = 0;
+        while i < b.len() {
+            if a[i] != b[i] {
+                return false;
+            }
+            i += 1;
+        }
+        return true;
     }
     false
 }
