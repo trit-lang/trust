@@ -58,6 +58,10 @@ pub struct Method {
     pub owner: String,
     pub name: String,
     pub ret: ast::Ty,
+    /// The receiver is taken by value — `fn eat(self)` and not
+    /// `fn eat(&self)` — so a call moves the receiver it is written on
+    /// (Ch. 3 §2.2).
+    pub receives_value: bool,
 }
 
 /// What the file defines, and what is in scope where the walk has reached.
@@ -214,10 +218,19 @@ fn gather(w: &mut World, item: &ast::Item) {
             let mut i: taddr = 0;
             while i < fns.len() {
                 let ret = expand(w, &fns[i].ret);
+                let mut value_self = false;
+                if fns[i].params.len() > 0 {
+                    if fns[i].params[0].name.same("self")
+                        && !is_ty_ref(&fns[i].params[0].ty)
+                    {
+                        value_self = true;
+                    }
+                }
                 w.methods.push(Method {
                     owner: owner.to_string(),
                     name: fns[i].name.to_string(),
                     ret: ret,
+                    receives_value: value_self,
                 });
                 i += 1;
             }
@@ -301,6 +314,12 @@ fn walk_block(w: &mut World, what: &str, b: &ast::Block) {
                 if is_unit_ty(&from) {
                     w.other = true;
                 }
+                // A binding of what a borrow only lends is the refusal
+                // the other implementation words as moving out of a
+                // reference (Ch. 3 §1.2, G9.169).
+                if moved_out_of_ref(w, value) {
+                    w.other = true;
+                }
                 let t = match written {
                     Option::Some(x) => {
                         let want = expand(w, x);
@@ -336,7 +355,14 @@ fn walk_block(w: &mut World, what: &str, b: &ast::Block) {
         i += 1;
     }
     match &b.tail {
-        Option::Some(e) => walk_expr(w, what, e),
+        Option::Some(e) => {
+            walk_expr(w, what, e);
+            // The tail is what the block hands over, and what a borrow
+            // only lends is not for handing over (Ch. 3 §1.2, G9.169).
+            if moved_out_of_ref(w, e) {
+                w.other = true;
+            }
+        }
         Option::None => {}
     }
     unbind(w, mark);
@@ -446,6 +472,11 @@ fn walk_expr(w: &mut World, what: &str, e: &ast::Expr) {
                     Option::None => {}
                 }
                 walk_expr(w, what, &arms[i].body);
+                // The arm answers with its body, and a borrower's is the
+                // same refusal everywhere it moves (Ch. 3 §1.2, G9.169).
+                if moved_out_of_ref(w, &arms[i].body) {
+                    w.other = true;
+                }
                 i += 1;
             }
             // A bare name in a scalar arm binds nothing (G9.163): asking
@@ -518,6 +549,11 @@ fn walk_expr(w: &mut World, what: &str, e: &ast::Expr) {
         ast::Expr::Assign(op, a, b) => {
             walk_expr(w, what, a);
             walk_expr(w, what, b);
+            // What is written over is taken *somewhere*, and taking it out
+            // of a borrow is the refusal (Ch. 3 §1.2, G9.169).
+            if moved_out_of_ref(w, b) {
+                w.other = true;
+            }
         }
         ast::Expr::Group(a) => walk_expr(w, what, a),
         ast::Expr::Unary(op, a) => {
@@ -549,6 +585,11 @@ fn walk_expr(w: &mut World, what: &str, e: &ast::Expr) {
             let mut i: taddr = 0;
             while i < fields.len() {
                 walk_expr(w, what, &fields[i].value);
+                // The field *takes* the value into the aggregate, so a
+                // borrower's field is the refusal (Ch. 3 §1.2, G9.169).
+                if moved_out_of_ref(w, &fields[i].value) {
+                    w.other = true;
+                }
                 i += 1;
             }
             check_aggregate(w, path, fields);
@@ -560,6 +601,12 @@ fn walk_expr(w: &mut World, what: &str, e: &ast::Expr) {
                 walk_expr(w, what, &args[i]);
                 i += 1;
             }
+            // A receiver taken by value is moved on the call (Ch. 3 §2.2),
+            // and a borrower's receiver is not for moving (G9.169).
+            let whole = type_of(w, r);
+            if takes_value_method(w, &whole, name) && moved_out_of_ref(w, r) {
+                w.other = true;
+            }
         }
         ast::Expr::Call(name, args) => {
             let mut i: taddr = 0;
@@ -569,8 +616,28 @@ fn walk_expr(w: &mut World, what: &str, e: &ast::Expr) {
             }
             check_call(w, name, args);
         }
-        ast::Expr::Return(v) => walk_optional(w, what, v),
-        ast::Expr::Break(v) => walk_optional(w, what, v),
+        ast::Expr::Return(v) => {
+            walk_optional(w, what, v);
+            match v {
+                Option::Some(e) => {
+                    if moved_out_of_ref(w, e) {
+                        w.other = true;
+                    }
+                }
+                Option::None => {}
+            }
+        }
+        ast::Expr::Break(v) => {
+            walk_optional(w, what, v);
+            match v {
+                Option::Some(e) => {
+                    if moved_out_of_ref(w, e) {
+                        w.other = true;
+                    }
+                }
+                Option::None => {}
+            }
+        }
         _ => {}
     }
 }
@@ -605,6 +672,11 @@ fn check_call(w: &mut World, name: &str, args: &Vec<ast::Expr>) {
         if !agrees(&want, &got) {
             w.refused = true;
         }
+        // Handed over by value, so a borrower's is not the caller's to
+        // give (Ch. 3 §1.2, G9.169).
+        if moved_out_of_ref(w, &args[i]) {
+            w.other = true;
+        }
         i += 1;
     }
 }
@@ -636,6 +708,111 @@ fn sig_at(w: &World, name: &str) -> taddr {
         i += 1;
     }
     0 - 1
+}
+
+/// A type that holds something with a *drop* — and so can be moved out
+/// of a place only if the move is the point (Ch. 3 §1.2, §1.4). A plain
+/// struct's answer is no, because its copy is field by field and nothing
+/// it holds is at an address it owns.
+fn owns_value(w: &World, t: &ast::Ty, depth: taddr) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    match t {
+        ast::Ty::App(segments, args) => {
+            let head = joined(segments);
+            if head.same("Box") || head.same("Raw") {
+                return true;
+            }
+            owns_named(w, &head, depth + 1)
+        }
+        ast::Ty::Name(segments) => {
+            let head = joined(segments);
+            owns_named(w, &head, depth + 1)
+        }
+        _ => false,
+    }
+}
+
+fn owns_named(w: &World, head: &str, depth: taddr) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    if head.same("Box") || head.same("Raw") {
+        return true;
+    }
+    let mut i: taddr = 0;
+    while i < w.variants.len() {
+        if w.variants[i].owner.same(head) {
+            let mut j: taddr = 0;
+            while j < w.variants[i].fields.len() {
+                if owns_value(w, &w.variants[i].fields[j], depth + 1) {
+                    return true;
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    while i < w.fields.len() {
+        if w.fields[i].owner.same(head)
+            && owns_value(w, &w.fields[i].ty, depth + 1)
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// A reference spelled as one (Ch. 3 §2.1).
+fn is_ty_ref(t: &ast::Ty) -> bool {
+    match t {
+        ast::Ty::Ref(inner, m) => true,
+        _ => false,
+    }
+}
+
+/// What a value *moves out of* and whether that is a borrower's place
+/// (Ch. 3 §1.2): an owning type read out of anywhere a reference points,
+/// in any of the positions a move is made — a `let`, a `return`, a call's
+/// by-value argument, an aggregate's field, an assignment, a method's
+/// by-value receiver (G9.169). A reference only *lends*: what it points
+/// at is still its owner's to drop.
+fn moved_out_of_ref(w: &mut World, e: &ast::Expr) -> bool {
+    let ty = type_of(w, e);
+    if !owns_value(w, &ty, 0) {
+        return false;
+    }
+    expr_derefs_a_ref(w, e)
+}
+
+fn expr_derefs_a_ref(w: &mut World, e: &ast::Expr) -> bool {
+    match e {
+        ast::Expr::Group(a) => expr_derefs_a_ref(w, &*a),
+        ast::Expr::Deref(a) => {
+            let inner = type_of(w, &*a);
+            match &inner {
+                ast::Ty::Ref(r, m) => true,
+                _ => expr_derefs_a_ref(w, &*a),
+            }
+        }
+        _ => false,
+    }
+}
+
+/// The method the receiver's type is written with, asked whether it takes
+/// the receiver by value — and so is a move site on a call (Ch. 3 §2.2).
+fn takes_value_method(w: &World, t: &ast::Ty, name: &str) -> bool {
+    let head = head_of(t);
+    let mut i: taddr = 0;
+    while i < w.methods.len() {
+        if w.methods[i].owner.same(&head) && w.methods[i].name.same(name) {
+            return w.methods[i].receives_value;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// What an expression is.

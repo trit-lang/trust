@@ -1,0 +1,79 @@
+// A reference only *lends*, and what it points at is still its owner's
+// to drop (Ch. 3 §1.2) — so a value that *owns* may not be read out of
+// one, wherever the move is made: a `return`, a `let`, a call's by-value
+// argument, an aggregate's field, an assignment, a method's by-value
+// receiver, an arm's answer (G9.169). A plain struct's copy is field by
+// field and legal everywhere the same words would be said of it, because
+// nothing it holds has a drop.
+enum Tree { Leaf(t27), Pair(Box<Tree>, Box<Tree>) }
+struct Node { n: t27, k: t27 }
+struct Wrap { t: Tree, k: t27 }
+enum Kind { A, B }
+
+impl Node {
+    fn get(self) -> t27 {
+        self.n
+    }
+}
+
+impl Tree {
+    fn eat(self) -> t27 {
+        1
+    }
+}
+
+fn build(n: t27) -> Tree {
+    Tree::Leaf(n)
+}
+
+fn take(t: Tree) -> t27 {
+    1
+}
+
+fn deref_scalar_right(r: &t27) -> t27 {
+    *r
+}
+
+fn copy_struct_right(c: &Node) -> Node {
+    *c
+}
+
+fn copy_enum_right(c: &Kind) -> Kind {
+    *c
+}
+
+fn method_copy_right(c: &Node) -> t27 {
+    (*c).get()
+}
+
+fn return_own_other(c: &Tree) -> Tree {
+    *c
+}
+
+fn let_own_other(c: &Tree) -> Tree {
+    let t = *c;
+    t
+}
+
+fn call_own_other(c: &Tree) -> t27 {
+    take(*c)
+}
+
+fn field_own_other(c: &Tree) -> Wrap {
+    Wrap { t: *c, k: 1 }
+}
+
+fn assign_own_other(c: &Tree, out: &mut Tree) {
+    *out = *c;
+}
+
+fn method_own_other(c: &Tree) -> t27 {
+    (*c).eat()
+}
+
+fn arm_own_other(c: &Tree, k: t27) -> Tree {
+    match k {
+        0 => *c,
+        _ => build(k),
+    }
+}

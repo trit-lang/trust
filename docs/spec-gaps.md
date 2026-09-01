@@ -2635,14 +2635,21 @@ yet sequenced anywhere in the second checker: each of `f(&mut o); f(&mut
 o);` written as two statements is refused, which is exactly where the one
 inside the operator gets away.
 
-**G9.169 — a move out of a reference is heard at the `match` and nowhere
-else, in the second checker.** `*c` where the whole body is the move —
-`fn plain(c: &Tree) -> Tree { *c }` — is the same refusal as `match *c`'s
-to the Rust compiler, for the same reason (Ch. 3 §1.2). G9.161 gave the
-second checker the rule at the one place it was asked for, and the rest
-of the language's move sites — a return, a call's by-value argument, a
-`let`'s right-hand side — are still to come: they are the same sentence
-in more positions, and positions are what a move tracker is made of.
+**G9.169 — a reference only *lends*, and nowhere is a value that owns
+read out of one.** The rule is the one sentence said at every move site
+— a `return`, a `let`, a call's by-value argument, an aggregate's field,
+an assignment, a method's by-value receiver, an arm's answer — and the
+second checker says it at all of them in `mismatch/09.tr` now: what a
+borrower *points at* is the point's owner's to drop, and the move is
+refused whether it was the whole body of the function or one field of
+one aggregate. The rule is keyed on what the thing *holds*, exactly as
+Ch. 3 §1.2 says a copy is: a plain struct's copy is field by field and
+nothing it holds has an address to own twice over, so `*c` for it is
+legal wherever the same words would read — which is why the ask is
+`owns` and not `is a class name`, and why a scalar never hears it at
+all. The lowering asked the same question once, at the `match`
+scrutinee (G9.161); now both compilers hear the one sentence everywhere
+a value is handed over.
 
 **G9.168 — `&&T` binds to an address, and an address is what a place
 already is.** `let rr = &r` is no instruction at all: the reference's
