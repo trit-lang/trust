@@ -1,0 +1,54 @@
+// Ch. 7's expansion can be wrong, and every way of wrong reports the same
+// way in both implementations.
+macro good($x) {
+    $x + $x
+}
+
+macro bad_body($x) {
+    $z + $x
+}
+
+macro no_repeat($x) {
+    $( $x )*
+}
+
+macro ring_a($x) {
+    ring_b!($x)
+}
+
+macro ring_b($x) {
+    ring_a!($x)
+}
+
+// A call of a macro that does not exist is the caller's mistake.
+fn missing() -> t27 {
+    nope!(3)
+}
+
+// A call with the wrong number of arguments is the caller's.
+fn count_wrong() -> t27 {
+    good!(1, 2)
+}
+
+// A body that names a parameter that was not declared is the macro's, and
+// its expansion leaves its stand-in admitted rather than typed.
+fn not_a_param() -> t27 {
+    bad_body!(1)
+}
+
+// A repetition in a body with no repetition to repeat is the macro's too.
+fn nothing_repeated() -> t27 {
+    no_repeat!(1)
+}
+
+// Expansion that reaches itself through another macro stops at the depth
+// the chapter bounds it with (§3.1) — also the macro's mistake, so this
+// function itself hears nothing.
+fn circles() -> t27 {
+    ring_a!(1)
+}
+
+// Nothing wrong at all expands as written.
+fn fine() -> t27 {
+    good!(3)
+}

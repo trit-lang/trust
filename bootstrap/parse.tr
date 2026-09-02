@@ -270,7 +270,8 @@ pub fn unary(p: &mut Parser) -> Result<Expr, lex::Error> {
 }
 
 /// Whether an expression is written with braces, and so may stand as a
-/// statement without a `;` (§5.1).
+/// statement without a `;` (§5.1). A `$( … )*` has no braces and is one
+/// anyway: it ends at its `*` and holds statements of its own (Ch. 7 §3).
 pub fn block_shaped(e: &Expr) -> bool {
     match e {
         Expr::Nested(b) => true,
@@ -279,6 +280,7 @@ pub fn block_shaped(e: &Expr) -> bool {
         Expr::For(n, e, b) => true,
         Expr::Loop(b) => true,
         Expr::Match(e, arms) => true,
+        Expr::MacroRepeat(stmts) => true,
         _ => false,
     }
 }
@@ -937,7 +939,22 @@ pub fn block(p: &mut Parser) -> Result<ast::Block, lex::Error> {
                     stmts.push(ast::Stmt::Do(e));
                 }
             } else {
-                tail = Option::Some(Box::new(e));
+                // What is not block-shaped ends only one way: it is the
+                // block's value where a `}` follows, and a refusal anywhere
+                // else — `{ a b; }` is not two statements, in either parser.
+                let t4 = peek(p)?;
+                let closes = match t4.tok {
+                    Tok::Op(o) => o.same("}"),
+                    _ => false,
+                };
+                if closes {
+                    tail = Option::Some(Box::new(e));
+                } else {
+                    return Result::Err(lex::Error {
+                        at: p.at,
+                        message: "expected `;` or `}`".to_string(),
+                    });
+                }
             }
         }
     }

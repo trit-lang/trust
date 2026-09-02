@@ -17,6 +17,7 @@
 mod ast;
 mod input;
 mod lex;
+mod macros;
 mod parse;
 
 /// One name in scope, and what it is.
@@ -74,6 +75,10 @@ pub struct World {
     /// Set to report which functions are refused, rather than what every
     /// binding is.
     pub agreeing: bool,
+    /// The functions an expansion error was found in (Ch. 7 §5): their
+    /// verdict is `other` without a further question, exactly as the other
+    /// implementation's first error in the body is the one it stops at.
+    pub poisoned: Vec<String>,
     /// Whether the function being walked has already been refused: one
     /// answer per function, as the Rust side gives (it stops at the first).
     pub refused: bool,
@@ -126,7 +131,11 @@ fn main() -> t27 {
                 variants: Vec::new(),
                 locals: Vec::new(),
                 loans: Vec::new(),
+                poisoned: Vec::new(),
             };
+            let done = macros::expand(items);
+            let items = done.items;
+            w.poisoned = done.poisoned;
             prelude(&mut w);
             // Aliases first: one may be written after what uses it, and
             // nothing below should ever see a name that is only a name.
@@ -273,6 +282,24 @@ fn walk_item(w: &mut World, item: &ast::Item) {
             }
             match &f.body {
                 Option::Some(b) => {
+                    let mut i: taddr = 0;
+                    let mut touched = false;
+                    while i < w.poisoned.len() {
+                        if w.poisoned[i].same(&f.name) {
+                            touched = true;
+                        }
+                        i += 1;
+                    }
+                    if touched && w.agreeing {
+                        // The expansion error is the first one in the body,
+                        // and a first error is the one both stop at.
+                        print(&f.name);
+                        println(" other");
+                        return;
+                    }
+                    if touched {
+                        return;
+                    }
                     w.refused = false;
                     w.other = false;
                     walk_fn(w, f, b);
@@ -962,7 +989,15 @@ pub fn type_of(w: &mut World, e: &ast::Expr) -> ast::Ty {
             let base = strip(&whole);
             element_of(&base)
         }
-        ast::Expr::Call(name, args) => return_of(w, name),
+        ast::Expr::Call(name, args) => {
+            // What an expansion error left in its place: the error was
+            // already heard, so the stand-in is admitted the way everything
+            // unknown is (Ch. 7 §5).
+            if name.same("#error") {
+                return named("#unknown");
+            }
+            return_of(w, name)
+        }
         ast::Expr::Method(r, name, args) => {
             let whole = type_of(w, r);
             let on = strip(&whole);

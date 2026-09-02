@@ -17,6 +17,7 @@ mod input;
 mod layout;
 mod lex;
 mod lower;
+mod macros;
 mod parse;
 mod resolve;
 
@@ -124,6 +125,18 @@ fn main() -> t27 {
         }
         f += 1;
     }
+
+    // Passes four and five: macros, then the lowering (Ch. 7 §5). A macro's
+    // mistake is the program's, and what it expands to is timed by nothing
+    // outside it — so the walk is one pass over the one list, and an error
+    // there is reported the way a module's parse error is: nothing of the
+    // program is printed but the refusal.
+    let done = macros::expand(items);
+    if done.errors.len() > 0 {
+        println("error");
+        return 0;
+    }
+    let items = done.items;
 
     println("tir 0.1 target \"tritium\"");
 

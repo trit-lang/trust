@@ -1,0 +1,44 @@
+// Macros (Ch. 7): expansion, hygiene, and the repetition.
+//
+// `twice!` substitutes an argument twice — and evaluates it twice, which is
+// §2.1's rule and not a bug. `swap!` writes a name `main` also writes, and
+// they are different bindings: a body binds its own (§4). `say!` repeats a
+// statement per argument — zero arguments is a repetition of zero turns.
+
+/// An argument is substituted as an expression, wherever it is written.
+macro twice($x) {
+    $x + $x
+}
+
+/// Exchange two places.
+///
+/// The body writes `tmp`, and so does `main`. They are different bindings:
+/// a name a macro's body binds is renamed where it expands (Ch. 7 §4), so
+/// this swaps what the caller shadows, not what the macro does.
+macro swap($a, $b) {
+    { let tmp = $a; $a = $b; $b = tmp; }
+}
+
+/// Print each argument, then a newline.
+macro say($($x),*) {
+    {
+        $( print($x); )*
+        println("");
+    }
+}
+
+fn main() -> t27 {
+    // 5 + 5 = 10, as `twice!` wrote it.
+    let ten = twice!(5);
+    // and the argument is an expression, evaluated twice: (1 + 2 * 3) + (1 + 2 * 3).
+    let fourteen = twice!(1 + 2 * 3);
+
+    let mut tmp = 1;
+    let mut x = 2;
+    swap!(tmp, x);
+
+    say!("double the count is in hand");
+    say!();
+
+    ten + fourteen + tmp * 10 + x
+}

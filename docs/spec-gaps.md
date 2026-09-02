@@ -2626,6 +2626,54 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.173 — expansion is substitution, hygiene is a rename, and a
+repetition of nothing is nothing.** Ch. 7's one pass lands in the second
+implementation, where the other one has it — after the resolve that
+qualifies a body's names and before a lowering that never meets a call
+(§5): the macros are collected and dropped, every `name!` is walked and
+replaced with the block it expands to, and an argument is the caller's
+text, substituted where it is written (§2.1 — `$x + $x` evaluates twice
+and means it). **Hygiene** is the rename §4 promises: a name a body binds
+takes a dot and the counting of its expansion — `tmp.mac3` is a name no
+program can write — and the renaming scopes exactly the way blocks do,
+so a nested block's bindings end with it. The counting walks a body's
+children in the other compiler's order, because `.mac3` is a name the
+TIR prints and a comparison that normalized names away could not see two
+expanders numbering differently. A **repetition** repeats its statements
+once per argument, flattened where a statement stands rather than scoped
+by a block, and no arguments is zero turns, which is still a repetition.
+
+The mistakes come in the pair the other compiler's spans already draw.
+`nope!` and the wrong count are the *caller's*, and they poison the
+function they were written in — the word is `other`. A `$z` that was
+never a parameter and the body that repeats what repeats nothing are the
+*macro's*, found in the macro's own text — and a macro's text spans no
+caller, so the function that named it hears nothing and the stand-in the
+error leaves in its place is admitted the way anything unknown is
+(`mismatch/11.tr`, five ways). The bound on the reaching, §3.1's depth,
+is the same sixty-four.
+
+And landing it fixed a reader's disagreement nothing else had reached:
+`$( … )*` is a statement that ends at its `*` and needs no `;` (§3), and
+the day it was written into a corpus the second parser's block read it
+backwards — it had always taken the tail wherever a `;` was missing, so
+`{ a b; }` was b-then-a where the other parser refuses. The rule is the
+other's now: the tail only before `}`, what is block-shaped may stand
+alone, and anything else is the refusal both give.
+
+**G9.174 — recorded, not settled: a block's own aggregate, bound and then
+used, lowers nothing yet.** `let v = { let mut w: Vec<t27> = Vec::new();
+w.push(3); w }; print_int(v[0]);` writes nothing after the header on the
+second implementation — no macro anywhere — while the other lowers it in
+full (mm6). It is *read* behind G9.163's contributor model: the block's
+answer type is the tail's, but the lowering keeps the block's value as
+storage only on some paths, and `let` of it then using it is one the
+storage question has not reached. It is the same reason `examples/`'
+`vec!` is not in `bootstrap/programs/macros/`: expansion is right
+(db-run shows the five `push` statements under `v.mac1`), and the call
+site's `let v = {…}` is what stays silent. Settling it is its own
+commit; the macro corpus avoids the shape until then.
+
 **G9.172 — `macro` is an item, `$x` and `$( … )*` are a body's business,
 and `name!` is a call a later pass owes.** The second parser had no word
 for Ch. 7 at all: a file opening `macro twice($x) { $x + $x }` failed its

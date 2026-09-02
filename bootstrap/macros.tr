@@ -1,0 +1,1325 @@
+// Macro expansion (Ch. 7).
+//
+// One pass, run before anything that reads the program's meaning (§5): after
+// the names are resolved, so a macro's body names what its own module names,
+// and before the lowering, so no call is left for it to find.
+//
+// Two things it has to get right, and they are the chapter's two decisions.
+//
+// **Hygiene** (§4). A name the body *binds* is a new name; a name the body
+// *uses* and does not bind is the macro's own. So every binding a body
+// introduces is renamed at each expansion to something no program can
+// write — the same device invented names already use — and the renaming
+// reaches every use of that name inside the body, and nothing outside it.
+//
+// **One rule** (§2). A parameter list, optionally ending in a repetition,
+// and one body. Expansion is substitution and nothing is matched, so the
+// only way an invocation can be wrong is by count.
+//
+// `ast` is not declared here: the root declares it, and a module of the
+// program names what the root's tree already holds (Ch. 6 §1) — `use`
+// makes the name one this file resolves itself (Ch. 6 §3.2).
+
+use ast;
+
+/// A macro the file defined, kept where a call can find it.
+struct Macro {
+    name: String,
+    params: Vec<String>,
+    rest: Option<String>,
+    body: ast::Block,
+}
+
+/// The items with every invocation expanded, and the mistakes found on the
+/// way — carried rather than returned, because a walk that stops at the
+/// first wrong call would not see the rest (§5).
+pub struct Expanded {
+    pub items: Vec<ast::Item>,
+    pub errors: Vec<String>,
+    /// The names of the functions an error was found in, which is how a
+    /// caller that reports per function learns whose walk touched one.
+    pub poisoned: Vec<String>,
+}
+
+struct X {
+    macros: Vec<Macro>,
+    errors: Vec<String>,
+    poisoned: Vec<String>,
+    /// The function being walked, so an error knows whose body held it.
+    in_fn: String,
+    /// Set while what is being expanded came out of a macro's body: an
+    /// error there belongs to the macro's text, not to the caller's —
+    /// which is the attribution span-containment makes on the other side.
+    in_body: taddr,
+    /// Counts the bindings renamed, so two expansions of one macro do not
+    /// collide with each other either.
+    fresh: taddr,
+    depth: taddr,
+}
+
+/// How deep an expansion may nest before it is called a cycle.
+///
+/// §3.1 forbids recursion outright, so any depth beyond a handful is one
+/// macro reaching another reaching another — legal, and bounded by how many
+/// were written.
+fn depth_limit() -> taddr {
+    64
+}
+
+/// Expand every invocation among the items, and drop the macros (§5).
+pub fn expand(items: Vec<ast::Item>) -> Expanded {
+    let mut x = X { macros: Vec::new(), errors: Vec::new(), poisoned: Vec::new(), in_fn: "".to_string(), in_body: 0, fresh: 0, depth: 0 };
+    let mut kept: Vec<ast::Item> = Vec::new();
+    for i in items {
+        match &i.what {
+            ast::What::Macro(name, params, rest, body) => {
+                let mut owned_rest: Option<String> = Option::None;
+                match rest {
+                    Option::Some(r) => owned_rest = Option::Some(r.to_string()),
+                    Option::None => {}
+                }
+                x.macros.push(Macro {
+                    name: name.to_string(),
+                    params: ast::copy_names(params),
+                    rest: owned_rest,
+                    body: ast::copy_block(body),
+                });
+            }
+            _ => kept.push(i),
+        }
+    }
+    // The walk happens even when nothing is defined: an invocation of a
+    // macro that does not exist is the program's mistake, and skipping the
+    // walk left it to be found below as something unexpanded.
+    let mut out: Vec<ast::Item> = Vec::new();
+    for i in kept {
+        out.push(item(&mut x, i));
+    }
+    Expanded { items: out, errors: x.errors, poisoned: x.poisoned }
+}
+
+fn item(x: &mut X, i: ast::Item) -> ast::Item {
+    let what = match i.what {
+        ast::What::Function(f) => ast::What::Function(expand_fn(x, f)),
+        ast::What::Const(name, ty, value) => {
+            x.in_fn = "".to_string();
+            let v = expr(x, value);
+            ast::What::Const(name, ty, v)
+        }
+        ast::What::Impl(gs, tr, ty, fns) => {
+            let mut out: Vec<ast::Fn> = Vec::new();
+            for f in fns {
+                out.push(expand_fn(x, f));
+            }
+            ast::What::Impl(gs, tr, ty, out)
+        }
+        ast::What::Trait(name, params, supers, assoc, fns) => {
+            let mut out: Vec<ast::Fn> = Vec::new();
+            for f in fns {
+                out.push(expand_fn(x, f));
+            }
+            ast::What::Trait(name, params, supers, assoc, out)
+        }
+        other => other,
+    };
+    ast::Item { public: i.public, linear: i.linear, derives: i.derives, what: what }
+}
+
+fn expand_fn(x: &mut X, f: ast::Fn) -> ast::Fn {
+    x.in_fn = f.name.to_string();
+    let mut body: Option<ast::Block> = Option::None;
+    match f.body {
+        Option::Some(b) => body = Option::Some(block(x, b)),
+        Option::None => {}
+    };
+    let mut requires: Vec<ast::Expr> = Vec::new();
+    for r in f.requires {
+        requires.push(expr(x, r));
+    }
+    ast::Fn {
+        name: f.name,
+        generics: f.generics,
+        requires: requires,
+        params: f.params,
+        ret: f.ret,
+        body: body,
+    }
+}
+
+/// A block: statements, then the tail, with a repetition in statement
+/// position flattened into the statements it repeated — `$( v.push(x); )*`
+/// is a sequence and a block would scope its bindings away.
+fn block(x: &mut X, b: ast::Block) -> ast::Block {
+    flatten(x, b.stmts, b.tail)
+}
+
+fn flatten(x: &mut X, stmts: Vec<ast::Stmt>, tail: Option<Box<ast::Expr>>) -> ast::Block {
+    let mut out: Vec<ast::Stmt> = Vec::new();
+    for s in stmts {
+        match s {
+            ast::Stmt::Let(mutable, name, written, value) => {
+                let v = expr(x, value);
+                out.push(ast::Stmt::Let(mutable, name, written, v));
+            }
+            ast::Stmt::LetPattern(held, pat, value) => {
+                let v = expr(x, value);
+                out.push(ast::Stmt::LetPattern(held, pat, v));
+            }
+            ast::Stmt::Do(e) => {
+                let done = expr(x, e);
+                match done {
+                    ast::Expr::MacroRepeat(filled) => {
+                        for s2 in filled {
+                            out.push(s2);
+                        }
+                    }
+                    other => out.push(ast::Stmt::Do(other)),
+                }
+            }
+        }
+    }
+    let mut end: Option<Box<ast::Expr>> = Option::None;
+    match tail {
+        Option::Some(t) => end = Option::Some(Box::new(expr(x, *t))),
+        Option::None => {}
+    };
+    ast::Block { stmts: out, tail: end }
+}
+
+/// One expression: children first, so an argument that is itself an
+/// invocation is already expanded when it is substituted; then the call, if
+/// it is one.
+fn expr(x: &mut X, e: ast::Expr) -> ast::Expr {
+    // A block is where a repetition is flattened, so every block has to be
+    // reached as one rather than through the generic walk.
+    match e {
+        ast::Expr::Nested(b) => ast::Expr::Nested(Box::new(block(x, *b))),
+        ast::Expr::If(c, t, o) => {
+            let cond = Box::new(expr(x, *c));
+            let then = Box::new(block(x, *t));
+            let mut other: Option<Box<ast::Expr>> = Option::None;
+            match o {
+                Option::Some(e2) => other = Option::Some(Box::new(expr(x, *e2))),
+                Option::None => {}
+            };
+            ast::Expr::If(cond, then, other)
+        }
+        ast::Expr::While(c, b) => {
+            let cond = Box::new(expr(x, *c));
+            let body = Box::new(block(x, *b));
+            ast::Expr::While(cond, body)
+        }
+        ast::Expr::Loop(b) => ast::Expr::Loop(Box::new(block(x, *b))),
+        other => expand_call(x, children(x, other)),
+    }
+}
+
+/// A call of a macro, expanded where it stands — or the program's mistake,
+/// which leaves `()` in its place so the rest of the file can still be read.
+fn expand_call(x: &mut X, e: ast::Expr) -> ast::Expr {
+    match e {
+        ast::Expr::MacroCall(name, args) => match call(x, &name, args) {
+            Result::Ok(body) => body,
+            Result::Err(why) => {
+                if why.attributable {
+                    x.poisoned.push(x.in_fn.to_string());
+                }
+                x.errors.push(why.message);
+                // What stands where the call was is itself a hearing of
+                // that error, not a value: the invented name says so to any
+                // walk below, and no program can already hold one (Ch. 0
+                // §5.2). A types-read of it is admitted, like anything
+                // unknown; a lowering is never reached with it.
+                ast::Expr::Call("#error".to_string(), Vec::new())
+            }
+        },
+        other => other,
+    }
+}
+
+/// Every child of a non-block expression, in the order the other compiler
+/// walks them — the order decides which nested call is expanded first, and
+/// so which tag its bindings take.
+fn children(x: &mut X, e: ast::Expr) -> ast::Expr {
+    match e {
+        ast::Expr::Unary(op, a) => ast::Expr::Unary(op, Box::new(expr(x, *a))),
+        ast::Expr::Borrow(a, m) => ast::Expr::Borrow(Box::new(expr(x, *a)), m),
+        ast::Expr::Deref(a) => ast::Expr::Deref(Box::new(expr(x, *a))),
+        ast::Expr::Try(a) => ast::Expr::Try(Box::new(expr(x, *a))),
+        ast::Expr::Field(a, name) => ast::Expr::Field(Box::new(expr(x, *a)), name),
+        ast::Expr::Cast(a, t) => ast::Expr::Cast(Box::new(expr(x, *a)), t),
+        ast::Expr::Binary(op, a, b) => {
+            let l = Box::new(expr(x, *a));
+            let r = Box::new(expr(x, *b));
+            ast::Expr::Binary(op, l, r)
+        }
+        ast::Expr::Assign(op, a, b) => {
+            let l = Box::new(expr(x, *a));
+            let r = Box::new(expr(x, *b));
+            ast::Expr::Assign(op, l, r)
+        }
+        ast::Expr::Index(a, b) => {
+            let l = Box::new(expr(x, *a));
+            let r = Box::new(expr(x, *b));
+            ast::Expr::Index(l, r)
+        }
+        ast::Expr::Repeat(v, n) => {
+            let l = Box::new(expr(x, *v));
+            let r = Box::new(expr(x, *n));
+            ast::Expr::Repeat(l, r)
+        }
+        ast::Expr::Call(name, args) => ast::Expr::Call(name, exprs(x, args)),
+        ast::Expr::Array(items) => ast::Expr::Array(exprs(x, items)),
+        ast::Expr::Tuple(items) => ast::Expr::Tuple(exprs(x, items)),
+        ast::Expr::MacroCall(name, args) => ast::Expr::MacroCall(name, exprs(x, args)),
+        ast::Expr::Method(r, name, args) => {
+            let recv = Box::new(expr(x, *r));
+            ast::Expr::Method(recv, name, exprs(x, args))
+        }
+        ast::Expr::CallExpr(c, args) => {
+            let callee = Box::new(expr(x, *c));
+            ast::Expr::CallExpr(callee, exprs(x, args))
+        }
+        ast::Expr::Aggregate(path, fields) => {
+            let mut out: Vec<ast::Field> = Vec::new();
+            for f in fields {
+                let v = expr(x, f.value);
+                out.push(ast::Field { name: f.name, value: v });
+            }
+            ast::Expr::Aggregate(path, out)
+        }
+        ast::Expr::Closure(params, ret, body) => {
+            let b = Box::new(expr(x, *body));
+            ast::Expr::Closure(params, ret, b)
+        }
+        ast::Expr::Group(inner) => ast::Expr::Group(Box::new(expr(x, *inner))),
+        ast::Expr::Match(v, arms) => {
+            let scrutinee = Box::new(expr(x, *v));
+            let mut out: Vec<ast::Arm> = Vec::new();
+            for a in arms {
+                let mut guard: Option<ast::Expr> = Option::None;
+                match a.guard {
+                    Option::Some(g) => guard = Option::Some(expr(x, g)),
+                    Option::None => {}
+                };
+                let body = expr(x, a.body);
+                out.push(ast::Arm { patterns: a.patterns, guard: guard, body: body });
+            }
+            ast::Expr::Match(scrutinee, out)
+        }
+        ast::Expr::For(name, it, b) => {
+            let over = Box::new(expr(x, *it));
+            let body = Box::new(block_children(x, *b));
+            ast::Expr::For(name, over, body)
+        }
+        ast::Expr::Break(v) => ast::Expr::Break(jump_value(x, v)),
+        ast::Expr::Return(v) => ast::Expr::Return(jump_value(x, v)),
+        ast::Expr::MacroRepeat(stmts) => ast::Expr::MacroRepeat(stmt_values(x, stmts)),
+        other => other,
+    }
+}
+
+fn exprs(x: &mut X, args: Vec<ast::Expr>) -> Vec<ast::Expr> {
+    let mut out: Vec<ast::Expr> = Vec::new();
+    for a in args {
+        out.push(expr(x, a));
+    }
+    out
+}
+
+fn jump_value(x: &mut X, v: Option<Box<ast::Expr>>) -> Option<Box<ast::Expr>> {
+    let mut out: Option<Box<ast::Expr>> = Option::None;
+    match v {
+        Option::Some(e) => out = Option::Some(Box::new(expr(x, *e))),
+        Option::None => {}
+    }
+    out
+}
+
+/// The statements of a `for` body or a repetition: their expressions are
+/// walked, but the position is not one a repetition is flattened into.
+fn stmt_values(x: &mut X, stmts: Vec<ast::Stmt>) -> Vec<ast::Stmt> {
+    let mut out: Vec<ast::Stmt> = Vec::new();
+    for s in stmts {
+        match s {
+            ast::Stmt::Let(mutable, name, written, value) => {
+                let v = expr(x, value);
+                out.push(ast::Stmt::Let(mutable, name, written, v));
+            }
+            ast::Stmt::LetPattern(held, pat, value) => {
+                let v = expr(x, value);
+                out.push(ast::Stmt::LetPattern(held, pat, v));
+            }
+            ast::Stmt::Do(e) => out.push(ast::Stmt::Do(expr(x, e))),
+        }
+    }
+    out
+}
+
+fn block_children(x: &mut X, b: ast::Block) -> ast::Block {
+    let stmts = stmt_values(x, b.stmts);
+    let mut tail: Option<Box<ast::Expr>> = Option::None;
+    match b.tail {
+        Option::Some(t) => tail = Option::Some(Box::new(expr(x, *t))),
+        Option::None => {}
+    }
+    ast::Block { stmts: stmts, tail: tail }
+}
+
+/// Why an invocation was not expanded, and whose mistake it is: a wrong
+/// call is the caller's, where a body that cannot expand is the macro's.
+struct Fail {
+    message: String,
+    attributable: bool,
+}
+
+/// Whether an error at this point of the walk is the caller's: something
+/// expanded out of a body carries the body's text, which spans no caller.
+fn caller_error(x: &X) -> bool {
+    x.in_body == 0
+}
+
+/// One invocation, expanded.
+fn call(x: &mut X, name: &str, args: Vec<ast::Expr>) -> Result<ast::Expr, Fail> {
+    let found = lookup(x, name);
+    if found < 0 {
+        let mut m: String = Vec::new();
+        m.push('`');
+        m.push_str(name);
+        m.push_str("!` is not a macro in scope");
+        return Result::Err(Fail { message: m, attributable: caller_error(x) });
+    }
+    let m = &x.macros[found as taddr];
+    let fixed = m.params.len();
+    let has_rest = match &m.rest {
+        Option::Some(_) => true,
+        Option::None => false,
+    };
+    let enough = if has_rest { args.len() >= fixed } else { args.len() == fixed };
+    if !enough {
+        let mut msg: String = Vec::new();
+        msg.push('`');
+        msg.push_str(name);
+        if has_rest {
+            msg.push_str("!` takes at least ");
+        } else {
+            msg.push_str("!` takes ");
+        }
+        ast::push_int(&mut msg, fixed as t27);
+        msg.push_str(" argument(s), ");
+        ast::push_int(&mut msg, args.len() as t27);
+        msg.push_str(" given");
+        return Result::Err(Fail { message: msg, attributable: caller_error(x) });
+    }
+    x.depth += 1;
+    if x.depth > depth_limit() {
+        x.depth -= 1;
+        let mut msg: String = Vec::new();
+        msg.push('`');
+        msg.push_str(name);
+        msg.push_str("!` expands into itself, directly or through another macro (Ch. 7 §3.1)");
+        return Result::Err(Fail { message: msg, attributable: caller_error(x) });
+    }
+
+    // The arguments are already expanded — children first — and bound to
+    // the parameters written before them.
+    let mut bound: Vec<BoundArg> = Vec::new();
+    let mut repeated: Vec<ast::Expr> = Vec::new();
+    let mut j: taddr = 0;
+    for a in args {
+        if j < fixed {
+            bound.push(BoundArg { name: m.params[j].to_string(), arg: a });
+        } else {
+            repeated.push(a);
+        }
+        j += 1;
+    }
+    let mut rest: Option<String> = Option::None;
+    match &m.rest {
+        Option::Some(r) => rest = Option::Some(r.to_string()),
+        Option::None => {}
+    }
+
+    // Hygiene: the body's own bindings are renamed before anything is
+    // substituted into it, so a rename can never reach an argument.
+    x.fresh += 1;
+    let tag = x.fresh;
+    let mut renames = Renames { from: Vec::new(), to: Vec::new() };
+    let mut body = rename_bindings(ast::copy_block(&m.body), tag, &mut renames);
+
+    let mut sub = Sub { bound: bound, rest: rest, repeated: repeated, errors: Vec::new() };
+    body = sub_block(&mut sub, body);
+    if sub.errors.len() > 0 {
+        x.depth -= 1;
+        return Result::Err(Fail { message: sub.errors[0].to_string(), attributable: false });
+    }
+
+    // The expansion is the body, which may itself hold calls of other
+    // macros: expand what it expanded to. What it expands to is the
+    // macro's own text until the expansion is done.
+    x.in_body += 1;
+    let out = expr(x, ast::Expr::Nested(Box::new(body)));
+    x.in_body -= 1;
+    x.depth -= 1;
+    Result::Ok(out)
+}
+
+fn lookup(x: &X, name: &str) -> t27 {
+    let mut i: taddr = 0;
+    while i < x.macros.len() {
+        if x.macros[i].name.same(name) {
+            return i as t27;
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
+/// A fixed parameter with the argument it takes.
+struct BoundArg {
+    name: String,
+    arg: ast::Expr,
+}
+
+/// Put the arguments where the parameters are.
+struct Sub {
+    bound: Vec<BoundArg>,
+    rest: Option<String>,
+    repeated: Vec<ast::Expr>,
+    errors: Vec<String>,
+}
+
+fn sub_block(s: &mut Sub, b: ast::Block) -> ast::Block {
+    let mut out: Vec<ast::Stmt> = Vec::new();
+    for st in b.stmts {
+        match st {
+            ast::Stmt::Let(mutable, name, written, value) => {
+                let v = sub_expr(s, value);
+                out.push(ast::Stmt::Let(mutable, name, written, v));
+            }
+            ast::Stmt::LetPattern(held, pat, value) => {
+                let v = sub_expr(s, value);
+                out.push(ast::Stmt::LetPattern(held, pat, v));
+            }
+            ast::Stmt::Do(e) => {
+                let done = sub_expr(s, e);
+                match done {
+                    ast::Expr::MacroRepeat(filled) => {
+                        for s2 in filled {
+                            out.push(s2);
+                        }
+                    }
+                    other => out.push(ast::Stmt::Do(other)),
+                }
+            }
+        }
+    }
+    let mut end: Option<Box<ast::Expr>> = Option::None;
+    match b.tail {
+        Option::Some(t) => end = Option::Some(Box::new(sub_expr(s, *t))),
+        Option::None => {}
+    }
+    ast::Block { stmts: out, tail: end }
+}
+
+fn sub_expr(s: &mut Sub, e: ast::Expr) -> ast::Expr {
+    match e {
+        ast::Expr::MacroParam(name) => {
+            let at = bound_at(&s.bound, &name);
+            if at < 0 {
+                let mut m: String = Vec::new();
+                m.push_str("`$");
+                m.push_str(&name);
+                m.push_str("` is not a parameter of this macro (Ch. 7 §2)");
+                s.errors.push(m);
+                return ast::Expr::Unit;
+            }
+            ast::copy_expr(&s.bound[at as taddr].arg)
+        }
+        ast::Expr::MacroRepeat(stmts) => {
+            match &s.rest {
+                Option::Some(_) => {}
+                Option::None => {
+                    s.errors.push(
+                        "this macro has no repetition, so `$( … )*` repeats nothing (Ch. 7 §3)"
+                            .to_string(),
+                    );
+                    return ast::Expr::MacroRepeat(stmts);
+                }
+            }
+            let mut out: Vec<ast::Stmt> = Vec::new();
+            let mut ai: taddr = 0;
+            while ai < s.repeated.len() {
+                let turn_arg = ast::copy_expr(&s.repeated[ai]);
+                let mut si: taddr = 0;
+                while si < stmts.len() {
+                    let turn = one_turn(s, ast::copy_stmt(&stmts[si]), &turn_arg);
+                    out.push(turn);
+                    si += 1;
+                }
+                ai += 1;
+            }
+            ast::Expr::MacroRepeat(out)
+        }
+        ast::Expr::Nested(b) => ast::Expr::Nested(Box::new(sub_block(s, *b))),
+        ast::Expr::If(c, t, o) => {
+            let cond = Box::new(sub_expr(s, *c));
+            let then = Box::new(sub_block(s, *t));
+            let mut other: Option<Box<ast::Expr>> = Option::None;
+            match o {
+                Option::Some(e2) => other = Option::Some(Box::new(sub_expr(s, *e2))),
+                Option::None => {}
+            };
+            ast::Expr::If(cond, then, other)
+        }
+        ast::Expr::While(c, b) => {
+            let cond = Box::new(sub_expr(s, *c));
+            let body = Box::new(sub_block(s, *b));
+            ast::Expr::While(cond, body)
+        }
+        ast::Expr::Loop(b) => ast::Expr::Loop(Box::new(sub_block(s, *b))),
+        other => sub_children(s, other),
+    }
+}
+
+/// One turn of a repetition: the repeated parameter is this argument, and
+/// every other parameter is what it always was.
+///
+/// A repetition nested inside one is not expanded here, exactly as the
+/// other compiler leaves it: it is a mistake the walk below reports, not
+/// something this one untangles.
+fn one_turn(s: &mut Sub, st: ast::Stmt, arg: &ast::Expr) -> ast::Stmt {
+    match st {
+        ast::Stmt::Let(mutable, name, written, value) => {
+            let v = replace_param(s, value, arg);
+            ast::Stmt::Let(mutable, name, written, v)
+        }
+        ast::Stmt::LetPattern(held, pat, value) => {
+            let v = replace_param(s, value, arg);
+            ast::Stmt::LetPattern(held, pat, v)
+        }
+        ast::Stmt::Do(e) => ast::Stmt::Do(replace_param(s, e, arg)),
+    }
+}
+
+/// Substitute inside one turn: any `$name` becomes either a fixed argument
+/// or this turn's.
+fn replace_param(s: &mut Sub, e: ast::Expr, arg: &ast::Expr) -> ast::Expr {
+    match e {
+        ast::Expr::MacroParam(name) => {
+            let at = bound_at(&s.bound, &name);
+            if at >= 0 {
+                return ast::copy_expr(&s.bound[at as taddr].arg);
+            }
+            ast::copy_expr(arg)
+        }
+        other => replace_children(s, other, arg),
+    }
+}
+
+/// Children of a substituting walk: every place a `$name` can be written.
+/// Blocks are walked as statements rather than flattened — what a turn is
+/// made of, in the shape it was written.
+fn replace_children(s: &mut Sub, e: ast::Expr, arg: &ast::Expr) -> ast::Expr {
+    match e {
+        ast::Expr::Unary(op, a) => ast::Expr::Unary(op, Box::new(replace_param(s, *a, arg))),
+        ast::Expr::Borrow(a, m) => ast::Expr::Borrow(Box::new(replace_param(s, *a, arg)), m),
+        ast::Expr::Deref(a) => ast::Expr::Deref(Box::new(replace_param(s, *a, arg))),
+        ast::Expr::Try(a) => ast::Expr::Try(Box::new(replace_param(s, *a, arg))),
+        ast::Expr::Field(a, name) => ast::Expr::Field(Box::new(replace_param(s, *a, arg)), name),
+        ast::Expr::Cast(a, t) => ast::Expr::Cast(Box::new(replace_param(s, *a, arg)), t),
+        ast::Expr::Binary(op, a, b) => {
+            let l = Box::new(replace_param(s, *a, arg));
+            let r = Box::new(replace_param(s, *b, arg));
+            ast::Expr::Binary(op, l, r)
+        }
+        ast::Expr::Assign(op, a, b) => {
+            let l = Box::new(replace_param(s, *a, arg));
+            let r = Box::new(replace_param(s, *b, arg));
+            ast::Expr::Assign(op, l, r)
+        }
+        ast::Expr::Index(a, b) => {
+            let l = Box::new(replace_param(s, *a, arg));
+            let r = Box::new(replace_param(s, *b, arg));
+            ast::Expr::Index(l, r)
+        }
+        ast::Expr::Repeat(v, n) => {
+            let l = Box::new(replace_param(s, *v, arg));
+            let r = Box::new(replace_param(s, *n, arg));
+            ast::Expr::Repeat(l, r)
+        }
+        ast::Expr::Call(name, args) => ast::Expr::Call(name, replace_exprs(s, args, arg)),
+        ast::Expr::Array(items) => ast::Expr::Array(replace_exprs(s, items, arg)),
+        ast::Expr::Tuple(items) => ast::Expr::Tuple(replace_exprs(s, items, arg)),
+        ast::Expr::MacroCall(name, args) => ast::Expr::MacroCall(name, replace_exprs(s, args, arg)),
+        ast::Expr::Method(r, name, args) => {
+            let recv = Box::new(replace_param(s, *r, arg));
+            ast::Expr::Method(recv, name, replace_exprs(s, args, arg))
+        }
+        ast::Expr::CallExpr(c, args) => {
+            let callee = Box::new(replace_param(s, *c, arg));
+            ast::Expr::CallExpr(callee, replace_exprs(s, args, arg))
+        }
+        ast::Expr::Aggregate(path, fields) => {
+            let mut out: Vec<ast::Field> = Vec::new();
+            for f in fields {
+                let v = replace_param(s, f.value, arg);
+                out.push(ast::Field { name: f.name, value: v });
+            }
+            ast::Expr::Aggregate(path, out)
+        }
+        ast::Expr::Closure(params, ret, body) => {
+            let b = Box::new(replace_param(s, *body, arg));
+            ast::Expr::Closure(params, ret, b)
+        }
+        ast::Expr::Group(inner) => ast::Expr::Group(Box::new(replace_param(s, *inner, arg))),
+        ast::Expr::Nested(b) => {
+            let mut inner = *b;
+            inner.stmts = replace_stmts(s, inner.stmts, arg);
+            inner.tail = replace_tail(s, inner.tail, arg);
+            ast::Expr::Nested(Box::new(inner))
+        }
+        ast::Expr::If(c, t, o) => {
+            let cond = Box::new(replace_param(s, *c, arg));
+            let mut then = *t;
+            then.stmts = replace_stmts(s, then.stmts, arg);
+            then.tail = replace_tail(s, then.tail, arg);
+            let mut other: Option<Box<ast::Expr>> = Option::None;
+            match o {
+                Option::Some(e2) => other = Option::Some(Box::new(replace_param(s, *e2, arg))),
+                Option::None => {}
+            }
+            ast::Expr::If(cond, Box::new(then), other)
+        }
+        ast::Expr::Match(v, arms) => {
+            let scrutinee = Box::new(replace_param(s, *v, arg));
+            let mut out: Vec<ast::Arm> = Vec::new();
+            for a in arms {
+                let mut guard: Option<ast::Expr> = Option::None;
+                match a.guard {
+                    Option::Some(g) => guard = Option::Some(replace_param(s, g, arg)),
+                    Option::None => {}
+                };
+                let body = replace_param(s, a.body, arg);
+                out.push(ast::Arm { patterns: a.patterns, guard: guard, body: body });
+            }
+            ast::Expr::Match(scrutinee, out)
+        }
+        ast::Expr::While(c, b) => {
+            let cond = Box::new(replace_param(s, *c, arg));
+            let mut body = *b;
+            body.stmts = replace_stmts(s, body.stmts, arg);
+            body.tail = replace_tail(s, body.tail, arg);
+            ast::Expr::While(cond, Box::new(body))
+        }
+        ast::Expr::Loop(b) => {
+            let mut body = *b;
+            body.stmts = replace_stmts(s, body.stmts, arg);
+            body.tail = replace_tail(s, body.tail, arg);
+            ast::Expr::Loop(Box::new(body))
+        }
+        ast::Expr::For(name, it, b) => {
+            let over = Box::new(replace_param(s, *it, arg));
+            let mut body = *b;
+            body.stmts = replace_stmts(s, body.stmts, arg);
+            body.tail = replace_tail(s, body.tail, arg);
+            ast::Expr::For(name, over, Box::new(body))
+        }
+        ast::Expr::Break(v) => ast::Expr::Break(replace_tail(s, v, arg)),
+        ast::Expr::Return(v) => ast::Expr::Return(replace_tail(s, v, arg)),
+        other => other,
+    }
+}
+
+fn replace_exprs(s: &mut Sub, args: Vec<ast::Expr>, arg: &ast::Expr) -> Vec<ast::Expr> {
+    let mut out: Vec<ast::Expr> = Vec::new();
+    for a in args {
+        out.push(replace_param(s, a, arg));
+    }
+    out
+}
+
+fn replace_tail(
+    s: &mut Sub,
+    v: Option<Box<ast::Expr>>,
+    arg: &ast::Expr,
+) -> Option<Box<ast::Expr>> {
+    let mut out: Option<Box<ast::Expr>> = Option::None;
+    match v {
+        Option::Some(e) => out = Option::Some(Box::new(replace_param(s, *e, arg))),
+        Option::None => {}
+    }
+    out
+}
+
+fn replace_stmts(s: &mut Sub, stmts: Vec<ast::Stmt>, arg: &ast::Expr) -> Vec<ast::Stmt> {
+    let mut out: Vec<ast::Stmt> = Vec::new();
+    for st in stmts {
+        match st {
+            ast::Stmt::Let(mutable, name, written, value) => {
+                let v = replace_param(s, value, arg);
+                out.push(ast::Stmt::Let(mutable, name, written, v));
+            }
+            ast::Stmt::LetPattern(held, pat, value) => {
+                let v = replace_param(s, value, arg);
+                out.push(ast::Stmt::LetPattern(held, pat, v));
+            }
+            ast::Stmt::Do(e) => out.push(ast::Stmt::Do(replace_param(s, e, arg))),
+        }
+    }
+    out
+}
+
+/// Children of the outer substituting walk, which visits a block as a block
+/// so a repetition inside one is flattened there.
+fn sub_children(s: &mut Sub, e: ast::Expr) -> ast::Expr {
+    match e {
+        ast::Expr::Unary(op, a) => ast::Expr::Unary(op, Box::new(sub_expr(s, *a))),
+        ast::Expr::Borrow(a, m) => ast::Expr::Borrow(Box::new(sub_expr(s, *a)), m),
+        ast::Expr::Deref(a) => ast::Expr::Deref(Box::new(sub_expr(s, *a))),
+        ast::Expr::Try(a) => ast::Expr::Try(Box::new(sub_expr(s, *a))),
+        ast::Expr::Field(a, name) => ast::Expr::Field(Box::new(sub_expr(s, *a)), name),
+        ast::Expr::Cast(a, t) => ast::Expr::Cast(Box::new(sub_expr(s, *a)), t),
+        ast::Expr::Binary(op, a, b) => {
+            let l = Box::new(sub_expr(s, *a));
+            let r = Box::new(sub_expr(s, *b));
+            ast::Expr::Binary(op, l, r)
+        }
+        ast::Expr::Assign(op, a, b) => {
+            let l = Box::new(sub_expr(s, *a));
+            let r = Box::new(sub_expr(s, *b));
+            ast::Expr::Assign(op, l, r)
+        }
+        ast::Expr::Index(a, b) => {
+            let l = Box::new(sub_expr(s, *a));
+            let r = Box::new(sub_expr(s, *b));
+            ast::Expr::Index(l, r)
+        }
+        ast::Expr::Repeat(v, n) => {
+            let l = Box::new(sub_expr(s, *v));
+            let r = Box::new(sub_expr(s, *n));
+            ast::Expr::Repeat(l, r)
+        }
+        ast::Expr::Call(name, args) => ast::Expr::Call(name, sub_exprs(s, args)),
+        ast::Expr::Array(items) => ast::Expr::Array(sub_exprs(s, items)),
+        ast::Expr::Tuple(items) => ast::Expr::Tuple(sub_exprs(s, items)),
+        ast::Expr::MacroCall(name, args) => ast::Expr::MacroCall(name, sub_exprs(s, args)),
+        ast::Expr::Method(r, name, args) => {
+            let recv = Box::new(sub_expr(s, *r));
+            ast::Expr::Method(recv, name, sub_exprs(s, args))
+        }
+        ast::Expr::CallExpr(c, args) => {
+            let callee = Box::new(sub_expr(s, *c));
+            ast::Expr::CallExpr(callee, sub_exprs(s, args))
+        }
+        ast::Expr::Aggregate(path, fields) => {
+            let mut out: Vec<ast::Field> = Vec::new();
+            for f in fields {
+                let v = sub_expr(s, f.value);
+                out.push(ast::Field { name: f.name, value: v });
+            }
+            ast::Expr::Aggregate(path, out)
+        }
+        ast::Expr::Closure(params, ret, body) => {
+            let b = Box::new(sub_expr(s, *body));
+            ast::Expr::Closure(params, ret, b)
+        }
+        ast::Expr::Group(inner) => ast::Expr::Group(Box::new(sub_expr(s, *inner))),
+        ast::Expr::Match(v, arms) => {
+            let scrutinee = Box::new(sub_expr(s, *v));
+            let mut out: Vec<ast::Arm> = Vec::new();
+            for a in arms {
+                let mut guard: Option<ast::Expr> = Option::None;
+                match a.guard {
+                    Option::Some(g) => guard = Option::Some(sub_expr(s, g)),
+                    Option::None => {}
+                };
+                let body = sub_expr(s, a.body);
+                out.push(ast::Arm { patterns: a.patterns, guard: guard, body: body });
+            }
+            ast::Expr::Match(scrutinee, out)
+        }
+        ast::Expr::For(name, it, b) => {
+            let over = Box::new(sub_expr(s, *it));
+            let mut body = *b;
+            body.stmts = sub_stmts(s, body.stmts);
+            body.tail = sub_tail(s, body.tail);
+            ast::Expr::For(name, over, Box::new(body))
+        }
+        ast::Expr::Break(v) => ast::Expr::Break(sub_tail(s, v)),
+        ast::Expr::Return(v) => ast::Expr::Return(sub_tail(s, v)),
+        other => other,
+    }
+}
+
+fn sub_exprs(s: &mut Sub, args: Vec<ast::Expr>) -> Vec<ast::Expr> {
+    let mut out: Vec<ast::Expr> = Vec::new();
+    for a in args {
+        out.push(sub_expr(s, a));
+    }
+    out
+}
+
+fn sub_tail(s: &mut Sub, v: Option<Box<ast::Expr>>) -> Option<Box<ast::Expr>> {
+    let mut out: Option<Box<ast::Expr>> = Option::None;
+    match v {
+        Option::Some(e) => out = Option::Some(Box::new(sub_expr(s, *e))),
+        Option::None => {}
+    }
+    out
+}
+
+fn sub_stmts(s: &mut Sub, stmts: Vec<ast::Stmt>) -> Vec<ast::Stmt> {
+    let mut out: Vec<ast::Stmt> = Vec::new();
+    for st in stmts {
+        match st {
+            ast::Stmt::Let(mutable, name, written, value) => {
+                let v = sub_expr(s, value);
+                out.push(ast::Stmt::Let(mutable, name, written, v));
+            }
+            ast::Stmt::LetPattern(held, pat, value) => {
+                let v = sub_expr(s, value);
+                out.push(ast::Stmt::LetPattern(held, pat, v));
+            }
+            ast::Stmt::Do(e) => out.push(ast::Stmt::Do(sub_expr(s, e))),
+        }
+    }
+    out
+}
+
+fn bound_at(bound: &Vec<BoundArg>, name: &str) -> t27 {
+    let mut i: taddr = 0;
+    while i < bound.len() {
+        if bound[i].name.same(name) {
+            return i as t27;
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
+// ---------------------------------------------------------------- hygiene
+
+/// The renames one expansion holds: a written name and what it became.
+/// Two lists, because the borrowed-pair shape this file's walkers already
+/// have to move would borrow one of them while the other is written.
+struct Renames {
+    from: Vec<String>,
+    to: Vec<String>,
+}
+
+fn rename_set(r: &mut Renames, name: &str, to: &str) {
+    let mut i: taddr = 0;
+    while i < r.from.len() {
+        if r.from[i].same(name) {
+            r.to[i] = to.to_string();
+            return;
+        }
+        i += 1;
+    }
+    r.from.push(name.to_string());
+    r.to.push(to.to_string());
+}
+
+fn rename_get(r: &Renames, name: &str) -> Option<String> {
+    let mut i: taddr = 0;
+    while i < r.from.len() {
+        if r.from[i].same(name) {
+            return Option::Some(r.to[i].to_string());
+        }
+        i += 1;
+    }
+    Option::None
+}
+
+fn rename_copy(r: &Renames) -> Renames {
+    Renames { from: ast::copy_names(&r.from), to: ast::copy_names(&r.to) }
+}
+
+/// What a binding is called inside one expansion: its name with a dot the
+/// program cannot write and the counting of the expansion it was made for
+/// (Ch. 7 §4). A dot is what marks it: Ch. 0 §1.3's identifiers hold none,
+/// and the compiler already forms names this way for closures and
+/// instantiations.
+fn tagged(name: &str, tag: taddr) -> String {
+    let mut out: String = Vec::new();
+    out.push_str(name);
+    out.push_str(".mac");
+    ast::push_int(&mut out, tag as t27);
+    out
+}
+
+/// Give every binding a macro's body introduces a name no program can write.
+fn rename_bindings(b: ast::Block, tag: taddr, renames: &mut Renames) -> ast::Block {
+    let mut out: Vec<ast::Stmt> = Vec::new();
+    for st in b.stmts {
+        match st {
+            ast::Stmt::Let(mutable, name, written, value) => {
+                // The initializer is read before the name is bound (Ch. 0
+                // §5.2), so a `let n = n;` in a body means the outer `n`.
+                let v = rename_uses(value, renames);
+                let to = tagged(&name, tag);
+                rename_set(renames, &name, &to);
+                out.push(ast::Stmt::Let(mutable, to, written, v));
+            }
+            ast::Stmt::LetPattern(held, pat, value) => {
+                let v = rename_uses(value, renames);
+                let to = tagged(&held, tag);
+                rename_set(renames, &held, &to);
+                out.push(ast::Stmt::LetPattern(to, pat, v));
+            }
+            ast::Stmt::Do(e) => out.push(ast::Stmt::Do(rename_expr(e, tag, renames))),
+        }
+    }
+    let mut end: Option<Box<ast::Expr>> = Option::None;
+    match b.tail {
+        Option::Some(t) => end = Option::Some(Box::new(rename_expr(*t, tag, renames))),
+        Option::None => {}
+    }
+    ast::Block { stmts: out, tail: end }
+}
+
+fn rename_expr(e: ast::Expr, tag: taddr, renames: &mut Renames) -> ast::Expr {
+    match e {
+        ast::Expr::Nested(b) => {
+            // A nested block's bindings end with it, exactly as they would
+            // outside a macro.
+            let mut inner = rename_copy(renames);
+            let body = rename_bindings(*b, tag, &mut inner);
+            ast::Expr::Nested(Box::new(body))
+        }
+        ast::Expr::Match(v, arms) => {
+            let scrutinee = Box::new(rename_expr(*v, tag, renames));
+            let mut out: Vec<ast::Arm> = Vec::new();
+            for a in arms {
+                let mut inner = rename_copy(renames);
+                let mut pats: Vec<ast::Pattern> = Vec::new();
+                for p in a.patterns {
+                    pats.push(rename_pattern(p, tag, &mut inner));
+                }
+                let mut guard: Option<ast::Expr> = Option::None;
+                match a.guard {
+                    Option::Some(g) => guard = Option::Some(rename_uses(g, &inner)),
+                    Option::None => {}
+                };
+                let body = rename_expr(a.body, tag, &mut inner);
+                out.push(ast::Arm { patterns: pats, guard: guard, body: body });
+            }
+            ast::Expr::Match(scrutinee, out)
+        }
+        ast::Expr::Closure(params, ret, body) => {
+            let mut inner = rename_copy(renames);
+            let mut ps: Vec<ast::Named> = Vec::new();
+            for p in params {
+                let to = tagged(&p.name, tag);
+                rename_set(&mut inner, &p.name, &to);
+                ps.push(ast::Named { name: to, ty: p.ty });
+            }
+            let b2 = Box::new(rename_expr(*body, tag, &mut inner));
+            ast::Expr::Closure(ps, ret, b2)
+        }
+        ast::Expr::Name(n) => {
+            let to = rename_get(renames, &n);
+            match to {
+                Option::Some(r) => ast::Expr::Name(r),
+                Option::None => ast::Expr::Name(n),
+            }
+        }
+        other => rename_children(other, tag, renames),
+    }
+}
+
+/// Rename uses only — for a place where no new binding may appear.
+fn rename_uses(e: ast::Expr, renames: &Renames) -> ast::Expr {
+    match e {
+        ast::Expr::Name(n) => {
+            let to = rename_get(renames, &n);
+            match to {
+                Option::Some(r) => ast::Expr::Name(r),
+                Option::None => ast::Expr::Name(n),
+            }
+        }
+        other => rename_uses_children(other, renames),
+    }
+}
+
+fn rename_pattern(p: ast::Pattern, tag: taddr, renames: &mut Renames) -> ast::Pattern {
+    match p {
+        ast::Pattern::Bind(n) => {
+            let to = tagged(&n, tag);
+            rename_set(renames, &n, &to);
+            ast::Pattern::Bind(to)
+        }
+        ast::Pattern::Aggregate(path, fields) => {
+            let mut out: Vec<ast::PatField> = Vec::new();
+            for f in fields {
+                let sub = rename_pattern(f.pat, tag, renames);
+                out.push(ast::PatField { name: f.name, pat: sub });
+            }
+            ast::Pattern::Aggregate(path, out)
+        }
+        ast::Pattern::Tuple(items) => {
+            let mut out: Vec<ast::Pattern> = Vec::new();
+            for i in items {
+                out.push(rename_pattern(i, tag, renames));
+            }
+            ast::Pattern::Tuple(out)
+        }
+        other => other,
+    }
+}
+
+/// Rewrites the children of an expression with the current renames. A
+/// nested block scopes and is reached by `rename_expr` instead, which is
+/// why those three are not here.
+fn rename_children(e: ast::Expr, tag: taddr, renames: &mut Renames) -> ast::Expr {
+    match e {
+        ast::Expr::Unary(op, a) => ast::Expr::Unary(op, Box::new(rename_expr(*a, tag, renames))),
+        ast::Expr::Borrow(a, m) => ast::Expr::Borrow(Box::new(rename_expr(*a, tag, renames)), m),
+        ast::Expr::Deref(a) => ast::Expr::Deref(Box::new(rename_expr(*a, tag, renames))),
+        ast::Expr::Try(a) => ast::Expr::Try(Box::new(rename_expr(*a, tag, renames))),
+        ast::Expr::Field(a, name) => ast::Expr::Field(Box::new(rename_expr(*a, tag, renames)), name),
+        ast::Expr::Cast(a, t) => ast::Expr::Cast(Box::new(rename_expr(*a, tag, renames)), t),
+        ast::Expr::Binary(op, a, b) => {
+            let l = Box::new(rename_expr(*a, tag, renames));
+            let r = Box::new(rename_expr(*b, tag, renames));
+            ast::Expr::Binary(op, l, r)
+        }
+        ast::Expr::Assign(op, a, b) => {
+            let l = Box::new(rename_expr(*a, tag, renames));
+            let r = Box::new(rename_expr(*b, tag, renames));
+            ast::Expr::Assign(op, l, r)
+        }
+        ast::Expr::Index(a, b) => {
+            let l = Box::new(rename_expr(*a, tag, renames));
+            let r = Box::new(rename_expr(*b, tag, renames));
+            ast::Expr::Index(l, r)
+        }
+        ast::Expr::Repeat(v, n) => {
+            let l = Box::new(rename_expr(*v, tag, renames));
+            let r = Box::new(rename_expr(*n, tag, renames));
+            ast::Expr::Repeat(l, r)
+        }
+        ast::Expr::Call(name, args) => ast::Expr::Call(name, rename_exprs(args, tag, renames)),
+        ast::Expr::Array(items) => ast::Expr::Array(rename_exprs(items, tag, renames)),
+        ast::Expr::Tuple(items) => ast::Expr::Tuple(rename_exprs(items, tag, renames)),
+        ast::Expr::MacroCall(name, args) => {
+            ast::Expr::MacroCall(name, rename_exprs(args, tag, renames))
+        }
+        ast::Expr::Method(r, name, args) => {
+            let recv = Box::new(rename_expr(*r, tag, renames));
+            ast::Expr::Method(recv, name, rename_exprs(args, tag, renames))
+        }
+        ast::Expr::CallExpr(c, args) => {
+            let callee = Box::new(rename_expr(*c, tag, renames));
+            ast::Expr::CallExpr(callee, rename_exprs(args, tag, renames))
+        }
+        ast::Expr::Aggregate(path, fields) => {
+            let mut out: Vec<ast::Field> = Vec::new();
+            for f in fields {
+                let v = rename_expr(f.value, tag, renames);
+                out.push(ast::Field { name: f.name, value: v });
+            }
+            ast::Expr::Aggregate(path, out)
+        }
+        ast::Expr::Group(inner) => ast::Expr::Group(Box::new(rename_expr(*inner, tag, renames))),
+        ast::Expr::MacroRepeat(stmts) => ast::Expr::MacroRepeat(rename_stmts(stmts, tag, renames)),
+        ast::Expr::For(name, it, b) => {
+            let over = Box::new(rename_expr(*it, tag, renames));
+            let mut body = *b;
+            body.stmts = rename_stmts(body.stmts, tag, renames);
+            body.tail = rename_tail(body.tail, tag, renames);
+            ast::Expr::For(name, over, Box::new(body))
+        }
+        ast::Expr::Break(v) => ast::Expr::Break(rename_tail(v, tag, renames)),
+        ast::Expr::Return(v) => ast::Expr::Return(rename_tail(v, tag, renames)),
+        other => other,
+    }
+}
+
+fn rename_exprs(args: Vec<ast::Expr>, tag: taddr, renames: &mut Renames) -> Vec<ast::Expr> {
+    let mut out: Vec<ast::Expr> = Vec::new();
+    for a in args {
+        out.push(rename_expr(a, tag, renames));
+    }
+    out
+}
+
+fn rename_tail(
+    v: Option<Box<ast::Expr>>,
+    tag: taddr,
+    renames: &mut Renames,
+) -> Option<Box<ast::Expr>> {
+    let mut out: Option<Box<ast::Expr>> = Option::None;
+    match v {
+        Option::Some(e) => out = Option::Some(Box::new(rename_expr(*e, tag, renames))),
+        Option::None => {}
+    }
+    out
+}
+
+fn rename_stmts(stmts: Vec<ast::Stmt>, tag: taddr, renames: &mut Renames) -> Vec<ast::Stmt> {
+    let mut out: Vec<ast::Stmt> = Vec::new();
+    for st in stmts {
+        match st {
+            ast::Stmt::Let(mutable, name, written, value) => {
+                let v = rename_expr(value, tag, renames);
+                out.push(ast::Stmt::Let(mutable, name, written, v));
+            }
+            ast::Stmt::LetPattern(held, pat, value) => {
+                let v = rename_expr(value, tag, renames);
+                out.push(ast::Stmt::LetPattern(held, pat, v));
+            }
+            ast::Stmt::Do(e) => out.push(ast::Stmt::Do(rename_expr(e, tag, renames))),
+        }
+    }
+    out
+}
+
+/// The children of a use-only walk: no new names introduced anywhere, and
+/// blocks walked the same way — a use walk does not introduce scoping.
+fn rename_uses_children(e: ast::Expr, renames: &Renames) -> ast::Expr {
+    match e {
+        ast::Expr::Unary(op, a) => ast::Expr::Unary(op, Box::new(rename_uses(*a, renames))),
+        ast::Expr::Borrow(a, m) => ast::Expr::Borrow(Box::new(rename_uses(*a, renames)), m),
+        ast::Expr::Deref(a) => ast::Expr::Deref(Box::new(rename_uses(*a, renames))),
+        ast::Expr::Try(a) => ast::Expr::Try(Box::new(rename_uses(*a, renames))),
+        ast::Expr::Field(a, name) => ast::Expr::Field(Box::new(rename_uses(*a, renames)), name),
+        ast::Expr::Cast(a, t) => ast::Expr::Cast(Box::new(rename_uses(*a, renames)), t),
+        ast::Expr::Binary(op, a, b) => {
+            let l = Box::new(rename_uses(*a, renames));
+            let r = Box::new(rename_uses(*b, renames));
+            ast::Expr::Binary(op, l, r)
+        }
+        ast::Expr::Assign(op, a, b) => {
+            let l = Box::new(rename_uses(*a, renames));
+            let r = Box::new(rename_uses(*b, renames));
+            ast::Expr::Assign(op, l, r)
+        }
+        ast::Expr::Index(a, b) => {
+            let l = Box::new(rename_uses(*a, renames));
+            let r = Box::new(rename_uses(*b, renames));
+            ast::Expr::Index(l, r)
+        }
+        ast::Expr::Repeat(v, n) => {
+            let l = Box::new(rename_uses(*v, renames));
+            let r = Box::new(rename_uses(*n, renames));
+            ast::Expr::Repeat(l, r)
+        }
+        ast::Expr::Call(name, args) => ast::Expr::Call(name, uses_exprs(args, renames)),
+        ast::Expr::Array(items) => ast::Expr::Array(uses_exprs(items, renames)),
+        ast::Expr::Tuple(items) => ast::Expr::Tuple(uses_exprs(items, renames)),
+        ast::Expr::MacroCall(name, args) => ast::Expr::MacroCall(name, uses_exprs(args, renames)),
+        ast::Expr::Method(r, name, args) => {
+            let recv = Box::new(rename_uses(*r, renames));
+            ast::Expr::Method(recv, name, uses_exprs(args, renames))
+        }
+        ast::Expr::CallExpr(c, args) => {
+            let callee = Box::new(rename_uses(*c, renames));
+            ast::Expr::CallExpr(callee, uses_exprs(args, renames))
+        }
+        ast::Expr::Aggregate(path, fields) => {
+            let mut out: Vec<ast::Field> = Vec::new();
+            for f in fields {
+                let v = rename_uses(f.value, renames);
+                out.push(ast::Field { name: f.name, value: v });
+            }
+            ast::Expr::Aggregate(path, out)
+        }
+        ast::Expr::Closure(params, ret, body) => {
+            let b = Box::new(rename_uses(*body, renames));
+            ast::Expr::Closure(params, ret, b)
+        }
+        ast::Expr::Group(inner) => ast::Expr::Group(Box::new(rename_uses(*inner, renames))),
+        ast::Expr::Nested(b) => {
+            let mut inner = *b;
+            inner.stmts = uses_stmts(inner.stmts, renames);
+            inner.tail = uses_tail(inner.tail, renames);
+            ast::Expr::Nested(Box::new(inner))
+        }
+        ast::Expr::If(c, t, o) => {
+            let cond = Box::new(rename_uses(*c, renames));
+            let mut then = *t;
+            then.stmts = uses_stmts(then.stmts, renames);
+            then.tail = uses_tail(then.tail, renames);
+            let mut other: Option<Box<ast::Expr>> = Option::None;
+            match o {
+                Option::Some(e2) => other = Option::Some(Box::new(rename_uses(*e2, renames))),
+                Option::None => {}
+            }
+            ast::Expr::If(cond, Box::new(then), other)
+        }
+        ast::Expr::Match(v, arms) => {
+            let scrutinee = Box::new(rename_uses(*v, renames));
+            let mut out: Vec<ast::Arm> = Vec::new();
+            for a in arms {
+                let mut guard: Option<ast::Expr> = Option::None;
+                match a.guard {
+                    Option::Some(g) => guard = Option::Some(rename_uses(g, renames)),
+                    Option::None => {}
+                };
+                let body = rename_uses(a.body, renames);
+                out.push(ast::Arm { patterns: a.patterns, guard: guard, body: body });
+            }
+            ast::Expr::Match(scrutinee, out)
+        }
+        ast::Expr::While(c, b) => {
+            let cond = Box::new(rename_uses(*c, renames));
+            let mut body = *b;
+            body.stmts = uses_stmts(body.stmts, renames);
+            body.tail = uses_tail(body.tail, renames);
+            ast::Expr::While(cond, Box::new(body))
+        }
+        ast::Expr::Loop(b) => {
+            let mut body = *b;
+            body.stmts = uses_stmts(body.stmts, renames);
+            body.tail = uses_tail(body.tail, renames);
+            ast::Expr::Loop(Box::new(body))
+        }
+        ast::Expr::For(name, it, b) => {
+            let over = Box::new(rename_uses(*it, renames));
+            let mut body = *b;
+            body.stmts = uses_stmts(body.stmts, renames);
+            body.tail = uses_tail(body.tail, renames);
+            ast::Expr::For(name, over, Box::new(body))
+        }
+        ast::Expr::Break(v) => ast::Expr::Break(uses_tail(v, renames)),
+        ast::Expr::Return(v) => ast::Expr::Return(uses_tail(v, renames)),
+        other => other,
+    }
+}
+
+fn uses_exprs(args: Vec<ast::Expr>, renames: &Renames) -> Vec<ast::Expr> {
+    let mut out: Vec<ast::Expr> = Vec::new();
+    for a in args {
+        out.push(rename_uses(a, renames));
+    }
+    out
+}
+
+fn uses_tail(v: Option<Box<ast::Expr>>, renames: &Renames) -> Option<Box<ast::Expr>> {
+    let mut out: Option<Box<ast::Expr>> = Option::None;
+    match v {
+        Option::Some(e) => out = Option::Some(Box::new(rename_uses(*e, renames))),
+        Option::None => {}
+    }
+    out
+}
+
+fn uses_stmts(stmts: Vec<ast::Stmt>, renames: &Renames) -> Vec<ast::Stmt> {
+    let mut out: Vec<ast::Stmt> = Vec::new();
+    for st in stmts {
+        match st {
+            ast::Stmt::Let(mutable, name, written, value) => {
+                let v = rename_uses(value, renames);
+                out.push(ast::Stmt::Let(mutable, name, written, v));
+            }
+            ast::Stmt::LetPattern(held, pat, value) => {
+                let v = rename_uses(value, renames);
+                out.push(ast::Stmt::LetPattern(held, pat, v));
+            }
+            ast::Stmt::Do(e) => out.push(ast::Stmt::Do(rename_uses(e, renames))),
+        }
+    }
+    out
+}

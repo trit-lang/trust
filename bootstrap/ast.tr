@@ -1365,7 +1365,9 @@ pub fn copy_block(b: &Block) -> Block {
     Block { stmts: stmts, tail: copy_option(&b.tail) }
 }
 
-fn copy_stmt(s: &Stmt) -> Stmt {
+/// One statement, copied — public for the same reason the blocks that hold
+/// them are (Ch. 7 §5's expansion needs a template's statements by the turn).
+pub fn copy_stmt(s: &Stmt) -> Stmt {
     match s {
         Stmt::Let(mutable, name, written, v) => {
             let mut ty: Option<Ty> = Option::None;
