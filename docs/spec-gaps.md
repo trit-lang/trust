@@ -2626,6 +2626,29 @@ The rename that made room: `trust build` and `trustc build` printed TIR,
 which is `rustc --emit=mir` and not `cargo build`. They are `trust tir` and
 `trustc tir` now, and `build` means what everyone means by it.
 
+**G9.172 — `macro` is an item, `$x` and `$( … )*` are a body's business,
+and `name!` is a call a later pass owes.** The second parser had no word
+for Ch. 7 at all: a file opening `macro twice($x) { $x + $x }` failed its
+first item. The tree holds it now — `What::Macro` keeps the name, the
+fixed parameters and the repetition's one if any, and the block that is
+the body (§§1–3); `MacroCall`, `MacroParam` and `MacroRepeat` keep what
+is written where a value goes (§6). The grammar is the one the other
+parser reads: one repetition and it is last, no parameter twice, a group
+terminated before its `*`, and `!(` the two characters that make a name
+a call — read where the path is read, because `!` after a name is
+nothing else in this language. The body's scope is the one flag both
+parsers carry, so `$x` outside a `macro` is a refusal and not a name.
+What a corpus can hold it to is the file's own track: the other printer
+does not know a macro item and falls back to its discriminant, so the
+agreement is `<Discriminant(9)>` on both sides — while a call written
+inside a function prints spans there that no second tree carries, the
+same reason `agree` reports words. A refusal's *position* is one more
+dimension no corpus holds: the two disagree by the width of the last
+token, which is spans again. And until the expander lands, a `twice!`
+that reaches the lowering is refused the way everything unsupported is,
+and typed `#unknown` the way everything unclaimed is — expansion is the
+next entry's business.
+
 **G9.170 — one `&mut` at a time over one place, however many `&` you
 like sharing it.** A borrow owes its place for the rest of the
 **statement** it is made in — every holder in one expression is used in

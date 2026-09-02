@@ -111,7 +111,7 @@ fn main() -> t27 {
     // `agree` on the first line asks the second question; anything else
     // asks the first. The driver has no arguments to give.
     let agreeing = starts_with_agree(&src);
-    let mut p = parse::Parser { src: src, at: 0, no_struct: false, counter: 0 };
+    let mut p = parse::Parser { src: src, at: 0, no_struct: false, in_macro: false, counter: 0 };
     match parse::file(&mut p) {
         Result::Ok(items) => {
             let mut w = World {

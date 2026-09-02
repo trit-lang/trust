@@ -84,6 +84,14 @@ pub enum Expr {
     Return(Option<Box<Expr>>),
     Break(Option<Box<Expr>>),
     Continue,
+    /// `twice!(x + 1)` — a macro written where a value goes (Ch. 7 §6).
+    /// Nothing downstream knows what it means: Ch. 7 §5's expansion replaces
+    /// it with the body it named before anything else reads it.
+    MacroCall(String, Vec<Expr>),
+    /// `$x` — a macro's parameter, written only inside its body (Ch. 7 §6).
+    MacroParam(String),
+    /// `$( … )*` — what repeats once per argument of a repetition (Ch. 7 §3).
+    MacroRepeat(Vec<Stmt>),
 }
 
 /// A written type (§3.4).
@@ -224,6 +232,10 @@ pub enum What {
     /// `trait Name<T>: Super { … }` (Ch. 4 §1.1): its type parameters, its
     /// supertraits, its associated types, and its methods.
     Trait(String, Vec<String>, Vec<String>, Vec<Assoc>, Vec<Fn>),
+    /// `macro name($a, $($x),*) { … }` (Ch. 7 §1): its fixed parameters, the
+    /// trailing repetition's parameter if any (§2), and the body that
+    /// expands where a call of it is written (§3).
+    Macro(String, Vec<String>, Option<String>, Block),
 }
 
 /// One arm: its patterns, its guard if it has one, and its value.
@@ -569,6 +581,31 @@ pub fn show(e: &Expr, out: &mut String) {
                 out.push_str(" ");
                 show(&fields[i].value, out);
                 out.push_str(")");
+                i += 1;
+            }
+            out.push_str(")");
+        }
+        Expr::MacroCall(name, args) => {
+            out.push_str("(macro! ");
+            out.push_str(name);
+            let mut i: taddr = 0;
+            while i < args.len() {
+                out.push_str(" ");
+                show(&args[i], out);
+                i += 1;
+            }
+            out.push_str(")");
+        }
+        Expr::MacroParam(name) => {
+            out.push('$');
+            out.push_str(name);
+        }
+        Expr::MacroRepeat(stmts) => {
+            out.push_str("(repeat*");
+            let mut i: taddr = 0;
+            while i < stmts.len() {
+                out.push_str(" ");
+                show_stmt(&stmts[i], out);
                 i += 1;
             }
             out.push_str(")");
@@ -1035,6 +1072,12 @@ pub fn show_item(i: &Item, out: &mut String) {
             }
             out.push_str(")");
         }
+        What::Macro(name, params, rest, body) => {
+            // The Rust printer does not know a macro item either and falls
+            // back to its discriminant, so that is the shape an agreement
+            // has to have: `9` is where Macro stands in that enum there.
+            out.push_str("<Discriminant(9)>");
+        }
     }
 }
 
@@ -1070,6 +1113,7 @@ pub fn defines(w: &What) -> Option<String> {
         What::Use(segments) => Option::None,
         What::Impl(gs, tr, ty, fns) => Option::None,
         What::Trait(name, params, supers, assoc, fns) => Option::Some(name.to_string()),
+        What::Macro(name, params, rest, body) => Option::Some(name.to_string()),
     }
 }
 
@@ -1085,6 +1129,7 @@ pub fn kind(w: &What) -> String {
         What::Use(segments) => "use".to_string(),
         What::Impl(gs, tr, ty, fns) => "impl".to_string(),
         What::Trait(name, params, supers, assoc, fns) => "trait".to_string(),
+        What::Macro(name, params, rest, body) => "macro".to_string(),
     }
 }
 
@@ -1276,6 +1321,17 @@ pub fn copy_expr(x: &Expr) -> Expr {
         Expr::Loop(body) => Expr::Loop(Box::new(copy_block(&*body))),
         Expr::Return(v) => Expr::Return(copy_option(v)),
         Expr::Break(v) => Expr::Break(copy_option(v)),
+        Expr::MacroCall(name, args) => Expr::MacroCall(name.to_string(), copy_exprs(args)),
+        Expr::MacroParam(name) => Expr::MacroParam(name.to_string()),
+        Expr::MacroRepeat(stmts) => {
+            let mut out: Vec<Stmt> = Vec::new();
+            let mut i: taddr = 0;
+            while i < stmts.len() {
+                out.push(copy_stmt(&stmts[i]));
+                i += 1;
+            }
+            Expr::MacroRepeat(out)
+        }
     }
 }
 

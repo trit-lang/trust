@@ -95,7 +95,7 @@ pub fn gather(w: &mut World, here: &str, item: &ast::Item) {
 /// What a resolved name turns out to be, for §4's shape corrections.
 fn shape(what: &What) -> String {
     let word = ast::kind(what);
-    if word.same("fn") || word.same("const") {
+    if word.same("fn") || word.same("const") || word.same("macro") {
         word
     } else {
         "type".to_string()
@@ -261,6 +261,12 @@ pub fn rewrite(w: &World, a: &mut At, item: ast::Item) -> ast::Item {
                 out.push(rw_fn(w, a, f, "", true));
             }
             What::Impl(gs, t, s, out)
+        }
+        What::Macro(name, params, rest, body) => {
+            // A macro's body is rewritten like any other code: the names it
+            // uses resolve where the macro was written (Ch. 7 §4.1).
+            let full = joined(&module, &name);
+            What::Macro(full, params, rest, rw_block(w, a, body))
         }
         other => other,
     };
@@ -503,6 +509,29 @@ fn rw_expr(w: &World, a: &mut At, e: ast::Expr) -> ast::Expr {
         }
         ast::Expr::Return(v) => ast::Expr::Return(rw_optional(w, a, v)),
         ast::Expr::Break(v) => ast::Expr::Break(rw_optional(w, a, v)),
+        // A macro's arguments are the caller's expressions and are
+        // rewritten like any others; `$x` is neither a name nor a place.
+        ast::Expr::MacroCall(name, args) => ast::Expr::MacroCall(name, rw_exprs(w, a, args)),
+        ast::Expr::MacroRepeat(inner) => {
+            // Only the values are rewritten, as the other compiler walks a
+            // repetition: a `let` it repeats binds nothing out of the group
+            // for the rewriter to see (Ch. 7 §3).
+            let mut out: Vec<ast::Stmt> = Vec::new();
+            for s in inner {
+                match s {
+                    ast::Stmt::Let(mutable, name, written, value) => {
+                        let v = rw_expr(w, a, value);
+                        out.push(ast::Stmt::Let(mutable, name, written, v));
+                    }
+                    ast::Stmt::LetPattern(held, pat, value) => {
+                        let v = rw_expr(w, a, value);
+                        out.push(ast::Stmt::LetPattern(held, pat, v));
+                    }
+                    ast::Stmt::Do(e) => out.push(ast::Stmt::Do(rw_expr(w, a, e))),
+                }
+            }
+            ast::Expr::MacroRepeat(out)
+        }
         ast::Expr::Match(s, arms) => {
             let scrutinee = rw_expr(w, a, *s);
             let mut out: Vec<ast::Arm> = Vec::new();

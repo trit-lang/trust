@@ -1,0 +1,30 @@
+// Ch. 7 §1 — macro items. The Rust printer does not know one and prints
+// the item's discriminant instead, so agreement here is agreement on which
+// item is a macro: every `macro` below is the same characters on both
+// sides.
+
+macro twice($x) {
+    $x + $x
+}
+
+macro swap($a, $b) {
+    let t = $a;
+    $a = $b;
+    $b = t;
+}
+
+macro vec_of($($x),*) {
+    {
+        let mut out = Vec::new();
+        $( out.push($x); )*
+        out
+    }
+}
+
+macro say($w) {
+    println($w);
+}
+
+fn value() -> t27 {
+    42
+}

@@ -20,6 +20,9 @@ pub struct Parser {
     /// condition of an `if` or a `while` (§2.8). The ambiguity is real and
     /// the flag is how both parsers resolve it.
     pub no_struct: bool,
+    /// Set while a macro's body is being read: `$` names one of its
+    /// parameters only there (Ch. 7 §6).
+    pub in_macro: bool,
     /// How many names the parser has invented for this file, which is what
     /// numbers the next one. `let _` and `let (a, b) = …` both need one and
     /// they share the count, because they are the same mechanism: a binding
@@ -373,6 +376,52 @@ pub fn primary(p: &mut Parser) -> Result<Expr, lex::Error> {
         Tok::Str(text) => Result::Ok(Expr::Str(text)),
         Tok::Ident(n) => path_expr(p, n),
         Tok::Op(o) => {
+            // `$name` and `$( … )*` are only a macro body's (Ch. 7 §6).
+            if o.same("$") {
+                if !p.in_macro {
+                    return Result::Err(lex::Error {
+                        at: p.at,
+                        message: "`$` appears only in a macro (Ch. 7 §6)".to_string(),
+                    });
+                }
+                let t2 = peek(p)?;
+                let at2 = t2.at;
+                let grouped = match t2.tok {
+                    Tok::Op(o2) => o2.same("("),
+                    _ => false,
+                };
+                if grouped {
+                    p.at = at2;
+                    let mut stmts: Vec<ast::Stmt> = Vec::new();
+                    loop {
+                        let t3 = peek(p)?;
+                        let at3 = t3.at;
+                        let done = match &t3.tok {
+                            Tok::Op(o3) => o3.same(")"),
+                            _ => false,
+                        };
+                        if done {
+                            p.at = at3;
+                            break;
+                        }
+                        let ended = match &t3.tok {
+                            Tok::Eof => true,
+                            _ => false,
+                        };
+                        if ended {
+                            return Result::Err(lex::Error {
+                                at: p.at,
+                                message: "unterminated `$( … )*`".to_string(),
+                            });
+                        }
+                        stmts.push(repeat_stmt(p)?);
+                    }
+                    expect_op(p, "*")?;
+                    return Result::Ok(Expr::MacroRepeat(stmts));
+                }
+                let pn = ident(p)?;
+                return Result::Ok(Expr::MacroParam(pn));
+            }
             if o.same("(") {
                 // A struct literal is legal again inside parentheses: the
                 // `{` cannot be a block here, because a block cannot open
@@ -561,6 +610,32 @@ fn optional_value(p: &mut Parser) -> Result<Option<Box<Expr>>, lex::Error> {
 /// here for the same reason: it is the last point where the two can agree
 /// without knowing anything.
 fn path_expr(p: &mut Parser, first: String) -> Result<Expr, lex::Error> {
+    // `name!(args)` is a macro invocation (Ch. 7 §6). It is read here
+    // rather than in `postfix` because `!` is prefix negation everywhere
+    // else, and the two never meet: a `!` after a name is nothing else in
+    // this language.
+    let rewind = p.at;
+    let t0 = peek(p)?;
+    let at0 = t0.at;
+    let bang = match t0.tok {
+        Tok::Op(o0) => o0.same("!"),
+        _ => false,
+    };
+    if bang {
+        p.at = at0;
+        let t1 = peek(p)?;
+        let at1 = t1.at;
+        let opens = match t1.tok {
+            Tok::Op(o1) => o1.same("("),
+            _ => false,
+        };
+        if opens {
+            p.at = at1;
+            let args = arguments(p)?;
+            return Result::Ok(Expr::MacroCall(first, args));
+        }
+        p.at = rewind;
+    }
     let mut path = first;
     let mut segments: taddr = 1;
     loop {
@@ -1591,7 +1666,160 @@ fn what(p: &mut Parser) -> Result<ast::What, lex::Error> {
     if word.same("trait") {
         return trait_item(p);
     }
+    if word.same("macro") {
+        return macro_item(p);
+    }
     Result::Err(lex::Error { at: p.at, message: "expected an item".to_string() })
+}
+
+/// `macro name($a, $($x),*) { body }` (Ch. 7 §1). The repetition is one and
+/// it is last (§2); the body is what a call of the macro expands to (§3).
+fn macro_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
+    expect_kw(p, "macro")?;
+    let name = ident(p)?;
+    expect_op(p, "(")?;
+    let mut params: Vec<String> = Vec::new();
+    let mut rest: Option<String> = Option::None;
+    loop {
+        let t = peek(p)?;
+        let at_t = t.at;
+        let closed = match &t.tok {
+            Tok::Op(o) => o.same(")"),
+            _ => false,
+        };
+        if closed {
+            p.at = at_t;
+            break;
+        }
+        let ended = match &t.tok {
+            Tok::Eof => true,
+            _ => false,
+        };
+        if ended {
+            return Result::Err(lex::Error {
+                at: p.at,
+                message: "unterminated macro parameter list".to_string(),
+            });
+        }
+        match &rest {
+            Option::Some(r) => {
+                return Result::Err(lex::Error {
+                    at: p.at,
+                    message: "a macro has at most one repetition and it is last (Ch. 7 §2)"
+                        .to_string(),
+                })
+            }
+            Option::None => {}
+        }
+        expect_op(p, "$")?;
+        let t2 = peek(p)?;
+        let at2 = t2.at;
+        let grouped = match t2.tok {
+            Tok::Op(o2) => o2.same("("),
+            _ => false,
+        };
+        // `$($x),*` — the repetition.
+        if grouped {
+            p.at = at2;
+            expect_op(p, "$")?;
+            let r = ident(p)?;
+            expect_op(p, ")")?;
+            expect_op(p, ",")?;
+            expect_op(p, "*")?;
+            rest = Option::Some(r);
+        } else {
+            let t3 = peek(p)?;
+            let at3 = t3.at;
+            let pn = ident(p)?;
+            let mut twice = false;
+            let mut i: taddr = 0;
+            while i < params.len() {
+                if params[i].same(&pn) {
+                    twice = true;
+                }
+                i += 1;
+            }
+            if twice {
+                let mut m: String = Vec::new();
+                m.push_str("`$");
+                m.push_str(&pn);
+                m.push_str("` is a parameter of this macro twice (Ch. 7 §2)");
+                return Result::Err(lex::Error { at: at3, message: m });
+            }
+            params.push(pn);
+        }
+        let t4 = peek(p)?;
+        let at4 = t4.at;
+        let comma = match &t4.tok {
+            Tok::Op(o4) => o4.same(","),
+            _ => false,
+        };
+        if comma {
+            p.at = at4;
+            continue;
+        }
+        let close = match &t4.tok {
+            Tok::Op(o4) => o4.same(")"),
+            _ => false,
+        };
+        if close {
+            p.at = at4;
+            break;
+        }
+        return Result::Err(lex::Error {
+            at: p.at,
+            message: "expected `,` or `)` in a macro's parameters".to_string(),
+        });
+    }
+    match &rest {
+        Option::Some(r) => {
+            let mut again = false;
+            let mut i: taddr = 0;
+            while i < params.len() {
+                if params[i].same(r) {
+                    again = true;
+                }
+                i += 1;
+            }
+            if again {
+                return Result::Err(lex::Error {
+                    at: p.at,
+                    message: "a macro's repetition may not repeat a fixed parameter's name"
+                        .to_string(),
+                });
+            }
+        }
+        Option::None => {}
+    }
+    let was = p.in_macro;
+    p.in_macro = true;
+    let body = block(p);
+    p.in_macro = was;
+    Result::Ok(ast::What::Macro(name, params, rest, body?))
+}
+
+/// One statement inside a `$( … )*` group, which is a body like any other
+/// and so may hold a `let` or an expression (Ch. 7 §3).
+fn repeat_stmt(p: &mut Parser) -> Result<ast::Stmt, lex::Error> {
+    let t = peek(p)?;
+    let is_let = match t.tok {
+        Tok::Kw(k) => k.same("let"),
+        _ => false,
+    };
+    if is_let {
+        return let_stmt(p);
+    }
+    let e = expr(p)?;
+    let t2 = peek(p)?;
+    let at2 = t2.at;
+    let semi = match t2.tok {
+        Tok::Op(o2) => o2.same(";"),
+        _ => false,
+    };
+    if semi {
+        p.at = at2;
+    }
+    Result::Ok(ast::Stmt::Do(e))
 }
 
 /// `struct Name { a: T, … }`, `struct Name;` (§3.3).
