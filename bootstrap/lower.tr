@@ -955,6 +955,25 @@ fn fresh(e: &mut Emit, prefix: &str) -> String {
     out
 }
 
+/// A slot for a *temporary* aggregate: storage made for one value that no
+/// name was written for. It is not registered as a local, because it is
+/// not a local: its family is `%tmp.slot.*`, and a binding named `tmp` is
+/// somebody's name, which a temporary that shared the family shadowed
+/// (G9.174).
+fn temporary_slot(e: &mut Emit, ty: &str) -> String {
+    let slot = fresh(e, "tmp.slot");
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&slot);
+    line.push_str(" = slot tryte[");
+    let wide = tir_of(ty);
+    let size = sized(e, &wide);
+    push_int(&mut line, size);
+    line.push_str("]");
+    e.slots.push(line);
+    slot
+}
+
 /// A slot for a local, made where the value that fills it is ready.
 fn slot_for(e: &mut Emit, name: &str, ty: &str) -> String {
     let mut prefix: String = Vec::new();
@@ -1752,7 +1771,7 @@ fn raw_method(
     }
     if name.same("read") {
         if big {
-            let held = slot_for(e, "tmp", &elem);
+            let held = temporary_slot(e, &elem);
             copy_between(e, &at, &held, &elem);
             return Value { text: held, ty: elem };
         }
@@ -1848,7 +1867,7 @@ fn raw_new(e: &mut Emit, want: &str) -> Value {
         e.stuck = true;
         return unknown_value();
     }
-    let held = slot_for(e, "tmp", want);
+    let held = temporary_slot(e, want);
     store_into(e, "taddr", "const t27 0", &held);
     let where_ = offset_of(e, &held, 3);
     store_into(e, "taddr", "const t27 0", &where_);
@@ -1995,7 +2014,7 @@ fn raw_alloc(e: &mut Emit, want: &str, count: &ast::Expr) -> Value {
     let ok = label(e, "raw.ok");
     let bad = label(e, "raw.no");
     let join = label(e, "raw.join");
-    let room = slot_for(e, "tmp", want);
+    let room = temporary_slot(e, want);
     three_ways(e, &c, &bad, &bad, &ok);
 
     start(e, &ok);
@@ -2015,7 +2034,7 @@ fn raw_alloc(e: &mut Emit, want: &str, count: &ast::Expr) -> Value {
 /// An address read as a number, which is a store and a load: TIR keeps the
 /// two apart and a comparison against zero wants the number (TIR §3).
 fn as_number(e: &mut Emit, p: &str) -> String {
-    let cell = slot_for(e, "tmp", "taddr");
+    let cell = temporary_slot(e, "taddr");
     let mut line: String = Vec::new();
     line.push_str("    store ptr ");
     line.push_str(p);
@@ -2114,7 +2133,7 @@ fn char_try_from(e: &mut Emit, x: &ast::Expr) -> Value {
     if e.stuck {
         return unknown_value();
     }
-    let held = slot_for(e, "tmp", &named);
+    let held = temporary_slot(e, &named);
     let self_ty = ast::Ty::Name(one_name(&named));
     let l = match layout::of(&e.defs, &self_ty, 0) {
         Result::Ok(y) => y,
@@ -2560,7 +2579,7 @@ fn known_method(e: &Emit, name: &str) -> bool {
 /// nothing a program may read.
 fn as_text(e: &mut Emit, from: &str) -> String {
     let text = str_name();
-    let held = slot_for(e, "tmp", &text);
+    let held = temporary_slot(e, &text);
     let data = loaded(e, "ptr", from);
     store_into(e, "ptr", &data, &held);
     let vec_ty = ast::Ty::Name(one_name("Vec.char"));
@@ -4002,7 +4021,7 @@ fn scalar_arm_body(
             if held.len() == 0 {
                 *ty = v.ty.to_string();
                 let made = ty.to_string();
-                *held = slot_for(e, "tmp", &made);
+                *held = temporary_slot(e, &made);
             }
             // An arm whose value is an aggregate has nothing to store: it
             // **is** its storage, so what the arms agree to leave the
@@ -4255,7 +4274,7 @@ fn match_place(
                     if v.ty.len() > 0 && !answers_nothing(&v.ty) {
                         if held.len() == 0 {
                             ty = v.ty.to_string();
-                            held = slot_for(e, "tmp", &ty);
+                            held = temporary_slot(e, &ty);
                         }
                         // An arm whose value is an aggregate has nothing to
                         // store: it **is** its storage, so what the arms
@@ -4412,7 +4431,7 @@ fn if_expr(
             let ty = a.ty.to_string();
             // The slot is made where the first arm has its answer ready,
             // which is what decides the number it gets.
-            let held = slot_for(e, "tmp", &ty);
+            let held = temporary_slot(e, &ty);
             store_into(e, &ty, &a.text, &held);
             jump(e, &join_at);
             let after_then = owns_now(e);
@@ -5412,7 +5431,7 @@ fn loop_expr(e: &mut Emit, b: &ast::Block, want: &str, ret: &str) -> Value {
     let mut ty: String = Vec::new();
     if carries(e, want) {
         ty = want.to_string();
-        slot = slot_for(e, "tmp", &ty);
+        slot = temporary_slot(e, &ty);
     }
     jump(e, &head);
     start(e, &head);
@@ -6157,6 +6176,38 @@ fn is_temporary(text: &str) -> bool {
     true
 }
 
+/// Whether what was written is a block whose tail is a whole name: the
+/// `{ …; q }` of `let p = { …; q }`. Its tail moves the name, and a moved
+/// whole value's storage is the answer's storage — told apart from `if`
+/// and `match`, whose arms answer into one joined place and so copy
+/// (Ch. 3 §1.2, G9.174). A block inside a block is the same question
+/// written twice, which a macro's expansion is (Ch. 7 §5): `{ { q } }`
+/// moves `q` exactly as `{ q }` does.
+fn tail_moves(v: &ast::Expr) -> bool {
+    match v {
+        ast::Expr::Nested(b) => nested_tail_moves(&*b),
+        _ => false,
+    }
+}
+
+/// The block's tail is a whole name, possibly through more nested blocks:
+/// `{ { q } }` moves `q` exactly as `{ q }` does, and a macro's expansion
+/// is the same question written twice (Ch. 7 §5).
+fn nested_tail_moves(b: &ast::Block) -> bool {
+    match &b.tail {
+        Option::Some(x) => tail_is_move(&*x),
+        Option::None => false,
+    }
+}
+
+fn tail_is_move(x: &ast::Expr) -> bool {
+    match x {
+        ast::Expr::Name(n) => true,
+        ast::Expr::Nested(b) => nested_tail_moves(&*b),
+        _ => false,
+    }
+}
+
 /// Give a name a different one, wherever it was written.
 ///
 /// The only name a lowering ever changes its mind about: an aggregate is
@@ -6599,7 +6650,15 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                 // own and the fields cross one at a time (Ch. 3 §1.1).
                 // Renaming it would leave the older name pointing at a slot
                 // that no longer exists.
-                if !is_temporary(&val.text) {
+                //
+                // Unless what was written is `let p = { …; q }`: a block
+                // whose tail moves a whole name out of it. The tail's
+                // storage was made for the value and the block answers with
+                // it — the name is dead past the move — so the binding
+                // renames the storage rather than copying it, which is the
+                // adoption a computed temporary gets, and the only other
+                // way one happens here (G9.174).
+                if !is_temporary(&val.text) && !tail_moves(v) {
                     // A move out of a *named* place has to record that the
                     // place no longer owns what it held. Reading a whole
                     // name has already said so — that is what `value` does
@@ -7534,7 +7593,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                     return unknown_value();
                 }
             };
-            let slot = slot_for(e, "tmp", &name);
+            let slot = temporary_slot(e, &name);
             let mut c: taddr = 0;
             while c < made.captures.len() {
                 let at = offset_of(e, &slot, l.offsets[c]);
@@ -7907,7 +7966,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             // is what decides the numbers (TIR §3).
             let big = returned_aggregate(e, callee);
             if big.len() > 0 {
-                let into = slot_for(e, "tmp", &big);
+                let into = temporary_slot(e, &big);
                 return aggregate_call(e, callee, &big, &into, "", args);
             }
             let mut texts: Vec<String> = Vec::new();
@@ -8201,7 +8260,7 @@ fn method_value(
         into = if dest.len() > 0 {
             dest.to_string()
         } else {
-            slot_for(e, "tmp", &big)
+            temporary_slot(e, &big)
         };
     }
     if from_text.len() > 0 {
@@ -8215,7 +8274,7 @@ fn method_value(
         return unknown_value();
     }
     if big.len() > 0 && !sited {
-        into = slot_for(e, "tmp", &big);
+        into = temporary_slot(e, &big);
     }
     if big.len() > 0 {
         return aggregate_call(e, &full, &big, &into, &slot, args);
@@ -11504,7 +11563,7 @@ fn generic_call(
                 e.stuck = true;
                 return unknown_value();
             }
-            into = slot_for(e, "tmp", &answer);
+            into = temporary_slot(e, &answer);
         }
     }
     // Twice over the arguments, closures first.
@@ -11769,7 +11828,7 @@ fn closure_call(e: &mut Emit, at: taddr, args: &Vec<ast::Expr>) -> Value {
     }
     let big = returned_aggregate(e, &full);
     if big.len() > 0 {
-        let into = slot_for(e, "tmp", &big);
+        let into = temporary_slot(e, &big);
         return aggregate_call(e, &full, &big, &into, &slot, args);
     }
     let mut texts: Vec<String> = Vec::new();
@@ -13036,7 +13095,7 @@ fn short_circuit(e: &mut Emit, op: &str, a: &ast::Expr, b: &ast::Expr) -> Value 
             if e.stuck {
                 return unknown_value();
             }
-            let held = slot_for(e, "tmp", "t1");
+            let held = temporary_slot(e, "t1");
             store_into(e, "t1", &first.text, &held);
             let rhs = label(e, "sc.rhs");
             let join = label(e, "sc.join");

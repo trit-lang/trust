@@ -27,6 +27,15 @@ macro say($($x),*) {
     }
 }
 
+/// Build a vector from however many values are written.
+macro vec($($x),*) {
+    {
+        let mut v: Vec<t27> = Vec::new();
+        $( v.push($x); )*
+        v
+    }
+}
+
 fn main() -> t27 {
     // 5 + 5 = 10, as `twice!` wrote it.
     let ten = twice!(5);
@@ -37,8 +46,15 @@ fn main() -> t27 {
     let mut x = 2;
     swap!(tmp, x);
 
+    let v = vec!(3, 1, 4, 1, 5);
     say!("double the count is in hand");
+    let mut i: taddr = 0;
+    while i < v.len() {
+        print_int(v[i]);
+        print(" ");
+        i += 1;
+    }
     say!();
 
-    ten + fourteen + tmp * 10 + x
+    ten + fourteen + tmp * 10 + x + v[0]
 }

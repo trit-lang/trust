@@ -2661,18 +2661,45 @@ backwards — it had always taken the tail wherever a `;` was missing, so
 other's now: the tail only before `}`, what is block-shaped may stand
 alone, and anything else is the refusal both give.
 
-**G9.174 — recorded, not settled: a block's own aggregate, bound and then
-used, lowers nothing yet.** `let v = { let mut w: Vec<t27> = Vec::new();
-w.push(3); w }; print_int(v[0]);` writes nothing after the header on the
-second implementation — no macro anywhere — while the other lowers it in
-full (mm6). It is *read* behind G9.163's contributor model: the block's
-answer type is the tail's, but the lowering keeps the block's value as
-storage only on some paths, and `let` of it then using it is one the
-storage question has not reached. It is the same reason `examples/`'
-`vec!` is not in `bootstrap/programs/macros/`: expansion is right
-(db-run shows the five `push` statements under `v.mac1`), and the call
-site's `let v = {…}` is what stays silent. Settling it is its own
-commit; the macro corpus avoids the shape until then.
+**G9.174 — a block whose tail is a whole name is a move, and a temporary
+that shares a written name shadows it.** Two faces of one rule. The
+first: `let p = { let q = Pair { … }; q };` — the tail moves `q` and a
+moved whole value's storage is the answer's storage, so the binding
+*renames* the slot rather than copying it: `%q.slot.3` never exists in
+the text, because adoption works the way it does for a computed
+temporary — while `let p = q` is somebody else's storage and the fields
+cross one at a time, and an `if` or a `match` whose arms answer one
+place copy there for the same reason the join had to exist. A block
+inside a block is the same question written twice, which a macro's
+`Nested` is, and now `examples/trust/macros.tr` lowers whole — a `vec!`
+with five pushes, drop flags and all, where the call site used to go
+silent on the way through `owns && !whole`.
+
+The second face the same corpus found: the aggregate temporaries that
+machinery makes — every `%tmp.slot.N` — were registered as **locals**
+under the name `tmp`, so a program that also *wrote* `let tmp = 1;`
+looked the name up afterward and found the temporary's type. Two
+compilers had never disagreed about it because nobody had yet written
+`tmp` next to a computed aggregate in a corpus; `swap!`'s very example
+does. The family is reserved now: temporaries that nothing named are
+registered nowhere.
+
+**G9.175 — recorded, not settled: `let v = if … then <Vec> else <Vec>`
+and the same through a `match`, and the `for` the chapters desugar.** 
+Two branches that each answer with an
+owning value: Rust copies each arm's words into the join's storage, with
+the flags zeroed in the arms and set after it (r5), where the second
+implementation's refusal — `owns && !whole`, which is right about what
+it says — stops the whole module (r4 with `Pair` is fine in neither
+either: the borrow-free shape takes the same join path). Non-owning
+arms, owning arms, and the question of who writes the arm-end drop flag
+are one commit of their own; G9.174's rename-adoption does not cover the
+join because the join is not an adoption. And `for it in it.next()`
+itself: the other lowering desugars it into a block, a `loop` and a
+`match` with an invented `it.N` (Ch. 4 §5.7) — which is how the
+prelude's hand-written `fold` got here first — and the second
+implementation parses and resolves it and lowers nothing yet (fc1), so
+the joining of the desugar with G9.174's moves is its own commit too.
 
 **G9.172 — `macro` is an item, `$x` and `$( … )*` are a body's business,
 and `name!` is a call a later pass owes.** The second parser had no word
