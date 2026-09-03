@@ -56,5 +56,13 @@ fn main() -> t27 {
     }
     say!();
 
-    ten + fourteen + tmp * 10 + x + v[0]
+    // And over the range itself, the way Ch. 4 §5.7 says the chapters
+    // write them: a `for`, which a `let`, a `loop` and a `match` kneel
+    // for in the lowering.
+    let mut total: t27 = 0;
+    for it in 1..4 {
+        total += it;
+    }
+
+    total + ten + fourteen + tmp * 10 + x + v[0]
 }

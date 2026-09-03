@@ -2684,22 +2684,51 @@ compilers had never disagreed about it because nobody had yet written
 does. The family is reserved now: temporaries that nothing named are
 registered nowhere.
 
-**G9.175 — recorded, not settled: `let v = if … then <Vec> else <Vec>`
-and the same through a `match`, and the `for` the chapters desugar.** 
-Two branches that each answer with an
-owning value: Rust copies each arm's words into the join's storage, with
-the flags zeroed in the arms and set after it (r5), where the second
-implementation's refusal — `owns && !whole`, which is right about what
-it says — stops the whole module (r4 with `Pair` is fine in neither
-either: the borrow-free shape takes the same join path). Non-owning
-arms, owning arms, and the question of who writes the arm-end drop flag
-are one commit of their own; G9.174's rename-adoption does not cover the
-join because the join is not an adoption. And `for it in it.next()`
-itself: the other lowering desugars it into a block, a `loop` and a
-`match` with an invented `it.N` (Ch. 4 §5.7) — which is how the
-prelude's hand-written `fold` got here first — and the second
-implementation parses and resolves it and lowers nothing yet (fc1), so
-the joining of the desugar with G9.174's moves is its own commit too.
+**G9.175 — the join is nobody's name: each arm answers by its own rule,
+and the join only copies.** A scalar `if` or `match` was already
+lowered that way — one slot the arms agree to leave the answer in, read
+once at the join — and the aggregate-answering arms that came with
+`vec!` turned out to be the same slot with a different verb: a store of
+an aggregate is not a store, so the arms' answers are *computed* by
+their own rule (a construction into its own storage, a copy of a name,
+a call) and then copied into the join word by word, with the flag of an
+owning arm zeroed where it moved and the binding's own flag set after
+(G9.174's adoption covers the rest, because what is adopted is the
+join's temporary, never the join). Said where the earlier refusal was
+tightest: `owns && !whole` is still right, and the answer it refused
+now routes past it. One consequence asked three times — an arm that is
+a `let` and a name, an arm that is a name, and an arm that is a
+construction — and one answer paid for all three: the type is decided
+by the then-branch's shape before either arm is lowered, because a join
+needs the storage said before anything writes there (r4, r5, s1–s5;
+the `if let`-in-a-match shape in `fold`'s corpus is the one keeping the
+guard honest). A scrutinee that is a literal was the missing half of
+`match true`: the comparison asks and answers the literal before
+anything moves, the same rule a name follows, so `match true { … }`
+and `match 'a' { … }` lower exactly as if a binding had been read
+(r6 family, ml1–ml3). What is left is honest: the answer has to be
+readable from the shape — an `if` whose then-arm is an `if` again
+recurses, and none of it is inference, so `Option::None` with the arms'
+type parameters unsettled stays somebody else's refusal — and a scalar
+`match` over an aggregate with an arm guarded stays nobody's join because
+a guard never counts toward covered (the arm-readership the other
+implementation walks through is wider by that much).
+And `for it in xs { … }` — the desugar the chapters give
+(Ch. 4 §5.7): the iterator under a name nobody wrote, `it.<N>` for the
+function's Nth `for`, and the loop asking `next` of it until the option
+is spent (fc1–fd4). What the chapters do not spell is how
+`xs.into_iter()` is **found**: a rule over every type meeting a bound is
+named by the trait, not the type — `IntoIterator.into_iter.Range.t27` is
+the `into_iter` of `Range<t27>` — and that turned out to be the one
+method call nothing else could name: the family's key is the receiver's
+whole type, the member's `self` is the key itself (Ch. 4 §5.6), and the
+answer `-> I` under `I = Range.t27` is an instantiated name by then, so
+instantiating it again would be looking for a mangle nobody made.
+What remains outside is bounded honestly too: the blanket-keyed call is
+resolved from the shape the caller names and nothing else, and a
+trait's default givens for a blanket (`fold` itself takes
+`-> t27`) arrive as written because the code at the other end is the
+same code — the suite's count line says so.
 
 **G9.172 — `macro` is an item, `$x` and `$( … )*` are a body's business,
 and `name!` is a call a later pass owes.** The second parser had no word
