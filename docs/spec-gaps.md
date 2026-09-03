@@ -2684,6 +2684,24 @@ compilers had never disagreed about it because nobody had yet written
 does. The family is reserved now: temporaries that nothing named are
 registered nowhere.
 
+**G9.176 — recorded, not settled: a trait's **own hand** — the body it
+wrote itself — is a family of the impl that says yes.** `for it in
+(1..4).map(|x| x * 2)` needs `(1..4).map(g)` resolved, and the answer
+the other implementation gives is `Range.map.t27.t27.main.closure1`:
+the provided body's family keyed by the impl, its own type parameters
+the closure's appended (Ch. 4 §1.7, §5.6). The second implementation
+names the same function at instantiation time — the given table knows
+`Range` + `Iterator` ⇒ `map` — and at call time finds nothing, because
+only the impl's own methods and one rule over every type (G9.175) are
+looked up for a receiver. The lookup it needs is recorded shape-first:
+a call `recv.name(args)` whose concrete and instance-named candidates
+miss is asked of the givens for that receiver's instantiation, with
+which of the family's parameters the receiver settles decided by the
+impl rather than by the trait (fn's **own** `R, G` arrive from the
+arguments, as generic_call already computes for the rest). fc6–fc9
+holds the four shapes: an untyped closure for `g`, a named fn for `g`,
+and the same calls answered immediately and answered through `next`.
+
 **G9.175 — the join is nobody's name: each arm answers by its own rule,
 and the join only copies.** A scalar `if` or `match` was already
 lowered that way — one slot the arms agree to leave the answer in, read
@@ -2724,11 +2742,11 @@ method call nothing else could name: the family's key is the receiver's
 whole type, the member's `self` is the key itself (Ch. 4 §5.6), and the
 answer `-> I` under `I = Range.t27` is an instantiated name by then, so
 instantiating it again would be looking for a mangle nobody made.
-What remains outside is bounded honestly too: the blanket-keyed call is
-resolved from the shape the caller names and nothing else, and a
-trait's default givens for a blanket (`fold` itself takes
-`-> t27`) arrive as written because the code at the other end is the
-same code — the suite's count line says so.
+What remains outside is bounded honestly too: the blanket-keyed call
+is resolved from the shape the caller names and nothing else, and the
+trait's **own hand** — the body it wrote itself, `fold` and `map` —
+is found by a lookup this does not do yet (fc6–fc9), which is the next
+entry's business rather than this one's tail.
 
 **G9.172 — `macro` is an item, `$x` and `$( … )*` are a body's business,
 and `name!` is a call a later pass owes.** The second parser had no word
