@@ -1,0 +1,20 @@
+// Ch. 4 §1.7 and §5.6, lower.rs `expand_impls` and the given table it fills:
+// a trait's **own hand** — the body it wrote itself — is a family of the
+// impl that says yes, and applying it is binding the receiver's key first
+// and the arguments after. `Range.map` is the family, its `Self` is what
+// the receiver already was, and what it answers with is read back from the
+// whole of what was written, not only the head — `Map<Self, G>` under
+// `Self = Range.t27` and `G = main.closure1` is one instantiated name.
+//
+// Both implementations are compared character for character: the call's
+// lowered name (`Range.map.t27.t27.main.closure1`), the member it instantiates
+// and stains the instantiations' loop with, and the adaptor struct the
+// answer's storage is the incarnation of. What is still somebody else's
+// commit is written down in spec-gaps: the associated-type lookup
+// (`Self::Item` is a name the impl wrote) and the closures left untyped
+// are G9.177.
+fn main() -> t27 {
+    let m = (1..4).map(|x: t27| -> t27 { x * 2 });
+    let m2 = (5..8).map(|y: t27| -> t27 { y + 1 });
+    0
+}

@@ -41,6 +41,11 @@ pub struct Family {
     /// be, so it is read off the receiver's own instantiation and the rest
     /// are inferred from the arguments as usual.
     pub from_self: taddr,
+    /// What the family's return application is written at, `,`-joined with
+    /// the impl's `Self` kept as a word of its own — the term the answer
+    /// is instantiated from once the key exists (Ch. 4 §1.7). Empty where
+    /// the answer is not an application.
+    pub ret_term: String,
     /// Whether the rule is written over every type satisfying a bound and
     /// so is named by the trait, not the type (Ch. 4 §5.6): a candidate a
     /// method's receiver answers to, which a wrong key must not take.
@@ -2326,7 +2331,7 @@ fn indexed_by_method(e: &mut Emit, held: &Value, at: &ast::Expr) -> Value {
     }
     let mut args: Vec<ast::Expr> = Vec::new();
     args.push(ast::copy_expr(at));
-    let got = generic_call(e, fam, &under, &held.text, &given, &args);
+    let got = generic_call(e, fam, &under, &held.text, &given, &args, "");
     if e.stuck {
         return unknown_value();
     }
@@ -7823,7 +7828,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                     if held >= 0 {
                         given = ast::copy_names(&e.instances[held].key);
                     }
-                    return generic_call(e, fam, &full, "", &given, &args);
+                    return generic_call(e, fam, &full, "", &given, &args, "");
                 }
             }
             let made = aggregate_type(e, path, want, fields);
@@ -8112,7 +8117,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             let fam = family_at(e, callee);
             if fam >= 0 {
                 let none: Vec<String> = Vec::new();
-                return generic_call(e, fam, callee, "", &none, args);
+                return generic_call(e, fam, callee, "", &none, args, "");
             }
             // A call whose answer is an aggregate is given the storage for
             // it, and the storage is taken before the arguments are — which
@@ -8439,7 +8444,13 @@ fn method_value(
     // one is that its receiver is already an argument. Where the receiver is
     // an *instantiation*, the family is the one written on the type it
     // instantiates — `Pair.first`, not `Pair.t27.first` — and its own key
-    // starts with the receiver's (Ch. 4 §2.5).
+    // starts with the receiver's (Ch. 4 §2.5). And the instantiation has to
+    // exist to be found: a receiver whose type was never lowered before asks
+    // for it here, because none of the names below exist without it.
+    if inst_at(e, &owner) < 0 {
+        let made_now = read_instance(e, &owner);
+        let _ = made_now;
+    }
     let inst = inst_at(e, &owner);
     let base = if inst < 0 {
         owner.to_string()
@@ -8458,14 +8469,16 @@ fn method_value(
     under.push_str(name);
     let fam = family_at(e, &under);
     if fam >= 0 {
+        
+
         if refuse_dest(e, dest) {
             return unknown_value();
         }
         slot = receiver_at(e, at, recv, &slot, &by_value);
         if e.stuck {
-            return unknown_value();
+                return unknown_value();
         }
-        return generic_call(e, fam, &under, &slot, &given, args);
+        return generic_call(e, fam, &under, &slot, &given, args, &owner);
     }
     // And the rules over every type meeting a bound, which are named by the
     // trait they are written on and are found only here — a candidate at
@@ -8502,7 +8515,7 @@ fn method_value(
             // dot in the name its member is printed under.
             let mut given_full: Vec<String> = Vec::new();
             given_full.push(owner.to_string());
-            return generic_call(e, found as taddr, &keyed, &slot, &given_full, args);
+            return generic_call(e, found as taddr, &keyed, &slot, &given_full, args, &owner);
         }
     }
     // And the rules over every type meeting a bound, which are named by the
@@ -11254,6 +11267,37 @@ pub fn context(items: &Vec<ast::Item>) -> Cx {
 /// nothing, a family's own name for `P<T>`, and the name for everything
 /// else. Three answers because there are three things a call does with
 /// them — nothing, a register, or storage the caller provides (TIR §3).
+/// The written arguments of what a family answers with, as one `,`-joined
+/// word, with the impl's `Self` kept as its own word: the term the answer
+/// is read back from where the head on its own is not enough
+/// (Ch. 4 §1.7). Nothing for a scalar and nothing nested.
+fn family_answer_term(t: &ast::Ty) -> String {
+    match t {
+        ast::Ty::App(segments, args) => {
+            let mut out: String = Vec::new();
+            let mut i: taddr = 0;
+            while i < args.len() {
+                if i > 0 {
+                    out.push(',');
+                }
+                let part = match &args[i] {
+                    ast::Ty::Name(ns) => joined(ns),
+                    ast::Ty::SelfTy => "Self".to_string(),
+                    _ => "".to_string(),
+                };
+                if part.len() == 0 {
+                    return "".to_string();
+                }
+                out.push_str(&part);
+                i += 1;
+            }
+            out
+        }
+        ast::Ty::SelfTy => "Self".to_string(),
+        _ => "".to_string(),
+    }
+}
+
 fn family_answer(t: &ast::Ty) -> String {
     match t {
         ast::Ty::Unit => "()".to_string(),
@@ -11298,6 +11342,7 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                         name: f.name.to_string(),
                         tyvars: all_tyvars(f),
                         from_self: 0,
+                        ret_term: family_answer_term(&f.ret),
                         blanket: false,
                         params: written_params(f),
                         // The *head* of what it answers with, which is a
@@ -11354,6 +11399,7 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                                 name: full,
                                 tyvars: tyvars,
                                 from_self: outer.len() as taddr,
+                                ret_term: family_answer_term(&fns[k].ret),
                                 blanket: is_blanket,
                                 params: written_params(&fns[k]),
                                 ret: family_answer(&fns[k].ret),
@@ -11361,6 +11407,55 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                             });
                         }
                         k += 1;
+                    }
+                    // And the body the trait wrote for it, where it did not
+                    // write one of its own: a provided method is one family
+                    // of the *impl*, which is the name a call answers to
+                    // (Ch. 4 §1.7). Asking the trait rather than the impl's
+                    // own list is the whole of what makes it given.
+                    if named.len() > 0 && !is_blanket {
+                        let at_t = trait_at(items, &named);
+                        if at_t >= 0 {
+                            match &items[at_t].what {
+                                ast::What::Trait(tn, tparams, supers, assoc, tfns) => {
+                                    let mut m2: taddr = 0;
+                                    while m2 < tfns.len() {
+                                        let mut has_body = false;
+                                        match &tfns[m2].body {
+                                            Option::Some(b) => has_body = true,
+                                            Option::None => {}
+                                        }
+                                        if has_body
+                                            && named_fn(fns, &tfns[m2].name) < 0
+                                        {
+                                            let mut full: String = Vec::new();
+                                            full.push_str(&owner);
+                                            full.push_str(".");
+                                            full.push_str(&tfns[m2].name);
+                                            let mut tyvars = ast::copy_names(&outer);
+                                            let own2 = all_tyvars(&tfns[m2]);
+                                            let mut g2: taddr = 0;
+                                            while g2 < own2.len() {
+                                                tyvars.push(own2[g2].to_string());
+                                                g2 += 1;
+                                            }
+                                            out.push(Family {
+                                                name: full,
+                                                tyvars: tyvars,
+                                                from_self: outer.len() as taddr,
+                                                ret_term: family_answer_term(&tfns[m2].ret),
+                                                blanket: false,
+                                                params: written_params(&tfns[m2]),
+                                                ret: family_answer(&tfns[m2].ret),
+                                                fnsigs: tyvar_fnsigs(&tfns[m2], outer.len() as taddr),
+                                            });
+                                        }
+                                        m2 += 1;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
             }
@@ -11875,6 +11970,48 @@ fn read_instance(e: &mut Emit, name: &str) -> String {
     }
 }
 
+/// What a family's return application instantiates as under the key: the
+/// head asked with what the arguments turned the parameters into, the
+/// impl's `Self` read as the receiver's own instantiation wherever it is
+/// written (Ch. 4 §1.7). Nothing where what is written is nested or only
+/// a name — those answers were already asked by the other gate.
+fn instantiate_answer(e: &mut Emit, fam: taddr, key: &Vec<String>, self_name: &str) -> String {
+    let terms = e.families[fam].ret_term.to_string();
+    if terms.len() == 0 {
+        return "".to_string();
+    }
+    let head = subst_through(&e.families[fam].tyvars, key, &e.families[fam].ret);
+    let selfword = "Self".to_string();
+    let mut parts: Vec<String> = Vec::new();
+    let mut piece: String = Vec::new();
+    let mut i: taddr = 0;
+    while i <= terms.len() {
+        let done = i == terms.len() || terms[i] == ',';
+        if done {
+            if piece.same(&selfword) {
+                parts.push(self_name.to_string());
+            } else {
+                parts.push(subst(&e.families[fam].tyvars, key, &piece));
+            }
+            piece = Vec::new();
+        } else {
+            piece.push(terms[i]);
+        }
+        i += 1;
+    }
+    let head_tyfam = tyfamily_at(e, &head);
+    if head_tyfam < 0 || e.tyfams[head_tyfam].tyvars.len() != parts.len() {
+        return "".to_string();
+    }
+    let full_ty = mangled(&head, &parts);
+    // Already made is taken, and what nobody needed before is made where it
+    // is wanted.
+    if def_at(&e.defs, &full_ty) >= 0 {
+        return full_ty;
+    }
+    instantiate(e, &head, &parts)
+}
+
 fn generic_call(
     e: &mut Emit,
     fam: taddr,
@@ -11882,6 +12019,7 @@ fn generic_call(
     recv: &str,
     given: &Vec<String>,
     args: &Vec<ast::Expr>,
+    self_name: &str,
 ) -> Value {
     // A method's receiver is its first argument and is not written as one,
     // so it is not among the declared types and infers nothing — except
@@ -11978,7 +12116,7 @@ fn generic_call(
                 let v = value(e, &args[i], &each);
                 e.fn_want = Vec::new();
                 if e.stuck {
-                    return unknown_value();
+                        return unknown_value();
                 }
                 if closure {
                     htext.push(v.text);
@@ -12046,22 +12184,41 @@ fn generic_call(
         // and what tells the two apart at the call is nothing — an
         // aggregate arrives as a pointer either way (TIR §3).
         if clash || !known_type(e, &found) {
+            
+
             e.stuck = true;
             return unknown_value();
         }
         key.push(found);
         t += 1;
     }
-    let ret = subst_through(&e.families[fam].tyvars, &key, &e.families[fam].ret);
+      let ret = subst_through(&e.families[fam].tyvars, &key, &e.families[fam].ret);
     let none = answers_nothing(&ret);
+    // An answer whose storage could not be named before the arguments
+    // existed is named now: the whole of what was written — application
+    // and all — is the key's reading back, with `Self` the receiver's
+    // own name wherever it stands (Ch. 4 §1.7).
+    if answer.len() == 0 && !none && scalar_named(&ret).same("?") {
+        
+
+        
+
+        let awaited = instantiate_answer(e, fam, &key, self_name);
+        
+
+        if awaited.len() > 0 {
+            answer = awaited.to_string();
+            into = temporary_slot(e, &answer);
+        }
+    }
     let addressed = referent_name(&ret).len() > 0;
     if answer.len() == 0 && !none && !addressed && scalar_named(&ret).same("?") {
         e.stuck = true;
         return unknown_value();
     }
-    let full = mangled(callee, &key);
+      let full = mangled(callee, &key);
     queue(e, callee, &key);
-    let mut name: String = Vec::new();
+      let mut name: String = Vec::new();
     let mut line: String = Vec::new();
     line.push_str("    ");
     if answer.len() == 0 && !none {
@@ -12193,7 +12350,7 @@ fn closure_call(e: &mut Emit, at: taddr, args: &Vec<ast::Expr>) -> Value {
     let none: Vec<String> = Vec::new();
     let fam = family_at(e, &full);
     if fam >= 0 {
-        return generic_call(e, fam, &full, &slot, &none, args);
+        return generic_call(e, fam, &full, &slot, &none, args, "");
     }
     let big = returned_aggregate(e, &full);
     if big.len() > 0 {
@@ -12356,12 +12513,15 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
                 let mut text: String = Vec::new();
                 let mut cx = context(items);
                 cx.closed = copy_closed(&work.closed);
+                
+
                 if function(
                     f, cx, "".to_string(), Vec::new(),
                     Vec::new(), Vec::new(), &mut work, &mut text)
                 {
-                    out.push(Made { name: f.name.to_string(), text: text });
-                }
+                        out.push(Made { name: f.name.to_string(), text: text });
+                } else {
+                    }
             }
             _ => {}
         }
@@ -13386,8 +13546,10 @@ pub fn instantiations(
         }
         let at = pending_at(&work.jobs, &done);
         if at < 0 {
-            return made;
+                return made;
         }
+        
+
         let name = work.jobs[at].name.to_string();
         let key = ast::copy_names(&work.jobs[at].key);
         let full = mangled(&name, &key);
@@ -13460,6 +13622,52 @@ pub fn instantiations(
 
                         }
                         k += 1;
+                    }
+                    // The trait's own hand where the impl wrote nothing of
+                    // its own: the family is named by the impl, and its
+                    // body is read under the impl's type parameters as the
+                    // first of its key — which is exactly how every other
+                    // method of the impl is read (Ch. 4 §1.7).
+                    if !ok && named2.len() > 0 && !is_blanket && owner.len() > 0 {
+                        let at_t = trait_at(items, &named2);
+                        if at_t >= 0 {
+                            match &items[at_t].what {
+                                ast::What::Trait(tn, tparams, supers, assoc, tfns) => {
+                                    let mut m2: taddr = 0;
+                                    while m2 < tfns.len() && !ok {
+                                        let mut has_body = false;
+                                        match &tfns[m2].body {
+                                            Option::Some(b) => has_body = true,
+                                            Option::None => {}
+                                        }
+                                        let mut m: String = Vec::new();
+                                        m.push_str(&owner);
+                                        m.push_str(".");
+                                        m.push_str(&tfns[m2].name);
+                                        if has_body
+                                            && named_fn(fns, &tfns[m2].name) < 0
+                                            && m.same(&name)
+                                            && is_family(&tfns[m2], outer.len())
+                                        {
+                                            
+
+                                            let mut cx = context(items);
+                                            cx.closed = copy_closed(&work.closed);
+                                            ok = function(
+                                                &tfns[m2], cx, owner.to_string(),
+                                                ast::copy_names(&outer),
+                                                ast::copy_names(&key),
+                                                Vec::new(), work, &mut text);
+                                            if ok {
+                                                                            } else {
+                                                                            }
+                                        }
+                                        m2 += 1;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
                 _ => {}

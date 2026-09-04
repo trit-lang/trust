@@ -2684,23 +2684,43 @@ compilers had never disagreed about it because nobody had yet written
 does. The family is reserved now: temporaries that nothing named are
 registered nowhere.
 
-**G9.176 — recorded, not settled: a trait's **own hand** — the body it
-wrote itself — is a family of the impl that says yes.** `for it in
-(1..4).map(|x| x * 2)` needs `(1..4).map(g)` resolved, and the answer
-the other implementation gives is `Range.map.t27.t27.main.closure1`:
-the provided body's family keyed by the impl, its own type parameters
-the closure's appended (Ch. 4 §1.7, §5.6). The second implementation
-names the same function at instantiation time — the given table knows
-`Range` + `Iterator` ⇒ `map` — and at call time finds nothing, because
-only the impl's own methods and one rule over every type (G9.175) are
-looked up for a receiver. The lookup it needs is recorded shape-first:
-a call `recv.name(args)` whose concrete and instance-named candidates
-miss is asked of the givens for that receiver's instantiation, with
-which of the family's parameters the receiver settles decided by the
-impl rather than by the trait (fn's **own** `R, G` arrive from the
-arguments, as generic_call already computes for the rest). fc6–fc9
-holds the four shapes: an untyped closure for `g`, a named fn for `g`,
-and the same calls answered immediately and answered through `next`.
+**G9.177 — recorded, not settled: an associated type is a name the impl
+already wrote.** `m.next()` over an adaptor answers `Option<Self::Item>`,
+and the item is what the impl chose — `type Item = O` over Map's own
+parameters of its own, which the *answer* must resolve before the option
+is instantiated (Ch. 4 §1.7). The second parser reads the declarations
+and sets them aside — the tree an impl prints is its methods — so the
+table the lowering would look them up in does not exist yet; with it
+would fall `Range.next` as a pure coincidence (`Item = T` is the first
+of the key, which is why the fd2's shape already agreed), the ones that
+are not the first, and the closures nobody typed asking a bound naming
+the association at all. fc12, fa1, fa2, fc6 and fc9 hold the shapes.
+
+**G9.176 — a trait's **own hand** is a family of the impl, and applying
+it is binding the receiver's key first.**
+`for it in (1..4).map(|x| x * 2)` needs `(1..4).map(g)` resolved, and
+the answer the other implementation gives is
+`Range.map.t27.t27.main.closure1`: the provided body's family keyed by
+the impl, the fn's own `R, G` settled by the arguments (Ch. 4 §1.7).
+The second implementation now registers exactly that family — one per
+impl per provided body the impl did not shadow — finds it where a
+receiver says which one it is, and emits it in the instantiations'
+loop under the impl's name, where it was always going to be printed
+alongside the impl's own methods. What the answer is told first, where
+the head on its own is not enough: what a family answers with was a
+head — `Vec` for a `-> Vec<T>` — and the trait's hand writes `-> Map<Self,
+G>`, whose arguments are themselves the instantiation — so the written
+arguments are kept as the family's own term, and once the key exists the
+answer is instantiated from it, the impl's `Self` read as the receiver's
+whole type wherever it is written. Named where the shape of the question
+shows: a receiver *literal*, never lowered before, gets instantiated at
+the call's lookup (`(1..4).map(…)` has no binding to have made the
+instance), which is the same rule the written `let v: Vec<t27>` already
+follows. `bootstrap/programs/adaptors` is the track and the example both.
+What is still somebody else's: the answers naming an **associated type**
+(`Self::Item`) are an impl's own choice and are G9.177's table, not
+this one's; and a closure nobody typed asking a bound that mentions one
+is the same table with a question mark over it.
 
 **G9.175 — the join is nobody's name: each arm answers by its own rule,
 and the join only copies.** A scalar `if` or `match` was already
