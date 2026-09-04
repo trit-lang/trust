@@ -2684,6 +2684,18 @@ compilers had never disagreed about it because nobody had yet written
 does. The family is reserved now: temporaries that nothing named are
 registered nowhere.
 
+**G9.178 — recorded, not settled: a `next` the chain itself answers in an
+instantiated hand.** Filter's next-member emits `Option::Some(self.p)(x)`
+inside a loop, and the second lowering's route — parenthesized call through
+the impl's own hold, the field opened where the closure was not celled one
+until then — covers the CALL and not the fn's flow: fa7, fa4, fa6 all
+mark the same seclusion, where the fn's body inside the *instantiation*
+ends silently where the comparison Rust produced is whole. What fa18–fa22
+proven is the shape every outward element plans: the closure-FIELD call,
+the parenthesized callee, the if-arm that returns inside a match arm in
+`Option`, and the construction over `Range` — of all shapes FILTER'S body
+has, none of its components is shut yet.
+
 **G9.177 — an associated type is a name the impl already wrote, and it
 is read off the receiver's key.** `type Item = O` was set aside at the
 parser because the tree an impl prints is its methods; the fact an

@@ -8116,7 +8116,17 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
         // whatever type the closure turned out to be, and the closure
         // itself is its first argument (Ch. 4 §4.2).
         ast::Expr::CallExpr(callee, args) => {
-            match &*callee {
+            // Parentheses group and say nothing (§2.1), so what the call's
+            // callee *is* is what they group: `(self.p)(x)` is the call of
+            // a field, not another kind of it.
+            let mut opened: &ast::Expr = &*callee;
+            loop {
+                match opened {
+                    ast::Expr::Group(inner) => opened = &*inner,
+                    _ => break,
+                }
+            }
+            match opened {
                 ast::Expr::Name(n) => {
                     let at = local_at(e, n);
                     if at < 0 {
