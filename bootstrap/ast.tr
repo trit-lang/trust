@@ -171,6 +171,14 @@ pub struct Named {
     pub ty: Ty,
 }
 
+/// An associated type an **impl chooses**: `type Item = t27;` — what the
+/// name stands for under this impl's own generics (Ch. 4 §1.7). Carried and
+/// not printed: the tree an impl prints is its methods.
+pub struct ImplAssoc {
+    pub name: String,
+    pub ty: Ty,
+}
+
 /// An associated type a trait declares: its name, and the bounds every
 /// implementation's choice must satisfy — `type Iter: Iterator;` (Ch. 4 §1.7).
 pub struct Assoc {
@@ -228,7 +236,7 @@ pub enum What {
     Const(String, Ty, Expr),
     /// `impl Trait for Type { … }`. There is no trait for an inherent impl
     /// (Ch. 4 §1.2), which is the difference a reader sees.
-    Impl(Vec<Generic>, Option<Ty>, Ty, Vec<Fn>),
+    Impl(Vec<Generic>, Option<Ty>, Ty, Vec<Fn>, Vec<ImplAssoc>),
     /// `trait Name<T>: Super { … }` (Ch. 4 §1.1): its type parameters, its
     /// supertraits, its associated types, and its methods.
     Trait(String, Vec<String>, Vec<String>, Vec<Assoc>, Vec<Fn>),
@@ -1050,7 +1058,7 @@ pub fn show_item(i: &Item, out: &mut String) {
             show(value, out);
             out.push_str(")");
         }
-        What::Impl(gs, tr, ty, fns) => {
+        What::Impl(gs, tr, ty, fns, assoc) => {
             out.push_str("(impl ");
             if gs.len() > 0 {
                 show_generics(gs, out);
@@ -1111,7 +1119,7 @@ pub fn defines(w: &What) -> Option<String> {
         What::Const(name, ty, value) => Option::Some(name.to_string()),
         What::Mod(name) => Option::Some(name.to_string()),
         What::Use(segments) => Option::None,
-        What::Impl(gs, tr, ty, fns) => Option::None,
+        What::Impl(gs, tr, ty, fns, assoc) => Option::None,
         What::Trait(name, params, supers, assoc, fns) => Option::Some(name.to_string()),
         What::Macro(name, params, rest, body) => Option::Some(name.to_string()),
     }
@@ -1127,7 +1135,7 @@ pub fn kind(w: &What) -> String {
         What::Const(name, ty, value) => "const".to_string(),
         What::Mod(name) => "mod".to_string(),
         What::Use(segments) => "use".to_string(),
-        What::Impl(gs, tr, ty, fns) => "impl".to_string(),
+        What::Impl(gs, tr, ty, fns, assoc) => "impl".to_string(),
         What::Trait(name, params, supers, assoc, fns) => "trait".to_string(),
         What::Macro(name, params, rest, body) => "macro".to_string(),
     }

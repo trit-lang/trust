@@ -248,7 +248,7 @@ pub fn rewrite(w: &World, a: &mut At, item: ast::Item) -> ast::Item {
             let t = rw_ty(w, a, ty);
             What::Const(full, t, rw_expr(w, a, value))
         }
-        What::Impl(gs, tr, ty, fns) => {
+        What::Impl(gs, tr, ty, fns, assoc) => {
             let t: Option<Ty> = match tr {
                 Option::Some(x) => Option::Some(rw_ty(w, a, x)),
                 Option::None => Option::None,
@@ -260,7 +260,7 @@ pub fn rewrite(w: &World, a: &mut At, item: ast::Item) -> ast::Item {
                 // it is reached through the type, which carries the path.
                 out.push(rw_fn(w, a, f, "", true));
             }
-            What::Impl(gs, t, s, out)
+            What::Impl(gs, t, s, out, assoc)
         }
         What::Macro(name, params, rest, body) => {
             // A macro's body is rewritten like any other code: the names it

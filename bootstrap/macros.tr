@@ -106,12 +106,12 @@ fn item(x: &mut X, i: ast::Item) -> ast::Item {
             let v = expr(x, value);
             ast::What::Const(name, ty, v)
         }
-        ast::What::Impl(gs, tr, ty, fns) => {
+        ast::What::Impl(gs, tr, ty, fns, assoc) => {
             let mut out: Vec<ast::Fn> = Vec::new();
             for f in fns {
                 out.push(expand_fn(x, f));
             }
-            ast::What::Impl(gs, tr, ty, out)
+            ast::What::Impl(gs, tr, ty, out, assoc)
         }
         ast::What::Trait(name, params, supers, assoc, fns) => {
             let mut out: Vec<ast::Fn> = Vec::new();

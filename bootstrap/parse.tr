@@ -2005,6 +2005,7 @@ fn impl_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
     }
     expect_op(p, "{")?;
     let mut fns: Vec<ast::Fn> = Vec::new();
+    let mut assoc: Vec<ast::ImplAssoc> = Vec::new();
     loop {
         let t2 = peek(p)?;
         let at2 = t2.at;
@@ -2014,7 +2015,7 @@ fn impl_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
         };
         if done {
             p.at = at2;
-            return Result::Ok(ast::What::Impl(generics, tr, ty, fns));
+            return Result::Ok(ast::What::Impl(generics, tr, ty, fns, assoc));
         }
         // An `impl` block takes no `pub`, and neither does anything in one:
         // its methods are as visible as the block, which is as visible as the
@@ -2031,9 +2032,9 @@ fn impl_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
             });
         }
         // `type Item = t27;` — what this impl chooses for the trait's
-        // associated type (Ch. 4 §1.7). It is read and set aside: what it
-        // chooses is a fact about the *type*, and the tree an impl prints
-        // is its methods.
+        // associated type (Ch. 4 §1.7). The tree an impl prints is its
+        // methods, and what it chooses is set aside for whoever the
+        // question is asked of, which is not the printer (Ch. 4 §1.7).
         let t4 = peek(p)?;
         let at4 = t4.at;
         let alias = match t4.tok {
@@ -2046,6 +2047,7 @@ fn impl_item(p: &mut Parser) -> Result<ast::What, lex::Error> {
             expect_op(p, "=")?;
             let held = type_name(p)?;
             expect_op(p, ";")?;
+            assoc.push(ast::ImplAssoc { name: name, ty: held });
             continue;
         }
         let held = peek(p)?;

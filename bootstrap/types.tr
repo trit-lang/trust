@@ -230,7 +230,7 @@ fn gather(w: &mut World, item: &ast::Item) {
                 i += 1;
             }
         }
-        ast::What::Impl(gs, tr, ty, fns) => {
+        ast::What::Impl(gs, tr, ty, fns, assoc) => {
             // A method of a generic impl is typed once per instantiation,
             // so there is no one answer and it is left out (§2.5).
             if gs.len() > 0 {

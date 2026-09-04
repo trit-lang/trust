@@ -183,6 +183,26 @@ pub struct Cx {
     pub rets: Vec<RetTy>,
     /// What every alias names, settled (Ch. 0 §3.6).
     pub aliases: Vec<Alias>,
+    /// What every impl chose for its trait's associated types — `type Item
+    /// = t27;` is set aside at the parser and handed over here, which is
+    /// where the question an `Option<Self::Item>` answers is asked
+    /// (Ch. 4 §1.7).
+    pub assoc: Vec<AssocChoice>,
+}
+
+/// What one impl chose for one name, with the impl's own generics and the
+/// type its choice names, so the same question is not walked again for
+/// every call: `Item` is what `impl` wrote, where it wrote it.
+pub struct AssocChoice {
+    /// The written head of the type the impl is on: `Filter`, or a whole
+    /// mangled one-member name where the impl names one.
+    pub owner: String,
+    /// The impl's own generic parameters, in order.
+    pub gens: Vec<String>,
+    /// The associated type's name.
+    pub name: String,
+    /// What it was chosen as, as written.
+    pub ty: ast::Ty,
 }
 
 /// One `type X = T;` (Ch. 0 §3.6).
@@ -302,11 +322,19 @@ pub struct Emit {
     /// What every alias names, settled — so that a written type is read as
     /// what it *is* and not as the name somebody gave it (Ch. 0 §3.6).
     pub aliases: Vec<Alias>,
+    /// What each impl chose for its trait's associated types, so that a
+    /// written `Self::Item` answers from a table and not from a walk.
+    pub assoc: Vec<AssocChoice>,
     /// What **this function** answers with, where that is a type this file
     /// defines. A `return` needs it and the wanted type is not it: what a
     /// binding wants and what the function answers are two questions, and
     /// a `return` inside a nested block is asked the second one.
     pub answer: String,
+    /// Where the next aggregate-answering family's storage is, if somebody
+    /// already said — which is only ever `%sret` in tail position, said on
+    /// this side because an eighth argument crowd is not an argument
+    /// (Ch. 4 §1.7).
+    pub family_into_hints: Vec<String>,
     /// The type an `impl`'s `self` points at, for a field read through it.
     pub self_ty: String,
     /// The generic functions of the file, so a call to one can work out
@@ -1090,8 +1118,10 @@ pub fn function(
         owned: Vec::new(),
         loops: Vec::new(),
         aliases: cx.aliases,
+        assoc: cx.assoc,
         answer: "".to_string(),
         self_ty: owner.to_string(),
+        family_into_hints: Vec::new(),
         families: cx.families,
         jobs: copy_jobs(&work.jobs),
         tyvars: ast::copy_names(&tyvars),
@@ -4594,9 +4624,9 @@ fn if_expr(
             let after_then = owns_now(e);
             owns_back(e, &was);
 
-            start(e, &else_at);
-            match o {
-                Option::Some(x) => {
+        start(e, &else_at);
+        match o {
+            Option::Some(x) => {
                     let b = value(e, x, &ty);
                     if e.stuck {
                         return unknown_value();
@@ -6546,8 +6576,10 @@ pub fn destructor(
         owned: Vec::new(),
         loops: Vec::new(),
         aliases: cx.aliases,
+        assoc: cx.assoc,
         answer: "".to_string(),
         self_ty: owner.to_string(),
+        family_into_hints: Vec::new(),
         // A destructor is reached by dropping and not by calling, so no
         // instantiation can be asked for from here: a generic call inside
         // one is refused rather than emitted under a name nothing queued.
@@ -8084,16 +8116,31 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
         // whatever type the closure turned out to be, and the closure
         // itself is its first argument (Ch. 4 §4.2).
         ast::Expr::CallExpr(callee, args) => {
-            let missing: taddr = 0 - 1;
-            let at = match callee {
-                ast::Expr::Name(n) => local_at(e, n),
-                _ => missing,
-            };
-            if at < 0 {
-                e.stuck = true;
-                return unknown_value();
+            match &*callee {
+                ast::Expr::Name(n) => {
+                    let at = local_at(e, n);
+                    if at < 0 {
+                        e.stuck = true;
+                        return unknown_value();
+                    }
+                    closure_call(e, at, args)
+                }
+                // And one through a *field*: `(self.f)(x)` is the adaptor
+                // calling the closure the impl was given, and the closure is
+                // the field, which the offset of the receiver already names
+                // (Ch. 4 §4.2).
+                ast::Expr::Field(base, name) => {
+                    let at_p = place(e, &*callee);
+                    if e.stuck {
+                        return unknown_value();
+                    }
+                    closure_call_at(e, &at_p.text, &at_p.ty, args)
+                }
+                _ => {
+                    e.stuck = true;
+                    unknown_value()
+                }
             }
-            closure_call(e, at, args)
         }
         ast::Expr::Call(callee, args) => {
             // `trap()` — a deliberate fault, and the one call that does not
@@ -8483,14 +8530,27 @@ fn method_value(
 
     let fam = family_at(e, &under);
     if fam >= 0 {
-        
-
+        // A family's answer in **tail position**, when it is an aggregate,
+        // goes where this function's answer goes: what a lowering owes
+        // `%sret` is exactly what the call owes — no one writes the
+        // temporary (TIR §3).
+        if dest.len() > 0 {
+            let answering = instantiate_answer(e, fam, &given, &owner);
+            if answering.len() > 0 && answering.same(into_ty) {
+                e.family_into_hints.push(dest.to_string());
+                slot = receiver_at(e, at, recv, &slot, &by_value);
+                if e.stuck {
+                    return unknown_value();
+                }
+                return generic_call(e, fam, &under, &slot, &given, args, &owner);
+            }
+        }
         if refuse_dest(e, dest) {
             return unknown_value();
         }
         slot = receiver_at(e, at, recv, &slot, &by_value);
         if e.stuck {
-                return unknown_value();
+            return unknown_value();
         }
         return generic_call(e, fam, &under, &slot, &given, args, &owner);
     }
@@ -8979,7 +9039,7 @@ pub fn definitions(items: &Vec<ast::Item>) -> Vec<layout::Def> {
     while f < items.len() {
         match &items[f].what {
             ast::What::Function(held) => note_signature(held, &mut out),
-            ast::What::Impl(gs, tr, ty, fns) => {
+            ast::What::Impl(gs, tr, ty, fns, assoc) => {
                 let mut k: taddr = 0;
                 while k < fns.len() {
                     note_signature(&fns[k], &mut out);
@@ -9343,7 +9403,7 @@ pub fn givens(items: &Vec<ast::Item>) -> Vec<Given> {
     let mut i: taddr = 0;
     while i < items.len() {
         match &items[i].what {
-            ast::What::Impl(gs, tr, ty, fns) => {
+            ast::What::Impl(gs, tr, ty, fns, assoc) => {
                 let named = match tr {
                     Option::Some(t) => written_head(t),
                     Option::None => "".to_string(),
@@ -9425,7 +9485,7 @@ pub fn returns(items: &Vec<ast::Item>) -> Vec<RetTy> {
             ast::What::Function(f) => {
                 out.push(RetTy { name: f.name.to_string(), ty: settled_ty(&al, &f.ret) });
             }
-            ast::What::Impl(gs, tr, ty, fns) => {
+            ast::What::Impl(gs, tr, ty, fns, assoc) => {
                 let owner = impl_owner(gs, ty);
                 let mut k: taddr = 0;
                 while k < fns.len() {
@@ -10897,7 +10957,7 @@ pub fn destructors(items: &Vec<ast::Item>) -> Vec<String> {
     let mut i: taddr = 0;
     while i < items.len() {
         match &items[i].what {
-            ast::What::Impl(gs, tr, ty, fns) => {
+            ast::What::Impl(gs, tr, ty, fns, assoc) => {
                 match tr {
                     Option::Some(t) => {
                         let name = head_of(t);
@@ -10929,7 +10989,7 @@ pub fn parameters(items: &Vec<ast::Item>) -> Vec<Sig> {
                     ret: written_types(&mine),
                 });
             }
-            ast::What::Impl(gs, tr, ty, fns) => {
+            ast::What::Impl(gs, tr, ty, fns, assoc) => {
                 let owner = impl_owner(gs, ty);
                 let mut k: taddr = 0;
                 while k < fns.len() {
@@ -11053,7 +11113,7 @@ pub fn signatures(items: &Vec<ast::Item>) -> Vec<Sig> {
             }
             // A method is reached through its receiver, so the receiver's
             // name is half of its own (Ch. 4 §1.2).
-            ast::What::Impl(gs, tr, ty, fns) => {
+            ast::What::Impl(gs, tr, ty, fns, assoc) => {
                 let owner = impl_owner(gs, ty);
                 let mut k: taddr = 0;
                 while k < fns.len() {
@@ -11271,6 +11331,7 @@ pub fn context(items: &Vec<ast::Item>) -> Cx {
         tyfams: type_families(items),
         rets: returns(items),
         aliases: aliases(items),
+        assoc: assoc_choices(items),
     }
 }
 
@@ -11378,7 +11439,7 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
             // with parameters of its own, because those are decided by the
             // receiver and the method is one function per instantiation of
             // it just the same.
-            ast::What::Impl(gs, tr, ty, fns) => {
+            ast::What::Impl(gs, tr, ty, fns, assoc) => {
                 let named = match tr {
                     Option::Some(t) => written_head(t),
                     Option::None => "".to_string(),
@@ -11989,6 +12050,161 @@ fn read_instance(e: &mut Emit, name: &str) -> String {
     }
 }
 
+/// Every impl's own associated type choices, gathered once for the
+/// lowering: the ones written on one member's name, and the ones over a
+/// whole family the receiver answers for — `Range`'s record, `Filter`'s
+/// record — since a family's parameters are settled by whoever applies the
+/// impl, which is the instance (Ch. 4 §1.7).
+fn assoc_choices(items: &Vec<ast::Item>) -> Vec<AssocChoice> {
+    let mut out: Vec<AssocChoice> = Vec::new();
+    let mut i: taddr = 0;
+    while i < items.len() {
+        match &items[i].what {
+            ast::What::Impl(gs, tr, ty, fns, assoc) => {
+                if assoc.len() > 0 {
+                    let mut gens: Vec<String> = Vec::new();
+                    let mut settled = true;
+                    match ty {
+                        ast::Ty::App(segments, args) => {
+                            let want = generic_names(gs);
+                            if want.len() == args.len() {
+                                let mut j: taddr = 0;
+                                while j < args.len() {
+                                    match &args[j] {
+                                        ast::Ty::Name(ns) => gens.push(joined(ns)),
+                                        _ => settled = false,
+                                    }
+                                    j += 1;
+                                }
+                            } else {
+                                // A parameter the self type does not carry
+                                // is settled by inference, which is the one
+                                // question none of this asks yet (G9.177's
+                                // own remainder).
+                                settled = false;
+                            }
+                        }
+                        _ => {}
+                    }
+                    if settled {
+                        let assoc_name = written_head(ty);
+                        let mut k: taddr = 0;
+                        while k < assoc.len() {
+                            out.push(AssocChoice {
+                                owner: assoc_name.to_string(),
+                                gens: ast::copy_names(&gens),
+                                name: assoc[k].name.to_string(),
+                                ty: ast::copy_ty(&assoc[k].ty),
+                            });
+                            k += 1;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// What an impl chose for its trait's associated type, found where the
+/// receiver say which impl: `type Item = O` under the impl's own generics
+/// read off the receiver's instance, chained through the names it was
+/// chosen as — `I::Item` asks the same question of the type the impl
+/// holds (Ch. 4 §1.7). Nothing where no impl answered for the owner.
+fn assoc_resolve(e: &mut Emit, owner: &str, key: &Vec<String>, name: &str) -> String {
+    let mut i: taddr = 0;
+    while i < e.assoc.len() {
+        if e.assoc[i].owner.same(owner) && e.assoc[i].name.same(name) {
+
+            return assoc_term(e, key, &e.assoc[i].gens, &e.assoc[i].ty);
+        }
+        i += 1;
+    }
+
+    "".to_string()
+}
+
+/// What the choice says under the impl's own generics: a parameter is the
+/// key's word, `I::Item` is the question asked of what the impl holds,
+/// and a plain `t27` answers itself.
+fn assoc_term(e: &mut Emit, key: &Vec<String>, gens: &Vec<String>, ty: &ast::Ty) -> String {
+    match ty {
+        ast::Ty::Name(segments) => {
+            if segments.len() == 0 {
+                return "".to_string();
+            }
+            let head_str = segments[0].to_string();
+            let mut j: taddr = 0;
+            let mut hit: taddr = 0 - 1;
+            while j < gens.len() {
+                if gens[j].same(&head_str) {
+                    hit = j as taddr;
+                }
+                j += 1;
+            }
+            if hit < 0 {
+                return joined(segments);
+            }
+            let inner = key[hit as taddr].to_string();
+            if segments.len() == 1 {
+                return inner;
+            }
+            // A name with a `::` through the impl's hold asks the next
+            // impl: `I::Item` wants what the inner impl chose, and the
+            // inner one is found the same way.
+            let inner_inst = inst_at(e, &inner);
+            if inner_inst < 0 {
+                return "".to_string();
+            }
+            let inner_base = e.instances[inner_inst as taddr].base.to_string();
+            let inner_key = ast::copy_names(&e.instances[inner_inst as taddr].key);
+            let rest = segments[1].to_string();
+            assoc_resolve(e, &inner_base, &inner_key, &rest)
+        }
+        _ => "".to_string(),
+    }
+}
+
+/// Where the first `::` of a piece is, or −1.
+fn find_colon(s: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i + 1 < s.len() {
+        if s[i] == ':' && s[i + 1] == ':' {
+            return i;
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
+/// The rest of a `…::…` piece, resolved where the impl holding it asks
+/// from: the first of it under its own name and key, and then the name
+/// itself, the same walk every other name takes (Ch. 4 §1.7).
+fn assoc_through_name(
+    e: &mut Emit,
+    first: &str,
+    from: &str,
+    piece: &str,
+    start: taddr,
+) -> String {
+    let mut rest: String = Vec::new();
+    let mut q = start;
+    while q < piece.len() {
+        rest.push(piece[q]);
+        q += 1;
+    }
+    let inst_for_self = inst_at(e, from);
+    if inst_for_self < 0 {
+        return "".to_string();
+    }
+    let own_base = e.instances[inst_for_self].base.to_string();
+    let own_key = ast::copy_names(&e.instances[inst_for_self].key);
+    let got = assoc_resolve(e, &own_base, &own_key, &rest);
+    got
+}
+
 /// What a family's return application instantiates as under the key: the
 /// head asked with what the arguments turned the parameters into, the
 /// impl's `Self` read as the receiver's own instantiation wherever it is
@@ -12001,6 +12217,7 @@ fn instantiate_answer(e: &mut Emit, fam: taddr, key: &Vec<String>, self_name: &s
     }
     let head = subst_through(&e.families[fam].tyvars, key, &e.families[fam].ret);
     let selfword = "Self".to_string();
+    let selfassoc = "Self::".to_string();
     let mut parts: Vec<String> = Vec::new();
     let mut piece: String = Vec::new();
     let mut i: taddr = 0;
@@ -12009,6 +12226,33 @@ fn instantiate_answer(e: &mut Emit, fam: taddr, key: &Vec<String>, self_name: &s
         if done {
             if piece.same(&selfword) {
                 parts.push(self_name.to_string());
+            } else if at_here(&piece, 0, &selfassoc) {
+                // `Self::Item` is not the receiver and not a generic: what
+                // the impl chose the association as, asked where the impl
+                // asked it (Ch. 4 §1.7).
+                let inner = assoc_through_name(e, &selfword, self_name, &piece, 6);
+                if inner.len() == 0 {
+                    return "".to_string();
+                }
+                parts.push(inner);
+            } else if find_colon(&piece) >= 0 {
+                // And the same question written one name deeper: `I::Item`
+                // asks what the impl's hold `I` was under the key
+                // (Ch. 4 §1.7).
+                let at = find_colon(&piece);
+                let mut first_part: String = Vec::new();
+                let mut i2: taddr = 0;
+                while i2 < at as taddr {
+                    first_part.push(piece[i2]);
+                    i2 += 1;
+                }
+                let subbed_first = subst(&e.families[fam].tyvars, key, &first_part);
+                let after_start = (at + 2) as taddr;
+                let inner = assoc_through_name(e, &first_part, &subbed_first, &piece, after_start);
+                if inner.len() == 0 {
+                    return "".to_string();
+                }
+                parts.push(inner);
             } else {
                 parts.push(subst(&e.families[fam].tyvars, key, &piece));
             }
@@ -12076,9 +12320,17 @@ fn generic_call(
             // `-> I` under `I = Range.t27` is **already** an instantiated
             // name and not a family to read again — asking for a
             // `Range.t27.t27` would be looking for a mangle nobody made
-            // (Ch. 4 §5.6).
+            // (Ch. 4 §5.6). And an application written over `Self` whose
+            // *arguments* are the impl's own choice — `Option<Self::Item>`
+            // is no `Option`'s own parameters — is read from the same
+            // table the rest of this already keeps (Ch. 4 §1.7).
             let substituted = !head.same(&e.families[fam].ret);
-            if substituted && given.len() == front.len() {
+            let via_terms = instantiate_answer(e, fam, given, self_name);
+
+
+            if via_terms.len() > 0 {
+                answer = via_terms;
+            } else if substituted && given.len() == front.len() {
                 answer = read_instance(e, &head);
             } else if def_at(&e.defs, &head) >= 0 {
                 answer = head.to_string();
@@ -12089,7 +12341,13 @@ fn generic_call(
                 e.stuck = true;
                 return unknown_value();
             }
-            into = temporary_slot(e, &answer);
+            into = if e.family_into_hints.len() > 0 {
+                let h = e.family_into_hints[0].to_string();
+                e.family_into_hints = Vec::new();
+                h
+            } else {
+                temporary_slot(e, &answer)
+            };
         }
     }
     // Twice over the arguments, closures first.
@@ -12227,7 +12485,13 @@ fn generic_call(
 
         if awaited.len() > 0 {
             answer = awaited.to_string();
-            into = temporary_slot(e, &answer);
+            into = if e.family_into_hints.len() > 0 {
+                let h = e.family_into_hints[0].to_string();
+                e.family_into_hints = Vec::new();
+                h
+            } else {
+                temporary_slot(e, &answer)
+            };
         }
     }
     let addressed = referent_name(&ret).len() > 0;
@@ -12363,18 +12627,25 @@ fn closed_says(c: &Closed, sig: &str, want: &str) -> String {
 fn closure_call(e: &mut Emit, at: taddr, args: &Vec<ast::Expr>) -> Value {
     let owner = e.locals[at].ty.to_string();
     let slot = e.locals[at].slot.to_string();
+    closure_call_at(e, &slot, &owner, args)
+}
+
+/// The same, where the closure's place and type came from somewhere other
+/// than a local's own slot — a field's offset, so `(self.f)(x)` is the
+/// impl settling the closure it was given (Ch. 4 §4.2).
+fn closure_call_at(e: &mut Emit, slot: &str, owner: &str, args: &Vec<ast::Expr>) -> Value {
     let mut full: String = Vec::new();
-    full.push_str(&owner);
+    full.push_str(owner);
     full.push_str(".call");
     let none: Vec<String> = Vec::new();
     let fam = family_at(e, &full);
     if fam >= 0 {
-        return generic_call(e, fam, &full, &slot, &none, args, "");
+        return generic_call(e, fam, &full, slot, &none, args, "");
     }
     let big = returned_aggregate(e, &full);
     if big.len() > 0 {
         let into = temporary_slot(e, &big);
-        return aggregate_call(e, &full, &big, &into, &slot, args);
+        return aggregate_call(e, &full, &big, &into, slot, args);
     }
     let mut texts: Vec<String> = Vec::new();
     let mut i: taddr = 0;
@@ -12398,7 +12669,7 @@ fn closure_call(e: &mut Emit, at: taddr, args: &Vec<ast::Expr>) -> Value {
     line.push_str(" = call @");
     line.push_str(&full);
     line.push_str("(");
-    line.push_str(&slot);
+    line.push_str(slot);
     let mut k: taddr = 0;
     while k < texts.len() {
         line.push_str(", ");
@@ -12555,7 +12826,7 @@ pub fn module(items: &Vec<ast::Item>) -> Vec<Made> {
     let mut d: taddr = 0;
     while d < items.len() {
         match &items[d].what {
-            ast::What::Impl(gs, tr, ty, fns) => {
+            ast::What::Impl(gs, tr, ty, fns, assoc) => {
                 // What the impl is written *on*, where that is one member
                 // of a family: `impl Vec<char>` is `Vec` read at `char`, and
                 // its methods are `Vec.char.push_str` (Ch. 5 §2.6). The
@@ -12905,7 +13176,7 @@ fn drop_glue(
     let mut vars: Vec<String> = Vec::new();
     if dropper >= 0 {
         match &items[dropper].what {
-            ast::What::Impl(gs, tr, ty, fns) => {
+            ast::What::Impl(gs, tr, ty, fns, assoc) => {
                 vars = self_parameters(gs, ty);
             }
             _ => {}
@@ -12930,8 +13201,10 @@ fn drop_glue(
         owned: Vec::new(),
         loops: Vec::new(),
         aliases: cx.aliases,
+        assoc: cx.assoc,
         answer: "".to_string(),
         self_ty: owner.to_string(),
+        family_into_hints: Vec::new(),
         families: Vec::new(),
         // **Seeded**, because what is handed back is the *new* part of it:
         // a queue that started empty hands back nothing, since nothing in
@@ -13002,7 +13275,7 @@ fn drop_glue(
     // (Ch. 3 §1.4). It answers with nothing, so a tail is not one.
     if dropper >= 0 {
         match &items[dropper].what {
-            ast::What::Impl(gs, tr, ty, fns) => {
+            ast::What::Impl(gs, tr, ty, fns, assoc) => {
                 if fns.len() != 1 {
                     return false;
                 }
@@ -13093,7 +13366,7 @@ fn written_drop(items: &Vec<ast::Item>, base: &str) -> taddr {
     let mut i: taddr = 0;
     while i < items.len() {
         match &items[i].what {
-            ast::What::Impl(gs, tr, ty, fns) => {
+            ast::What::Impl(gs, tr, ty, fns, assoc) => {
                 let named = match tr {
                     Option::Some(t) => written_head(t),
                     Option::None => "".to_string(),
@@ -13604,7 +13877,7 @@ pub fn instantiations(
                             work, &mut text);
                     }
                 }
-                ast::What::Impl(gs, tr, ty, fns) => {
+                ast::What::Impl(gs, tr, ty, fns, assoc) => {
                         let named2 = match tr {
                         Option::Some(t) => written_head(t),
                         Option::None => "".to_string(),

@@ -2684,20 +2684,37 @@ compilers had never disagreed about it because nobody had yet written
 does. The family is reserved now: temporaries that nothing named are
 registered nowhere.
 
-**G9.177 — recorded, not settled: an associated type is a name the impl
-already wrote.** `m.next()` over an adaptor answers `Option<Self::Item>`,
-and the item is what the impl chose — `type Item = O` over Map's own
-parameters of its own, which the *answer* must resolve before the option
-is instantiated (Ch. 4 §1.7). The second parser reads the declarations
-and sets them aside — the tree an impl prints is its methods — so the
-table the lowering would look them up in does not exist yet; with it
-would fall `Range.next` as a pure coincidence (`Item = T` is the first
-of the key, which is why the fd2's shape already agreed), the ones that
-are not the first, and the closures nobody typed asking a bound naming
-the association at all. fc12, fa1, fa2, fa4, fc6 and fc9 hold the
-shapes — `fa4` being the pointed one: a `count` over a *filter-chain*,
-whose `next` asks the association once per step inside an instantiation
-that already has every other word it needs.
+**G9.177 — an associated type is a name the impl already wrote, and it
+is read off the receiver's key.** `type Item = O` was set aside at the
+parser because the tree an impl prints is its methods; the fact an
+`Option<Self::Item>` needs is now kept where the question is asked:
+each impl's own choice is joined by the impl's own generics, so the
+receiver's instance — `Range.t27`, `Filter.Range.t27.main.closure1`
+— settles each name exactly once. The name the answer spells,
+`Self::Item` or `I::Item` where it is written one hold further in,
+asks the same question of what the impl holds — since `Option<I::Item>`
+is what Filter next's ret is written as, and associating is just the
+name asked of the same table (Ch. 4 §1.7). Answers it could not read
+otherwise fall out of two refinements that attended the table's arrival:
+the whole-of-what-was-written's `Self` is the receiver's own name
+wherever a parameter *is* the impl's bound, and `Self::Item` is where
+the same walk says a parameter name is a *path*, which is no longer a
+substitution, and the receiver's key reads `Item` back as its own
+name. Two side-effects paid the shapes this was wanted for: a closure
+whose `p` the impl was given now reads the field the impl stored —
+`(self.p)(x)` asks the offset of the receiver, the same walk every
+field reads — and a family's answer in *tail* position that is an
+aggregate goes where the function's answer goes: `self.inner.next()`
+on the last line of `mext` hands its callee's storage to `%sret`
+directly, because no implementation writes the temporary (TIR §3).
+`fa17` is the admired shape: aside from its two bound-checks the
+whole of `Filter.next`'s machinery runs inside one instantiation.
+What remains outside answers honestly too: an impl's generics the
+self type does not carry (`impl<I: Iterator, B, F: Fn(I::Item) -> B>`)
+answer by *inference*, which no table can — `Map`'s `next` delegating
+by one further step — and closures nobody typed asking a bound naming
+an association — both recorded, not settled: fa1, fa2, fa4, fa6, fa7,
+fc6, fc10, fc12.
 
 **G9.176 — a trait's **own hand** is a family of the impl, and applying
 it is binding the receiver's key first.**
