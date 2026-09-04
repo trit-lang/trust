@@ -2684,17 +2684,27 @@ compilers had never disagreed about it because nobody had yet written
 does. The family is reserved now: temporaries that nothing named are
 registered nowhere.
 
-**G9.178 — recorded, not settled: a `next` the chain itself answers in an
-instantiated hand.** Filter's next-member emits `Option::Some(self.p)(x)`
-inside a loop, and the second lowering's route — parenthesized call through
+**G9.178 — recorded, not settled: the count of an instantiation's own
+steps.** Filter's next-member emits `Option::Some(self.p)(x)` inside a
+loop, and the second lowering's route — parenthesized call through
 the impl's own hold, the field opened where the closure was not celled one
-until then — covers the CALL and not the fn's flow: fa7, fa4, fa6 all
-mark the same seclusion, where the fn's body inside the *instantiation*
-ends silently where the comparison Rust produced is whole. What fa18–fa22
-proven is the shape every outward element plans: the closure-FIELD call,
-the parenthesized callee, the if-arm that returns inside a match arm in
-`Option`, and the construction over `Range` — of all shapes FILTER'S body
-has, none of its components is shut yet.
+until then — covers the CALL and not the fn's flow: fa7, fa4, fa6 mark
+the first hole, where the fn's body inside the *instantiation* ends
+silently where the comparison Rust produced is whole, while fa18–fa22
+prove every outward element of the body is *separately* at rest — the
+closure-FIELD call, the parenthesized callee, the if-arm that returns
+inside a match arm in `Option`, the construction over `Range` — so the
+holy-place is the conjunction of them under one instantiation at a time,
+not any one. And in a *non-chained* receiver the answer is not read
+*first*: `f.inner.next()` in a member's own body answers where the
+receiver's own method answers, `Range.next.t27` with the `option.t27`
+storage — at the numbers, rather than before the loads that make its
+receiver — but where the receiver *is* one more call, the number the
+slot got is what both printing says before the plain arguments along
+it (fa24–fa28), and the shape one takes first the other refuses, which
+the chapters do not spell (TIR §3). fa24 holds the name: `f.inner.next()`
+through `&FakeF` is rust correctly slot-#2-load-#3 and boot silently,
+because the answer was not asked for first on that occasion.
 
 **G9.177 — an associated type is a name the impl already wrote, and it
 is read off the receiver's key.** `type Item = O` was set aside at the
