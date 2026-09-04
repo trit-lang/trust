@@ -16,5 +16,16 @@
 fn main() -> t27 {
     let m = (1..4).map(|x: t27| -> t27 { x * 2 });
     let m2 = (5..8).map(|y: t27| -> t27 { y + 1 });
-    0
+    // And a body that is not even mentioned in the impl: `count` nobody
+    // wrote for `Range`, whose own `next` — walked in a hand it was given
+    // — is exactly why the adapters' reach is the impl's whole hand while
+    // the signature's own `Self`-type is subst'd from the receiver.
+    let n = (1..4).count();
+    // Chained, where the receiver has to be *asked* before the family is
+    // found: an answer lowers where the question was raised, which is the
+    // order `Filter.count.Range.t27.main.closure1` reads.
+    let m3 = (1..10)
+        .filter(|x: t27| -> bool { x % 2 == 0 })
+        .map(|y: t27| -> t27 { y + 1 });
+    n as t27
 }

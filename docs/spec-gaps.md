@@ -2694,7 +2694,10 @@ table the lowering would look them up in does not exist yet; with it
 would fall `Range.next` as a pure coincidence (`Item = T` is the first
 of the key, which is why the fd2's shape already agreed), the ones that
 are not the first, and the closures nobody typed asking a bound naming
-the association at all. fc12, fa1, fa2, fc6 and fc9 hold the shapes.
+the association at all. fc12, fa1, fa2, fa4, fc6 and fc9 hold the
+shapes — `fa4` being the pointed one: a `count` over a *filter-chain*,
+whose `next` asks the association once per step inside an instantiation
+that already has every other word it needs.
 
 **G9.176 — a trait's **own hand** is a family of the impl, and applying
 it is binding the receiver's key first.**
@@ -2716,11 +2719,16 @@ whole type wherever it is written. Named where the shape of the question
 shows: a receiver *literal*, never lowered before, gets instantiated at
 the call's lookup (`(1..4).map(…)` has no binding to have made the
 instance), which is the same rule the written `let v: Vec<t27>` already
-follows. `bootstrap/programs/adaptors` is the track and the example both.
-What is still somebody else's: the answers naming an **associated type**
-(`Self::Item`) are an impl's own choice and are G9.177's table, not
-this one's; and a closure nobody typed asking a bound that mentions one
-is the same table with a question mark over it.
+follows; and a chained call asks the receiver before the family —
+`.map(…).map(…)` and `.filter(…).map(…)`'s own receiver is lowered first,
+because a call whose family is not yet named is exactly the one asking
+its answer where the question was raised. `(1..4).count()` nobody wrote
+is the same hand the impl holds, and `bootstrap/programs/adaptors` is
+the track and the example both. What is still somebody else's: the
+answers naming an **associated type** (`Self::Item`) are an impl's own
+choice and are G9.177's table, not this one's; and a closure nobody
+typed asking a bound that mentions one is the same table with a
+question mark over it.
 
 **G9.175 — the join is nobody's name: each arm answers by its own rule,
 and the join only copies.** A scalar `if` or `match` was already

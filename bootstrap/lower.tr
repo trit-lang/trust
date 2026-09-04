@@ -8321,15 +8321,28 @@ fn method_value(
     } else {
         e.locals[at].ty.to_string()
     };
-    if owner.len() == 0 {
-        e.stuck = true;
-        return unknown_value();
-    }
     let mut slot = if at < 0 {
         "".to_string()
     } else {
         e.locals[at].slot.to_string()
     };
+    // And where the shape of the receiver's own question cannot be said
+    // without lowering it — a chained call is its own answer — it is
+    // asked first, by value and not place, which is the same order a
+    // destination-less call already gives it (`.map(…).count()`).
+    if owner.len() == 0 && at < 0 && dest.len() == 0 {
+        
+        let asked = value(e, recv, "");
+        if e.stuck {
+            return unknown_value();
+        }
+        owner = asked.ty.to_string();
+        slot = asked.text.to_string();
+    }
+    if owner.len() == 0 {
+        e.stuck = true;
+        return unknown_value();
+    }
     // A receiver that is itself a reference holds the *address* of the
     // object, so what a method is given is what the slot holds and not the
     // slot: `self.area()` inside a `&self` method reads through `self`
@@ -8467,6 +8480,7 @@ fn method_value(
     under.push_str(&base);
     under.push_str(".");
     under.push_str(name);
+
     let fam = family_at(e, &under);
     if fam >= 0 {
         
@@ -11201,7 +11215,10 @@ fn receiver_at(
     by_value: &str,
 ) -> String {
     let mut out = held.to_string();
-    if at < 0 {
+    // A receiver the caller *already lowered* is where it ended: asking
+    // the place of an answer would be asking a question that has none —
+    // the chained call found its receiver before the family had a name.
+    if at < 0 && held.len() == 0 {
         let found = place(e, recv);
         if e.stuck {
             return out;
@@ -11333,6 +11350,7 @@ fn subst_through(tyvars: &Vec<String>, key: &Vec<String>, name: &str) -> String 
 
 pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
     let mut out: Vec<Family> = Vec::new();
+
     let mut i: taddr = 0;
     while i < items.len() {
         match &items[i].what {
@@ -11439,6 +11457,7 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                                                 tyvars.push(own2[g2].to_string());
                                                 g2 += 1;
                                             }
+
                                             out.push(Family {
                                                 name: full,
                                                 tyvars: tyvars,
