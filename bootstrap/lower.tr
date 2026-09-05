@@ -5159,6 +5159,7 @@ fn if_statement(
     if e.stuck {
         return;
     }
+
     let then_at = label(e, "then");
     let else_at = label(e, "else");
     let join_at = label(e, "join");
@@ -10921,6 +10922,25 @@ fn subst_ty(
 ) -> ast::Ty {
     match t {
         ast::Ty::Name(segments) => {
+            // A name with a `::` through a parameter *is* an associated
+            // question: `I::Item` wants what the impl chose for the name,
+            // having decided the impl first, which is the only order the
+            // table makes sense in (Ch. 4 §1.7).
+            if segments.len() > 1 {
+                let first = subst(tyvars, key, &segments[0]);
+                if !first.same(&segments[0]) {
+                    let inner_inst = inst_at(e, &first);
+                    if inner_inst >= 0 {
+                        let inner_base = e.instances[inner_inst].base.to_string();
+                        let inner_key = ast::copy_names(&e.instances[inner_inst].key);
+                        let rest = segments[1].to_string();
+                        let chosen = assoc_resolve(e, &inner_base, &inner_key, &rest);
+                        if chosen.len() > 0 {
+                            return ast::Ty::Name(one_name(&chosen));
+                        }
+                    }
+                }
+            }
             let written = joined(segments);
             // A type parameter first — `T` is not an alias and an alias is
             // not a parameter — and then what an alias names (Ch. 0 §3.6).

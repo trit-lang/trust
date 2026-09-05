@@ -2684,18 +2684,43 @@ compilers had never disagreed about it because nobody had yet written
 does. The family is reserved now: temporaries that nothing named are
 registered nowhere.
 
-**G9.178 — recorded, not settled: the count of an instantiation's own
-steps.** Filter's next-member emits `Option::Some(self.p)(x)` inside a
-loop, and the second lowering's route — parenthesized call through
-the impl's own hold, the field opened where the closure was not celled one
-until then — covers the CALL and not the fn's flow: fa7, fa4, fa6 mark
-the first hole, where the fn's body inside the *instantiation* ends
-silently where the comparison Rust produced is whole, while fa18–fa22
-prove every outward element of the body is *separately* at rest — the
-closure-FIELD call, the parenthesized callee, the if-arm that returns
-inside a match arm in `Option`, the construction over `Range` — so the
-holy-place is the conjunction of them under one instantiation at a time,
-not any one. And in a *non-chained* receiver the answer is not read
+**G9.178 — the count of an instantiation's own steps, said precisely:
+what an assoc name is *under* the key.** Filter's next-member wrote
+`if (self.p)(x) { return Option::Some(x); }` and fell silent; the
+count's answer is not any of its pieces individually — parenthesized
+callee ✓, closure through a field ✓, join-of-self-answer ✓ — but the
+three-hundred-line-long question it sits inside: the member's own
+return *annotation* was still `Option<I::Item>` — which nobody had
+asked for by the time its `Option::Some` arm needed a name — and the
+name it settled for is the same walk the substitutions already do:
+substitute the impl first (the table says), and read Self::Item as an
+associated question (fa7; `Option.I::Item` was the text both sides
+printed, which was the *signature*, not the name). With that read in
+hand the rest fell off all at once: the chain's own call
+(`.filter(…).count()` of fa4, which the whole machinery had been
+*waiting* on), the loop's own count-with-a-closure in hand (fa6),
+`f.inner.next()` through the reference its own arm awarded (fa28's own
+rule). What is yet in its place is what `Item = B` asks: the closure's
+*answer's* type is the name, which Rust reads through `F: Fn(X) -> B`
+under the closure's own key — the map version in fc6's, fc10's, fc12's —
+and that is `G9.179`-worth-of-work, because the answer must descend
+through the closure itself, not the table any key holds.
+
+**G9.179 — recorded, not settled: a closure's answer is a type when it
+answers toward somebody else's written question.** `map<B, G: Fn(I::Item)
+-> B>` turns B into the family's fourth key, and the first
+implementation infers it from the closure's own signature — which it
+*says* is already the whole signature, by the same rule that a closure
+is one of two words: the receiver's whole type is its name, the
+closure's other components are its key's tail. What the second
+lowering already holds is answer-side now — a `main.closure1` is an
+instantiated name and its `.call` has parameters both directions — but
+a member of a *named* method family whose name is `Map.next.Range.t27
+.main.closure1.t27` says `B = t27` sits at the tail of the *method's*
+key, and the walk reaches it through a whole method family and not
+through guesswork the file had. fc6's `for it in (1..4).map(…)`
+still marks the hole, because a `for` of one is exactly the fold that
+asks it. And in a *non-chained* receiver the answer is not read
 *first*: `f.inner.next()` in a member's own body answers where the
 receiver's own method answers, `Range.next.t27` with the `option.t27`
 storage — at the numbers, rather than before the loads that make its
