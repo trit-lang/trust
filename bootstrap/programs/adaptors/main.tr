@@ -27,5 +27,13 @@ fn main() -> t27 {
     let m3 = (1..10)
         .filter(|x: t27| -> bool { x % 2 == 0 })
         .map(|y: t27| -> t27 { y + 1 });
-    n as t27
+    // And over an adaptor somebody else made — `take` is a family of its
+    // own, and what the `for` kneels for it asks of `Iterator`'s Item,
+    // which `Take`'s impl writes as its own `I::Item` — an assoc name the
+    // substitution's own substitution reads (G9.177).
+    let mut total: t27 = 0;
+    for it in (1..10).take(3) {
+        total += it;
+    }
+    total + (n as t27)
 }
