@@ -8558,9 +8558,32 @@ fn method_value(
         if refuse_dest(e, dest) {
             return unknown_value();
         }
+        // Storage of its own where the receiver is **somewhere already**,
+        // and answered **there**: an aggregate a call provides is taken
+        // first of the receiver's own words wherever the receiver already
+        // decided the whole of the family it is — because the answer is one
+        // of those keys — and nowhere where an argument still has to say
+        // its mind (fa28's `p.3` would otherwise have to wait for nobody,
+        // and `(1..10).filter(…).map(…)` would otherwise have to answer a
+        // destination before there were arguments for it).
+        let whole = given.len() == e.families[fam].tyvars.len();
+        let answering = if whole {
+            instantiate_answer(e, fam, &given, &owner)
+        } else {
+            "".to_string()
+        };
+        let sited = is_place_expr(recv);
+        if answering.len() > 0 && sited {
+            let hinted = temporary_slot(e, &answering);
+            e.family_into_hints.push(hinted);
+        }
         slot = receiver_at(e, at, recv, &slot, &by_value);
         if e.stuck {
             return unknown_value();
+        }
+        if answering.len() > 0 && !sited {
+            let hinted = temporary_slot(e, &answering);
+            e.family_into_hints.push(hinted);
         }
         return generic_call(e, fam, &under, &slot, &given, args, &owner);
     }

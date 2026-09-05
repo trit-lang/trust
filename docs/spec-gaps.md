@@ -2702,9 +2702,15 @@ storage — at the numbers, rather than before the loads that make its
 receiver — but where the receiver *is* one more call, the number the
 slot got is what both printing says before the plain arguments along
 it (fa24–fa28), and the shape one takes first the other refuses, which
-the chapters do not spell (TIR §3). fa24 holds the name: `f.inner.next()`
-through `&FakeF` is rust correctly slot-#2-load-#3 and boot silently,
-because the answer was not asked for first on that occasion.
+the chapters do not spell (TIR §3). That is now said where the question
+is asked: **where the receiver already settled the whole of its family**,
+the aggregate's storage is taken before the receiver's own words
+(`f.inner.next()` is `%tmp.slot.2` before `p.3`, as the other lowering
+emits it), and where an argument still has to speak the answer waits
+(`(1..10).map(…)` has no business answering one before `(self.f)`
+has been called at all). fa24's name-family went to a green suite
+with fa5, fc11 and fa17–fa22 alongside, which are the ones saying
+either side would be enough on its own and neither reads the other.
 
 **G9.177 — an associated type is a name the impl already wrote, and it
 is read off the receiver's key.** `type Item = O` was set aside at the
