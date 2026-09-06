@@ -1,0 +1,16 @@
+// A `for` is written over what *has* an iterator: `&v` is a reference,
+// and no `IntoIterator` over `&Vec` is written anywhere the chapters let
+// it — a reference may only *be* its receiver. The two implementations
+// report it one way each: the first by naming the missing implicit
+// conversion, the second by printing no program at all (Ch. 4 §5.7).
+
+fn main() -> t27 {
+    let v: Vec<t27> = Vec::new();
+    v.push(3);
+    v.push(14);
+    let mut total: t27 = 0;
+    for x in &v {
+        total += x;
+    }
+    total
+}

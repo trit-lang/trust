@@ -598,7 +598,7 @@ rm -rf "$tmp"
 # the two agree on is that the program does not exist — `trust tir` says so
 # by failing, and `bootstrap/program.tr`, which carries no spans and no
 # error text, by printing the header and nothing under it.
-for root in bootstrap/programs/nomain/main.tr; do
+for root in bootstrap/programs/nomain/main.tr bootstrap/programs/cannot/main.tr bootstrap/programs/fnno/main.tr bootstrap/programs/forref/main.tr bootstrap/programs/folded/main.tr; do
     if "$trust" tir "$root" > /dev/null 2>&1; then
         echo "bootstrap: $root is meant to be refused and the Rust one lowered it"
         exit 1

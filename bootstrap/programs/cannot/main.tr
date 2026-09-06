@@ -1,0 +1,12 @@
+// A value whose type nothing ever says is a value the chapters refuse:
+// `Option::None` needs the option it *is*, and nothing here names one —
+// the `let` has no annotation and the family is what asked, the same
+// refusal Ch. 4 §2.3 writes down for the binding that left `T` without
+// a word of its own. Both implementations refuse it by name, and what
+// each says of why is the one thing they are not held to (G9.181's
+// own, beside the ones that went the other way).
+
+fn main() -> t27 {
+    let a = Option::None;
+    0
+}

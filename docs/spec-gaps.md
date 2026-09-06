@@ -2735,14 +2735,40 @@ for every family-instance (`Map.Range.t27.main.closure1` for `Map<I,F>`
 by projection — `*map` is exactly as `I` — `into_iter` on it bakes the
 whole).
 
-**G9.181 — recorded, not settled: the rest of the prelude's iterator
-genera.** The remaining chains (a named-`fn` as the closure's answer —
-fc15 against `fn double(x: t27) -> t27 { x * 2 }` — are a fn*item* where
-the call-site's `Fn` bound was a closure's argument, which is a narrower
-question than the one this file now spells, and the two say the same
-thing only where the fn itself registers a `main.double`-of-the-kind
-what notes itself says. `VecIter`'s own for-of-`&Vec` spread is the
-other open cousin.
+**G9.181 — settled the other way: three of the four are refusals, not
+gaps.** The suite now holds each refusal as a whole program it refuses:
+- `programs/fnno/` is a *named* fn against a generic `Fn` bound —
+  `apply`'s `#F0` settles nothing from `double`'s name alone, and a
+  fn-item is an item no closure's binding holds, so it is not one
+  (Ch. 4 §2.3, §4.1).
+- `programs/forref/` is `for x in &v`: no `IntoIterator for &Vec` was
+  ever written, for the same reason any `&Vec<T>` method of a `Vec<i32>`
+  is a coercion nobody wrote.
+- `programs/cannot/` is `let a = Option::None;`: `T` is what the
+  binding was never told — `r6d`'s shape — and the refusal is the one
+  Ch. 4 §2.3 already names; where nobody asks, nobody says.
+- `programs/folded/` is `r.fold(0, …)`: `fold` is a **function** and
+  no member of any of these impls — the fa1/fa2 probes that first
+  appeared in the harness were asking about a gap between the two
+  where there was no gap in the *language*; the refusal is the shape
+  the suite keeps, because it is the one both implementations had.
+
+The probe-family's own lesson is written down there too: a refused
+call is not a failing call, and the prevalence of the former is what
+the suite holds to whichever of `rust` or `boot` prints something as
+an answer (programs/refused, which refuses whole-fns and whole-modules
+the same way). `VecIter`'s own for-shape is the cousin of `forref`'s:
+it says *nothing* — there is no `into_iter()` of `&Vec` at all (the
+same §5.7 name). `programs/nomain/` already held the shape originally.
+
+**G9.182 — recorded, not settled: a single file used as a corpus is only
+a probe if the two implementations can be said to lower it.** The
+`bootstrap/macros.tr` file alone is the boot's *module* for macros: it
+asks for `ast` from the module system — there is no prelude that wants
+it — and the other implementation is right to refuse by name. Whole
+macros parity is covered by `programs/macros/main.tr` (the suite's own,
+including the iterator spread over take-of-any) and
+`examples/trust/macros.tr` at the same line.
  And in a *non-chained* receiver the answer is not read
 *first*: `f.inner.next()` in a member's own body answers where the
 receiver's own method answers, `Range.next.t27` with the `option.t27`

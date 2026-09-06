@@ -1,0 +1,14 @@
+// A function is a value only against a `Fn` bound it is written against:
+// `apply`'s `#F0` is a type parameter one call settles, and a *named* fn
+// is an item nobody wrote the binding of — an argument of one says
+// everything about itself and nothing of what it settles (Ch. 4 §4.1, §2.3).
+// Rust names it `cannot tell what #F0 is in this call` and this one names
+// the same by emitting nothing at all.
+//
+// The same is refused for the same reason in the prelude's own shape:
+// `(1..4).map(double)`, where `R` is whatever the bound's own closure
+// would have said and a name still is not written as one.
+
+fn double(x: t27) -> t27 { x * 2 }
+fn apply(f: impl Fn(t27) -> t27, x: t27) -> t27 { f(x) }
+fn main() -> t27 { apply(double, 2) }

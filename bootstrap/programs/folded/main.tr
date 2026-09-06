@@ -1,0 +1,16 @@
+// `fold` is a **function**, not a method: what one writes is `fold(xs, f)`,
+// and a range has no `fold` of its own whatsoever — the family that has
+// `map` has no obligation to answer with `fold` too (Ch. 1 §6; Ch. 4 §5.6).
+// Reported one way each: the first says the method does not exist, the
+// second says no program exists. Probes that made this look like a
+// lowering gap were the *harness*'s mistake: a refused call is not a
+// failing call.
+//
+// (The same is refused for `r.fold(...)` where the body's own call is a
+// closure of two: `|acc, x| acc + x`.)
+
+fn main() -> t27 {
+    let r = 1..4;
+    let x = r.fold(0, |a: t27, b: t27| a + b);
+    x
+}
