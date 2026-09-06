@@ -549,6 +549,25 @@ for f in bootstrap/lowered/*.tr; do
             } > "$tmp/$idx.err"
             exit 1
         fi
+        # And then the same module is optimized: TIR §6's target-independent
+        # canonicalizer is the pass pair of this seam, and
+        # `bootstrap/tircanon.tr` holds it to `trustc canon` the same way —
+        # the same module after the same seven passes, or neither prints one.
+        if rcan=$("$trustc" canon "$tmp/$idx.tir" 2>/dev/null); then
+            mcan=$(printf '%s\n' "$rust" | "$trust" run bootstrap/tircanon.tr 2>/dev/null)
+            if [ "$rcan" != "$mcan" ]; then
+                {
+                    echo "bootstrap: the two canonicalize $f differently"
+                    diff <(printf '%s\n' "$rcan") <(printf '%s\n' "$mcan") | head -10
+                } > "$tmp/$idx.err"
+                exit 1
+            fi
+        elif printf '%s\n' "$rust" | "$trust" run bootstrap/tircanon.tr > /dev/null 2>&1; then
+            {
+                echo "bootstrap: $f canonicalizes under one implementation and not the other"
+            } > "$tmp/$idx.err"
+            exit 1
+        fi
         printf '%s\n' "$rust" | wc -l > "$tmp/$idx.n"
     ) &
     idx=$((idx + 1))

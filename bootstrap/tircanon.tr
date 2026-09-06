@@ -1,0 +1,3392 @@
+// Canonicalization of TIR, in Trust.
+//
+// This is `compiler/src/tir/canon.rs` written again in the language it
+// helps compile: the target-independent optimization TIR §6 places between
+// parsing and legalization. A canonicalizer's contract is narrow — the same
+// program in a form later passes handle better — and the way to hold a
+// second writing of it to the first is what it always is here: the two
+// print the same module, character for character, on every module the suite
+// stands up. `trustc canon` is this oracle's other side.
+//
+// The passes run in the order the Rust one runs them, per function:
+// promote_slots, mem2reg, fold_constants, elide_sign_checks,
+// branch_through_select, elide_dominated_checks, remove_dead.
+
+mod input;
+mod tir;
+
+fn main() -> t27 {
+    let src = input::read_all();
+    match tir::parse(&src) {
+        Result::Ok(m) => {
+            let out = canonicalize(m);
+            tir::print_module(&out);
+            0
+        }
+        Result::Err(e) => {
+            let _ = e;
+            1
+        }
+    }
+}
+
+// ---------------------------------------------------------------- clones
+
+fn clone_ty(t: &tir::Ty) -> tir::Ty {
+    match t {
+        tir::Ty::Int(n) => tir::Ty::Int(n),
+        tir::Ty::Ptr => tir::Ty::Ptr,
+    }
+}
+
+fn same_ty(a: &tir::Ty, b: &tir::Ty) -> bool {
+    match a {
+        tir::Ty::Int(n) => match b {
+            tir::Ty::Int(m) => n == m,
+            _ => false,
+        },
+        tir::Ty::Ptr => match b {
+            tir::Ty::Ptr => true,
+            _ => false,
+        },
+    }
+}
+
+fn clone_opnd(o: &tir::Opnd) -> tir::Opnd {
+    match o {
+        tir::Opnd::Val(v) => tir::Opnd::Val(v.to_string()),
+        tir::Opnd::Konst(t, v) => tir::Opnd::Konst(clone_ty(&t), v),
+        tir::Opnd::Glob(g) => tir::Opnd::Glob(g.to_string()),
+    }
+}
+
+fn same_opnd(a: &tir::Opnd, b: &tir::Opnd) -> bool {
+    match a {
+        tir::Opnd::Val(x) => match b {
+            tir::Opnd::Val(y) => x.same(y),
+            _ => false,
+        },
+        tir::Opnd::Konst(t, v) => match b {
+            tir::Opnd::Konst(u, w) => same_ty(&t, &u) && v == w,
+            _ => false,
+        },
+        tir::Opnd::Glob(x) => match b {
+            tir::Opnd::Glob(y) => x.same(y),
+            _ => false,
+        },
+    }
+}
+
+fn clone_target(t: &tir::Target) -> tir::Target {
+    let mut args: Vec<tir::Opnd> = Vec::new();
+    let mut i: taddr = 0;
+    while i < t.args.len() {
+        args.push(clone_opnd(&t.args[i]));
+        i += 1;
+    }
+    tir::Target { label: t.label.to_string(), args: args }
+}
+
+fn same_target(a: &tir::Target, b: &tir::Target) -> bool {
+    if !a.label.same(&b.label) {
+        return false;
+    }
+    if a.args.len() != b.args.len() {
+        return false;
+    }
+    let mut i: taddr = 0;
+    while i < a.args.len() {
+        if !same_opnd(&a.args[i], &b.args[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+fn clone_callee(c: &tir::Callee) -> tir::Callee {
+    match c {
+        tir::Callee::Direct(n) => tir::Callee::Direct(n.to_string()),
+        tir::Callee::Indirect(o) => tir::Callee::Indirect(clone_opnd(o)),
+    }
+}
+
+fn clone_kind(k: &tir::Kind) -> tir::Kind {
+    match k {
+        tir::Kind::Flav(op, fl, ty, a, b) => {
+            tir::Kind::Flav(op, fl, clone_ty(&ty), clone_opnd(a), clone_opnd(b))
+        }
+        tir::Kind::Plain(op, ty, a, b) => tir::Kind::Plain(op, clone_ty(&ty), clone_opnd(a), clone_opnd(b)),
+        tir::Kind::Neg(ty, a) => tir::Kind::Neg(clone_ty(&ty), clone_opnd(a)),
+        tir::Kind::Cmp(ty, a, b) => tir::Kind::Cmp(clone_ty(&ty), clone_opnd(a), clone_opnd(b)),
+        tir::Kind::Select3(t, ty, n, z, p) => {
+            tir::Kind::Select3(clone_opnd(t), clone_ty(&ty), clone_opnd(n), clone_opnd(z), clone_opnd(p))
+        }
+        tir::Kind::Slot(n) => tir::Kind::Slot(n),
+        tir::Kind::Load(ty, p) => tir::Kind::Load(clone_ty(&ty), clone_opnd(p)),
+        tir::Kind::Store(ty, v, p) => tir::Kind::Store(clone_ty(&ty), clone_opnd(v), clone_opnd(p)),
+        tir::Kind::Offset(p, d) => tir::Kind::Offset(clone_opnd(p), clone_opnd(d)),
+        tir::Kind::Widen(from, a, to) => tir::Kind::Widen(clone_ty(&from), clone_opnd(a), clone_ty(&to)),
+        tir::Kind::Trunc(from, a, to) => tir::Kind::Trunc(clone_ty(&from), clone_opnd(a), clone_ty(&to)),
+        tir::Kind::Call(callee, args, ret) => {
+            let mut as2: Vec<tir::Opnd> = Vec::new();
+            let mut i: taddr = 0;
+            while i < args.len() {
+                as2.push(clone_opnd(&args[i]));
+                i += 1;
+            }
+            let ret2: Option<tir::Ty> = match ret {
+                Option::Some(t) => Option::Some(clone_ty(&t)),
+                Option::None => Option::None,
+            };
+            tir::Kind::Call(clone_callee(callee), as2, ret2)
+        }
+    }
+}
+
+fn clone_inst(i: &tir::Inst) -> tir::Inst {
+    let mut rs: Vec<String> = Vec::new();
+    let mut k: taddr = 0;
+    while k < i.results.len() {
+        rs.push(i.results[k].to_string());
+        k += 1;
+    }
+    tir::Inst { results: rs, kind: clone_kind(&i.kind) }
+}
+
+fn clone_term(t: &tir::Term) -> tir::Term {
+    match t {
+        tir::Term::Br3(sel, n, z, p) => {
+            tir::Term::Br3(clone_opnd(sel), clone_target(n), clone_target(z), clone_target(p))
+        }
+        tir::Term::Br(d) => tir::Term::Br(clone_target(d)),
+        tir::Term::Ret(v) => {
+            let v2: Option<tir::Opnd> = match v {
+                Option::Some(o) => Option::Some(clone_opnd(o)),
+                Option::None => Option::None,
+            };
+            tir::Term::Ret(v2)
+        }
+        tir::Term::Trap(code) => tir::Term::Trap(code.to_string()),
+        tir::Term::Unreachable => tir::Term::Unreachable,
+    }
+}
+
+fn clone_block(b: &tir::Block) -> tir::Block {
+    let mut ps: Vec<tir::Param> = Vec::new();
+    let mut i: taddr = 0;
+    while i < b.params.len() {
+        ps.push(tir::Param { name: b.params[i].name.to_string(), ty: clone_ty(&b.params[i].ty) });
+        i += 1;
+    }
+    let mut is: Vec<tir::Inst> = Vec::new();
+    i = 0;
+    while i < b.insts.len() {
+        is.push(clone_inst(&b.insts[i]));
+        i += 1;
+    }
+    tir::Block {
+        label: b.label.to_string(),
+        params: ps,
+        insts: is,
+        term: clone_term(&b.term),
+    }
+}
+
+// ---------------------------------------------------------------- maps
+
+/// A `String → operand` map, kept as parallel vectors: corpus modules are
+/// small, and the question is membership and lookup, not scale.
+pub struct OMap {
+    pub keys: Vec<String>,
+    pub vals: Vec<tir::Opnd>,
+}
+
+fn omap_new() -> OMap {
+    OMap { keys: Vec::new(), vals: Vec::new() }
+}
+
+fn omap_find(m: &OMap, k: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < m.keys.len() {
+        if m.keys[i].same(k) {
+            return i;
+        }
+        i += 1;
+    }
+    m.keys.len()
+}
+
+fn omap_has(m: &OMap, k: &str) -> bool {
+    omap_find(m, k) < m.keys.len()
+}
+
+fn omap_get(m: &OMap, k: &str) -> Option<tir::Opnd> {
+    let i = omap_find(m, k);
+    if i < m.vals.len() {
+        return Option::Some(clone_opnd(&m.vals[i]));
+    }
+    Option::None
+}
+
+fn omap_set(m: &mut OMap, k: &str, v: tir::Opnd) {
+    let i = omap_find(m, k);
+    if i < m.keys.len() {
+        m.vals[i] = v;
+        return;
+    }
+    m.keys.push(k.to_string());
+    m.vals.push(v);
+}
+
+fn omap_remove(m: &mut OMap, k: &str) {
+    let i = omap_find(m, k);
+    if i < m.keys.len() {
+        let last = m.keys.len() - 1;
+        m.keys[i] = m.keys[last].to_string();
+        m.vals[i] = clone_opnd(&m.vals[last]);
+        m.keys.pop();
+        m.vals.pop();
+    }
+}
+
+/// A string set, the same shape without the payload.
+pub struct SSet {
+    pub names: Vec<String>,
+}
+
+fn sset_new() -> SSet {
+    SSet { names: Vec::new() }
+}
+
+fn sset_has(s: &SSet, k: &str) -> bool {
+    let mut i: taddr = 0;
+    while i < s.names.len() {
+        if s.names[i].same(k) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn sset_add(s: &mut SSet, k: &str) {
+    if !sset_has(s, k) {
+        s.names.push(k.to_string());
+    }
+}
+
+fn sset_remove(s: &mut SSet, k: &str) {
+    let mut i: taddr = 0;
+    while i < s.names.len() {
+        if s.names[i].same(k) {
+            let last = s.names.len() - 1;
+            s.names[i] = s.names[last].to_string();
+            s.names.pop();
+            return;
+        }
+        i += 1;
+    }
+}
+
+/// `a < b` on names, the order a `BTreeMap<String, _>` iterates in.
+fn str_less(a: &str, b: &str) -> bool {
+    let mut i: taddr = 0;
+    while i < a.len() && i < b.len() {
+        if a[i] != b[i] {
+            return a[i] < b[i];
+        }
+        i += 1;
+    }
+    a.len() < b.len()
+}
+
+fn str_sorted(names: &Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < names.len() {
+        out.push(names[i].to_string());
+        i += 1;
+    }
+    let mut a: taddr = 1;
+    while a < out.len() {
+        let mut b = a;
+        while b > 0 && str_less(&out[b], &out[b - 1]) {
+            let t = out[b].to_string();
+            out[b] = out[b - 1].to_string();
+            out[b - 1] = t;
+            b -= 1;
+        }
+        a += 1;
+    }
+    out
+}
+
+// ---------------------------------------------------------------- substitutes
+
+/// Every operand a kind reads, forwarded through the map.
+fn subst_opnd(o: &tir::Opnd, m: &OMap) -> tir::Opnd {
+    match o {
+        tir::Opnd::Val(v) => {
+            match omap_get(m, v) {
+                Option::Some(w) => w,
+                Option::None => clone_opnd(o),
+            }
+        }
+        _ => clone_opnd(o),
+    }
+}
+
+fn subst_target(t: &tir::Target, m: &OMap) -> tir::Target {
+    let mut args: Vec<tir::Opnd> = Vec::new();
+    let mut i: taddr = 0;
+    while i < t.args.len() {
+        args.push(subst_opnd(&t.args[i], m));
+        i += 1;
+    }
+    tir::Target { label: t.label.to_string(), args: args }
+}
+
+fn subst_kind(k: &tir::Kind, m: &OMap) -> tir::Kind {
+    match k {
+        tir::Kind::Flav(op, fl, ty, a, b) => {
+            tir::Kind::Flav(op, fl, clone_ty(&ty), subst_opnd(a, m), subst_opnd(b, m))
+        }
+        tir::Kind::Plain(op, ty, a, b) => {
+            tir::Kind::Plain(op, clone_ty(&ty), subst_opnd(a, m), subst_opnd(b, m))
+        }
+        tir::Kind::Neg(ty, a) => tir::Kind::Neg(clone_ty(&ty), subst_opnd(a, m)),
+        tir::Kind::Cmp(ty, a, b) => tir::Kind::Cmp(clone_ty(&ty), subst_opnd(a, m), subst_opnd(b, m)),
+        tir::Kind::Select3(t, ty, n, z, p) => tir::Kind::Select3(
+            subst_opnd(t, m),
+            clone_ty(&ty),
+            subst_opnd(n, m),
+            subst_opnd(z, m),
+            subst_opnd(p, m),
+        ),
+        tir::Kind::Slot(n) => tir::Kind::Slot(n),
+        tir::Kind::Load(ty, p) => tir::Kind::Load(clone_ty(&ty), subst_opnd(p, m)),
+        tir::Kind::Store(ty, v, p) => tir::Kind::Store(clone_ty(&ty), subst_opnd(v, m), subst_opnd(p, m)),
+        tir::Kind::Offset(p, d) => tir::Kind::Offset(subst_opnd(p, m), subst_opnd(d, m)),
+        tir::Kind::Widen(from, a, to) => tir::Kind::Widen(clone_ty(&from), subst_opnd(a, m), clone_ty(&to)),
+        tir::Kind::Trunc(from, a, to) => tir::Kind::Trunc(clone_ty(&from), subst_opnd(a, m), clone_ty(&to)),
+        tir::Kind::Call(callee, args, ret) => {
+            let c2 = match callee {
+                tir::Callee::Direct(n) => tir::Callee::Direct(n.to_string()),
+                tir::Callee::Indirect(o) => tir::Callee::Indirect(subst_opnd(o, m)),
+            };
+            let mut as2: Vec<tir::Opnd> = Vec::new();
+            let mut i: taddr = 0;
+            while i < args.len() {
+                as2.push(subst_opnd(&args[i], m));
+                i += 1;
+            }
+            let ret2: Option<tir::Ty> = match ret {
+                Option::Some(t) => Option::Some(clone_ty(&t)),
+                Option::None => Option::None,
+            };
+            tir::Kind::Call(c2, as2, ret2)
+        }
+    }
+}
+
+fn subst_term(t: &tir::Term, m: &OMap) -> tir::Term {
+    match t {
+        tir::Term::Br3(sel, n, z, p) => {
+            tir::Term::Br3(subst_opnd(sel, m), subst_target(n, m), subst_target(z, m), subst_target(p, m))
+        }
+        tir::Term::Br(d) => tir::Term::Br(subst_target(d, m)),
+        tir::Term::Ret(v) => {
+            let v2: Option<tir::Opnd> = match v {
+                Option::Some(o) => Option::Some(subst_opnd(o, m)),
+                Option::None => Option::None,
+            };
+            tir::Term::Ret(v2)
+        }
+        tir::Term::Trap(code) => tir::Term::Trap(code.to_string()),
+        tir::Term::Unreachable => tir::Term::Unreachable,
+    }
+}
+
+// ---------------------------------------------------------------- walks
+
+/// The labels a terminator may transfer to, in arm order, duplicates
+/// included — the order edge arguments are filled in.
+fn successors(t: &tir::Term) -> Vec<String> {
+    match t {
+        tir::Term::Br3(_, n, z, p) => {
+            let mut out: Vec<String> = Vec::new();
+            out.push(n.label.to_string());
+            out.push(z.label.to_string());
+            out.push(p.label.to_string());
+            out
+        }
+        tir::Term::Br(d) => {
+            let mut out: Vec<String> = Vec::new();
+            out.push(d.label.to_string());
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The block a label names, or the count.
+fn block_index(f: &tir::Func, label: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < f.blocks.len() {
+        if f.blocks[i].label.same(label) {
+            return i;
+        }
+        i += 1;
+    }
+    f.blocks.len()
+}
+
+/// Every value an instruction's operands name, into the set.
+fn note_kind_values(k: &tir::Kind, s: &mut SSet) {
+    match k {
+        tir::Kind::Flav(_, _, _, a, b) => {
+            note_opnd_value(a, s);
+            note_opnd_value(b, s);
+        }
+        tir::Kind::Plain(_, _, a, b) => {
+            note_opnd_value(a, s);
+            note_opnd_value(b, s);
+        }
+        tir::Kind::Neg(_, a) => note_opnd_value(a, s),
+        tir::Kind::Cmp(_, a, b) => {
+            note_opnd_value(a, s);
+            note_opnd_value(b, s);
+        }
+        tir::Kind::Select3(t, _, n, z, p) => {
+            note_opnd_value(t, s);
+            note_opnd_value(n, s);
+            note_opnd_value(z, s);
+            note_opnd_value(p, s);
+        }
+        tir::Kind::Slot(_) => {}
+        tir::Kind::Load(_, p) => note_opnd_value(p, s),
+        tir::Kind::Store(_, v, p) => {
+            note_opnd_value(v, s);
+            note_opnd_value(p, s);
+        }
+        tir::Kind::Offset(p, d) => {
+            note_opnd_value(p, s);
+            note_opnd_value(d, s);
+        }
+        tir::Kind::Widen(_, a, _) => note_opnd_value(a, s),
+        tir::Kind::Trunc(_, a, _) => note_opnd_value(a, s),
+        tir::Kind::Call(callee, args, _) => {
+            match callee {
+                tir::Callee::Indirect(o) => note_opnd_value(o, s),
+                _ => {}
+            }
+            let mut i: taddr = 0;
+            while i < args.len() {
+                note_opnd_value(&args[i], s);
+                i += 1;
+            }
+        }
+    }
+}
+
+fn note_opnd_value(o: &tir::Opnd, s: &mut SSet) {
+    match o {
+        tir::Opnd::Val(v) => sset_add(s, v),
+        _ => {}
+    }
+}
+
+fn note_term_values(t: &tir::Term, s: &mut SSet) {
+    match t {
+        tir::Term::Br3(sel, n, z, p) => {
+            note_opnd_value(sel, s);
+            note_target_values(n, s);
+            note_target_values(z, s);
+            note_target_values(p, s);
+        }
+        tir::Term::Br(d) => note_target_values(d, s),
+        tir::Term::Ret(v) => {
+            match v {
+                Option::Some(o) => note_opnd_value(o, s),
+                Option::None => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+fn note_target_values(t: &tir::Target, s: &mut SSet) {
+    let mut i: taddr = 0;
+    while i < t.args.len() {
+        note_opnd_value(&t.args[i], s);
+        i += 1;
+    }
+}
+
+// ---------------------------------------------------------------- driver
+
+fn canonicalize(m: tir::Module) -> tir::Module {
+    let mut funcs: Vec<tir::Func> = Vec::new();
+    let mut i: taddr = 0;
+    while i < m.funcs.len() {
+        funcs.push(canonicalize_fn(&m.funcs[i]));
+        i += 1;
+    }
+    let mut decls: Vec<tir::Sig> = Vec::new();
+    let mut d: taddr = 0;
+    while d < m.decls.len() {
+        let s = &m.decls[d];
+        decls.push(clone_sig(s));
+        d += 1;
+    }
+    let mut globals: Vec<tir::Global> = Vec::new();
+    let mut g: taddr = 0;
+    while g < m.globals.len() {
+        globals.push(clone_global(&m.globals[g]));
+        g += 1;
+    }
+    tir::Module {
+        version: m.version.to_string(),
+        target: m.target.to_string(),
+        globals: globals,
+        decls: decls,
+        funcs: funcs,
+    }
+}
+
+fn clone_sig(s: &tir::Sig) -> tir::Sig {
+    let mut ps: Vec<tir::Param> = Vec::new();
+    let mut i: taddr = 0;
+    while i < s.params.len() {
+        ps.push(tir::Param { name: s.params[i].name.to_string(), ty: clone_ty(&s.params[i].ty) });
+        i += 1;
+    }
+    let ret: Option<tir::Ty> = match &s.ret {
+        Option::Some(t) => Option::Some(clone_ty(&t)),
+        Option::None => Option::None,
+    };
+    tir::Sig { name: s.name.to_string(), params: ps, ret: ret }
+}
+
+fn clone_global(g: &tir::Global) -> tir::Global {
+    let init: Option<Vec<tir::InitItem>> = match &g.init {
+        Option::Some(items) => {
+            let mut out: Vec<tir::InitItem> = Vec::new();
+            let mut i: taddr = 0;
+            while i < items.len() {
+                match &items[i] {
+                    tir::InitItem::Tryte(v) => out.push(tir::InitItem::Tryte(v)),
+                    tir::InitItem::Addr(n) => out.push(tir::InitItem::Addr(n.to_string())),
+                }
+                i += 1;
+            }
+            Option::Some(out)
+        }
+        Option::None => Option::None,
+    };
+    tir::Global { name: g.name.to_string(), trytes: g.trytes, init: init }
+}
+
+/// The same program, in a form later passes handle better.
+fn canonicalize_fn(f: &tir::Func) -> tir::Func {
+    let mut out = clone_func(f);
+    promote_slots(&mut out);
+    mem2reg(&mut out);
+    fold_constants(&mut out);
+    elide_sign_checks(&mut out);
+    branch_through_select(&mut out);
+    elide_dominated_checks(&mut out);
+    remove_dead(&mut out);
+    out
+}
+
+fn clone_func(f: &tir::Func) -> tir::Func {
+    let mut bs: Vec<tir::Block> = Vec::new();
+    let mut i: taddr = 0;
+    while i < f.blocks.len() {
+        bs.push(clone_block(&f.blocks[i]));
+        i += 1;
+    }
+    tir::Func { sig: clone_sig(&f.sig), blocks: bs }
+}
+
+// ---------------------------------------------------------------- promote_slots
+
+/// Replace single-block, never-escaping slots with the values they hold.
+fn promote_slots(f: &mut tir::Func) {
+    let mut i: taddr = 0;
+    while i < f.blocks.len() {
+        let promotable = promotable_in(f, i);
+        if promotable.names.len() == 0 {
+            i += 1;
+            continue;
+        }
+        let subst = rewrite_block(&mut f.blocks[i], &promotable);
+        if subst.keys.len() == 0 {
+            i += 1;
+            continue;
+        }
+        let subst2 = &subst;
+        let mut j: taddr = 0;
+        while j < f.blocks.len() {
+            if j != i {
+                let mut insts: Vec<tir::Inst> = Vec::new();
+                let mut k: taddr = 0;
+                while k < f.blocks[j].insts.len() {
+                    let inst = &f.blocks[j].insts[k];
+                    insts.push(tir::Inst {
+                        results: clone_names(&inst.results),
+                        kind: subst_kind(&inst.kind, subst2),
+                    });
+                    k += 1;
+                }
+                let term = subst_term(&f.blocks[j].term, subst2);
+                let label = f.blocks[j].label.to_string();
+                let params = clone_params(&f.blocks[j].params);
+                f.blocks[j] = tir::Block {
+                    label: label,
+                    params: params,
+                    insts: insts,
+                    term: term,
+                };
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+}
+
+fn clone_names(v: &Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < v.len() {
+        out.push(v[i].to_string());
+        i += 1;
+    }
+    out
+}
+
+fn clone_params(v: &Vec<tir::Param>) -> Vec<tir::Param> {
+    let mut out: Vec<tir::Param> = Vec::new();
+    let mut i: taddr = 0;
+    while i < v.len() {
+        out.push(tir::Param { name: v[i].name.to_string(), ty: clone_ty(&v[i].ty) });
+        i += 1;
+    }
+    out
+}
+
+/// The slots block `i` defines that this pass may promote.
+fn promotable_in(f: &tir::Func, i: taddr) -> SSet {
+    let mut candidates = sset_new();
+    let block = &f.blocks[i];
+    let mut k: taddr = 0;
+    while k < block.insts.len() {
+        match &block.insts[k].kind {
+            tir::Kind::Slot(_) => {
+                if block.insts[k].results.len() > 0 {
+                    sset_add(&mut candidates, &block.insts[k].results[0]);
+                }
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    if candidates.names.len() == 0 {
+        return candidates;
+    }
+
+    // Any use that is not an access through the slot, or is not in this
+    // block, disqualifies it.
+    let mut j: taddr = 0;
+    while j < f.blocks.len() {
+        let here = j == i;
+        let b = &f.blocks[j];
+        let mut n: taddr = 0;
+        while n < b.insts.len() {
+            let inst = &b.insts[n];
+            match &inst.kind {
+                tir::Kind::Load(_, p) => {
+                    if here {
+                        match p {
+                            tir::Opnd::Val(_) => {}
+                            _ => disqualify_kind(&inst.kind, &mut candidates),
+                        }
+                    } else {
+                        disqualify_kind(&inst.kind, &mut candidates);
+                    }
+                }
+                tir::Kind::Store(_, v, p) => {
+                    if here {
+                        disqualify_opnd(v, &mut candidates);
+                        match p {
+                            tir::Opnd::Val(_) => {}
+                            _ => disqualify_opnd(p, &mut candidates),
+                        }
+                    } else {
+                        disqualify_kind(&inst.kind, &mut candidates);
+                    }
+                }
+                _ => disqualify_kind(&inst.kind, &mut candidates),
+            }
+            n += 1;
+        }
+        disqualify_term(&b.term, &mut candidates);
+        j += 1;
+    }
+
+    // What is left is accessed only through loads and stores in this block.
+    // Two more conditions are about the accesses themselves.
+    let mut ty_names: Vec<String> = Vec::new();
+    let mut tys: Vec<tir::Ty> = Vec::new();
+    let mut first_names: Vec<String> = Vec::new();
+    let mut firsts: Vec<bool> = Vec::new();
+    let mut n: taddr = 0;
+    while n < block.insts.len() {
+        let inst = &block.insts[n];
+        match &inst.kind {
+            tir::Kind::Load(ty, p) => {
+                access_note(p, &ty, false, &mut candidates, &mut ty_names, &mut tys, &mut first_names, &mut firsts);
+            }
+            tir::Kind::Store(ty, _, p) => {
+                access_note(p, &ty, true, &mut candidates, &mut ty_names, &mut tys, &mut first_names, &mut firsts);
+            }
+            _ => {}
+        }
+        n += 1;
+    }
+
+    let mut kept = sset_new();
+    let mut q: taddr = 0;
+    while q < first_names.len() {
+        if firsts[q] && sset_has(&candidates, &first_names[q]) {
+            sset_add(&mut kept, &first_names[q]);
+        }
+        q += 1;
+    }
+    kept
+}
+
+fn disqualify_opnd(o: &tir::Opnd, s: &mut SSet) {
+    match o {
+        tir::Opnd::Val(v) => sset_remove(s, v),
+        _ => {}
+    }
+}
+
+fn disqualify_kind(k: &tir::Kind, s: &mut SSet) {
+    let mut vals = sset_new();
+    note_kind_values(k, &mut vals);
+    let mut i: taddr = 0;
+    while i < vals.names.len() {
+        sset_remove(s, &vals.names[i]);
+        i += 1;
+    }
+}
+
+fn disqualify_term(t: &tir::Term, s: &mut SSet) {
+    let mut vals = sset_new();
+    note_term_values(t, &mut vals);
+    let mut i: taddr = 0;
+    while i < vals.names.len() {
+        sset_remove(s, &vals.names[i]);
+        i += 1;
+    }
+}
+
+/// One access to a candididates' slot: the pointer, the type, whether it
+/// stored — recorded for the type-agreement and first-is-store conditions.
+fn access_note(
+    p: &tir::Opnd,
+    ty: &tir::Ty,
+    is_store: bool,
+    candidates: &mut SSet,
+    ty_names: &mut Vec<String>,
+    tys: &mut Vec<tir::Ty>,
+    first_names: &mut Vec<String>,
+    firsts: &mut Vec<bool>,
+) {
+    match p {
+        tir::Opnd::Val(n) => {
+            if !sset_has(candidates, n) {
+                return;
+            }
+            let mut seen: taddr = 0;
+            let mut found = false;
+            while seen < ty_names.len() {
+                if ty_names[seen].same(n) {
+                    found = true;
+                    break;
+                }
+                seen += 1;
+            }
+            if !found {
+                ty_names.push(n.to_string());
+                tys.push(clone_ty(ty));
+                first_names.push(n.to_string());
+                firsts.push(is_store);
+                return;
+            }
+            if !same_ty(&tys[seen], ty) {
+                sset_remove(candidates, n);
+                // The recorded type no longer stands for the slot.
+                let last = ty_names.len() - 1;
+                ty_names[seen] = ty_names[last].to_string();
+                tys[seen] = clone_ty(&tys[last]);
+                ty_names.pop();
+                tys.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Delete the promoted slots' allocations and accesses, forwarding each
+/// load to the value last stored. Returns the loads' renamings.
+fn rewrite_block(b: &mut tir::Block, promoted: &SSet) -> OMap {
+    let mut held = omap_new();
+    let mut subst = omap_new();
+
+    let mut kept: Vec<tir::Inst> = Vec::new();
+    let mut i: taddr = 0;
+    while i < b.insts.len() {
+        let inst = &b.insts[i];
+        // Every operand is rewritten first: a value forwarded out of a
+        // deleted load may be named anywhere below it.
+        let kind2 = subst_kind(&inst.kind, &subst);
+        let results2 = clone_names(&inst.results);
+        match &kind2 {
+            tir::Kind::Slot(_) => {
+                let mut skip = false;
+                if results2.len() > 0 && sset_has(promoted, &results2[0]) {
+                    skip = true;
+                }
+                if !skip {
+                    kept.push(tir::Inst { results: results2, kind: kind2 });
+                }
+            }
+            tir::Kind::Store(_, v, p) => {
+                let mut done = false;
+                match p {
+                    tir::Opnd::Val(n) => {
+                        if sset_has(promoted, n) {
+                            omap_set(&mut held, n, clone_opnd(v));
+                            done = true;
+                        }
+                    }
+                    _ => {}
+                }
+                if !done {
+                    kept.push(tir::Inst { results: results2, kind: kind2 });
+                }
+            }
+            tir::Kind::Load(_, p) => {
+                let mut done = false;
+                match p {
+                    tir::Opnd::Val(n) => {
+                        if sset_has(promoted, n) {
+                            // The first access to a promoted slot is a
+                            // store, so there is always something here.
+                            match omap_get(&held, n) {
+                                Option::Some(v) => {
+                                    if results2.len() > 0 {
+                                        omap_set(&mut subst, &results2[0], v);
+                                    }
+                                    done = true;
+                                }
+                                Option::None => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                if !done {
+                    kept.push(tir::Inst { results: results2, kind: kind2 });
+                }
+            }
+            _ => kept.push(tir::Inst { results: results2, kind: kind2 }),
+        }
+        i += 1;
+    }
+    b.insts = kept;
+    let term2 = subst_term(&b.term, &subst);
+    b.term = term2;
+    let mut out = omap_new();
+    let mut k: taddr = 0;
+    while k < subst.keys.len() {
+        omap_set(&mut out, &subst.keys[k], clone_opnd(&subst.vals[k]));
+        k += 1;
+    }
+    out
+}
+
+// ---------------------------------------------------------------- mem2reg
+
+/// Slots that never escape become SSA values, across the whole function.
+fn mem2reg(f: &mut tir::Func) {
+    let mut slots = m2r_promotable(f);
+    let assigned = definitely_assigned(f, &slots);
+    let mut kept_names: Vec<String> = Vec::new();
+    let mut kept_tys: Vec<tir::Ty> = Vec::new();
+    let mut i: taddr = 0;
+    while i < slots.names.len() {
+        if sset_has(&assigned, &slots.names[i]) {
+            kept_names.push(slots.names[i].to_string());
+            kept_tys.push(clone_ty(&slots.tys[i]));
+        }
+        i += 1;
+    }
+    slots.names = kept_names;
+    slots.tys = kept_tys;
+    if slots.names.len() == 0 {
+        return;
+    }
+    let mut b = m2r_builder(f, slots);
+    m2r_run(&mut b, f);
+}
+
+/// A promotable slot: its name and the type it is accessed at.
+pub struct SlotInfo {
+    pub names: Vec<String>,
+    pub tys: Vec<tir::Ty>,
+}
+
+/// The slots this pass may promote, with the type they are accessed at.
+fn m2r_promotable(f: &tir::Func) -> SlotInfo {
+    let mut names: Vec<String> = Vec::new();
+    let mut has_ty: Vec<bool> = Vec::new();
+    let mut tys: Vec<tir::Ty> = Vec::new();
+    let mut stored = sset_new();
+
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let b = &f.blocks[bi];
+        let mut i: taddr = 0;
+        while i < b.insts.len() {
+            match &b.insts[i].kind {
+                tir::Kind::Slot(_) => {
+                    if b.insts[i].results.len() > 0 {
+                        let r = &b.insts[i].results[0];
+                        if !name_in(&names, r) {
+                            names.push(r.to_string());
+                            has_ty.push(false);
+                            tys.push(tir::Ty::Int(1));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        bi += 1;
+    }
+
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let b = &f.blocks[bi];
+        let mut i: taddr = 0;
+        while i < b.insts.len() {
+            let inst = &b.insts[i];
+            match &inst.kind {
+                tir::Kind::Load(ty, p) => {
+                    m2r_access(p, &ty, false, &mut names, &mut has_ty, &mut tys, &mut stored);
+                }
+                tir::Kind::Store(ty, v, p) => {
+                    // Storing the address is letting it out.
+                    match v {
+                        tir::Opnd::Val(n) => name_remove(&mut names, &mut has_ty, &mut tys, n),
+                        _ => {}
+                    }
+                    m2r_access(p, &ty, true, &mut names, &mut has_ty, &mut tys, &mut stored);
+                }
+                _ => {
+                    let mut vals = sset_new();
+                    note_kind_values(&inst.kind, &mut vals);
+                    let mut k: taddr = 0;
+                    while k < vals.names.len() {
+                        name_remove(&mut names, &mut has_ty, &mut tys, &vals.names[k]);
+                        k += 1;
+                    }
+                }
+            }
+            i += 1;
+        }
+        let mut vals = sset_new();
+        note_term_values(&b.term, &mut vals);
+        let mut k: taddr = 0;
+        while k < vals.names.len() {
+            name_remove(&mut names, &mut has_ty, &mut tys, &vals.names[k]);
+            k += 1;
+        }
+        bi += 1;
+    }
+
+    let mut out_names: Vec<String> = Vec::new();
+    let mut out_tys: Vec<tir::Ty> = Vec::new();
+    let mut i: taddr = 0;
+    while i < names.len() {
+        if has_ty[i] && sset_has(&stored, &names[i]) {
+            out_names.push(names[i].to_string());
+            out_tys.push(clone_ty(&tys[i]));
+        }
+        i += 1;
+    }
+    SlotInfo { names: out_names, tys: out_tys }
+}
+
+fn name_in(names: &Vec<String>, n: &str) -> bool {
+    let mut i: taddr = 0;
+    while i < names.len() {
+        if names[i].same(n) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn name_remove(names: &mut Vec<String>, has_ty: &mut Vec<bool>, tys: &mut Vec<tir::Ty>, n: &str) {
+    let mut i: taddr = 0;
+    while i < names.len() {
+        if names[i].same(n) {
+            let last = names.len() - 1;
+            names[i] = names[last].to_string();
+            has_ty[i] = has_ty[last];
+            tys[i] = clone_ty(&tys[last]);
+            names.pop();
+            has_ty.pop();
+            tys.pop();
+            return;
+        }
+        i += 1;
+    }
+}
+
+/// Record an access through `p`, or disqualify whatever it names.
+fn m2r_access(
+    p: &tir::Opnd,
+    ty: &tir::Ty,
+    is_store: bool,
+    names: &mut Vec<String>,
+    has_ty: &mut Vec<bool>,
+    tys: &mut Vec<tir::Ty>,
+    stored: &mut SSet,
+) {
+    match p {
+        tir::Opnd::Val(n) => {
+            let mut i: taddr = 0;
+            let mut found = false;
+            while i < names.len() {
+                if names[i].same(n) {
+                    found = true;
+                    break;
+                }
+                i += 1;
+            }
+            if !found {
+                return;
+            }
+            if has_ty[i] {
+                if !same_ty(&tys[i], ty) {
+                    name_remove(names, has_ty, tys, n);
+                    return;
+                }
+            } else {
+                has_ty[i] = true;
+                tys[i] = clone_ty(ty);
+            }
+            if is_store {
+                sset_add(stored, n);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The slots every load of which has a store reaching it along every path.
+fn definitely_assigned(f: &tir::Func, slots: &SlotInfo) -> SSet {
+    let n = f.blocks.len();
+    let mut preds: Vec<Vec<taddr>> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < n {
+        preds.push(Vec::new());
+        bi += 1;
+    }
+    let mut bi: taddr = 0;
+    while bi < n {
+        let succ = successors(&f.blocks[bi].term);
+        let mut s: taddr = 0;
+        while s < succ.len() {
+            let j = block_index(f, &succ[s]);
+            if j < n {
+                preds[j].push(bi);
+            }
+            s += 1;
+        }
+        bi += 1;
+    }
+
+    let mut all = sset_new();
+    let mut i: taddr = 0;
+    while i < slots.names.len() {
+        sset_add(&mut all, &slots.names[i]);
+        i += 1;
+    }
+
+    // Start optimistic everywhere but the entry, which nothing precedes,
+    // and shrink to a fixpoint.
+    let mut on_entry: Vec<SSet> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < n {
+        let mut s = sset_new();
+        let mut k: taddr = 0;
+        while k < all.names.len() {
+            sset_add(&mut s, &all.names[k]);
+            k += 1;
+        }
+        on_entry.push(s);
+        bi += 1;
+    }
+    if n > 0 {
+        on_entry[0] = sset_new();
+    }
+    loop {
+        let mut changed = false;
+        let mut bi: taddr = 0;
+        while bi < n {
+            if preds[bi].len() == 0 {
+                bi += 1;
+                continue;
+            }
+            let mut into = sset_new();
+            let mut k: taddr = 0;
+            while k < all.names.len() {
+                sset_add(&mut into, &all.names[k]);
+                k += 1;
+            }
+            let mut pi: taddr = 0;
+            while pi < preds[bi].len() {
+                let p = preds[bi][pi];
+                let mut out_names: Vec<String> = Vec::new();
+                let mut k: taddr = 0;
+                while k < on_entry[p].names.len() {
+                    out_names.push(on_entry[p].names[k].to_string());
+                    k += 1;
+                }
+                let mut ii: taddr = 0;
+                while ii < f.blocks[p].insts.len() {
+                    match &f.blocks[p].insts[ii].kind {
+                        tir::Kind::Store(_, _, tir::Opnd::Val(s)) => {
+                            if name_in(&slots.names, s) {
+                                sset_add_strings(&mut out_names, s);
+                            }
+                        }
+                        _ => {}
+                    }
+                    ii += 1;
+                }
+                let mut shrunk = sset_new();
+                let mut k: taddr = 0;
+                while k < into.names.len() {
+                    if name_in(&out_names, &into.names[k]) {
+                        sset_add(&mut shrunk, &into.names[k]);
+                    }
+                    k += 1;
+                }
+                into = shrunk;
+                pi += 1;
+            }
+            if !sset_same(&into, &on_entry[bi]) {
+                on_entry[bi] = into;
+                changed = true;
+            }
+            bi += 1;
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut ok = sset_new();
+    let mut k: taddr = 0;
+    while k < all.names.len() {
+        sset_add(&mut ok, &all.names[k]);
+        k += 1;
+    }
+    let mut bi: taddr = 0;
+    while bi < n {
+        let mut have_names: Vec<String> = Vec::new();
+        let mut k: taddr = 0;
+        while k < on_entry[bi].names.len() {
+            have_names.push(on_entry[bi].names[k].to_string());
+            k += 1;
+        }
+        let mut ii: taddr = 0;
+        while ii < f.blocks[bi].insts.len() {
+            match &f.blocks[bi].insts[ii].kind {
+                tir::Kind::Load(_, tir::Opnd::Val(s)) => {
+                    if name_in(&slots.names, s) && !name_in(&have_names, s) {
+                        sset_remove(&mut ok, s);
+                    }
+                }
+                tir::Kind::Store(_, _, tir::Opnd::Val(s)) => {
+                    if name_in(&slots.names, s) {
+                        sset_add_strings(&mut have_names, s);
+                    }
+                }
+                _ => {}
+            }
+            ii += 1;
+        }
+        bi += 1;
+    }
+    ok
+}
+
+fn sset_add_strings(names: &mut Vec<String>, s: &str) {
+    if !name_in(names, s) {
+        names.push(s.to_string());
+    }
+}
+
+fn sset_same(a: &SSet, b: &SSet) -> bool {
+    if a.names.len() != b.names.len() {
+        return false;
+    }
+    let mut i: taddr = 0;
+    while i < a.names.len() {
+        if !sset_has(b, &a.names[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The builder: what is known while the questions of the construction are
+/// asked and answered.
+pub struct M2R {
+    pub slots: SlotInfo,
+    pub preds: Vec<Vec<taddr>>,
+    /// What each block stores into each slot, last store winning.
+    pub local: Vec<OMap>,
+    /// Memoized answers, and the guard against recursing round a loop.
+    pub entry: Vec<OMap>,
+    pub asking: Vec<SSet>,
+    /// Parameters this pass added: name → (block, slot).
+    pub added_names: Vec<String>,
+    pub added_block: Vec<taddr>,
+    pub added_slot: Vec<String>,
+    /// Added parameters per block, in the order edges must supply them.
+    pub params: Vec<Vec<MParam>>,
+    pub subst: OMap,
+    pub counter: taddr,
+}
+
+pub struct MParam {
+    pub name: String,
+    pub ty: tir::Ty,
+}
+
+fn m2r_builder(f: &tir::Func, slots: SlotInfo) -> M2R {
+    let n = f.blocks.len();
+    let mut preds: Vec<Vec<taddr>> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < n {
+        preds.push(Vec::new());
+        bi += 1;
+    }
+    let mut bi: taddr = 0;
+    while bi < n {
+        let succ = successors(&f.blocks[bi].term);
+        let mut s: taddr = 0;
+        while s < succ.len() {
+            let j = block_index(f, &succ[s]);
+            if j < n {
+                preds[j].push(bi);
+            }
+            s += 1;
+        }
+        bi += 1;
+    }
+    let mut local: Vec<OMap> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < n {
+        local.push(omap_new());
+        bi += 1;
+    }
+    let mut bi: taddr = 0;
+    while bi < n {
+        let mut i: taddr = 0;
+        while i < f.blocks[bi].insts.len() {
+            match &f.blocks[bi].insts[i].kind {
+                tir::Kind::Store(_, v, tir::Opnd::Val(p)) => {
+                    if name_in(&slots.names, p) {
+                        omap_set(&mut local[bi], p, clone_opnd(v));
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        bi += 1;
+    }
+    let mut entry: Vec<OMap> = Vec::new();
+    let mut asking: Vec<SSet> = Vec::new();
+    let mut params: Vec<Vec<MParam>> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < n {
+        entry.push(omap_new());
+        asking.push(sset_new());
+        params.push(Vec::new());
+        bi += 1;
+    }
+    M2R {
+        slots: slots,
+        preds: preds,
+        local: local,
+        entry: entry,
+        asking: asking,
+        added_names: Vec::new(),
+        added_block: Vec::new(),
+        added_slot: Vec::new(),
+        params: params,
+        subst: omap_new(),
+        counter: 0,
+    }
+}
+
+/// What holds at the end of block `bi`.
+fn m2r_at_end(b: &mut M2R, f: &tir::Func, bi: taddr, slot: &str) -> tir::Opnd {
+    match omap_get(&b.local[bi], slot) {
+        Option::Some(v) => v,
+        Option::None => m2r_at_entry(b, f, bi, slot),
+    }
+}
+
+/// What holds at the entry of block `bi`.
+fn m2r_at_entry(b: &mut M2R, f: &tir::Func, bi: taddr, slot: &str) -> tir::Opnd {
+    match omap_get(&b.entry[bi], slot) {
+        Option::Some(v) => return v,
+        Option::None => {}
+    }
+    // Re-entering the question is a loop, and the answer is a parameter
+    // for the same reason a disagreement is.
+    let looping = sset_has(&b.asking[bi], slot);
+    if !looping {
+        sset_add(&mut b.asking[bi], slot);
+    }
+    let value = if b.preds[bi].len() == 0 {
+        // Nothing reaches here: untouched frame storage, which is zero.
+        let ty = m2r_slot_ty(b, slot);
+        tir::Opnd::Konst(ty, 0)
+    } else if !looping && b.preds[bi].len() == 1 {
+        let only = b.preds[bi][0];
+        m2r_at_end(b, f, only, slot)
+    } else {
+        m2r_new_param(b, bi, slot)
+    };
+    sset_remove(&mut b.asking[bi], slot);
+    if !omap_has(&b.entry[bi], slot) {
+        omap_set(&mut b.entry[bi], slot, clone_opnd(&value));
+    }
+    match omap_get(&b.entry[bi], slot) {
+        Option::Some(v) => v,
+        Option::None => value,
+    }
+}
+
+fn m2r_slot_ty(b: &M2R, slot: &str) -> tir::Ty {
+    let mut i: taddr = 0;
+    while i < b.slots.names.len() {
+        if b.slots.names[i].same(slot) {
+            return clone_ty(&b.slots.tys[i]);
+        }
+        i += 1;
+    }
+    tir::Ty::Int(1)
+}
+
+fn m2r_new_param(b: &mut M2R, bi: taddr, slot: &str) -> tir::Opnd {
+    b.counter += 1;
+    let mut name: String = Vec::new();
+    push_str(&mut name, "m2r.");
+    let mut i: taddr = 0;
+    while i < slot.len() {
+        let c = slot[i];
+        if c == '.' {
+            name.push('_');
+        } else {
+            name.push(c);
+        }
+        i += 1;
+    }
+    name.push('.');
+    push_int(&mut name, b.counter as t27);
+    let ty = m2r_slot_ty(b, slot);
+    b.params[bi].push(MParam { name: name.to_string(), ty: ty });
+    b.added_names.push(name.to_string());
+    b.added_block.push(bi);
+    b.added_slot.push(slot.to_string());
+    let param = tir::Opnd::Val(name);
+    // Recorded before the recursion that fills its edges, so a back edge
+    // asking the same question finds it rather than asking again.
+    omap_set(&mut b.entry[bi], slot, clone_opnd(&param));
+    param
+}
+
+/// Append one string to another: this language's strings are `Vec<char>`.
+fn push_str(out: &mut String, s: &str) {
+    let mut i: taddr = 0;
+    while i < s.len() {
+        out.push(s[i]);
+        i += 1;
+    }
+}
+
+/// A decimal, pushed: the same walk `push_int` already does elsewhere.
+fn push_int(out: &mut String, v: t27) {
+    let mut n = v;
+    if n < 0 {
+        out.push('-');
+        n = 0 - n;
+    }
+    if n == 0 {
+        out.push('0');
+        return;
+    }
+    let mut digits: Vec<char> = Vec::new();
+    while n != 0 {
+        let d = n % 10;
+        let fixed = if d < 0 { d + 10 } else { d };
+        digits.push(char::try_from(48 + fixed).unwrap());
+        n = (n - fixed) / 10;
+    }
+    let mut i = digits.len();
+    while i > 0 {
+        i -= 1;
+        out.push(digits[i]);
+    }
+}
+
+fn m2r_run(b: &mut M2R, f: &mut tir::Func) {
+    // Answer every load: what a store above it in the block left, or what
+    // held at the block's entry.
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let mut above = omap_new();
+        let mut i: taddr = 0;
+        while i < f.blocks[bi].insts.len() {
+            match &f.blocks[bi].insts[i].kind {
+                tir::Kind::Store(_, v, tir::Opnd::Val(p)) => {
+                    if name_in(&b.slots.names, p) {
+                        omap_set(&mut above, p, clone_opnd(v));
+                    }
+                }
+                tir::Kind::Load(_, tir::Opnd::Val(p)) => {
+                    if name_in(&b.slots.names, p) {
+                        let v = match omap_get(&above, p) {
+                            Option::Some(v) => v,
+                            Option::None => m2r_at_entry(b, f, bi, p),
+                        };
+                        if f.blocks[bi].insts[i].results.len() > 0 {
+                            let r = f.blocks[bi].insts[i].results[0].to_string();
+                            omap_set(&mut b.subst, &r, v);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        bi += 1;
+    }
+
+    // Every added parameter needs an argument on each incoming edge, and
+    // finding one may add further parameters.
+    let mut args_names: Vec<String> = Vec::new();
+    let mut args_preds: Vec<Vec<taddr>> = Vec::new();
+    let mut args_vals: Vec<Vec<tir::Opnd>> = Vec::new();
+    let mut done = sset_new();
+    loop {
+        let mut pool: Vec<String> = Vec::new();
+        let mut i: taddr = 0;
+        while i < b.added_names.len() {
+            if !sset_has(&done, &b.added_names[i]) {
+                pool.push(b.added_names[i].to_string());
+            }
+            i += 1;
+        }
+        let pending = str_sorted(&pool);
+        if pending.len() == 0 {
+            break;
+        }
+        let mut i: taddr = 0;
+        while i < pending.len() {
+            let name = &pending[i];
+            sset_add(&mut done, name);
+            let mut bi: taddr = 0;
+            let mut slot: String = Vec::new();
+            let mut a: taddr = 0;
+            while a < b.added_names.len() {
+                if b.added_names[a].same(name) {
+                    bi = b.added_block[a];
+                    slot = b.added_slot[a].to_string();
+                }
+                a += 1;
+            }
+            let pi_list = clone_taddrs(&b.preds[bi]);
+            let mut pi: taddr = 0;
+            while pi < pi_list.len() {
+                let p = pi_list[pi];
+                let v = m2r_at_end(b, f, p, &slot);
+                args_record(&mut args_names, &mut args_preds, &mut args_vals, name, p, v);
+                pi += 1;
+            }
+            i += 1;
+        }
+    }
+
+    m2r_remove_trivial(b, &mut args_names, &mut args_preds, &mut args_vals);
+    m2r_install(b, f, &args_names, &args_preds, &args_vals);
+}
+
+fn args_record(
+    names: &mut Vec<String>,
+    preds: &mut Vec<Vec<taddr>>,
+    vals: &mut Vec<Vec<tir::Opnd>>,
+    name: &str,
+    p: taddr,
+    v: tir::Opnd,
+) {
+    let mut i: taddr = 0;
+    while i < names.len() {
+        if names[i].same(name) {
+            preds[i].push(p);
+            vals[i].push(v);
+            return;
+        }
+        i += 1;
+    }
+    names.push(name.to_string());
+    let mut ps: Vec<taddr> = Vec::new();
+    ps.push(p);
+    preds.push(ps);
+    let mut vs: Vec<tir::Opnd> = Vec::new();
+    vs.push(v);
+    vals.push(vs);
+}
+
+/// A parameter whose arguments are all one operand says nothing.
+fn m2r_remove_trivial(b: &mut M2R, names: &mut Vec<String>, preds: &mut Vec<Vec<taddr>>, vals: &mut Vec<Vec<tir::Opnd>>) {
+    loop {
+        let mut found_name: String = Vec::new();
+        let mut found_with = tir::Opnd::Konst(tir::Ty::Int(1), 0);
+        let mut found = false;
+        let order = str_sorted(names);
+        let mut i: taddr = 0;
+        while i < order.len() {
+            let name = &order[i];
+            let mut ai: taddr = 0;
+            while ai < names.len() {
+                if names[ai].same(name) {
+                    break;
+                }
+                ai += 1;
+            }
+            let mut only = tir::Opnd::Konst(tir::Ty::Int(1), 0);
+            let mut only_set = false;
+            let mut same = true;
+            let mut vi: taddr = 0;
+            while vi < vals[ai].len() {
+                let v = m2r_resolve(b, &vals[ai][vi]);
+                let mut is_self = false;
+                match &v {
+                    tir::Opnd::Val(n) => {
+                        if n.same(name) {
+                            is_self = true;
+                        }
+                    }
+                    _ => {}
+                }
+                if !is_self {
+                    if !only_set {
+                        only = v;
+                        only_set = true;
+                    } else if !same_opnd(&only, &v) {
+                        same = false;
+                        break;
+                    }
+                }
+                vi += 1;
+            }
+            if same && only_set {
+                found_name = name.to_string();
+                found_with = only;
+                found = true;
+                break;
+            }
+            i += 1;
+        }
+        if !found {
+            return;
+        }
+        omap_set(&mut b.subst, &found_name, found_with);
+        // The parameter is gone: from the edges, from the added list and
+        // from the block's own parameter list.
+        let mut i: taddr = 0;
+        while i < names.len() {
+            if names[i].same(&found_name) {
+                let last = names.len() - 1;
+                names[i] = names[last].to_string();
+                preds[i] = clone_taddrs(&preds[last]);
+                vals[i] = clone_opnd_vecs(&vals[last]);
+                names.pop();
+                preds.pop();
+                vals.pop();
+                break;
+            }
+            i += 1;
+        }
+        let mut a: taddr = 0;
+        while a < b.added_names.len() {
+            if b.added_names[a].same(&found_name) {
+                let bi = b.added_block[a];
+                let last = b.added_names.len() - 1;
+                b.added_names[a] = b.added_names[last].to_string();
+                b.added_block[a] = b.added_block[last];
+                b.added_slot[a] = b.added_slot[last].to_string();
+                b.added_names.pop();
+                b.added_block.pop();
+                b.added_slot.pop();
+                let mut ps: Vec<MParam> = Vec::new();
+                let mut k: taddr = 0;
+                while k < b.params[bi].len() {
+                    if !b.params[bi][k].name.same(&found_name) {
+                        ps.push(MParam {
+                            name: b.params[bi][k].name.to_string(),
+                            ty: clone_ty(&b.params[bi][k].ty),
+                        });
+                    }
+                    k += 1;
+                }
+                b.params[bi] = ps;
+                break;
+            }
+            a += 1;
+        }
+    }
+}
+
+fn clone_taddrs(v: &Vec<taddr>) -> Vec<taddr> {
+    let mut out: Vec<taddr> = Vec::new();
+    let mut i: taddr = 0;
+    while i < v.len() {
+        out.push(v[i]);
+        i += 1;
+    }
+    out
+}
+
+fn clone_opnd_vecs(v: &Vec<tir::Opnd>) -> Vec<tir::Opnd> {
+    let mut out: Vec<tir::Opnd> = Vec::new();
+    let mut i: taddr = 0;
+    while i < v.len() {
+        out.push(clone_opnd(&v[i]));
+        i += 1;
+    }
+    out
+}
+
+/// Install the parameters, fill the edges, and drop what is now unread.
+fn m2r_install(
+    b: &M2R,
+    f: &mut tir::Func,
+    names: &Vec<String>,
+    preds: &Vec<Vec<taddr>>,
+    vals: &Vec<Vec<tir::Opnd>>,
+) {
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let mut ps = clone_params(&f.blocks[bi].params);
+        let mut k: taddr = 0;
+        while k < b.params[bi].len() {
+            ps.push(tir::Param {
+                name: b.params[bi][k].name.to_string(),
+                ty: clone_ty(&b.params[bi][k].ty),
+            });
+            k += 1;
+        }
+        f.blocks[bi].params = ps;
+        bi += 1;
+    }
+
+    // A block's added parameters come after whatever it already had, in
+    // the same order, so the arguments append in that order too.
+    let mut pi: taddr = 0;
+    while pi < f.blocks.len() {
+        let mut extra_labels: Vec<String> = Vec::new();
+        let mut extra_vals: Vec<Vec<tir::Opnd>> = Vec::new();
+        let succ = successors(&f.blocks[pi].term);
+        let mut s: taddr = 0;
+        while s < succ.len() {
+            let bj = block_index(f, &succ[s]);
+            if bj < f.blocks.len() {
+                let mut vs: Vec<tir::Opnd> = Vec::new();
+                let mut k: taddr = 0;
+                while k < b.params[bj].len() {
+                    let pname = &b.params[bj][k].name;
+                    let v = args_lookup(b, names, preds, vals, pname, pi);
+                    vs.push(v);
+                    k += 1;
+                }
+                extra_labels.push(succ[s].to_string());
+                extra_vals.push(vs);
+            }
+            s += 1;
+        }
+        let term2 = extend_term_args(&f.blocks[pi].term, &extra_labels, &extra_vals);
+        f.blocks[pi].term = term2;
+        pi += 1;
+    }
+
+    // The renaming table is chained — one removal names another renaming —
+    // and every operand here reads it to the end, the way the other
+    // implementation's `resolve` walks it.
+    let mut resolved = omap_new();
+    let mut k: taddr = 0;
+    while k < b.subst.keys.len() {
+        let v = m2r_resolve(b, &b.subst.vals[k]);
+        omap_set(&mut resolved, &b.subst.keys[k], v);
+        k += 1;
+    }
+
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let mut kept: Vec<tir::Inst> = Vec::new();
+        let mut i: taddr = 0;
+        while i < f.blocks[bi].insts.len() {
+            let inst = &f.blocks[bi].insts[i];
+            let drop_it = match &inst.kind {
+                tir::Kind::Slot(_) => {
+                    inst.results.len() > 0 && name_in(&b.slots.names, &inst.results[0])
+                }
+                tir::Kind::Load(_, tir::Opnd::Val(n)) => name_in(&b.slots.names, n),
+                tir::Kind::Store(_, _, tir::Opnd::Val(n)) => name_in(&b.slots.names, n),
+                _ => false,
+            };
+            if !drop_it {
+                kept.push(tir::Inst {
+                    results: clone_names(&inst.results),
+                    kind: subst_kind(&inst.kind, &resolved),
+                });
+            }
+            i += 1;
+        }
+        f.blocks[bi].insts = kept;
+        let term2 = subst_term(&f.blocks[bi].term, &resolved);
+        f.blocks[bi].term = term2;
+        bi += 1;
+    }
+}
+
+fn args_lookup(
+    b: &M2R,
+    names: &Vec<String>,
+    preds: &Vec<Vec<taddr>>,
+    vals: &Vec<Vec<tir::Opnd>>,
+    name: &str,
+    pi: taddr,
+) -> tir::Opnd {
+    let mut i: taddr = 0;
+    while i < names.len() {
+        if names[i].same(name) {
+            let mut k: taddr = 0;
+            while k < preds[i].len() {
+                if preds[i][k] == pi {
+                    return m2r_resolve(b, &vals[i][k]);
+                }
+                k += 1;
+            }
+        }
+        i += 1;
+    }
+    tir::Opnd::Konst(tir::Ty::Int(1), 0)
+}
+
+/// Appended edge arguments, per target label: the first extra of a label
+/// extends every target that names it.
+fn extend_term_args(t: &tir::Term, labels: &Vec<String>, vals: &Vec<Vec<tir::Opnd>>) -> tir::Term {
+    match t {
+        tir::Term::Br3(sel, n, z, p) => tir::Term::Br3(
+            clone_opnd(sel),
+            extend_target_args(n, labels, vals),
+            extend_target_args(z, labels, vals),
+            extend_target_args(p, labels, vals),
+        ),
+        tir::Term::Br(d) => tir::Term::Br(extend_target_args(d, labels, vals)),
+        _ => clone_term(t),
+    }
+}
+
+fn extend_target_args(t: &tir::Target, labels: &Vec<String>, vals: &Vec<Vec<tir::Opnd>>) -> tir::Target {
+    let mut out = clone_target(t);
+    let mut i: taddr = 0;
+    while i < labels.len() {
+        if labels[i].same(&t.label) {
+            let mut k: taddr = 0;
+            while k < vals[i].len() {
+                out.args.push(clone_opnd(&vals[i][k]));
+                k += 1;
+            }
+            return out;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Follow renamings to the end.
+fn m2r_resolve(b: &M2R, o: &tir::Opnd) -> tir::Opnd {
+    let mut cur = clone_opnd(o);
+    // A renaming chain is acyclic — each step names something defined
+    // earlier — but a bound costs nothing and a hang costs a lot.
+    let mut steps: taddr = 0;
+    while steps < 1024 {
+        match &cur {
+            tir::Opnd::Val(n) => {
+                match omap_get(&b.subst, n) {
+                    Option::Some(next) => {
+                        if same_opnd(&next, &cur) {
+                            return cur;
+                        }
+                        cur = next;
+                    }
+                    Option::None => return cur,
+                }
+            }
+            _ => return cur,
+        }
+        steps += 1;
+    }
+    cur
+}
+
+// ---------------------------------------------------------------- fold_constants
+
+/// Compute what is already known (TIR §6): an instruction whose operands
+/// are all constants has a constant result, and the arithmetic is the
+/// machine's. A fold that would fault is left alone.
+fn fold_constants(f: &mut tir::Func) {
+    let mut known_names: Vec<String> = Vec::new();
+    let mut known_tys: Vec<tir::Ty> = Vec::new();
+    let mut known_vals: Vec<t27> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let mut insts: Vec<tir::Inst> = Vec::new();
+        let mut i: taddr = 0;
+        while i < f.blocks[bi].insts.len() {
+            let inst = &f.blocks[bi].insts[i];
+            let kind2 = subst_known(&inst.kind, &known_names, &known_tys, &known_vals);
+            let results2 = clone_names(&inst.results);
+            match folded(&kind2) {
+                Option::Some(fv) => {
+                    if results2.len() == 1 {
+                        known_names.push(results2[0].to_string());
+                        known_tys.push(clone_ty(&fv.ty));
+                        known_vals.push(fv.value);
+                    }
+                    insts.push(tir::Inst {
+                        results: results2,
+                        kind: tir::Kind::Plain(
+                            5,
+                            clone_ty(&fv.ty),
+                            tir::Opnd::Konst(clone_ty(&fv.ty), fv.value),
+                            tir::Opnd::Konst(fv.ty, fv.value),
+                        ),
+                    });
+                }
+                Option::None => {
+                    insts.push(tir::Inst { results: results2, kind: kind2 });
+                }
+            }
+            i += 1;
+        }
+        f.blocks[bi].insts = insts;
+        let term2 = subst_known_term(&f.blocks[bi].term, &known_names, &known_tys, &known_vals);
+        f.blocks[bi].term = term2;
+        bi += 1;
+    }
+    remove_dead(f);
+}
+
+/// A fold's answer.
+pub struct FoldVal {
+    pub ty: tir::Ty,
+    pub value: t27,
+}
+
+fn subst_known(k: &tir::Kind, names: &Vec<String>, tys: &Vec<tir::Ty>, vals: &Vec<t27>) -> tir::Kind {
+    let mut m = omap_new();
+    let mut i: taddr = 0;
+    while i < names.len() {
+        omap_set(&mut m, &names[i], tir::Opnd::Konst(clone_ty(&tys[i]), vals[i]));
+        i += 1;
+    }
+    subst_kind(k, &m)
+}
+
+fn subst_known_term(t: &tir::Term, names: &Vec<String>, tys: &Vec<tir::Ty>, vals: &Vec<t27>) -> tir::Term {
+    let mut m = omap_new();
+    let mut i: taddr = 0;
+    while i < names.len() {
+        omap_set(&mut m, &names[i], tir::Opnd::Konst(clone_ty(&tys[i]), vals[i]));
+        i += 1;
+    }
+    subst_term(t, &m)
+}
+
+fn konst_of(o: &tir::Opnd) -> Option<t27> {
+    match o {
+        tir::Opnd::Konst(_, v) => Option::Some(v),
+        _ => Option::None,
+    }
+}
+
+/// The balanced-ternary length of a value.
+fn trit_len(v: t27) -> taddr {
+    let mut x = v;
+    let mut n: taddr = 0;
+    while x != 0 {
+        x = x / 3;
+        n += 1;
+    }
+    n
+}
+
+/// `3^k`, in range for every `k` this language can name a width for.
+fn pow3(k: taddr) -> t27 {
+    let mut v: t27 = 1;
+    let mut i: taddr = 0;
+    while i < k {
+        v = v * 3;
+        i += 1;
+    }
+    v
+}
+
+/// The low `width` trits: the symmetric residue mod 3^width.
+fn wrap_to(v: t27, width: taddr) -> t27 {
+    if width >= trit_len(v) {
+        return v;
+    }
+    let half = (pow3(width) - 1) / 2;
+    // The remainder of a round-to-nearest division is balanced; stepping
+    // the negative half up a modulus is the Euclidean one.
+    let m = pow3(width);
+    let u = v + half;
+    let r0 = u % m;
+    let r = if r0 < 0 { r0 + m } else { r0 };
+    r - half
+}
+
+/// The constant an instruction computes, if every operand is one and the
+/// result cannot fault. Magnitude gates: this language's own `t27`
+/// arithmetic is the machine's, so a fold whose exact answer cannot
+/// overflow its own registers cannot disagree with the book.
+fn folded(k: &tir::Kind) -> Option<FoldVal> {
+    match k {
+        tir::Kind::Flav(op, flavor, ty, a, b) => {
+            let x = match konst_of(a) {
+                Option::Some(v) => v,
+                Option::None => return Option::None,
+            };
+            let y = match konst_of(b) {
+                Option::Some(v) => v,
+                Option::None => return Option::None,
+            };
+            let width = match ty {
+                tir::Ty::Int(n) => n,
+                _ => return Option::None,
+            };
+            // Two values of at most 26 trits add, subtract and multiply
+            // inside one of this machine's words with room to check.
+            if trit_len(x) > 26 || trit_len(y) > 26 {
+                return Option::None;
+            }
+            let exact = if op == 0 {
+                x + y
+            } else if op == 1 {
+                x - y
+            } else if op == 2 {
+                x * y
+            } else {
+                // A shift's amount is checked by the machine, so a fold
+                // that would fault is not a fold.
+                if y < 0 || y >= width as t27 {
+                    return Option::None;
+                }
+                x * pow3(y as taddr)
+            };
+            let wrapped = wrap_to(exact, width);
+            if flavor == 0 {
+                return Option::Some(FoldVal { ty: clone_ty(&ty), value: wrapped });
+            }
+            if flavor == 1 && trit_len(exact) <= width {
+                return Option::Some(FoldVal { ty: clone_ty(&ty), value: wrapped });
+            }
+            Option::None
+        }
+        tir::Kind::Cmp(_, a, b) => {
+            let x = match konst_of(a) {
+                Option::Some(v) => v,
+                Option::None => return Option::None,
+            };
+            let y = match konst_of(b) {
+                Option::Some(v) => v,
+                Option::None => return Option::None,
+            };
+            let t = if x < y {
+                0 - 1
+            } else if x == y {
+                0
+            } else {
+                1
+            };
+            Option::Some(FoldVal { ty: tir::Ty::Int(1), value: t })
+        }
+        tir::Kind::Select3(t, ty, n, z, p) => {
+            let sel = match konst_of(t) {
+                Option::Some(v) => v,
+                Option::None => return Option::None,
+            };
+            let arm = if sel < 0 {
+                n
+            } else if sel == 0 {
+                z
+            } else {
+                p
+            };
+            match konst_of(arm) {
+                Option::Some(v) => Option::Some(FoldVal { ty: clone_ty(&ty), value: v }),
+                Option::None => Option::None,
+            }
+        }
+        _ => Option::None,
+    }
+}
+
+// ---------------------------------------------------------------- remove_dead
+
+/// Delete instructions nothing reads, iterated, because deleting one is
+/// what makes the next one dead.
+fn remove_dead(f: &mut tir::Func) {
+    let owned = slot_bases(f);
+    loop {
+        let mut live = sset_new();
+        let mut bi: taddr = 0;
+        while bi < f.blocks.len() {
+            let b = &f.blocks[bi];
+            let mut i: taddr = 0;
+            while i < b.insts.len() {
+                note_kind_values(&b.insts[i].kind, &mut live);
+                i += 1;
+            }
+            note_term_values(&b.term, &mut live);
+            bi += 1;
+        }
+        let mut removed = false;
+        let mut bi: taddr = 0;
+        while bi < f.blocks.len() {
+            let mut kept: Vec<tir::Inst> = Vec::new();
+            let mut i: taddr = 0;
+            while i < f.blocks[bi].insts.len() {
+                let inst = &f.blocks[bi].insts[i];
+                let mut wanted = inst.results.len() == 0;
+                let mut r: taddr = 0;
+                while r < inst.results.len() {
+                    if sset_has(&live, &inst.results[r]) {
+                        wanted = true;
+                    }
+                    r += 1;
+                }
+                let keep = wanted || !is_removable(&inst.kind, &owned);
+                if !keep {
+                    removed = true;
+                } else {
+                    kept.push(clone_inst(inst));
+                }
+                i += 1;
+            }
+            f.blocks[bi].insts = kept;
+            bi += 1;
+        }
+        if !removed {
+            return;
+        }
+    }
+}
+
+/// Whether an instruction's only effect is its results.
+fn is_removable(k: &tir::Kind, owned: &OMap) -> bool {
+    match k {
+        // `shl` faults on a shift amount outside its width whatever its
+        // flavor, and a trapping flavor faults on overflow.
+        tir::Kind::Flav(op, flavor, _, _, _) => op != 3 && flavor != 1,
+        // `div` and `rem` fault on a zero divisor; `shr` on the amounts
+        // `shl` does. mulh=0, div=1, rem=2, shr=3, tmin=4, tmax=5, tmul=6.
+        tir::Kind::Plain(op, _, _, _) => op == 0 || op >= 4,
+        tir::Kind::Cmp(_, _, _) => true,
+        tir::Kind::Neg(_, _) => true,
+        tir::Kind::Widen(_, _, _) => true,
+        tir::Kind::Trunc(_, _, _) => true,
+        tir::Kind::Select3(_, _, _, _, _) => true,
+        tir::Kind::Slot(_) => true,
+        tir::Kind::Offset(_, _) => true,
+        tir::Kind::Load(_, tir::Opnd::Val(p)) => omap_has(owned, p),
+        _ => false,
+    }
+}
+
+/// For every value that is an address into a slot, which slot — provided
+/// the slot's address never escapes. A use anywhere but the pointer
+/// position of a load, a store or an offset is an escape.
+fn slot_bases(f: &tir::Func) -> OMap {
+    let mut base = omap_new();
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let b = &f.blocks[bi];
+        let mut i: taddr = 0;
+        while i < b.insts.len() {
+            let inst = &b.insts[i];
+            match &inst.kind {
+                tir::Kind::Slot(_) => {
+                    if inst.results.len() > 0 {
+                        let r = &inst.results[0];
+                        omap_set(&mut base, r, tir::Opnd::Val(r.to_string()));
+                    }
+                }
+                tir::Kind::Offset(tir::Opnd::Val(p), _) => {
+                    if inst.results.len() > 0 {
+                        match omap_get(&base, p) {
+                            Option::Some(tir::Opnd::Val(s)) => {
+                                let r = inst.results[0].to_string();
+                                omap_set(&mut base, &r, tir::Opnd::Val(s));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        bi += 1;
+    }
+    let mut escaped = sset_new();
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let b = &f.blocks[bi];
+        let mut i: taddr = 0;
+        while i < b.insts.len() {
+            match &b.insts[i].kind {
+                tir::Kind::Load(_, _) => {}
+                tir::Kind::Store(_, v, _) => note_escape(v, &base, &mut escaped),
+                tir::Kind::Offset(_, d) => note_escape(d, &base, &mut escaped),
+                other => {
+                    let clone = clone_kind(&other);
+                    note_kind_escape(&clone, &base, &mut escaped);
+                }
+            }
+            i += 1;
+        }
+        note_term_escape(&b.term, &base, &mut escaped);
+        bi += 1;
+    }
+    let mut kept = omap_new();
+    let mut i: taddr = 0;
+    while i < base.keys.len() {
+        match &base.vals[i] {
+            tir::Opnd::Val(s) => {
+                if !sset_has(&escaped, s) {
+                    omap_set(&mut kept, &base.keys[i], tir::Opnd::Val(s.to_string()));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    kept
+}
+
+fn note_escape(o: &tir::Opnd, base: &OMap, escaped: &mut SSet) {
+    match o {
+        tir::Opnd::Val(v) => {
+            match omap_get(base, v) {
+                Option::Some(tir::Opnd::Val(s)) => sset_add(escaped, &s),
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+fn note_kind_escape(k: &tir::Kind, base: &OMap, escaped: &mut SSet) {
+    match k {
+        tir::Kind::Flav(_, _, _, a, b) => {
+            note_escape(a, base, escaped);
+            note_escape(b, base, escaped);
+        }
+        tir::Kind::Plain(_, _, a, b) => {
+            note_escape(a, base, escaped);
+            note_escape(b, base, escaped);
+        }
+        tir::Kind::Neg(_, a) => note_escape(a, base, escaped),
+        tir::Kind::Cmp(_, a, b) => {
+            note_escape(a, base, escaped);
+            note_escape(b, base, escaped);
+        }
+        tir::Kind::Select3(t, _, n, z, p) => {
+            note_escape(t, base, escaped);
+            note_escape(n, base, escaped);
+            note_escape(z, base, escaped);
+            note_escape(p, base, escaped);
+        }
+        tir::Kind::Slot(_) => {}
+        tir::Kind::Load(_, p) => note_escape(p, base, escaped),
+        tir::Kind::Store(_, v, p) => {
+            note_escape(v, base, escaped);
+            note_escape(p, base, escaped);
+        }
+        tir::Kind::Offset(p, d) => {
+            note_escape(p, base, escaped);
+            note_escape(d, base, escaped);
+        }
+        tir::Kind::Widen(_, a, _) => note_escape(a, base, escaped),
+        tir::Kind::Trunc(_, a, _) => note_escape(a, base, escaped),
+        tir::Kind::Call(callee, args, _) => {
+            match callee {
+                tir::Callee::Indirect(o) => note_escape(o, base, escaped),
+                _ => {}
+            }
+            let mut i: taddr = 0;
+            while i < args.len() {
+                note_escape(&args[i], base, escaped);
+                i += 1;
+            }
+        }
+    }
+}
+
+fn note_term_escape(t: &tir::Term, base: &OMap, escaped: &mut SSet) {
+    match t {
+        tir::Term::Br3(sel, n, z, p) => {
+            note_escape(sel, base, escaped);
+            note_target_escape(n, base, escaped);
+            note_target_escape(z, base, escaped);
+            note_target_escape(p, base, escaped);
+        }
+        tir::Term::Br(d) => note_target_escape(d, base, escaped),
+        tir::Term::Ret(v) => {
+            match v {
+                Option::Some(o) => note_escape(o, base, escaped),
+                Option::None => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+fn note_target_escape(t: &tir::Target, base: &OMap, escaped: &mut SSet) {
+    let mut i: taddr = 0;
+    while i < t.args.len() {
+        note_escape(&t.args[i], base, escaped);
+        i += 1;
+    }
+}
+
+// ---------------------------------------------------------------- prune
+
+/// Drop the blocks nothing can reach, keeping the order.
+fn prune_unreachable(f: &mut tir::Func) {
+    let n = f.blocks.len();
+    let mut live: Vec<bool> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < n {
+        live.push(false);
+        bi += 1;
+    }
+    if n > 0 {
+        live[0] = true;
+    }
+    let mut stack: Vec<taddr> = Vec::new();
+    if n > 0 {
+        stack.push(0);
+    }
+    while stack.len() > 0 {
+        let b = stack[stack.len() - 1];
+        stack.pop();
+        let succ = successors(&f.blocks[b].term);
+        let mut s: taddr = 0;
+        while s < succ.len() {
+            let j = block_index(f, &succ[s]);
+            if j < n && !live[j] {
+                live[j] = true;
+                stack.push(j);
+            }
+            s += 1;
+        }
+    }
+    let mut kept: Vec<tir::Block> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < n {
+        if live[bi] {
+            kept.push(clone_block(&f.blocks[bi]));
+        }
+        bi += 1;
+    }
+    f.blocks = kept;
+}
+
+// ---------------------------------------------------------------- sign checks
+
+/// Drop a check that a value which cannot be negative is not negative
+/// (TIR §6). Only where the other two arms agree: then knowing the first
+/// impossible makes the branch unconditional.
+fn elide_sign_checks(f: &mut tir::Func) {
+    let ok = non_negative(f);
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let mut rewrite: Option<tir::Target> = Option::None;
+        match &f.blocks[bi].term {
+            tir::Term::Br3(t, _, zero, pos) => {
+                if same_target(zero, pos) {
+                    match t {
+                        tir::Opnd::Val(c) => {
+                            if against_zero(&f.blocks[bi], c, &ok) {
+                                rewrite = Option::Some(clone_target(zero));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        match rewrite {
+            Option::Some(target) => {
+                f.blocks[bi].term = tir::Term::Br(target);
+            }
+            Option::None => {}
+        }
+        bi += 1;
+    }
+    prune_unreachable(f);
+    remove_dead(f);
+}
+
+/// Whether the block defines `c` by a comparison of a known-non-negative
+/// value against zero.
+fn against_zero(b: &tir::Block, c: &str, ok: &SSet) -> bool {
+    let mut i: taddr = 0;
+    while i < b.insts.len() {
+        let inst = &b.insts[i];
+        if inst.results.len() == 1 && inst.results[0].same(c) {
+            match &inst.kind {
+                tir::Kind::Cmp(_, a, xb) => {
+                    let lhs = match a {
+                        tir::Opnd::Val(x) => sset_has(ok, x),
+                        _ => false,
+                    };
+                    if lhs && is_zero(xb) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn is_zero(o: &tir::Opnd) -> bool {
+    match o {
+        tir::Opnd::Konst(_, v) => v == 0,
+        _ => false,
+    }
+}
+
+/// The values that cannot be negative, by refutation from an optimistic
+/// start — the only way a counter that is defined in terms of itself can
+/// be proved anything at all.
+fn non_negative(f: &tir::Func) -> SSet {
+    let mut ok = sset_new();
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let b = &f.blocks[bi];
+        let mut i: taddr = 0;
+        while i < b.params.len() {
+            sset_add(&mut ok, &b.params[i].name);
+            i += 1;
+        }
+        let mut i: taddr = 0;
+        while i < b.insts.len() {
+            let mut r: taddr = 0;
+            while r < b.insts[i].results.len() {
+                sset_add(&mut ok, &b.insts[i].results[r]);
+                r += 1;
+            }
+            i += 1;
+        }
+        bi += 1;
+    }
+    // A parameter arrives from outside and says nothing about itself.
+    let mut i: taddr = 0;
+    while i < f.sig.params.len() {
+        sset_remove(&mut ok, &f.sig.params[i].name);
+        i += 1;
+    }
+
+    // What reaches each block parameter, by position: incoming[bi][k] is
+    // the list of operands the k-th parameter of block bi receives.
+    let n = f.blocks.len();
+    let mut incoming: Vec<Vec<Vec<tir::Opnd>>> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < n {
+        let mut per: Vec<Vec<tir::Opnd>> = Vec::new();
+        let mut k: taddr = 0;
+        while k < f.blocks[bi].params.len() {
+            per.push(Vec::new());
+            k += 1;
+        }
+        incoming.push(per);
+        bi += 1;
+    }
+    let mut bi: taddr = 0;
+    while bi < n {
+        let succ = successors(&f.blocks[bi].term);
+        // The targets with their argument lists, in the order they are
+        // written: `successors` alone drops the arguments.
+        match &f.blocks[bi].term {
+            tir::Term::Br3(_, t1, t2, t3) => {
+                incoming_record(&mut incoming, f, t1);
+                incoming_record(&mut incoming, f, t2);
+                incoming_record(&mut incoming, f, t3);
+            }
+            tir::Term::Br(t1) => incoming_record(&mut incoming, f, t1),
+            _ => {}
+        }
+        bi += 1;
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let mut bi: taddr = 0;
+        while bi < n {
+            let mut k: taddr = 0;
+            while k < f.blocks[bi].params.len() {
+                let name = f.blocks[bi].params[k].name.to_string();
+                if !sset_has(&ok, &name) {
+                    k += 1;
+                    continue;
+                }
+                let args = &incoming[bi][k];
+                let mut all = args.len() > 0;
+                let mut a: taddr = 0;
+                while a < args.len() {
+                    if !holds(&args[a], &ok) {
+                        all = false;
+                    }
+                    a += 1;
+                }
+                if !all {
+                    sset_remove(&mut ok, &name);
+                    changed = true;
+                }
+                k += 1;
+            }
+            let mut i: taddr = 0;
+            while i < f.blocks[bi].insts.len() {
+                let inst = &f.blocks[bi].insts[i];
+                if inst.results.len() > 1 {
+                    let mut r: taddr = 0;
+                    while r < inst.results.len() {
+                        if sset_has(&ok, &inst.results[r]) {
+                            sset_remove(&mut ok, &inst.results[r]);
+                            changed = true;
+                        }
+                        r += 1;
+                    }
+                    i += 1;
+                    continue;
+                }
+                if inst.results.len() == 1 {
+                    let r = &inst.results[0];
+                    if sset_has(&ok, r) {
+                        // `.trap` is the whole of the argument: a wrapping
+                        // add can land below zero, and a trapping one
+                        // faults instead.
+                        let sound = match &inst.kind {
+                            tir::Kind::Flav(op, flavor, _, a, b) => {
+                                flavor == 1 && (op == 0 || op == 2) && holds(a, &ok) && holds(b, &ok)
+                            }
+                            tir::Kind::Slot(_) => true,
+                            _ => false,
+                        };
+                        if !sound {
+                            sset_remove(&mut ok, r);
+                            changed = true;
+                        }
+                    }
+                }
+                i += 1;
+            }
+            bi += 1;
+        }
+    }
+    ok
+}
+
+fn incoming_record(incoming: &mut Vec<Vec<Vec<tir::Opnd>>>, f: &tir::Func, t: &tir::Target) {
+    let bj = block_index(f, &t.label);
+    if bj >= f.blocks.len() {
+        return;
+    }
+    let mut k: taddr = 0;
+    while k < t.args.len() {
+        if k < incoming[bj].len() {
+            incoming[bj][k].push(clone_opnd(&t.args[k]));
+        }
+        k += 1;
+    }
+}
+
+fn holds(o: &tir::Opnd, ok: &SSet) -> bool {
+    match o {
+        tir::Opnd::Konst(_, v) => v >= 0,
+        tir::Opnd::Val(v) => sset_has(ok, v),
+        tir::Opnd::Glob(_) => false,
+    }
+}
+
+// ---------------------------------------------------------------- branch_through_select
+
+/// Branch on a comparison rather than on what a `select3` made of it: a
+/// `br3` on a `select3` of constants is a `br3` on the select's own
+/// selector, with the arms permuted.
+fn branch_through_select(f: &mut tir::Func) {
+    // Every `select3` whose three arms are constants, by result name.
+    let mut sel_names: Vec<String> = Vec::new();
+    let mut sel_t: Vec<tir::Opnd> = Vec::new();
+    let mut sel_signs: Vec<Vec<t27>> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let b = &f.blocks[bi];
+        let mut i: taddr = 0;
+        while i < b.insts.len() {
+            let inst = &b.insts[i];
+            match &inst.kind {
+                tir::Kind::Select3(t, _, n, z, p) => {
+                    if inst.results.len() == 1 {
+                        match konst_of(n) {
+                            Option::Some(vn) => {
+                                match konst_of(z) {
+                                    Option::Some(vz) => {
+                                        match konst_of(p) {
+                                            Option::Some(vp) => {
+                                                sel_names.push(inst.results[0].to_string());
+                                                sel_t.push(clone_opnd(t));
+                                                let mut signs: Vec<t27> = Vec::new();
+                                                signs.push(sign_of(vn));
+                                                signs.push(sign_of(vz));
+                                                signs.push(sign_of(vp));
+                                                sel_signs.push(signs);
+                                            }
+                                            Option::None => {}
+                                        }
+                                    }
+                                    Option::None => {}
+                                }
+                            }
+                            Option::None => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        bi += 1;
+    }
+    if sel_names.len() == 0 {
+        return;
+    }
+
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let mut new_term: Option<tir::Term> = Option::None;
+        match &f.blocks[bi].term {
+            tir::Term::Br3(t, neg, zero, pos) => {
+                match t {
+                    tir::Opnd::Val(name) => {
+                        let mut si: taddr = 0;
+                        while si < sel_names.len() {
+                            if sel_names[si].same(name) {
+                                // The select's selector dominates this
+                                // branch, so reading it here is in scope.
+                                let signs = &sel_signs[si];
+                                let mut arms: Vec<tir::Target> = Vec::new();
+                                arms.push(clone_target(neg));
+                                arms.push(clone_target(zero));
+                                arms.push(clone_target(pos));
+                                let pick_neg = clone_target(&arms[(signs[0] + 1) as taddr]);
+                                let pick_zero = clone_target(&arms[(signs[1] + 1) as taddr]);
+                                let pick_pos = clone_target(&arms[(signs[2] + 1) as taddr]);
+                                new_term = Option::Some(tir::Term::Br3(
+                                    clone_opnd(&sel_t[si]),
+                                    pick_neg,
+                                    pick_zero,
+                                    pick_pos,
+                                ));
+                            }
+                            si += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        match new_term {
+            Option::Some(t) => {
+                f.blocks[bi].term = t;
+            }
+            Option::None => {}
+        }
+        bi += 1;
+    }
+}
+
+fn sign_of(v: t27) -> t27 {
+    if v < 0 {
+        0 - 1
+    } else if v == 0 {
+        0
+    } else {
+        1
+    }
+}
+
+// ---------------------------------------------------------------- dominated checks
+
+/// A relation a branch decided, and where it became true.
+pub struct Fact {
+    pub at: String,
+    pub a: tir::Opnd,
+    pub b: tir::Opnd,
+    /// `a < b` when set, `a <= b` when not.
+    pub strict: bool,
+    /// Whether nothing has written since, so that two loads may still be
+    /// compared by what defines them.
+    pub settled: bool,
+}
+
+/// The definitions of single-result instructions, by result name.
+pub struct Defs {
+    pub names: Vec<String>,
+    pub kinds: Vec<tir::Kind>,
+}
+
+fn def_get(d: &Defs, name: &str) -> Option<tir::Kind> {
+    let mut i: taddr = 0;
+    while i < d.names.len() {
+        if d.names[i].same(name) {
+            return Option::Some(clone_kind(&d.kinds[i]));
+        }
+        i += 1;
+    }
+    Option::None
+}
+
+/// Drop a comparison a branch above it already decided (TIR §6): nothing
+/// is rewritten; an oracle costs no registers.
+fn elide_dominated_checks(f: &mut tir::Func) {
+    let mut defs = Defs { names: Vec::new(), kinds: Vec::new() };
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let mut i: taddr = 0;
+        while i < f.blocks[bi].insts.len() {
+            let inst = &f.blocks[bi].insts[i];
+            if inst.results.len() == 1 {
+                defs.names.push(inst.results[0].to_string());
+                defs.kinds.push(clone_kind(&inst.kind));
+            }
+            i += 1;
+        }
+        bi += 1;
+    }
+    let preds = predecessors_by_label(f);
+    let doms = dominators(f);
+
+    // Every fact a branch decides, and the block it becomes true in.
+    let mut facts: Vec<Fact> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let b = &f.blocks[bi];
+        match &b.term {
+            tir::Term::Br3(t, neg, zero, pos) => {
+                match t {
+                    tir::Opnd::Val(c) => {
+                        match def_get(&defs, c) {
+                            Option::Some(tir::Kind::Cmp(_, a, cb)) => {
+                                // Which edge, and therefore which
+                                // relation.
+                                let n_eq_z = neg.label.same(&zero.label);
+                                let n_eq_p = neg.label.same(&pos.label);
+                                let take = if !n_eq_z && !n_eq_p {
+                                    1
+                                } else if n_eq_z && !n_eq_p {
+                                    2
+                                } else {
+                                    0
+                                };
+                                if take > 0 {
+                                    let mut npreds: taddr = 0;
+                                    match preds_get(&preds, &neg.label) {
+                                        Option::Some(ps) => npreds = ps.len(),
+                                        Option::None => npreds = 0,
+                                    }
+                                    if npreds == 1 {
+                                        facts.push(Fact {
+                                            at: neg.label.to_string(),
+                                            a: clone_opnd(&a),
+                                            b: clone_opnd(&cb),
+                                            strict: take == 1,
+                                            settled: false,
+                                        });
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        bi += 1;
+    }
+
+    let reach = reachability(f);
+    let base_of = slot_bases(f);
+
+    let mut rewrite_at: Vec<taddr> = Vec::new();
+    let mut rewrite_to: Vec<tir::Target> = Vec::new();
+    let mut bi: taddr = 0;
+    let n = f.blocks.len();
+    while bi < n {
+        let b = &f.blocks[bi];
+        let mut check: Option<tir::Target> = Option::None;
+        match &b.term {
+            tir::Term::Br3(t, neg, zero, pos) => {
+                if same_target(zero, pos) {
+                    match t {
+                        tir::Opnd::Val(c2) => {
+                            match def_get(&defs, c2) {
+                                Option::Some(tir::Kind::Cmp(_, x2, y2)) => {
+                                    if doms_has(&doms, &b.label) {
+                                        let mut here: Vec<Fact> = Vec::new();
+                                        let mut fi: taddr = 0;
+                                        while fi < facts.len() {
+                                            let fact = &facts[fi];
+                                            if doms_contains(&doms, &b.label, &fact.at) {
+                                                let bases = fact_bases(fact, &defs, &base_of);
+                                                let mut settled = true;
+                                                let mut wi: taddr = 0;
+                                                while wi < n {
+                                                    let w = &f.blocks[wi];
+                                                    if clobbers(w, &bases, &base_of)
+                                                        && reach_at(&reach, f, &fact.at, wi)
+                                                        && reach_to(&reach, f, wi, &b.label)
+                                                    {
+                                                        settled = false;
+                                                    }
+                                                    wi += 1;
+                                                }
+                                                here.push(Fact {
+                                                    at: fact.at.to_string(),
+                                                    a: clone_opnd(&fact.a),
+                                                    b: clone_opnd(&fact.b),
+                                                    strict: fact.strict,
+                                                    settled: settled,
+                                                });
+                                            }
+                                            fi += 1;
+                                        }
+                                        if entails_less(&x2, &y2, &here, &defs) {
+                                            check = Option::Some(clone_target(neg));
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        match check {
+            Option::Some(target) => {
+                rewrite_at.push(bi);
+                rewrite_to.push(target);
+            }
+            Option::None => {}
+        }
+        bi += 1;
+    }
+    let mut i: taddr = 0;
+    while i < rewrite_at.len() {
+        f.blocks[rewrite_at[i]].term = tir::Term::Br(clone_target(&rewrite_to[i]));
+        i += 1;
+    }
+    prune_unreachable(f);
+    remove_dead(f);
+}
+
+/// The predecessors of each block, deduplicated, in writing order.
+pub struct Preds {
+    pub labels: Vec<String>,
+    pub lists: Vec<Vec<String>>,
+}
+
+fn preds_get(p: &Preds, label: &str) -> Option<Vec<String>> {
+    let mut i: taddr = 0;
+    while i < p.labels.len() {
+        if p.labels[i].same(label) {
+            let mut out: Vec<String> = Vec::new();
+            let mut k: taddr = 0;
+            while k < p.lists[i].len() {
+                out.push(p.lists[i][k].to_string());
+                k += 1;
+            }
+            return Option::Some(out);
+        }
+        i += 1;
+    }
+    Option::None
+}
+
+fn predecessors_by_label(f: &tir::Func) -> Preds {
+    let mut out = Preds { labels: Vec::new(), lists: Vec::new() };
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let succ = successors(&f.blocks[bi].term);
+        let mut s: taddr = 0;
+        while s < succ.len() {
+            let label = &succ[s];
+            let mut i: taddr = 0;
+            let mut found = false;
+            while i < out.labels.len() {
+                if out.labels[i].same(label) {
+                    found = true;
+                    break;
+                }
+                i += 1;
+            }
+            if !found {
+                out.labels.push(label.to_string());
+                out.lists.push(Vec::new());
+            }
+            if !name_in(&out.lists[i], &f.blocks[bi].label) {
+                out.lists[i].push(f.blocks[bi].label.to_string());
+            }
+            s += 1;
+        }
+        bi += 1;
+    }
+    out
+}
+
+/// The transitive closure of the successor relation, as a square of bits.
+pub struct Reach {
+    pub n: taddr,
+    pub to: Vec<bool>,
+}
+
+/// Whether a small `taddr` list holds a value.
+fn ss_contains(v: &Vec<taddr>, x: taddr) -> bool {
+    let mut i: taddr = 0;
+    while i < v.len() {
+        if v[i] == x {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn reach_get(r: &Reach, i: taddr, j: taddr) -> bool {
+    r.to[i * r.n + j]
+}
+
+fn reach_set(r: &mut Reach, i: taddr, j: taddr) {
+    let k = i * r.n + j;
+    r.to[k] = true;
+}
+
+fn reachability(f: &tir::Func) -> Reach {
+    let n = f.blocks.len();
+    let mut r = Reach { n: n, to: Vec::new() };
+    let mut i: taddr = 0;
+    while i < n * n {
+        r.to.push(false);
+        i += 1;
+    }
+    let mut bi: taddr = 0;
+    while bi < n {
+        reach_set(&mut r, bi, bi);
+        let succ = successors(&f.blocks[bi].term);
+        let mut s: taddr = 0;
+        while s < succ.len() {
+            let j = block_index(f, &succ[s]);
+            if j < n {
+                reach_set(&mut r, bi, j);
+            }
+            s += 1;
+        }
+        bi += 1;
+    }
+    let mut k: taddr = 0;
+    while k < n {
+        let mut i: taddr = 0;
+        while i < n {
+            if reach_get(&r, i, k) {
+                let mut j: taddr = 0;
+                while j < n {
+                    if reach_get(&r, k, j) {
+                        reach_set(&mut r, i, j);
+                    }
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+        k += 1;
+    }
+    r
+}
+
+fn reach_at(r: &Reach, f: &tir::Func, from: &str, w: taddr) -> bool {
+    let i = block_index(f, from);
+    if i >= f.blocks.len() {
+        return false;
+    }
+    reach_get(r, i, w)
+}
+
+fn reach_to(r: &Reach, f: &tir::Func, w: taddr, to: &str) -> bool {
+    let j = block_index(f, to);
+    if j >= f.blocks.len() {
+        return false;
+    }
+    reach_get(r, w, j)
+}
+
+/// Whether a block can write the memory these slots hold.
+fn clobbers(b: &tir::Block, bases: &Option<SSet>, base_of: &OMap) -> bool {
+    match bases {
+        Option::None => writes(b),
+        Option::Some(set) => {
+            let mut i: taddr = 0;
+            while i < b.insts.len() {
+                match &b.insts[i].kind {
+                    tir::Kind::Store(_, _, tir::Opnd::Val(p)) => {
+                        match omap_get(base_of, p) {
+                            Option::Some(tir::Opnd::Val(s)) => {
+                                if sset_has(set, &s) {
+                                    return true;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            false
+        }
+    }
+}
+
+/// Whether a block writes anything a later read could see.
+fn writes(b: &tir::Block) -> bool {
+    let mut i: taddr = 0;
+    while i < b.insts.len() {
+        match &b.insts[i].kind {
+            tir::Kind::Store(_, _, _) => return true,
+            tir::Kind::Call(_, _, _) => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The slots a fact's operands read, or nothing if any read is from
+/// somewhere this cannot name.
+fn fact_bases(fact: &Fact, defs: &Defs, base_of: &OMap) -> Option<SSet> {
+    let mut out = sset_new();
+    let r1 = collect_bases(&fact.a, defs, base_of, &mut out, 0);
+    if r1 != 0 {
+        return Option::None;
+    }
+    let r2 = collect_bases(&fact.b, defs, base_of, &mut out, 0);
+    if r2 != 0 {
+        return Option::None;
+    }
+    Option::Some(out)
+}
+
+/// 0 for done, 1 when a read is from somewhere this cannot name.
+fn collect_bases(o: &tir::Opnd, defs: &Defs, base_of: &OMap, out: &mut SSet, depth: taddr) -> taddr {
+    if depth > 4 {
+        return 1;
+    }
+    match o {
+        tir::Opnd::Val(v) => {
+            match def_get(defs, v) {
+                Option::None => 0,
+                Option::Some(tir::Kind::Load(_, p)) => {
+                    match p {
+                        tir::Opnd::Val(a) => {
+                            match omap_get(base_of, &a) {
+                                Option::Some(tir::Opnd::Val(s)) => {
+                                    sset_add(out, &s);
+                                    0
+                                }
+                                _ => 1,
+                            }
+                        }
+                        _ => 1,
+                    }
+                }
+                Option::Some(tir::Kind::Flav(_, _, _, a, b)) => {
+                    let r = collect_bases(&a, defs, base_of, out, depth + 1);
+                    if r != 0 {
+                        r
+                    } else {
+                        collect_bases(&b, defs, base_of, out, depth + 1)
+                    }
+                }
+                Option::Some(tir::Kind::Plain(_, _, a, b)) => {
+                    let r = collect_bases(&a, defs, base_of, out, depth + 1);
+                    if r != 0 {
+                        r
+                    } else {
+                        collect_bases(&b, defs, base_of, out, depth + 1)
+                    }
+                }
+                Option::Some(_) => 0,
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Whether two operands must hold the same value — by what defines them,
+/// not by what they are called.
+fn equiv(a: &tir::Opnd, b: &tir::Opnd, defs: &Defs, depth: taddr, clean: bool) -> bool {
+    // The same name is the same value, whatever happened in between.
+    if same_opnd(a, b) {
+        return true;
+    }
+    if depth > 4 {
+        return false;
+    }
+    let x = match a {
+        tir::Opnd::Val(x) => x,
+        _ => return false,
+    };
+    let y = match b {
+        tir::Opnd::Val(y) => y,
+        _ => return false,
+    };
+    let dx = match def_get(defs, x) {
+        Option::Some(k) => k,
+        Option::None => return false,
+    };
+    let dy = match def_get(defs, y) {
+        Option::Some(k) => k,
+        Option::None => return false,
+    };
+    match &dx {
+        tir::Kind::Load(t1, p1) => {
+            match &dy {
+                tir::Kind::Load(t2, p2) => {
+                    clean && same_ty(&t1, &t2) && equiv(p1, p2, defs, depth + 1, clean)
+                }
+                _ => false,
+            }
+        }
+        tir::Kind::Offset(p1, d1) => {
+            match &dy {
+                tir::Kind::Offset(p2, d2) => {
+                    equiv(p1, p2, defs, depth + 1, clean) && equiv(d1, d2, defs, depth + 1, clean)
+                }
+                _ => false,
+            }
+        }
+        tir::Kind::Flav(o1, f1, t1, a1, b1) => {
+            match &dy {
+                tir::Kind::Flav(o2, f2, t2, a2, b2) => {
+                    o1 == o2
+                        && f1 == f2
+                        && same_ty(&t1, &t2)
+                        && equiv(a1, a2, defs, depth + 1, clean)
+                        && equiv(b1, b2, defs, depth + 1, clean)
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Whether `z <= y` is known: the same value, two constants in order, or a
+/// fact `z < y`.
+fn no_larger(z: &tir::Opnd, y: &tir::Opnd, defs: &Defs, clean: bool) -> bool {
+    if equiv(z, y, defs, 0, clean) {
+        return true;
+    }
+    match z {
+        tir::Opnd::Konst(_, a) => {
+            match y {
+                tir::Opnd::Konst(_, w) => a <= w,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Whether the facts force `x < y`: directly, or through one step.
+fn entails_less(x: &tir::Opnd, y: &tir::Opnd, facts: &Vec<Fact>, defs: &Defs) -> bool {
+    let mut i: taddr = 0;
+    while i < facts.len() {
+        let f1 = &facts[i];
+        if equiv(&f1.a, x, defs, 0, f1.settled) {
+            // `x < y` outright.
+            if f1.strict && equiv(&f1.b, y, defs, 0, f1.settled) {
+                return true;
+            }
+            // One step: `x ? z` and `z ? y`, strict at least once.
+            if f1.strict && no_larger(&f1.b, y, defs, f1.settled) {
+                return true;
+            }
+            let mut j: taddr = 0;
+            while j < facts.len() {
+                let f2 = &facts[j];
+                if (f1.strict || f2.strict)
+                    && equiv(&f1.b, &f2.a, defs, 0, f1.settled && f2.settled)
+                    && equiv(&f2.b, y, defs, 0, f2.settled)
+                {
+                    return true;
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The dominator sets of every reachable block, by label: Cooper, Harvey
+/// and Kennedy's algorithm — reverse postorder, then a fixpoint over
+/// immediate dominators where the meet is a walk up the chains.
+pub struct Doms {
+    pub labels: Vec<String>,
+    pub sets: Vec<SSet>,
+}
+
+fn doms_has(d: &Doms, label: &str) -> bool {
+    name_in(&d.labels, label)
+}
+
+fn doms_contains(d: &Doms, label: &str, what: &str) -> bool {
+    let mut i: taddr = 0;
+    while i < d.labels.len() {
+        if d.labels[i].same(label) {
+            return sset_has(&d.sets[i], what);
+        }
+        i += 1;
+    }
+    false
+}
+
+fn dominators(f: &tir::Func) -> Doms {
+    let n = f.blocks.len();
+    let mut succs: Vec<Vec<taddr>> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < n {
+        let mut ss: Vec<taddr> = Vec::new();
+        let succ = successors(&f.blocks[bi].term);
+        let mut s: taddr = 0;
+        while s < succ.len() {
+            let j = block_index(f, &succ[s]);
+            if j < n && !ss_contains(&ss, j) {
+                ss.push(j);
+            }
+            s += 1;
+        }
+        succs.push(ss);
+        bi += 1;
+    }
+
+    // Reverse postorder: the order that makes the fixpoint converge in a
+    // couple of passes for anything a compiler emits.
+    let mut post: Vec<taddr> = Vec::new();
+    let mut seen: Vec<bool> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < n {
+        seen.push(false);
+        bi += 1;
+    }
+    if n > 0 {
+        seen[0] = true;
+    }
+    let mut stack_b: Vec<taddr> = Vec::new();
+    let mut stack_k: Vec<taddr> = Vec::new();
+    if n > 0 {
+        stack_b.push(0);
+        stack_k.push(0);
+    }
+    while stack_b.len() > 0 {
+        let b = stack_b[stack_b.len() - 1];
+        let k = stack_k[stack_k.len() - 1];
+        if k < succs[b].len() {
+            stack_k[stack_k.len() - 1] = k + 1;
+            let s = succs[b][k];
+            if !seen[s] {
+                seen[s] = true;
+                stack_b.push(s);
+                stack_k.push(0);
+            }
+        } else {
+            post.push(b);
+            stack_b.pop();
+            stack_k.pop();
+        }
+    }
+    let mut rpo: Vec<taddr> = Vec::new();
+    let mut i: taddr = post.len();
+    while i > 0 {
+        i -= 1;
+        rpo.push(post[i]);
+    }
+    let mut rank: Vec<taddr> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < n {
+        rank.push(1_000_000);
+        bi += 1;
+    }
+    let mut r: taddr = 0;
+    while r < rpo.len() {
+        rank[rpo[r]] = r;
+        r += 1;
+    }
+
+    let mut preds: Vec<Vec<taddr>> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < n {
+        preds.push(Vec::new());
+        bi += 1;
+    }
+    let mut bi: taddr = 0;
+    while bi < n {
+        let mut s: taddr = 0;
+        while s < succs[bi].len() {
+            preds[succs[bi][s]].push(bi);
+            s += 1;
+        }
+        bi += 1;
+    }
+
+    let none: taddr = 1_000_000;
+    let mut idom: Vec<taddr> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < n {
+        idom.push(none);
+        bi += 1;
+    }
+    if n > 0 {
+        idom[0] = 0;
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let mut ri: taddr = 1;
+        while ri < rpo.len() {
+            let b = rpo[ri];
+            let mut new = none;
+            let mut pi: taddr = 0;
+            while pi < preds[b].len() {
+                let p = preds[b][pi];
+                if idom[p] != none {
+                    if new == none {
+                        new = p;
+                    } else {
+                        new = dom_meet(p, new, &idom, &rank, none);
+                    }
+                }
+                pi += 1;
+            }
+            if new != none && idom[b] != new {
+                idom[b] = new;
+                changed = true;
+            }
+            ri += 1;
+        }
+    }
+
+    let mut out = Doms { labels: Vec::new(), sets: Vec::new() };
+    let mut ri: taddr = 0;
+    while ri < rpo.len() {
+        let b = rpo[ri];
+        let mut set = sset_new();
+        let mut at = b;
+        loop {
+            sset_add(&mut set, &f.blocks[at].label);
+            if at == 0 {
+                break;
+            }
+            at = idom[at];
+        }
+        out.labels.push(f.blocks[b].label.to_string());
+        out.sets.push(set);
+        ri += 1;
+    }
+    out
+}
+
+/// The meet: walk both up until they meet, which is the deepest block
+/// dominating them both.
+fn dom_meet(a: taddr, b: taddr, idom: &Vec<taddr>, rank: &Vec<taddr>, none: taddr) -> taddr {
+    let mut x = a;
+    let mut y = b;
+    while x != y {
+        while rank[x] > rank[y] {
+            x = idom[x];
+        }
+        while rank[y] > rank[x] {
+            y = idom[y];
+        }
+    }
+    x
+}

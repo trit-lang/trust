@@ -10,6 +10,13 @@ trustc — the Trust compiler (draft 0.1)
 usage:
     trustc check <file.tir>                    parse and verify a TIR module
     trustc fmt <file.tir>                      print a module in canonical form
+    trustc canon <file.tir>                    canonicalize a module, target-
+                                               independently (TIR §6), and
+                                               print the result
+    trustc preopt <file.tir>                   the whole target-independent
+                                               half of `compile` — canon,
+                                               inline, drop, canon — and
+                                               print the result
     trustc run <file.tir> [@fn] [args…]        interpret a TIR function
     trustc legalize <file.tir> [file.target]   legalize for a target (TIR §6)
     trustc tir <file.tr>                       compile Trust source to TIR
@@ -31,6 +38,8 @@ fn main() -> ExitCode {
     let result = match cmd.as_str() {
         "check" => cmd_check(rest),
         "fmt" => cmd_fmt(rest),
+        "canon" => cmd_canon(rest),
+        "preopt" => cmd_preopt(rest),
         "run" => cmd_run(rest),
         "legalize" => cmd_legalize(rest),
         "tir" => cmd_build(rest),
@@ -86,6 +95,32 @@ fn cmd_fmt(args: &[String]) -> Result<(), String> {
     let path = args.first().ok_or("fmt: expected a file")?;
     let src = read(path)?;
     let module = tir::parse_module(&src).map_err(|e| format!("{path}:{e}"))?;
+    print!("{}", tir::print_module(&module));
+    Ok(())
+}
+
+fn cmd_canon(args: &[String]) -> Result<(), String> {
+    let path = args.first().ok_or("canon: expected a file")?;
+    let module = load(path)?;
+    // The same read `compile` makes of `optimize-then-legalize`: the first
+    // half of that seam, printed, so the second implementation's
+    // canonicalizer can be held to this one without assembling the whole
+    // backend first (see `bootstrap/tircanon.tr`).
+    let canonical = tir::canonicalize_module(&module);
+    print!("{}", tir::print_module(&canonical));
+    Ok(())
+}
+
+fn cmd_preopt(args: &[String]) -> Result<(), String> {
+    let path = args.first().ok_or("preopt: expected a file")?;
+    let module = load(path)?;
+    // Everything `compile` is before legalization, printed at the seam where
+    // the module stops changing shape by agreement and starts changing for a
+    // target (see the same pipeline in `cmd_compile`).
+    let module = tir::canonicalize_module(&module);
+    let mut module = tir::inline_module(&module);
+    tir::drop_uncalled(&mut module, &["main"]);
+    let module = tir::canonicalize_module(&module);
     print!("{}", tir::print_module(&module));
     Ok(())
 }

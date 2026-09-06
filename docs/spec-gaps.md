@@ -2770,6 +2770,22 @@ macros parity is covered by `programs/macros/main.tr` (the suite's own,
 including the iterator spread over take-of-any) and
 `examples/trust/macros.tr` at the same line.
 
+**G9.184 — recorded, not settled: an `Option<()>` carried up a recursion
+was a run-time bomb, and a status code was not.** The second
+canonicalizer's `collect_bases` first answered `Option<()>` from inside
+its depth-limited walk, the caller matching on the answer — and that
+shape, and nothing else about the pass, made the assembled program die
+at run time under `F_ALIGN`. Answering with a `taddr` status code
+instead — the walk otherwise unchanged — made it not die, and the lane
+then went character-for-character green over the whole corpus. Whether
+the bomb is the unit payload's layout, the recursion's frame, or the
+match's scrutinee is not proven; the itch is recorded here so the next
+one who scratches in this spot knows where the scar is. The rest of
+G9.184's work is settled in the file it was found in: TIR §6's
+canonicalizer exists twice now, `bootstrap/tircanon.tr` holds the seven
+passes to `trustc canon` on every module of the corpus, and the two
+print the same module.
+
 **G9.183 — recorded, not settled: the printer of TIR's text and the
 reader of it disagree about what a name is.** The lowering names its
 slots `%#wild1.slot.4` and `%#pat1.slot.4` — a `#` from the counter of
