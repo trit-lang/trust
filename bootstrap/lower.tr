@@ -8616,13 +8616,20 @@ fn method_value(
     // somebody's generic is not asked here: `it: I` answers through its
     // bound, not through a candidate (Ch. 4 §1.7).
     if inst >= 0 {
+        // A blanket's `I` is the receiver's whole type, whoever wrote it
+        // around: an instance of a family's own is *still* one name, and
+        // what a blanket wants of it is the name, not the key the type was
+        // made under — `Map.Range.t27.main.closure1` fits `I` by itself
+        // (G9.179).
+        let mut whole: Vec<String> = Vec::new();
+        whole.push(owner.to_string());
         let mut bi: taddr = 0;
         let mut found: taddr = 0 - 1;
         while bi < e.families.len() {
             let cand = e.families[bi].name.to_string();
             if e.families[bi].blanket
                 && e.families[bi].from_self > 0
-                && e.families[bi].from_self == given.len() as taddr
+                && e.families[bi].from_self == whole.len() as taddr
                 && tray_of(&cand, name)
             {
                 found = bi as taddr;
@@ -12034,6 +12041,56 @@ fn tyvar_fnsigs(f: &ast::Fn, outer: taddr) -> Vec<String> {
 ///
 /// An *argument* that is one takes the whole signature with it, because a
 /// closure's parameters are settled together or not at all.
+/// The bound's signature **as the call already spells it**: a name that
+/// was a parameter of the family stays one today, because an untyped
+/// closure asking of it cannot yet say — but one written *of* something
+/// else (`Self::Item`) the receiver already has a name for, and naming it
+/// is a hint worth giving (Ch. 4 §4.3, G9.180).
+fn fnsig_hint_resolved(
+    e: &mut Emit,
+    fam: taddr,
+    given: &Vec<String>,
+    self_name: &str,
+    sig: &str,
+) -> String {
+    let front = ast::copy_names(&e.families[fam].tyvars);
+    let asked = fnsig_args(sig);
+    let mut all: String = Vec::new();
+    let mut i: taddr = 0;
+    while i < asked.len() {
+        let mut part = asked[i].to_string();
+        // A piece with a `::` inside is a lookup: what `Self` names is the
+        // receiver's whole instantiation, and what it holds the impl wrote.
+        let c = find_colon(&part);
+        if c >= 0 {
+            let heading = heading_of(&part, c);
+            let mut chosen = heading.to_string();
+            if heading.same("Self") {
+                chosen = self_name.to_string();
+            } else {
+                chosen = subst(&front, given, &heading);
+            }
+            if !chosen.same(&heading) {
+                let held = assoc_through_name(e, &heading, &chosen, &part, c + 2);
+                if held.len() > 0 {
+                    part = held;
+                }
+            }
+        }
+        if i > 0 {
+            all.push(',');
+        }
+        all.push_str(&part);
+        i += 1;
+    }
+    all.push('>');
+    let answer = fnsig_answer(sig);
+    if !holds_name(&front, &answer) {
+        all.push_str(&answer);
+    }
+    all
+}
+
 fn fnsig_hint(names: &Vec<String>, sig: &str) -> String {
     if sig.len() == 0 {
         return "".to_string();
@@ -12418,6 +12475,17 @@ fn find_colon(s: &str) -> taddr {
     0 - 1
 }
 
+/// The part of `…::…` before its first `::`, which is the impl being asked.
+fn heading_of(s: &str, end: taddr) -> String {
+    let mut out: String = Vec::new();
+    let mut i: taddr = 0;
+    while i < end {
+        out.push(s[i]);
+        i += 1;
+    }
+    out
+}
+
 /// The rest of a `…::…` piece, resolved where the impl holding it asks
 /// from: the first of it under its own name and key, and then the name
 /// itself, the same walk every other name takes (Ch. 4 §1.7).
@@ -12625,7 +12693,7 @@ fn generic_call(
                     let at = name_at(&e.families[fam].tyvars, &declared[i]);
                     if at >= 0 && at < e.families[fam].fnsigs.len() {
                         let sig = e.families[fam].fnsigs[at].to_string();
-                        hint = fnsig_hint(&e.families[fam].tyvars, &sig);
+                        hint = fnsig_hint_resolved(e, fam, given, self_name, &sig);
                     }
                 }
                 e.fn_want = hint;

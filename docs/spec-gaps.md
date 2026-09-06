@@ -2724,15 +2724,25 @@ of its closure's closure: `Take`'s `type Item = I::Item` descends where
 `I` is a Map-instance, and the *selfs* the chain arrives at stay
 `Map.Range.t27.main.closure1` (`ft5`'s chain, `ft5d`'s `.take(2)`-only
 shape, `fc12`'s `let n = m.next(); 0`, `fc10`'s direct chain,
-`fc7`'s same-down-a-for). Bottom out with: `for it in
-(1..4).map(|x| x * 2)` (fc6), where the closure is *not* a closure's
-written type but an untyped `|x|`, whose answer is the *same question* —
-under `前瞻 fn_want`hands — this chain *still* descends the line.
-**G9.180 — recorded, not settled: the closure's hint itself is a
-question.**fc6's shape is a `for` over the map of an untyped closure:
-what the closure asks is settled the same way as every other closure
-that has `fn_want` set, but the file walks it after two of the three
-walks that precede it here.
+`fc7`'s same-down-a-for). And where the closure is *asked*, the bound
+already says it: `Fn(Self::Item) -> R` for an untyped `|x| x * 2` is not
+two unknowns but one — Self::Item is read off the receiver's own key —
+and the hint for the `x` settles where the trait left it (fc6, fc1-FC3-
+class, fx1 — the closure-hint question beside this one). Since `for`-desugar only calls
+`into_iter` of the blanket, and `from_self = 1` wants the receiver's own
+whole name and not its self-args, the blanket-scan names it equivalently
+for every family-instance (`Map.Range.t27.main.closure1` for `Map<I,F>`
+by projection — `*map` is exactly as `I` — `into_iter` on it bakes the
+whole).
+
+**G9.181 — recorded, not settled: the rest of the prelude's iterator
+genera.** The remaining chains (a named-`fn` as the closure's answer —
+fc15 against `fn double(x: t27) -> t27 { x * 2 }` — are a fn*item* where
+the call-site's `Fn` bound was a closure's argument, which is a narrower
+question than the one this file now spells, and the two say the same
+thing only where the fn itself registers a `main.double`-of-the-kind
+what notes itself says. `VecIter`'s own for-of-`&Vec` spread is the
+other open cousin.
  And in a *non-chained* receiver the answer is not read
 *first*: `f.inner.next()` in a member's own body answers where the
 receiver's own method answers, `Range.next.t27` with the `option.t27`
