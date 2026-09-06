@@ -2769,6 +2769,27 @@ it — and the other implementation is right to refuse by name. Whole
 macros parity is covered by `programs/macros/main.tr` (the suite's own,
 including the iterator spread over take-of-any) and
 `examples/trust/macros.tr` at the same line.
+
+**G9.183 — recorded, not settled: the printer of TIR's text and the
+reader of it disagree about what a name is.** The lowering names its
+slots `%#wild1.slot.4` and `%#pat1.slot.4` — a `#` from the counter of
+bindings nobody wrote (Ch. 0 §5.2) — but TIR §8's lexer reads a name as
+letters, digits, `_` and `.` and nothing else, so `trustc fmt`, reading
+the canonical text the printer only just wrote, refuses
+`bootstrap/lowered/02.tr`'s module and `bootstrap/lowered/21.tr`'s on
+exactly that character. `compiler/src/codegen.rs` banked on the dot
+being the mangler ("TIR values are named by the frontend, which mangles
+with `.`"), which it mostly is; the `#` comes from the one place that
+never goes through the mangler, the pattern counter. It is a hole in
+the *contract*, not in either implementation, and now there are two
+readers to prove it says the same thing twice: `bootstrap/tir.tr`
+parses the text form from inside the language and `bootstrap/tirfmt.tr`
+holds it to `trustc fmt` on every module of the corpus — agreeing on
+the twenty-two that parse, and refusing the two that do not at the same
+word on the same line. Where the fix belongs — the counter's alphabet,
+or §8's table of word characters — is a Naming question, and until it
+is answered both readers keep the refusal rather than either one
+reading past it.
  And in a *non-chained* receiver the answer is not read
 *first*: `f.inner.next()` in a member's own body answers where the
 receiver's own method answers, `Range.next.t27` with the `option.t27`

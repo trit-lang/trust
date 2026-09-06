@@ -1,0 +1,28 @@
+// TIR §8, round-tripped: a module read from stdin and written back in
+// canonical form.
+//
+//     trust run bootstrap/tirfmt.tr < module.tir
+//
+// The text form is the canonical serialization of TIR, so parsing it and
+// printing again must reproduce it exactly — and must reproduce what
+// `trustc fmt` prints, which the suite holds this to on every module the
+// lowered corpus stands for. A module the text form cannot hold — one
+// naming a value `%#wild…` (G9.183) — is refused here as it is there, and
+// nothing is printed.
+
+mod input;
+mod tir;
+
+fn main() -> t27 {
+    let src = input::read_all();
+    match tir::parse(&src) {
+        Result::Ok(m) => {
+            tir::print_module(&m);
+            0
+        }
+        Result::Err(e) => {
+            let _ = e;
+            1
+        }
+    }
+}

@@ -527,6 +527,28 @@ for f in bootstrap/lowered/*.tr; do
             } > "$tmp/$idx.err"
             exit 1
         fi
+        # And then the text is read back, by each implementation's own
+        # reader: TIR's text form is the canonical serialization (TIR §8),
+        # so `trustc fmt` and `bootstrap/tirfmt.tr` print the same module
+        # for it or it was not written down. Where the form cannot hold the
+        # module at all — the `%#wild…` slot names of G9.183 — refusal is
+        # agreement too: neither reader reads it.
+        printf '%s\n' "$rust" > "$tmp/$idx.tir"
+        if rfmt=$("$trustc" fmt "$tmp/$idx.tir" 2>/dev/null); then
+            mfmt=$(printf '%s\n' "$rust" | "$trust" run bootstrap/tirfmt.tr 2>/dev/null)
+            if [ "$rfmt" != "$mfmt" ]; then
+                {
+                    echo "bootstrap: the two readers of the text form print $f differently"
+                    diff <(printf '%s\n' "$rfmt") <(printf '%s\n' "$mfmt") | head -10
+                } > "$tmp/$idx.err"
+                exit 1
+            fi
+        elif printf '%s\n' "$rust" | "$trust" run bootstrap/tirfmt.tr > /dev/null 2>&1; then
+            {
+                echo "bootstrap: the text form of $f is refused by one reader and not the other"
+            } > "$tmp/$idx.err"
+            exit 1
+        fi
         printf '%s\n' "$rust" | wc -l > "$tmp/$idx.n"
     ) &
     idx=$((idx + 1))

@@ -1,0 +1,1830 @@
+// The TIR textual format (TIR §8), in Trust.
+//
+// This is `compiler/src/tir/text.rs` written again in the language it helps
+// compile: the lexer, the parser, and the canonical printer of the Ternary
+// Intermediate Representation. The text form is the canonical serialization
+// — there is no binary encoding — so reading it and writing it back is the
+// first thing a backend written in Trust must do exactly the way the one
+// written in Rust does. `bootstrap/tirfmt.tr` holds it to `trustc fmt`,
+// character for character, on every module the suite lowers.
+//
+// What is mirrored is behavior, not just shape: `br2` is sugar for the
+// `br3` whose first two arms coincide and prints as sugar again, `tneg`
+// parses to `neg`, a `"0h"`-prefixed constant is heptavintimal, and a name
+// is `[A-Za-z0-9_.]` and nothing else — the last by proof: two files of the
+// lowered corpus name values `%#wild…`, and this reader refuses them
+// exactly where the Rust one does (G9.183).
+
+// ---------------------------------------------------------------- types
+
+/// A TIR type (TIR §2): `tN`, or `ptr`.
+pub enum Ty {
+    Int(taddr),
+    Ptr,
+}
+
+fn same_ty(a: &Ty, b: &Ty) -> bool {
+    match a {
+        Ty::Int(n) => match b {
+            Ty::Int(m) => n == m,
+            _ => false,
+        },
+        Ty::Ptr => match b {
+            Ty::Ptr => true,
+            _ => false,
+        },
+    }
+}
+
+fn clone_ty(t: &Ty) -> Ty {
+    match t {
+        Ty::Int(n) => Ty::Int(n),
+        Ty::Ptr => Ty::Ptr,
+    }
+}
+
+/// An instruction operand: `%name`, `const tN <literal>`, or `@name`.
+pub enum Opnd {
+    Val(String),
+    Konst(Ty, t27),
+    Glob(String),
+}
+
+fn same_opnd(a: &Opnd, b: &Opnd) -> bool {
+    match a {
+        Opnd::Val(x) => match b {
+            Opnd::Val(y) => x.same(y),
+            _ => false,
+        },
+        Opnd::Konst(t, v) => match b {
+            Opnd::Konst(u, w) => same_ty(&t, &u) && v == w,
+            _ => false,
+        },
+        Opnd::Glob(x) => match b {
+            Opnd::Glob(y) => x.same(y),
+            _ => false,
+        },
+    }
+}
+
+fn clone_opnd(o: &Opnd) -> Opnd {
+    match o {
+        Opnd::Val(v) => Opnd::Val(v.to_string()),
+        Opnd::Konst(t, v) => Opnd::Konst(clone_ty(&t), v),
+        Opnd::Glob(g) => Opnd::Glob(g.to_string()),
+    }
+}
+
+/// A branch destination plus the arguments for its block parameters.
+pub struct Target {
+    pub label: String,
+    pub args: Vec<Opnd>,
+}
+
+fn same_target(a: &Target, b: &Target) -> bool {
+    if !a.label.same(&b.label) {
+        return false;
+    }
+    if a.args.len() != b.args.len() {
+        return false;
+    }
+    let mut i: taddr = 0;
+    while i < a.args.len() {
+        if !same_opnd(&a.args[i], &b.args[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// What a `call` transfers to (TIR §3.7): a symbol, or a pointer's contents.
+pub enum Callee {
+    Direct(String),
+    Indirect(Opnd),
+}
+
+// The flavored operations, numbered: the tables below name them both ways.
+// 0 = add, 1 = sub, 2 = mul, 3 = shl.
+fn flavored_code(stem: &str) -> Option<taddr> {
+    if stem.same("add") {
+        Option::Some(0)
+    } else if stem.same("sub") {
+        Option::Some(1)
+    } else if stem.same("mul") {
+        Option::Some(2)
+    } else if stem.same("shl") {
+        Option::Some(3)
+    } else {
+        Option::None
+    }
+}
+
+fn flavored_name(op: taddr) -> String {
+    if op == 0 {
+        "add".to_string()
+    } else if op == 1 {
+        "sub".to_string()
+    } else if op == 2 {
+        "mul".to_string()
+    } else {
+        "shl".to_string()
+    }
+}
+
+// The overflow flavors, numbered: 0 = wrap, 1 = trap, 2 = flag.
+fn flavor_code(word: &str) -> Option<taddr> {
+    if word.same("wrap") {
+        Option::Some(0)
+    } else if word.same("trap") {
+        Option::Some(1)
+    } else if word.same("flag") {
+        Option::Some(2)
+    } else {
+        Option::None
+    }
+}
+
+fn flavor_suffix(flavor: taddr) -> String {
+    if flavor == 0 {
+        ".wrap".to_string()
+    } else if flavor == 1 {
+        ".trap".to_string()
+    } else {
+        ".flag".to_string()
+    }
+}
+
+// The plain operations — total, or faulting on their own terms (TIR §3.1):
+// 0 = mulh, 1 = div, 2 = rem, 3 = shr, 4 = tmin, 5 = tmax, 6 = tmul.
+fn plain_code(stem: &str) -> Option<taddr> {
+    if stem.same("mulh") {
+        Option::Some(0)
+    } else if stem.same("div") {
+        Option::Some(1)
+    } else if stem.same("rem") {
+        Option::Some(2)
+    } else if stem.same("shr") {
+        Option::Some(3)
+    } else if stem.same("tmin") {
+        Option::Some(4)
+    } else if stem.same("tmax") {
+        Option::Some(5)
+    } else if stem.same("tmul") {
+        Option::Some(6)
+    } else {
+        Option::None
+    }
+}
+
+fn plain_name(op: taddr) -> String {
+    if op == 0 {
+        "mulh".to_string()
+    } else if op == 1 {
+        "div".to_string()
+    } else if op == 2 {
+        "rem".to_string()
+    } else if op == 3 {
+        "shr".to_string()
+    } else if op == 4 {
+        "tmin".to_string()
+    } else if op == 5 {
+        "tmax".to_string()
+    } else {
+        "tmul".to_string()
+    }
+}
+
+/// What an instruction computes.
+pub enum Kind {
+    /// `add<fl> tN %a, %b` and friends: op, flavor, type, left, right.
+    Flav(taddr, taddr, Ty, Opnd, Opnd),
+    /// `div`/`rem`/`shr`/`tmin`/`tmax`/`tmul`/`mulh`: op, type, left, right.
+    Plain(taddr, Ty, Opnd, Opnd),
+    /// `neg tN %a` — `tneg` parses to this; one form survives (TIR §3.2).
+    Neg(Ty, Opnd),
+    /// `cmp tN %a, %b` — three-way, the only comparison.
+    Cmp(Ty, Opnd, Opnd),
+    /// `select3 %t, tN %vn, %vz, %vp`.
+    Select3(Opnd, Ty, Opnd, Opnd, Opnd),
+    /// `slot tryte[N]` — stack allocation of function lifetime, yields `ptr`.
+    Slot(taddr),
+    /// `load tN %p`.
+    Load(Ty, Opnd),
+    /// `store tN %v, %p`.
+    Store(Ty, Opnd, Opnd),
+    /// `offset %p, %d` — a `ptr` plus d trytes: the entire address arithmetic.
+    Offset(Opnd, Opnd),
+    /// `widen tM %a -> tN` — value-preserving.
+    Widen(Ty, Opnd, Ty),
+    /// `trunc tN %a -> tM` — wraps into the narrow symmetric range.
+    Trunc(Ty, Opnd, Ty),
+    /// `call @f(%a, %b) -> tN` — or `%p(...)` through a pointer.
+    Call(Callee, Vec<Opnd>, Option<Ty>),
+}
+
+/// One instruction: its result names and what it computes.
+pub struct Inst {
+    pub results: Vec<String>,
+    pub kind: Kind,
+}
+
+/// A block terminator (TIR §3.6). `br2` never appears here: it is `br3`
+/// whose −1 and 0 arms coincide, and the printer folds it back.
+pub enum Term {
+    Br3(Opnd, Target, Target, Target),
+    Br(Target),
+    Ret(Option<Opnd>),
+    /// `trap F_CODE` — a deliberate fault, kept as its `F_*` spelling.
+    Trap(String),
+    Unreachable,
+}
+
+/// A named, typed parameter — a function's or a block's.
+pub struct Param {
+    pub name: String,
+    pub ty: Ty,
+}
+
+/// One block: parameters, instructions, exactly one terminator.
+pub struct Block {
+    pub label: String,
+    pub params: Vec<Param>,
+    pub insts: Vec<Inst>,
+    pub term: Term,
+}
+
+/// A function signature.
+pub struct Sig {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub ret: Option<Ty>,
+}
+
+/// What `parse_function` found: a body, or only the signature.
+pub enum FnRead {
+    Def(Func),
+    Decl(Sig),
+}
+
+/// A function definition.
+pub struct Func {
+    pub sig: Sig,
+    pub blocks: Vec<Block>,
+}
+
+/// One item of a global initializer (TIR §1.2).
+pub enum InitItem {
+    /// One tryte of data.
+    Tryte(t27),
+    /// A relocation: the address of a symbol, one word wide.
+    Addr(String),
+}
+
+/// A global definition: `global @name : tryte[N] = <initializer>`.
+pub struct Global {
+    pub name: String,
+    pub trytes: taddr,
+    /// Absent means zero-initialized.
+    pub init: Option<Vec<InitItem>>,
+}
+
+/// A TIR module.
+pub struct Module {
+    pub version: String,
+    pub target: String,
+    pub globals: Vec<Global>,
+    pub decls: Vec<Sig>,
+    pub funcs: Vec<Func>,
+}
+
+// ---------------------------------------------------------------- diagnostics
+
+/// A parse failure, with the line it was found on.
+pub struct KBad {
+    pub line: taddr,
+    pub message: String,
+}
+
+fn kbad(line: taddr, message: &str) -> KBad {
+    KBad { line: line, message: message.to_string() }
+}
+
+// ---------------------------------------------------------------------- lexer
+
+pub enum Tok {
+    Word(String),
+    Sym(String),
+    Val(String),
+    Label(String),
+    Num(String),
+    Str(String),
+    Punct(char),
+    Arrow,
+    Eof,
+}
+
+pub struct Taken {
+    pub tok: Tok,
+    pub line: taddr,
+}
+
+fn word_char(c: char) -> bool {
+    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+        || c == '_' || c == '.'
+}
+
+fn lex(src: &str) -> Result<Vec<Taken>, KBad> {
+    let mut out: Vec<Taken> = Vec::new();
+    let mut line: taddr = 1;
+    let mut i: taddr = 0;
+    while i < src.len() {
+        let c = src[i];
+        if c == '\n' {
+            line += 1;
+            i += 1;
+        } else if c == ' ' || c == '\t' || c == '\r' {
+            i += 1;
+        } else if c == ';' {
+            // A comment, as in every listing in the spec.
+            while i < src.len() && src[i] != '\n' {
+                i += 1;
+            }
+        } else if c == '@' || c == '%' || c == '^' {
+            let start = i + 1;
+            let mut j = start;
+            while j < src.len() && word_char(src[j]) {
+                j += 1;
+            }
+            if j == start {
+                return Result::Err(kbad(line, "a sigil must be followed by a name"));
+            }
+            let mut name: String = Vec::new();
+            let mut k = start;
+            while k < j {
+                name.push(src[k]);
+                k += 1;
+            }
+            let tok = if c == '@' {
+                Tok::Sym(name)
+            } else if c == '%' {
+                Tok::Val(name)
+            } else {
+                Tok::Label(name)
+            };
+            out.push(Taken { tok: tok, line: line });
+            i = j;
+        } else if c == '"' {
+            let mut j = i + 1;
+            let mut s: String = Vec::new();
+            let mut closed = false;
+            while j < src.len() && src[j] != '"' {
+                if src[j] == '\n' {
+                    return Result::Err(kbad(line, "unterminated string"));
+                }
+                s.push(src[j]);
+                j += 1;
+            }
+            if j < src.len() {
+                closed = true;
+            }
+            if !closed {
+                return Result::Err(kbad(line, "unterminated string"));
+            }
+            out.push(Taken { tok: Tok::Str(s), line: line });
+            i = j + 1;
+        } else if c == '-' && i + 1 < src.len() && src[i + 1] == '>' {
+            out.push(Taken { tok: Tok::Arrow, line: line });
+            i += 2;
+        } else if c == '-' || (c >= '0' && c <= '9') {
+            let mut j = i + 1;
+            while j < src.len() && word_char(src[j]) {
+                j += 1;
+            }
+            if j == i + 1 && c == '-' {
+                return Result::Err(kbad(line, "stray `-`"));
+            }
+            let mut text: String = Vec::new();
+            let mut k = i;
+            while k < j {
+                text.push(src[k]);
+                k += 1;
+            }
+            out.push(Taken { tok: Tok::Num(text), line: line });
+            i = j;
+        } else if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' {
+            let mut j = i;
+            while j < src.len() && word_char(src[j]) {
+                j += 1;
+            }
+            let mut text: String = Vec::new();
+            let mut k = i;
+            while k < j {
+                text.push(src[k]);
+                k += 1;
+            }
+            out.push(Taken { tok: Tok::Word(text), line: line });
+            i = j;
+        } else if c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}'
+            || c == ',' || c == ':' || c == '='
+        {
+            out.push(Taken { tok: Tok::Punct(c), line: line });
+            i += 1;
+        } else {
+            return Result::Err(kbad(line, "unexpected character"));
+        }
+    }
+    out.push(Taken { tok: Tok::Eof, line: line });
+    Result::Ok(out)
+}
+
+// --------------------------------------------------------------------- parser
+
+/// Where the parser is, in a token vector that never changes under it.
+pub struct Psr {
+    pub toks: Vec<Taken>,
+    pub pos: taddr,
+}
+
+fn peek_line(p: &Psr) -> taddr {
+    p.toks[p.pos].line
+}
+
+fn clone_tok(t: &Tok) -> Tok {
+    match t {
+        Tok::Word(w) => Tok::Word(w.to_string()),
+        Tok::Sym(w) => Tok::Sym(w.to_string()),
+        Tok::Val(w) => Tok::Val(w.to_string()),
+        Tok::Label(w) => Tok::Label(w.to_string()),
+        Tok::Num(w) => Tok::Num(w.to_string()),
+        Tok::Str(w) => Tok::Str(w.to_string()),
+        Tok::Punct(c) => Tok::Punct(c),
+        Tok::Arrow => Tok::Arrow,
+        Tok::Eof => Tok::Eof,
+    }
+}
+
+fn peek(p: &Psr) -> Tok {
+    clone_tok(&p.toks[p.pos].tok)
+}
+
+fn bump(p: &mut Psr) -> Tok {
+    let t = clone_tok(&p.toks[p.pos].tok);
+    if p.pos + 1 < p.toks.len() {
+        p.pos += 1;
+    }
+    t
+}
+
+fn peek_punct(p: &Psr, c: char) -> bool {
+    match &p.toks[p.pos].tok {
+        Tok::Punct(d) => d == c,
+        _ => false,
+    }
+}
+
+fn eat_punct(p: &mut Psr, c: char) -> bool {
+    if peek_punct(p, c) {
+        bump(p);
+        return true;
+    }
+    false
+}
+
+fn expect_punct(p: &mut Psr, c: char) -> Result<(), KBad> {
+    if eat_punct(p, c) {
+        return Result::Ok(());
+    }
+    Result::Err(kbad(peek_line(p), "expected a punctuation mark"))
+}
+
+fn peek_word_is(p: &Psr, w: &str) -> bool {
+    match &p.toks[p.pos].tok {
+        Tok::Word(x) => x.same(w),
+        _ => false,
+    }
+}
+
+fn eat_word(p: &mut Psr, w: &str) -> bool {
+    if peek_word_is(p, w) {
+        bump(p);
+        return true;
+    }
+    false
+}
+
+fn expect_word(p: &mut Psr, w: &str) -> Result<(), KBad> {
+    if eat_word(p, w) {
+        return Result::Ok(());
+    }
+    Result::Err(kbad(peek_line(p), "expected a word"))
+}
+
+fn expect_val(p: &mut Psr) -> Result<String, KBad> {
+    let line = peek_line(p);
+    match bump(p) {
+        Tok::Val(v) => Result::Ok(v),
+        _ => {
+            p.pos -= 1;
+            Result::Err(kbad(line, "expected an SSA value"))
+        }
+    }
+}
+
+/// A non-negative decimal, the only integer the grammar writes bare.
+fn expect_uint(p: &mut Psr) -> Result<taddr, KBad> {
+    let line = peek_line(p);
+    match bump(p) {
+        Tok::Num(n) => {
+            if n.len() == 0 {
+                return Result::Err(kbad(line, "expected a number"));
+            }
+            let mut v: taddr = 0;
+            let mut i: taddr = 0;
+            while i < n.len() {
+                let c = n[i];
+                if c < '0' || c > '9' {
+                    return Result::Err(kbad(line, "expected a non-negative integer"));
+                }
+                v = v * 10 + (((c as t27) - ('0' as t27)) as taddr);
+                i += 1;
+            }
+            Result::Ok(v)
+        }
+        _ => {
+            p.pos -= 1;
+            Result::Err(kbad(line, "expected a number"))
+        }
+    }
+}
+
+/// `tN` or `ptr`, from a word — or nothing, if the word is neither.
+fn parse_ty_word(w: &str) -> Option<Ty> {
+    if w.same("ptr") {
+        return Option::Some(Ty::Ptr);
+    }
+    if w.len() < 2 || w[0] != 't' {
+        return Option::None;
+    }
+    let mut n: taddr = 0;
+    let mut i: taddr = 1;
+    while i < w.len() {
+        let c = w[i];
+        if c < '0' || c > '9' {
+            return Option::None;
+        }
+        n = n * 10 + (((c as t27) - ('0' as t27)) as taddr);
+        i += 1;
+    }
+    if n < 1 {
+        return Option::None;
+    }
+    Option::Some(Ty::Int(n))
+}
+
+fn parse_ty(p: &mut Psr) -> Result<Ty, KBad> {
+    let line = peek_line(p);
+    match bump(p) {
+        Tok::Word(w) => match parse_ty_word(&w) {
+            Option::Some(t) => Result::Ok(t),
+            Option::None => Result::Err(kbad(line, "not a TIR type")),
+        },
+        _ => {
+            p.pos -= 1;
+            Result::Err(kbad(line, "expected a type"))
+        }
+    }
+}
+
+fn peek_ty(p: &Psr) -> Option<Ty> {
+    match &p.toks[p.pos].tok {
+        Tok::Word(w) => parse_ty_word(w),
+        _ => Option::None,
+    }
+}
+
+// ------------------------------------------------------------- literals
+
+/// The balanced-ternary length of a value: its digits with no leading zero,
+/// which is what `fits_width` measures. Round-to-nearest division is exact
+/// here: the remainder of a balanced step is always in −1..=1.
+fn trit_len(v: t27) -> taddr {
+    let mut x = v;
+    let mut n: taddr = 0;
+    while x != 0 {
+        x = x / 3;
+        n += 1;
+    }
+    n
+}
+
+/// Whether the run from `at` is nothing but `_`, empty included.
+fn blank_run(text: &str, at: taddr) -> bool {
+    let mut i = at;
+    while i < text.len() {
+        if text[i] != '_' {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The decimal value of a run of digits with `_` allowed, from `at` to `to`.
+fn dec_run(text: &str, at: taddr, to: taddr) -> t27 {
+    let mut v: t27 = 0;
+    let mut i = at;
+    while i < to {
+        if text[i] != '_' {
+            v = v * 10 + ((text[i] as t27) - ('0' as t27));
+        }
+        i += 1;
+    }
+    v
+}
+
+/// The balanced digit value of a heptavintimal character, or −14 for none.
+fn hept_val(c: char) -> t27 {
+    if c >= '0' && c <= '9' {
+        return (c as t27) - ('0' as t27) - 13;
+    }
+    if c >= 'A' && c <= 'Q' {
+        return (c as t27) - ('A' as t27) + 10 - 13;
+    }
+    if c >= 'a' && c <= 'q' {
+        return (c as t27) - ('a' as t27) + 10 - 13;
+    }
+    0 - 14
+}
+
+/// A numeric literal in any of the three radices, sign included — the value
+/// only; the caller checks the width its `tN` allows. Mirrors
+/// `trit_core::literal::parse_literal`, order of cases included: the `t`
+/// suffix first, the binary world's prefixes rejected by name, then `0t`,
+/// `0h`, decimal.
+fn literal_value(text: &str, line: taddr) -> Result<t27, KBad> {
+    let mut neg = false;
+    let mut from: taddr = 0;
+    if text.len() > 0 && text[0] == '-' {
+        neg = true;
+        from = 1;
+    }
+    if from >= text.len() {
+        return Result::Err(kbad(line, "empty literal"));
+    }
+
+    // `1t`, `0t` and their negations: a decimal run ending in `t`, so long
+    // as it is not the `0t` prefix of a ternary literal.
+    let last = text[text.len() - 1];
+    if last == 't' && text.len() - from > 1 {
+        let mut digits = true;
+        let mut i = from;
+        while i < text.len() - 1 {
+            let c = text[i];
+            if c != '_' && (c < '0' || c > '9') {
+                digits = false;
+            }
+            i += 1;
+        }
+        let t_prefixed = text[from] == '0' && text.len() - from > 2 && text[from + 1] == 't';
+        if digits && !t_prefixed {
+            let v = dec_run(text, from, text.len() - 1);
+            let v = if neg { 0 - v } else { v };
+            if v >= 0 - 1 && v <= 1 {
+                return Result::Ok(v);
+            }
+            return Result::Err(kbad(line, "a trit literal is −1t, 0t or 1t"));
+        }
+    }
+
+    // Reject the binary world's radices by name before anything else.
+    if text[from] == '0' && text.len() - from > 1 {
+        let m = text[from + 1];
+        if m == 'b' || m == 'B' || m == 'o' || m == 'O' || m == 'x' || m == 'X' {
+            return Result::Err(kbad(line, "a binary world's radix"));
+        }
+    }
+
+    let mut v: t27 = 0;
+    if text[from] == '0' && text.len() - from > 1 && text[from + 1] == 't' {
+        if blank_run(text, from + 2) {
+            return Result::Err(kbad(line, "empty literal"));
+        }
+        let mut i = from + 2;
+        while i < text.len() {
+            let c = text[i];
+            if c != '_' {
+                let d = if c == '1' {
+                    1
+                } else if c == '0' {
+                    0
+                } else if c == 'T' || c == 't' {
+                    0 - 1
+                } else {
+                    2
+                };
+                if d == 2 {
+                    return Result::Err(kbad(line, "a bad ternary digit"));
+                }
+                v = v * 3 + d;
+            }
+            i += 1;
+        }
+    } else if text[from] == '0' && text.len() - from > 1 && text[from + 1] == 'h' {
+        if blank_run(text, from + 2) {
+            return Result::Err(kbad(line, "empty literal"));
+        }
+        let mut i = from + 2;
+        while i < text.len() {
+            let c = text[i];
+            if c != '_' {
+                let d = hept_val(c);
+                if d < 0 - 13 {
+                    return Result::Err(kbad(line, "a bad heptavintimal digit"));
+                }
+                v = v * 27 + d;
+            }
+            i += 1;
+        }
+    } else {
+        if blank_run(text, from) {
+            return Result::Err(kbad(line, "empty literal"));
+        }
+        let mut i = from;
+        while i < text.len() {
+            let c = text[i];
+            if c != '_' {
+                if c < '0' || c > '9' {
+                    return Result::Err(kbad(line, "a bad decimal digit"));
+                }
+                v = v * 10 + ((c as t27) - ('0' as t27));
+            }
+            i += 1;
+        }
+    }
+    if neg {
+        Result::Ok(0 - v)
+    } else {
+        Result::Ok(v)
+    }
+}
+
+fn parse_literal_value(p: &mut Psr, line: taddr) -> Result<t27, KBad> {
+    match bump(p) {
+        Tok::Num(n) => literal_value(&n, line),
+        _ => {
+            p.pos -= 1;
+            Result::Err(kbad(line, "expected a literal"))
+        }
+    }
+}
+
+// ------------------------------------------------------------- fragments
+
+/// `%name`, `@name`, or `const tN <literal>`.
+fn parse_opnd(p: &mut Psr) -> Result<Opnd, KBad> {
+    let line = peek_line(p);
+    match peek(p) {
+        Tok::Val(v) => {
+            bump(p);
+            Result::Ok(Opnd::Val(v))
+        }
+        Tok::Sym(g) => {
+            bump(p);
+            Result::Ok(Opnd::Glob(g))
+        }
+        Tok::Word(w) => {
+            if !w.same("const") {
+                return Result::Err(kbad(line, "expected an operand"));
+            }
+            bump(p);
+            let ty = parse_ty(p)?;
+            let vline = peek_line(p);
+            let v = parse_literal_value(p, vline)?;
+            match &ty {
+                Ty::Int(n) => {
+                    if trit_len(v) > n {
+                        return Result::Err(kbad(vline, "constant does not fit its type"));
+                    }
+                }
+                _ => {}
+            }
+            Result::Ok(Opnd::Konst(ty, v))
+        }
+        _ => Result::Err(kbad(line, "expected an operand")),
+    }
+}
+
+/// A comma-separated operand list until `)`.
+fn parse_arg_list(p: &mut Psr) -> Result<Vec<Opnd>, KBad> {
+    expect_punct(p, '(')?;
+    let mut args: Vec<Opnd> = Vec::new();
+    if !eat_punct(p, ')') {
+        loop {
+            args.push(parse_opnd(p)?);
+            if eat_punct(p, ')') {
+                break;
+            }
+            expect_punct(p, ',')?;
+        }
+    }
+    Result::Ok(args)
+}
+
+/// `^label` with an optional argument list.
+fn parse_target(p: &mut Psr) -> Result<Target, KBad> {
+    let line = peek_line(p);
+    let label = match bump(p) {
+        Tok::Label(l) => l,
+        _ => {
+            p.pos -= 1;
+            return Result::Err(kbad(line, "expected a block label"));
+        }
+    };
+    let args: Vec<Opnd> = if peek_punct(p, '(') {
+        parse_arg_list(p)?
+    } else {
+        Vec::new()
+    };
+    Result::Ok(Target { label: label, args: args })
+}
+
+/// `(%a: t27, %b: t9)` — a parameter list.
+fn parse_params(p: &mut Psr) -> Result<Vec<Param>, KBad> {
+    expect_punct(p, '(')?;
+    let mut params: Vec<Param> = Vec::new();
+    if !eat_punct(p, ')') {
+        loop {
+            let name = expect_val(p)?;
+            expect_punct(p, ':')?;
+            let ty = parse_ty(p)?;
+            params.push(Param { name: name, ty: ty });
+            if eat_punct(p, ')') {
+                break;
+            }
+            expect_punct(p, ',')?;
+        }
+    }
+    Result::Ok(params)
+}
+
+fn clone_args(args: &Vec<Opnd>) -> Vec<Opnd> {
+    let mut out: Vec<Opnd> = Vec::new();
+    let mut i: taddr = 0;
+    while i < args.len() {
+        out.push(clone_opnd(&args[i]));
+        i += 1;
+    }
+    out
+}
+
+// ---------------------------------------------------------------- entries
+
+/// Parse a TIR module from its textual form (TIR §8).
+pub fn parse(src: &str) -> Result<Module, KBad> {
+    let toks = lex(src)?;
+    let mut p = Psr { toks: toks, pos: 0 };
+
+    // Header: `tir 0.1 target "name"`.
+    expect_word(&mut p, "tir")?;
+    let vline = peek_line(&p);
+    match bump(&mut p) {
+        Tok::Num(v) => {
+            if !v.same("0.1") {
+                return Result::Err(kbad(vline, "not the TIR version this reads"));
+            }
+        }
+        _ => {
+            p.pos -= 1;
+            return Result::Err(kbad(vline, "expected a version stamp"));
+        }
+    }
+    expect_word(&mut p, "target")?;
+    let tline = peek_line(&p);
+    let target = match bump(&mut p) {
+        Tok::Str(s) => s,
+        _ => {
+            p.pos -= 1;
+            return Result::Err(kbad(tline, "expected a target name in quotes"));
+        }
+    };
+
+    let mut m = Module {
+        version: "0.1".to_string(),
+        target: target,
+        globals: Vec::new(),
+        decls: Vec::new(),
+        funcs: Vec::new(),
+    };
+    loop {
+        match peek(&p) {
+            Tok::Eof => break,
+            Tok::Word(w) => {
+                if w.same("global") {
+                    m.globals.push(parse_global(&mut p)?);
+                } else if w.same("fn") {
+                    match parse_function(&mut p)? {
+                        FnRead::Def(f) => m.funcs.push(f),
+                        FnRead::Decl(s) => m.decls.push(s),
+                    }
+                } else {
+                    return Result::Err(kbad(peek_line(&p), "expected `fn` or `global`"));
+                }
+            }
+            _ => {
+                return Result::Err(kbad(peek_line(&p), "expected `fn` or `global`"));
+            }
+        }
+    }
+    Result::Ok(m)
+}
+
+fn parse_global(p: &mut Psr) -> Result<Global, KBad> {
+    expect_word(p, "global")?;
+    let line = peek_line(p);
+    let name = match bump(p) {
+        Tok::Sym(s) => s,
+        _ => {
+            p.pos -= 1;
+            return Result::Err(kbad(line, "expected `@name`"));
+        }
+    };
+    expect_punct(p, ':')?;
+    expect_word(p, "tryte")?;
+    expect_punct(p, '[')?;
+    let trytes = expect_uint(p)?;
+    expect_punct(p, ']')?;
+
+    let mut init: Option<Vec<InitItem>> = Option::None;
+    if eat_punct(p, '=') {
+        if eat_word(p, "zeroinit") {
+            init = Option::None;
+        } else {
+            expect_punct(p, '[')?;
+            let mut vals: Vec<InitItem> = Vec::new();
+            if !eat_punct(p, ']') {
+                loop {
+                    // `addr @name` — a relocation, one word wide (TIR §1.2).
+                    if eat_word(p, "addr") {
+                        let aline = peek_line(p);
+                        match bump(p) {
+                            Tok::Sym(s) => vals.push(InitItem::Addr(s)),
+                            _ => {
+                                p.pos -= 1;
+                                return Result::Err(kbad(aline, "expected `@name`"));
+                            }
+                        }
+                    } else {
+                        let vline = peek_line(p);
+                        vals.push(InitItem::Tryte(parse_literal_value(p, vline)?));
+                    }
+                    if eat_punct(p, ']') {
+                        break;
+                    }
+                    expect_punct(p, ',')?;
+                }
+            }
+            let mut sum: taddr = 0;
+            let mut i: taddr = 0;
+            while i < vals.len() {
+                match &vals[i] {
+                    InitItem::Tryte(_) => sum += 1,
+                    InitItem::Addr(_) => sum += 3,
+                }
+                i += 1;
+            }
+            if sum != trytes {
+                return Result::Err(kbad(line, "initializer does not fill its global"));
+            }
+            init = Option::Some(vals);
+        }
+    }
+    Result::Ok(Global { name: name, trytes: trytes, init: init })
+}
+
+/// A definition reads as `FnRead::Def`; a declaration — a signature with no
+/// `{ … }` body — as `FnRead::Decl`, and `parse` files it accordingly.
+fn parse_function(p: &mut Psr) -> Result<FnRead, KBad> {
+    expect_word(p, "fn")?;
+    let line = peek_line(p);
+    let name = match bump(p) {
+        Tok::Sym(s) => s,
+        _ => {
+            p.pos -= 1;
+            return Result::Err(kbad(line, "expected `@name`"));
+        }
+    };
+    let params = parse_params(p)?;
+    let ret: Option<Ty> = match peek(p) {
+        Tok::Arrow => {
+            bump(p);
+            Option::Some(parse_ty(p)?)
+        }
+        _ => Option::None,
+    };
+    let sig = Sig { name: name, params: params, ret: ret };
+
+    if !eat_punct(p, '{') {
+        return Result::Ok(FnRead::Decl(sig));
+    }
+    let mut blocks: Vec<Block> = Vec::new();
+    while !eat_punct(p, '}') {
+        match peek(p) {
+            Tok::Eof => return Result::Err(kbad(peek_line(p), "unterminated function body")),
+            _ => blocks.push(parse_block(p)?),
+        }
+    }
+    if blocks.len() == 0 {
+        return Result::Err(kbad(line, "function has no entry block"));
+    }
+    Result::Ok(FnRead::Def(Func { sig: sig, blocks: blocks }))
+}
+
+fn parse_block(p: &mut Psr) -> Result<Block, KBad> {
+    let line = peek_line(p);
+    let label = match bump(p) {
+        Tok::Label(l) => l,
+        _ => {
+            p.pos -= 1;
+            return Result::Err(kbad(line, "expected a block label"));
+        }
+    };
+    let params: Vec<Param> = if peek_punct(p, '(') {
+        parse_params(p)?
+    } else {
+        Vec::new()
+    };
+    expect_punct(p, ':')?;
+
+    let mut insts: Vec<Inst> = Vec::new();
+    loop {
+        match parse_terminator(p)? {
+            Option::Some(term) => {
+                return Result::Ok(Block {
+                    label: label,
+                    params: params,
+                    insts: insts,
+                    term: term,
+                });
+            }
+            Option::None => {}
+        }
+        match peek(p) {
+            Tok::Punct(c) => {
+                if c == '}' {
+                    return Result::Err(kbad(peek_line(p), "block has no terminator"));
+                }
+                insts.push(parse_inst(p)?);
+            }
+            Tok::Label(_) => {
+                return Result::Err(kbad(peek_line(p), "block has no terminator"));
+            }
+            Tok::Eof => {
+                return Result::Err(kbad(peek_line(p), "block has no terminator"));
+            }
+            _ => insts.push(parse_inst(p)?),
+        }
+    }
+}
+
+fn block_end_word(w: &str) -> bool {
+    w.same("fn") || w.same("global")
+}
+
+fn parse_terminator(p: &mut Psr) -> Result<Option<Term>, KBad> {
+    match peek(p) {
+        Tok::Word(w) => {
+            if w.same("br3") {
+                bump(p);
+                let t = parse_opnd(p)?;
+                expect_punct(p, ',')?;
+                let neg = parse_target(p)?;
+                expect_punct(p, ',')?;
+                let zero = parse_target(p)?;
+                expect_punct(p, ',')?;
+                let pos = parse_target(p)?;
+                return Result::Ok(Option::Some(Term::Br3(t, neg, zero, pos)));
+            }
+            if w.same("br2") {
+                // Sugar for the two-way case: a `br3` whose −1 and 0 arms
+                // coincide (TIR §3.6). The `then` arm is taken on +1.
+                bump(p);
+                let t = parse_opnd(p)?;
+                expect_punct(p, ',')?;
+                let then = parse_target(p)?;
+                expect_punct(p, ',')?;
+                let els = parse_target(p)?;
+                let els2 = Target { label: els.label.to_string(), args: clone_args(&els.args) };
+                return Result::Ok(Option::Some(Term::Br3(t, els2, els, then)));
+            }
+            if w.same("br") {
+                bump(p);
+                let d = parse_target(p)?;
+                return Result::Ok(Option::Some(Term::Br(d)));
+            }
+            if w.same("ret") {
+                bump(p);
+                let v: Option<Opnd> = match peek(p) {
+                    Tok::Val(_) => Option::Some(parse_opnd(p)?),
+                    Tok::Word(w2) => {
+                        if block_end_word(&w2) {
+                            Option::None
+                        } else {
+                            Option::Some(parse_opnd(p)?)
+                        }
+                    }
+                    _ => Option::None,
+                };
+                return Result::Ok(Option::Some(Term::Ret(v)));
+            }
+            if w.same("trap") {
+                bump(p);
+                let tline = peek_line(p);
+                match bump(p) {
+                    Tok::Word(code) => {
+                        if fault_named(&code) {
+                            return Result::Ok(Option::Some(Term::Trap(code)));
+                        }
+                        return Result::Err(kbad(tline, "not a fault code"));
+                    }
+                    _ => {
+                        p.pos -= 1;
+                        return Result::Err(kbad(tline, "expected a fault code"));
+                    }
+                }
+            }
+            if w.same("unreachable") {
+                bump(p);
+                return Result::Ok(Option::Some(Term::Unreachable));
+            }
+            Result::Ok(Option::None)
+        }
+        _ => Result::Ok(Option::None),
+    }
+}
+
+fn fault_named(w: &str) -> bool {
+    w.same("F_OVERFLOW") || w.same("F_DIVZERO") || w.same("F_SHIFT") || w.same("F_ALIGN")
+        || w.same("F_TRAP")
+}
+
+/// The mnemonic read, with its overflow flavor split from the stem.
+pub struct Mnem {
+    pub stem: String,
+    pub has_flavor: bool,
+    pub flavor: String,
+}
+
+fn split_mnemonic(w: &str) -> Mnem {
+    let mut at: taddr = 0;
+    while at < w.len() {
+        if w[at] == '.' {
+            let mut stem: String = Vec::new();
+            let mut k: taddr = 0;
+            while k < at {
+                stem.push(w[k]);
+                k += 1;
+            }
+            let mut fl: String = Vec::new();
+            k = at + 1;
+            while k < w.len() {
+                fl.push(w[k]);
+                k += 1;
+            }
+            return Mnem { stem: stem, has_flavor: true, flavor: fl };
+        }
+        at += 1;
+    }
+    Mnem { stem: w.to_string(), has_flavor: false, flavor: "".to_string() }
+}
+
+fn reject_flavor(has: bool, line: taddr) -> Result<(), KBad> {
+    if has {
+        return Result::Err(kbad(line, "this instruction takes no overflow flavor"));
+    }
+    Result::Ok(())
+}
+
+/// The type of an instruction whose annotation may be omitted when a
+/// constant operand carries it.
+fn infer_ty(explicit: Option<Ty>, a: &Opnd, b: &Opnd, line: taddr) -> Result<Ty, KBad> {
+    match explicit {
+        Option::Some(t) => return Result::Ok(t),
+        Option::None => {}
+    }
+    match a {
+        Opnd::Konst(t, _) => return Result::Ok(clone_ty(&t)),
+        _ => {}
+    }
+    match b {
+        Opnd::Konst(t, _) => return Result::Ok(clone_ty(&t)),
+        _ => {}
+    }
+    Result::Err(kbad(line, "needs an explicit operand type"))
+}
+
+/// `select3`'s arms are three; the same inference, one operand wider.
+fn infer_ty3(explicit: Option<Ty>, a: &Opnd, b: &Opnd, c: &Opnd, line: taddr) -> Result<Ty, KBad> {
+    match explicit {
+        Option::Some(t) => return Result::Ok(t),
+        Option::None => {}
+    }
+    match a {
+        Opnd::Konst(t, _) => return Result::Ok(clone_ty(&t)),
+        _ => {}
+    }
+    match b {
+        Opnd::Konst(t, _) => return Result::Ok(clone_ty(&t)),
+        _ => {}
+    }
+    match c {
+        Opnd::Konst(t, _) => return Result::Ok(clone_ty(&t)),
+        _ => {}
+    }
+    Result::Err(kbad(line, "needs an explicit operand type"))
+}
+
+/// The three of a `tN %a, %b` instruction.
+pub struct TypedBin {
+    pub ty: Ty,
+    pub a: Opnd,
+    pub b: Opnd,
+}
+
+/// `tN %a, %b` — with the type omissible when a constant operand carries it.
+fn parse_typed_binary(p: &mut Psr) -> Result<TypedBin, KBad> {
+    let line = peek_line(p);
+    let explicit = peek_ty(p);
+    match &explicit {
+        Option::Some(_) => {
+            bump(p);
+        }
+        Option::None => {}
+    }
+    let a = parse_opnd(p)?;
+    expect_punct(p, ',')?;
+    let b = parse_opnd(p)?;
+    let ty = infer_ty(explicit, &a, &b, line)?;
+    Result::Ok(TypedBin { ty: ty, a: a, b: b })
+}
+
+fn parse_inst(p: &mut Psr) -> Result<Inst, KBad> {
+    // Optional result list: `%a = ` or `%a, %b = ` (the `.flag` form). The
+    // list is a guess until the `=` confirms it, so it is read tentatively
+    // and the parser steps back if no `=` follows.
+    let mut results: Vec<String> = Vec::new();
+    match peek(p) {
+        Tok::Val(_) => {
+            let save = p.pos;
+            let mut names: Vec<String> = Vec::new();
+            // 0 while reading; 1 when the `=` confirmed the list; 2 when
+            // the guess failed and the parser steps back.
+            let mut state: taddr = 0;
+            loop {
+                match bump(p) {
+                    Tok::Val(v) => names.push(v),
+                    _ => {
+                        state = 2;
+                        break;
+                    }
+                }
+                if eat_punct(p, ',') {
+                    continue;
+                }
+                if eat_punct(p, '=') {
+                    state = 1;
+                } else {
+                    state = 2;
+                }
+                break;
+            }
+            if state == 2 {
+                p.pos = save;
+            }
+            if state == 1 {
+                results = names;
+            }
+        }
+        _ => {}
+    }
+
+    let line = peek_line(p);
+    let mnemonic = match bump(p) {
+        Tok::Word(w) => w,
+        _ => {
+            p.pos -= 1;
+            return Result::Err(kbad(line, "expected an instruction"));
+        }
+    };
+
+    let mnem = split_mnemonic(&mnemonic);
+    let mut flavor: taddr = 0;
+    if mnem.has_flavor {
+        match flavor_code(&mnem.flavor) {
+            Option::Some(f) => flavor = f,
+            Option::None => {
+                return Result::Err(kbad(line, "not an overflow flavor"));
+            }
+        }
+    }
+
+    let kind = parse_inst_kind(p, &mnem.stem, mnem.has_flavor, flavor, line)?;
+    Result::Ok(Inst { results: results, kind: kind })
+}
+
+fn parse_inst_kind(p: &mut Psr, stem: &str, has_flavor: bool, flavor: taddr, line: taddr) -> Result<Kind, KBad> {
+    match flavored_code(stem) {
+        Option::Some(op) => {
+            if !has_flavor {
+                return Result::Err(kbad(line, "needs an overflow flavor"));
+            }
+            let tb = parse_typed_binary(p)?;
+            return Result::Ok(Kind::Flav(op, flavor, tb.ty, tb.a, tb.b));
+        }
+        Option::None => {}
+    }
+    match plain_code(stem) {
+        Option::Some(op) => {
+            reject_flavor(has_flavor, line)?;
+            let tb = parse_typed_binary(p)?;
+            return Result::Ok(Kind::Plain(op, tb.ty, tb.a, tb.b));
+        }
+        Option::None => {}
+    }
+    // `tneg` is an alias of `neg`; one canonical form survives parsing.
+    if stem.same("neg") || stem.same("tneg") {
+        reject_flavor(has_flavor, line)?;
+        let explicit = peek_ty(p);
+        match &explicit {
+            Option::Some(_) => {
+                bump(p);
+            }
+            Option::None => {}
+        }
+        let a = parse_opnd(p)?;
+        let ty = infer_ty(explicit, &a, &a, line)?;
+        return Result::Ok(Kind::Neg(ty, a));
+    }
+    if stem.same("cmp") {
+        reject_flavor(has_flavor, line)?;
+        let tb = parse_typed_binary(p)?;
+        return Result::Ok(Kind::Cmp(tb.ty, tb.a, tb.b));
+    }
+    if stem.same("select3") {
+        reject_flavor(has_flavor, line)?;
+        let t = parse_opnd(p)?;
+        expect_punct(p, ',')?;
+        let explicit = peek_ty(p);
+        match &explicit {
+            Option::Some(_) => {
+                bump(p);
+            }
+            Option::None => {}
+        }
+        let neg = parse_opnd(p)?;
+        expect_punct(p, ',')?;
+        let zero = parse_opnd(p)?;
+        expect_punct(p, ',')?;
+        let pos = parse_opnd(p)?;
+        let ty = infer_ty3(explicit, &neg, &zero, &pos, line)?;
+        return Result::Ok(Kind::Select3(t, ty, neg, zero, pos));
+    }
+    if stem.same("slot") {
+        reject_flavor(has_flavor, line)?;
+        expect_word(p, "tryte")?;
+        expect_punct(p, '[')?;
+        let trytes = expect_uint(p)?;
+        expect_punct(p, ']')?;
+        return Result::Ok(Kind::Slot(trytes));
+    }
+    if stem.same("load") {
+        reject_flavor(has_flavor, line)?;
+        let ty = parse_ty(p)?;
+        let ptr = parse_opnd(p)?;
+        return Result::Ok(Kind::Load(ty, ptr));
+    }
+    if stem.same("store") {
+        reject_flavor(has_flavor, line)?;
+        let ty = parse_ty(p)?;
+        let v = parse_opnd(p)?;
+        expect_punct(p, ',')?;
+        let ptr = parse_opnd(p)?;
+        return Result::Ok(Kind::Store(ty, v, ptr));
+    }
+    if stem.same("offset") {
+        reject_flavor(has_flavor, line)?;
+        let ptr = parse_opnd(p)?;
+        expect_punct(p, ',')?;
+        let d = parse_opnd(p)?;
+        return Result::Ok(Kind::Offset(ptr, d));
+    }
+    if stem.same("widen") || stem.same("trunc") {
+        reject_flavor(has_flavor, line)?;
+        let from = parse_ty(p)?;
+        let a = parse_opnd(p)?;
+        match peek(p) {
+            Tok::Arrow => {
+                bump(p);
+            }
+            _ => {
+                return Result::Err(kbad(peek_line(p), "expected `->` after the operand"));
+            }
+        }
+        let to = parse_ty(p)?;
+        if stem.same("widen") {
+            return Result::Ok(Kind::Widen(from, a, to));
+        }
+        return Result::Ok(Kind::Trunc(from, a, to));
+    }
+    if stem.same("call") {
+        reject_flavor(has_flavor, line)?;
+        let cline = peek_line(p);
+        let callee = match bump(p) {
+            Tok::Sym(s) => Callee::Direct(s),
+            Tok::Val(v) => Callee::Indirect(Opnd::Val(v)),
+            _ => {
+                p.pos -= 1;
+                return Result::Err(kbad(cline, "expected `@callee` or `%pointer`"));
+            }
+        };
+        let args = parse_arg_list(p)?;
+        let ret: Option<Ty> = match peek(p) {
+            Tok::Arrow => {
+                bump(p);
+                Option::Some(parse_ty(p)?)
+            }
+            _ => Option::None,
+        };
+        return Result::Ok(Kind::Call(callee, args, ret));
+    }
+    Result::Err(kbad(line, "unknown instruction"))
+}
+
+// -------------------------------------------------------------------- printer
+
+fn print_ty(t: &Ty) {
+    match t {
+        Ty::Int(n) => {
+            print("t");
+            print_dec(n as t27);
+        }
+        Ty::Ptr => print("ptr"),
+    }
+}
+
+/// A decimal, the way `Bt::to_decimal` writes one: the language's
+/// round-to-nearest division, stepped back to truncate, is the same walk.
+fn print_dec(v: t27) {
+    let mut n = v;
+    if n < 0 {
+        print("-");
+        n = 0 - n;
+    }
+    if n == 0 {
+        print("0");
+        return;
+    }
+    let mut digits: Vec<char> = Vec::new();
+    while n != 0 {
+        let d = n % 10;
+        let fixed = if d < 0 { d + 10 } else { d };
+        digits.push(char::try_from(48 + fixed).unwrap());
+        n = (n - fixed) / 10;
+    }
+    let mut i = digits.len();
+    while i > 0 {
+        i -= 1;
+        let mut one: String = Vec::new();
+        one.push(digits[i]);
+        print(&one);
+    }
+}
+
+fn print_opnd(o: &Opnd) {
+    match o {
+        Opnd::Val(v) => {
+            print("%");
+            print(v);
+        }
+        Opnd::Konst(t, v) => {
+            print("const ");
+            print_ty(&t);
+            print(" ");
+            print_dec(v);
+        }
+        Opnd::Glob(g) => {
+            print("@");
+            print(g);
+        }
+    }
+}
+
+fn print_results(results: &Vec<String>) {
+    if results.len() == 0 {
+        return;
+    }
+    let mut i: taddr = 0;
+    while i < results.len() {
+        if i > 0 {
+            print(", ");
+        }
+        print("%");
+        print(&results[i]);
+        i += 1;
+    }
+    print(" = ");
+}
+
+fn print_inst(inst: &Inst) {
+    print_results(&inst.results);
+    match &inst.kind {
+        Kind::Flav(op, flavor, ty, a, b) => {
+            let op_name = flavored_name(op);
+            print(&op_name);
+            let fl_suffix = flavor_suffix(flavor);
+            print(&fl_suffix);
+            print(" ");
+            print_ty(&ty);
+            print(" ");
+            print_opnd(a);
+            print(", ");
+            print_opnd(b);
+        }
+        Kind::Plain(op, ty, a, b) => {
+            let op_name = plain_name(op);
+            print(&op_name);
+            print(" ");
+            print_ty(&ty);
+            print(" ");
+            print_opnd(a);
+            print(", ");
+            print_opnd(b);
+        }
+        Kind::Neg(ty, a) => {
+            print("neg ");
+            print_ty(&ty);
+            print(" ");
+            print_opnd(a);
+        }
+        Kind::Cmp(ty, a, b) => {
+            print("cmp ");
+            print_ty(&ty);
+            print(" ");
+            print_opnd(a);
+            print(", ");
+            print_opnd(b);
+        }
+        Kind::Select3(t, ty, neg, zero, pos) => {
+            print("select3 ");
+            print_opnd(t);
+            print(", ");
+            print_ty(&ty);
+            print(" ");
+            print_opnd(neg);
+            print(", ");
+            print_opnd(zero);
+            print(", ");
+            print_opnd(pos);
+        }
+        Kind::Slot(trytes) => {
+            print("slot tryte[");
+            print_dec(trytes as t27);
+            print("]");
+        }
+        Kind::Load(ty, ptr) => {
+            print("load ");
+            print_ty(&ty);
+            print(" ");
+            print_opnd(ptr);
+        }
+        Kind::Store(ty, v, ptr) => {
+            print("store ");
+            print_ty(&ty);
+            print(" ");
+            print_opnd(v);
+            print(", ");
+            print_opnd(ptr);
+        }
+        Kind::Offset(ptr, d) => {
+            print("offset ");
+            print_opnd(ptr);
+            print(", ");
+            print_opnd(d);
+        }
+        Kind::Widen(from, a, to) => {
+            print("widen ");
+            print_ty(&from);
+            print(" ");
+            print_opnd(a);
+            print(" -> ");
+            print_ty(&to);
+        }
+        Kind::Trunc(from, a, to) => {
+            print("trunc ");
+            print_ty(&from);
+            print(" ");
+            print_opnd(a);
+            print(" -> ");
+            print_ty(&to);
+        }
+        Kind::Call(callee, args, ret) => {
+            print("call ");
+            match callee {
+                Callee::Direct(n) => {
+                    print("@");
+                    print(n);
+                }
+                Callee::Indirect(o) => print_opnd(o),
+            }
+            print("(");
+            let mut i: taddr = 0;
+            while i < args.len() {
+                if i > 0 {
+                    print(", ");
+                }
+                print_opnd(&args[i]);
+                i += 1;
+            }
+            print(")");
+            match ret {
+                Option::Some(r) => {
+                    print(" -> ");
+                    print_ty(&r);
+                }
+                Option::None => {}
+            }
+        }
+    }
+}
+
+fn print_target(t: &Target) {
+    print("^");
+    print(&t.label);
+    if t.args.len() > 0 {
+        print("(");
+        let mut i: taddr = 0;
+        while i < t.args.len() {
+            if i > 0 {
+                print(", ");
+            }
+            print_opnd(&t.args[i]);
+            i += 1;
+        }
+        print(")");
+    }
+}
+
+fn print_term(t: &Term) {
+    match t {
+        // The two-way case prints as `br2` sugar (TIR §3.6).
+        Term::Br3(sel, neg, zero, pos) => {
+            if same_target(neg, zero) {
+                print("br2 ");
+                print_opnd(sel);
+                print(", ");
+                print_target(pos);
+                print(", ");
+                print_target(neg);
+            } else {
+                print("br3 ");
+                print_opnd(sel);
+                print(", ");
+                print_target(neg);
+                print(", ");
+                print_target(zero);
+                print(", ");
+                print_target(pos);
+            }
+        }
+        Term::Br(d) => {
+            print("br ");
+            print_target(d);
+        }
+        Term::Ret(v) => {
+            match v {
+                Option::Some(o) => {
+                    print("ret ");
+                    print_opnd(o);
+                }
+                Option::None => print("ret"),
+            }
+        }
+        Term::Trap(code) => {
+            print("trap ");
+            print(code);
+        }
+        Term::Unreachable => print("unreachable"),
+    }
+}
+
+fn print_params(params: &Vec<Param>) {
+    let mut i: taddr = 0;
+    while i < params.len() {
+        if i > 0 {
+            print(", ");
+        }
+        print("%");
+        print(&params[i].name);
+        print(": ");
+        print_ty(&params[i].ty);
+        i += 1;
+    }
+}
+
+fn print_sig(s: &Sig) {
+    print("fn @");
+    print(&s.name);
+    print("(");
+    print_params(&s.params);
+    print(")");
+    match &s.ret {
+        Option::Some(r) => {
+            print(" -> ");
+            print_ty(&r);
+        }
+        Option::None => {}
+    }
+}
+
+/// The canonical serialization of a module, on stdout.
+pub fn print_module(m: &Module) {
+    print("tir ");
+    print(&m.version);
+    print(" target \"");
+    print(&m.target);
+    println("\"");
+
+    let mut gi: taddr = 0;
+    while gi < m.globals.len() {
+        println("");
+        let g = &m.globals[gi];
+        print("global @");
+        print(&g.name);
+        print(" : tryte[");
+        print_dec(g.trytes as t27);
+        print("] = ");
+        match &g.init {
+            Option::None => println("zeroinit"),
+            Option::Some(vals) => {
+                print("[");
+                let mut i: taddr = 0;
+                while i < vals.len() {
+                    if i > 0 {
+                        print(", ");
+                    }
+                    match &vals[i] {
+                        InitItem::Tryte(v) => print_dec(v),
+                        InitItem::Addr(n) => {
+                            print("addr @");
+                            print(n);
+                        }
+                    }
+                    i += 1;
+                }
+                println("]");
+            }
+        }
+        gi += 1;
+    }
+
+    let mut di: taddr = 0;
+    while di < m.decls.len() {
+        println("");
+        print_sig(&m.decls[di]);
+        println("");
+        di += 1;
+    }
+
+    let mut fi: taddr = 0;
+    while fi < m.funcs.len() {
+        println("");
+        let f = &m.funcs[fi];
+        print_sig(&f.sig);
+        println(" {");
+        let mut bi: taddr = 0;
+        while bi < f.blocks.len() {
+            let b = &f.blocks[bi];
+            print("^");
+            print(&b.label);
+            if b.params.len() > 0 {
+                print("(");
+                print_params(&b.params);
+                print(")");
+            }
+            println(":");
+            let mut ii: taddr = 0;
+            while ii < b.insts.len() {
+                print("    ");
+                print_inst(&b.insts[ii]);
+                println("");
+                ii += 1;
+            }
+            print("    ");
+            print_term(&b.term);
+            println("");
+            bi += 1;
+        }
+        println("}");
+        fi += 1;
+    }
+}
