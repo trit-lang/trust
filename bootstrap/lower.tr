@@ -199,6 +199,10 @@ pub struct AssocChoice {
     pub owner: String,
     /// The impl's own generic parameters, in order.
     pub gens: Vec<String>,
+    /// The `Fn` signature written where each is, which is nothing at all
+    /// where it is not one — a parameter the self type never named is a
+    /// type by that alone (Ch. 4 §4.3).
+    pub fnsigs: Vec<String>,
     /// The associated type's name.
     pub name: String,
     /// What it was chosen as, as written.
@@ -1155,7 +1159,30 @@ pub fn function(
     // family: `&self` in an `impl<T> Pair<T>` reads the fields of the
     // `Pair.t27` this one is for.
     let mut named_owner = owner.to_string();
-    if outer.len() > 0 {
+    // An impl written on **one member** of a family (Ch. 5 §2.6) is not the
+    // family's impl: its methods are one function each, named after the
+    // instantiation rather than read under a key. The instantiation has to
+    // be *made* here, because nothing in the file wrote it down. It is
+    // asked first now for one reason more: what `self` is when a family's
+    // key carries entries the self type never named is nobody's to read
+    // off the key — the caller settles it, because the caller wrote the
+    // impl.
+    if owner_key.len() > 0 {
+        let held = instantiate(&mut e, &owner, &owner_key);
+        if held.len() == 0 {
+            return false;
+        }
+        e.self_ty = held.to_string();
+        // A name for the function is the impl's owner plus the key it was
+        // read under: an impl of one family-member's own names what it is
+        // in full, while one of the family's local *instantiations* —
+        // `Map` at `Range.t27.main.closure1` — is still `Map.next` with a
+        // key beside it, which is the name a call already spelled.
+        if outer.len() == 0 {
+            named_owner = held;
+        }
+    }
+    if outer.len() > 0 && owner_key.len() == 0 {
         let mut mine: Vec<String> = Vec::new();
         let mut o: taddr = 0;
         while o < outer.len() {
@@ -1176,18 +1203,6 @@ pub fn function(
             return false;
         }
         e.self_ty = held2;
-    }
-    // An impl written on **one member** of a family (Ch. 5 §2.6) is not the
-    // family's impl: its methods are one function each, named after the
-    // instantiation rather than read under a key. The instantiation has to
-    // be *made* here, because nothing in the file wrote it down.
-    if owner_key.len() > 0 {
-        let held = instantiate(&mut e, &owner, &owner_key);
-        if held.len() == 0 {
-            return false;
-        }
-        e.self_ty = held.to_string();
-        named_owner = held;
     }
 
     // A parameter arrives as a value and is given storage at once, so that
@@ -3010,6 +3025,9 @@ fn one_name(name: &str) -> Vec<String> {
 /// caller gave, and the function answers nothing.
 fn aggregate_body(e: &mut Emit, b: &ast::Block, owner: &str) {
     aggregate_block(e, b, "%sret", owner);
+    if e.stuck {
+        return;
+    }
     if e.stuck {
         return;
     }
@@ -8546,7 +8564,8 @@ fn method_value(
         // `%sret` is exactly what the call owes — no one writes the
         // temporary (TIR §3).
         if dest.len() > 0 {
-            let answering = instantiate_answer(e, fam, &given, &owner);
+            let full_key = receiver_decided_key(e, fam, &given);
+            let answering = instantiate_answer(e, fam, &full_key, &owner);
             if answering.len() > 0 && answering.same(into_ty) {
                 e.family_into_hints.push(dest.to_string());
                 slot = receiver_at(e, at, recv, &slot, &by_value);
@@ -8567,9 +8586,10 @@ fn method_value(
         // its mind (fa28's `p.3` would otherwise have to wait for nobody,
         // and `(1..10).filter(…).map(…)` would otherwise have to answer a
         // destination before there were arguments for it).
-        let whole = given.len() == e.families[fam].tyvars.len();
+        let full_key = receiver_decided_key(e, fam, &given);
+        let whole = full_key.len() == e.families[fam].tyvars.len();
         let answering = if whole {
-            instantiate_answer(e, fam, &given, &owner)
+            instantiate_answer(e, fam, &full_key, &owner)
         } else {
             "".to_string()
         };
@@ -9850,7 +9870,12 @@ fn guess_ty(e: &mut Emit, x: &ast::Expr) -> String {
                 return named;
             }
             let written = ast::copy_ty(&e.defs[which].fields[index]);
-            nominal(e, &written)
+            // A field's own *generic* is answered under the key the
+            // function already holds: what `self.inner` is at `I = Range
+            // .t27` is the Range, which is what the family's substitution
+            // was already doing everywhere a *written* name was settled.
+            let settled = subst_ty(e, &e.tyvars, &e.key, &written);
+            nominal(e, &settled)
         }
         ast::Expr::Cast(a, t) => tir_ty_at(&e.tyvars, &e.key, t),
         // Arithmetic answers with what it was given and a comparison with a
@@ -11513,9 +11538,10 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                     } else {
                         impl_owner(gs, ty)
                     };
+                    let extras = impl_extras(gs, &outer);
                     let mut k: taddr = 0;
                     while k < fns.len() {
-                        if is_family(&fns[k], outer.len()) {
+                        if is_family(&fns[k], outer.len() + extras.len() as taddr) {
                             let mut full: String = Vec::new();
                             full.push_str(&owner);
                             full.push_str(".");
@@ -11527,6 +11553,26 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                                 tyvars.push(own[g].to_string());
                                 g += 1;
                             }
+                            let mut sigs = tyvar_fnsigs(&fns[k], outer.len() as taddr);
+                            let mut s: taddr = 0;
+                            while s < extras.len() {
+                                tyvars.push(extras[s].to_string());
+                                sigs.push("".to_string());
+                                s += 1;
+                            }
+                            // An impl-generic's own `Fn` bound rides with
+                            // the family the bound's writer rides in —
+                            // it is the only place the answer was ever said.
+                            let mut w: taddr = 0;
+                            while w < tyvars.len() {
+                                if sigs[w].len() == 0 {
+                                    let held = impl_generic_fnsig(gs, &tyvars[w]);
+                                    if held.len() > 0 {
+                                        sigs[w] = held;
+                                    }
+                                }
+                                w += 1;
+                            }
                             out.push(Family {
                                 name: full,
                                 tyvars: tyvars,
@@ -11535,7 +11581,7 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                                 blanket: is_blanket,
                                 params: written_params(&fns[k]),
                                 ret: family_answer(&fns[k].ret),
-                                fnsigs: tyvar_fnsigs(&fns[k], outer.len() as taddr),
+                                fnsigs: sigs,
                             });
                         }
                         k += 1;
@@ -11560,6 +11606,7 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                                         if has_body
                                             && named_fn(fns, &tfns[m2].name) < 0
                                         {
+                                            let extras2 = impl_extras(gs, &outer);
                                             let mut full: String = Vec::new();
                                             full.push_str(&owner);
                                             full.push_str(".");
@@ -11571,7 +11618,23 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                                                 tyvars.push(own2[g2].to_string());
                                                 g2 += 1;
                                             }
-
+                                            let mut sigs2 = tyvar_fnsigs(&tfns[m2], outer.len() as taddr);
+                                            let mut s2: taddr = 0;
+                                            while s2 < extras2.len() {
+                                                tyvars.push(extras2[s2].to_string());
+                                                sigs2.push("".to_string());
+                                                s2 += 1;
+                                            }
+                                            let mut w2: taddr = 0;
+                                            while w2 < tyvars.len() {
+                                                if sigs2[w2].len() == 0 {
+                                                    let held2 = impl_generic_fnsig(gs, &tyvars[w2]);
+                                                    if held2.len() > 0 {
+                                                        sigs2[w2] = held2;
+                                                    }
+                                                }
+                                                w2 += 1;
+                                            }
                                             out.push(Family {
                                                 name: full,
                                                 tyvars: tyvars,
@@ -11580,7 +11643,7 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                                                 blanket: false,
                                                 params: written_params(&tfns[m2]),
                                                 ret: family_answer(&tfns[m2].ret),
-                                                fnsigs: tyvar_fnsigs(&tfns[m2], outer.len() as taddr),
+                                                fnsigs: sigs2,
                                             });
                                         }
                                         m2 += 1;
@@ -11702,7 +11765,24 @@ fn self_parameters(gs: &Vec<ast::Generic>, ty: &ast::Ty) -> Vec<String> {
     match ty {
         ast::Ty::App(segments, args) => {
             if args.len() != want.len() {
-                return none;
+                // The self type may name **fewer** of the impl's parameters
+                // than the impl declared: `impl<I, B, F: Fn(I::Item) -> B>
+                // Iterator for Map<I, F>` settles I and F where it is
+                // written and leaves B to the bound that mentioned it —
+                // which is the only place a call could ever hear of it
+                // either (Ch. 4 §4.3).
+                let mut out2: Vec<String> = Vec::new();
+                let mut i: taddr = 0;
+                while i < args.len() {
+                    let each = name_head(&args[i]);
+                    let at = name_at(&want, &each);
+                    if at < 0 || name_at(&out2, &each) >= 0 {
+                        return none;
+                    }
+                    out2.push(each.to_string());
+                    i += 1;
+                }
+                return out2;
             }
             let mut i: taddr = 0;
             while i < args.len() {
@@ -11716,6 +11796,69 @@ fn self_parameters(gs: &Vec<ast::Generic>, ty: &ast::Ty) -> Vec<String> {
         }
         _ => none,
     }
+}
+
+/// The impl's parameters the self type never named, in declaration order.
+///
+/// Nothing says what `B` is in `Map<I, F>` — no argument is ever written
+/// where one is, because none was written in the impl either — so the one
+/// that answers for it is the `Fn` bound that mentioned it: `F: Fn(I::Item)
+/// -> B` made B the closure's answer wherever the closure is (Ch. 4 §4.3).
+/// Each extra is named only where that is so: an impl-generic in the
+/// position of no bound's answer is none of these.
+fn impl_extras(gs: &Vec<ast::Generic>, outer: &Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let want = generic_names(gs);
+    let mut i: taddr = 0;
+    while i < gs.len() {
+        match &gs[i] {
+            ast::Generic::Type(name, bounds) => {
+                if name_at(outer, name) >= 0 {
+                    let mut b: taddr = 0;
+                    while b < bounds.len() {
+                        if is_fn_bound(&bounds[b].name) {
+                            let sig = bound_fnsig(&bounds[b]);
+                            let answer = fnsig_answer(&sig);
+                            if answer.len() > 0
+                                && name_at(&want, &answer) >= 0
+                                && name_at(outer, &answer) < 0
+                                && name_at(&out, &answer) < 0
+                            {
+                                out.push(answer.to_string());
+                            }
+                        }
+                        b += 1;
+                    }
+                }
+            }
+            ast::Generic::Const(n, ty) => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The `Fn` signature written where this impl's parameter was, or nothing.
+fn impl_generic_fnsig(gs: &Vec<ast::Generic>, seek: &str) -> String {
+    let mut i: taddr = 0;
+    while i < gs.len() {
+        match &gs[i] {
+            ast::Generic::Type(name, bounds) => {
+                if name.same(seek) {
+                    let mut b: taddr = 0;
+                    while b < bounds.len() {
+                        if is_fn_bound(&bounds[b].name) {
+                            return bound_fnsig(&bounds[b]);
+                        }
+                        b += 1;
+                    }
+                }
+            }
+            ast::Generic::Const(n, ty) => {}
+        }
+        i += 1;
+    }
+    "".to_string()
 }
 
 /// Whether this function is a family: all of whose type parameters are
@@ -12130,22 +12273,46 @@ fn assoc_choices(items: &Vec<ast::Item>) -> Vec<AssocChoice> {
                                     j += 1;
                                 }
                             } else {
-                                // A parameter the self type does not carry
-                                // is settled by inference, which is the one
-                                // question none of this asks yet (G9.177's
-                                // own remainder).
-                                settled = false;
+                                // A parameter the self type never named is
+                                // not missing where an `Fn` bound said what
+                                // it is: B in `Map<I, F>` is F's answer
+                                // wherever F's key is (G9.179).
+                                let mut seen: Vec<String> = Vec::new();
+                                let mut j: taddr = 0;
+                                while j < args.len() {
+                                    match &args[j] {
+                                        ast::Ty::Name(ns) => seen.push(joined(ns)),
+                                        _ => settled = false,
+                                    }
+                                    j += 1;
+                                }
+                                if settled {
+                                    gens = ast::copy_names(&seen);
+                                    let xe = impl_extras(gs, &seen);
+                                    let mut xj: taddr = 0;
+                                    while xj < xe.len() {
+                                        gens.push(xe[xj].to_string());
+                                        xj += 1;
+                                    }
+                                }
                             }
                         }
                         _ => {}
                     }
                     if settled {
                         let assoc_name = written_head(ty);
+                        let mut sigs: Vec<String> = Vec::new();
+                        let mut s: taddr = 0;
+                        while s < gens.len() {
+                            sigs.push(impl_generic_fnsig(gs, &gens[s]));
+                            s += 1;
+                        }
                         let mut k: taddr = 0;
                         while k < assoc.len() {
                             out.push(AssocChoice {
                                 owner: assoc_name.to_string(),
                                 gens: ast::copy_names(&gens),
+                                fnsigs: ast::copy_names(&sigs),
                                 name: assoc[k].name.to_string(),
                                 ty: ast::copy_ty(&assoc[k].ty),
                             });
@@ -12170,8 +12337,7 @@ fn assoc_resolve(e: &mut Emit, owner: &str, key: &Vec<String>, name: &str) -> St
     let mut i: taddr = 0;
     while i < e.assoc.len() {
         if e.assoc[i].owner.same(owner) && e.assoc[i].name.same(name) {
-
-            return assoc_term(e, key, &e.assoc[i].gens, &e.assoc[i].ty);
+            return assoc_term(e, key, &e.assoc[i].gens, &e.assoc[i].fnsigs, &e.assoc[i].ty);
         }
         i += 1;
     }
@@ -12182,7 +12348,7 @@ fn assoc_resolve(e: &mut Emit, owner: &str, key: &Vec<String>, name: &str) -> St
 /// What the choice says under the impl's own generics: a parameter is the
 /// key's word, `I::Item` is the question asked of what the impl holds,
 /// and a plain `t27` answers itself.
-fn assoc_term(e: &mut Emit, key: &Vec<String>, gens: &Vec<String>, ty: &ast::Ty) -> String {
+fn assoc_term(e: &mut Emit, key: &Vec<String>, gens: &Vec<String>, sigs: &Vec<String>, ty: &ast::Ty) -> String {
     match ty {
         ast::Ty::Name(segments) => {
             if segments.len() == 0 {
@@ -12199,6 +12365,26 @@ fn assoc_term(e: &mut Emit, key: &Vec<String>, gens: &Vec<String>, ty: &ast::Ty)
             }
             if hit < 0 {
                 return joined(segments);
+            }
+            // A name written *behind* the names any caller ever wrote is
+            // not out of reach where the `Fn` bound that said it still
+            // rides beside them: it is the closure's answer, and the
+            // closure is the key's own (Ch. 4 §4.3).
+            if hit as taddr >= key.len() as taddr {
+                let mut p: taddr = 0;
+                while p < key.len() && p < sigs.len() {
+                    if sigs[p].len() > 0 {
+                        let found = closed_at(&e.closed, &key[p]);
+                        if found >= 0 {
+                            let held = closed_says(&e.closed[found], &sigs[p], &head_str);
+                            if held.len() > 0 {
+                                return held;
+                            }
+                        }
+                    }
+                    p += 1;
+                }
+                return "".to_string();
             }
             let inner = key[hit as taddr].to_string();
             if segments.len() == 1 {
@@ -12509,6 +12695,13 @@ fn generic_call(
         if found.len() == 0 {
             found = from_fn_bound(e, fam, &declared, &kinds, &each);
         }
+        // And one the receiver already settled rides the same bound: the
+        // impl wrote `F: Fn(I::Item) -> B` on a parameter it named in the
+        // self type, so the type the receiver turned out for F is where
+        // B is asked — this is a call to a reader that already holds it.
+        if found.len() == 0 {
+            found = from_impl_fn_bound(e, fam, &key, &each);
+        }
         // A type argument TIR spells, or one the program defines: a
         // `sum<T: Area>(x: T)` is instantiated at `Sq` as much as at `t27`,
         // and what tells the two apart at the call is nothing — an
@@ -12635,6 +12828,63 @@ fn from_fn_bound(
                     }
                 }
                 k += 1;
+            }
+        }
+        p += 1;
+    }
+    "".to_string()
+}
+
+/// What an impl's `Fn` bound says of a parameter the self type did not
+/// name, asked where the bound's writer already has a key.
+///
+/// The family named the bound in its own records because no argument ever
+/// names it: `B` occurs in `Map.next`'s key by name of the closure the
+/// receiver made of `F`, which the impl knew it would. A parameter whose
+/// writer has no key yet — the call itself will say first — is none of
+/// this family.
+/// How much of a family's key the receiver alone can answer: its own,
+/// plus every name an `Fn` bound said where they ride — B of `Map`'s is
+/// F's answer, and F is the receiver's second word (Ch. 4 §4.3). Nothing
+/// past what that reaches: an argument still has its say where it must.
+fn receiver_decided_key(e: &Emit, fam: taddr, given: &Vec<String>) -> Vec<String> {
+    let mut full: Vec<String> = ast::copy_names(given);
+    while full.len() < e.families[fam].tyvars.len() {
+        let want = e.families[fam].tyvars[full.len()].to_string();
+        let mut p: taddr = 0;
+        let mut found: String = Vec::new();
+        while p < full.len() && p < e.families[fam].fnsigs.len() {
+            if e.families[fam].fnsigs[p].len() > 0 {
+                let sig = e.families[fam].fnsigs[p].to_string();
+                let at = closed_at(&e.closed, &full[p]);
+                if at >= 0 {
+                    let held = closed_says(&e.closed[at], &sig, &want);
+                    if held.len() > 0 {
+                        found = held.to_string();
+                    }
+                }
+            }
+            p += 1;
+        }
+        if found.len() == 0 {
+            return full;
+        }
+        full.push(found.to_string());
+    }
+    full
+}
+
+fn from_impl_fn_bound(e: &Emit, fam: taddr, key: &Vec<String>, want: &str) -> String {
+    let mut p: taddr = 0;
+    while p < e.families[fam].fnsigs.len() && p < e.families[fam].tyvars.len() {
+        if e.families[fam].fnsigs[p].len() > 0 && p < key.len() {
+            let sig = e.families[fam].fnsigs[p].to_string();
+            let at = closed_at(&e.closed, &key[p]);
+            if at >= 0 {
+                let held = closed_says(&e.closed[at], &sig, want);
+                if held.len() > 0 {
+                    return held;
+                }
             }
         }
         p += 1;
@@ -13946,24 +14196,47 @@ pub fn instantiations(
                     // `into_iter` of `Range<t27>` (Ch. 4 §5.6).
                     let owner = if is_blanket {
                         named2.to_string()
-                    } else if gs.len() == outer.len() {
+                    } else if outer.len() > 0 {
                         impl_owner(gs, ty)
                     } else {
                         "".to_string()
                     };
+                    // The key is written receiver-first and extras-last, and
+                    // the body is its only order: an impl-generic the self
+                    // type never names comes in where the family's own
+                    // records put it (Ch. 4 §4.3).
+                    let extras = impl_extras(gs, &outer);
+                    let mut outer_full = ast::copy_names(&outer);
+                    let mut xf: taddr = 0;
+                    while xf < extras.len() {
+                        outer_full.push(extras[xf].to_string());
+                        xf += 1;
+                    }
+                    // What the receiver settled is how much of the key the
+                    // self type ever named, and the rest of the key is the
+                    // family's own holding: `self` is instantiated at the
+                    // first of them, which the caller alone could say.
+                    let mut self_key: Vec<String> = Vec::new();
+                    if !is_blanket {
+                        let mut sk: taddr = 0;
+                        while sk < outer.len() && sk < key.len() {
+                            self_key.push(key[sk].to_string());
+                            sk += 1;
+                        }
+                    }
                     let mut k: taddr = 0;
                     while k < fns.len() {
                         let mut m: String = Vec::new();
                         m.push_str(&owner);
                         m.push_str(".");
                         m.push_str(&fns[k].name);
-                        if !ok && m.same(&name) && is_family(&fns[k], outer.len()) {
+                        if !ok && m.same(&name) && is_family(&fns[k], outer_full.len() as taddr) {
                             let mut cx = context(items);
                             cx.closed = copy_closed(&work.closed);
                             ok = function(
                                 &fns[k], cx, owner.to_string(),
-                                ast::copy_names(&outer), ast::copy_names(&key),
-                                Vec::new(), work, &mut text);
+                                ast::copy_names(&outer_full), ast::copy_names(&key),
+                                ast::copy_names(&self_key), work, &mut text);
 
                         }
                         k += 1;
@@ -13992,17 +14265,22 @@ pub fn instantiations(
                                         if has_body
                                             && named_fn(fns, &tfns[m2].name) < 0
                                             && m.same(&name)
-                                            && is_family(&tfns[m2], outer.len())
+                                            && is_family(&tfns[m2], outer.len() + extras.len() as taddr)
                                         {
-                                            
+                                            let mut outer_full2 = ast::copy_names(&outer);
+                                            let mut xf2: taddr = 0;
+                                            while xf2 < extras.len() {
+                                                outer_full2.push(extras[xf2].to_string());
+                                                xf2 += 1;
+                                            }
 
                                             let mut cx = context(items);
                                             cx.closed = copy_closed(&work.closed);
                                             ok = function(
                                                 &tfns[m2], cx, owner.to_string(),
-                                                ast::copy_names(&outer),
+                                                ast::copy_names(&outer_full2),
                                                 ast::copy_names(&key),
-                                                Vec::new(), work, &mut text);
+                                                ast::copy_names(&self_key), work, &mut text);
                                             if ok {
                                                                             } else {
                                                                             }

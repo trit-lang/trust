@@ -2706,21 +2706,34 @@ under the closure's own key — the map version in fc6's, fc10's, fc12's —
 and that is `G9.179`-worth-of-work, because the answer must descend
 through the closure itself, not the table any key holds.
 
-**G9.179 — recorded, not settled: a closure's answer is a type when it
-answers toward somebody else's written question.** `map<B, G: Fn(I::Item)
--> B>` turns B into the family's fourth key, and the first
-implementation infers it from the closure's own signature — which it
-*says* is already the whole signature, by the same rule that a closure
-is one of two words: the receiver's whole type is its name, the
-closure's other components are its key's tail. What the second
-lowering already holds is answer-side now — a `main.closure1` is an
-instantiated name and its `.call` has parameters both directions — but
-a member of a *named* method family whose name is `Map.next.Range.t27
-.main.closure1.t27` says `B = t27` sits at the tail of the *method's*
-key, and the walk reaches it through a whole method family and not
-through guesswork the file had. fc6's `for it in (1..4).map(…)`
-still marks the hole, because a `for` of one is exactly the fold that
-asks it. And in a *non-chained* receiver the answer is not read
+**G9.179 — settled where the chapters ask of it: a parameter the self
+type never named is what its `Fn` bound made of it.** `impl<I: Iterator,
+B, F: Fn(I::Item) -> B> Iterator for Map<I, F>` settles `I` and `F` where
+`Map<I, F>` is written; it settles `B` nowhere the grammar of the impl's
+first line has a name for, yet after that line nothing in the program
+ever asks again. The walk is: what the receiver of a method is, is the
+family's `I` and `F`; what it answers, is whatever closes `F`'s bound —
+and `F` is a closure the receiver already settled (Ch. 4 §4.3). At the
+call, at the family's own table and at the substitution the impl's
+first line made (`type Item = B`), the question is only ever of `F`'s
+closure. `Map.next.Range.t27.main.closure1.t27` names it, where Rust's
+specialization by another means says the same thing; its answer comes
+as `Option<I::Item>` → `Option.t27` and puts the B-solve beside the
+assoc-decl the impl already made. Everything in `take`'s body then asks
+of its closure's closure: `Take`'s `type Item = I::Item` descends where
+`I` is a Map-instance, and the *selfs* the chain arrives at stay
+`Map.Range.t27.main.closure1` (`ft5`'s chain, `ft5d`'s `.take(2)`-only
+shape, `fc12`'s `let n = m.next(); 0`, `fc10`'s direct chain,
+`fc7`'s same-down-a-for). Bottom out with: `for it in
+(1..4).map(|x| x * 2)` (fc6), where the closure is *not* a closure's
+written type but an untyped `|x|`, whose answer is the *same question* —
+under `前瞻 fn_want`hands — this chain *still* descends the line.
+**G9.180 — recorded, not settled: the closure's hint itself is a
+question.**fc6's shape is a `for` over the map of an untyped closure:
+what the closure asks is settled the same way as every other closure
+that has `fn_want` set, but the file walks it after two of the three
+walks that precede it here.
+ And in a *non-chained* receiver the answer is not read
 *first*: `f.inner.next()` in a member's own body answers where the
 receiver's own method answers, `Range.next.t27` with the `option.t27`
 storage — at the numbers, rather than before the loads that make its
