@@ -14196,7 +14196,7 @@ pub fn instantiations(
                     // `into_iter` of `Range<t27>` (Ch. 4 §5.6).
                     let owner = if is_blanket {
                         named2.to_string()
-                    } else if outer.len() > 0 {
+                    } else if gs.len() == 0 || outer.len() > 0 {
                         impl_owner(gs, ty)
                     } else {
                         "".to_string()
