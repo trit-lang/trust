@@ -2770,6 +2770,20 @@ macros parity is covered by `programs/macros/main.tr` (the suite's own,
 including the iterator spread over take-of-any) and
 `examples/trust/macros.tr` at the same line.
 
+**G9.185 — the inliner's contract is a snapshot: every splice of a round
+reads the round's start, never the module mid-splicing.** A small callee
+dead in one round is spliced from the body it *had* when the round
+began, which is the only reading under which two implementations agree
+on the second splice of the same function — `small` is a map of clones
+on both sides now, and the tag, the `inline.{tag}.after` label, the
+`{name}.i{tag}` renaming, the slot hoist into the caller's entry and
+the dropped continuation of a callee that never returns are
+character-for-character where the suite asks: `bootstrap/tirinline.tr`
+holds `bootstrap/canon.tr` and `bootstrap/inline.tr` to `trustc preopt`
+on the whole corpus. What the snapshot does not settle is left where
+the table settles it: a body too big for the budget is left alone by
+both, and a cycle is still Tarjan's to name.
+
 **G9.184 — recorded, not settled: an `Option<()>` carried up a recursion
 was a run-time bomb, and a status code was not.** The second
 canonicalizer's `collect_bases` first answered `Option<()>` from inside

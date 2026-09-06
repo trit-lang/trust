@@ -568,6 +568,26 @@ for f in bootstrap/lowered/*.tr; do
             } > "$tmp/$idx.err"
             exit 1
         fi
+        # And then inlined: a small callee spliced into its caller, tag by
+        # tag and label by label (`inline.{tag}.after`, `{name}.i{tag}`),
+        # with the functions nothing calls any more dropped behind it. The
+        # seam is printed by both: `trustc preopt` and
+        # `bootstrap/tirinline.tr`, composed of the same two passes.
+        if rpre=$("$trustc" preopt "$tmp/$idx.tir" 2>/dev/null); then
+            mpre=$(printf '%s\n' "$rust" | "$trust" run bootstrap/tirinline.tr 2>/dev/null)
+            if [ "$rpre" != "$mpre" ]; then
+                {
+                    echo "bootstrap: the two inline $f differently"
+                    diff <(printf '%s\n' "$rpre") <(printf '%s\n' "$mpre") | head -10
+                } > "$tmp/$idx.err"
+                exit 1
+            fi
+        elif printf '%s\n' "$rust" | "$trust" run bootstrap/tirinline.tr > /dev/null 2>&1; then
+            {
+                echo "bootstrap: $f goes through preopt under one implementation and not the other"
+            } > "$tmp/$idx.err"
+            exit 1
+        fi
         printf '%s\n' "$rust" | wc -l > "$tmp/$idx.n"
     ) &
     idx=$((idx + 1))

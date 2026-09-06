@@ -1,0 +1,888 @@
+// Inlining TIR, in Trust.
+//
+// `compiler/src/tir/inline.rs` written again in the language it helps
+// compile: a call to a small, non-recursive function becomes the callee's
+// blocks, renamed, with its parameters bound to the call's arguments and
+// its `ret` turned into a branch to whatever followed the call — and then,
+// what it leaves behind: `drop_uncalled` removes the functions nothing
+// calls any more. `bootstrap/tirinline.tr` composes this with
+// `bootstrap/canon.tr` into the whole target-independent half of
+// `compile`, printed at the seam where `trustc preopt` prints it.
+
+use canon;
+use tir;
+
+/// How many instructions a callee may have and still be worth splicing
+/// (measurement, not argument: it takes `print_char` and the one-line
+/// accessors and leaves everything else alone).
+fn budget() -> taddr {
+    24
+}
+
+/// How many times to sweep, so that a call exposed by inlining is itself
+/// considered. Two is enough for the library's shapes and bounds the growth.
+fn rounds() -> taddr {
+    2
+}
+
+/// The whole pass, `main` kept and what it reaches: inline what is worth
+/// inlining, then drop what inlining orphaned.
+pub fn preopt(m: tir::Module) -> tir::Module {
+    let out = inline_module(m);
+    drop_uncalled(out, "main")
+}
+
+/// Inline what is worth inlining, everywhere in the module.
+pub fn inline_module(m: tir::Module) -> tir::Module {
+    let mut out = clone_module(&m);
+    let mut tag: taddr = 0;
+    let mut r: taddr = 0;
+    while r < rounds() {
+        // Recomputed each round: splicing changes who calls whom, and a
+        // function that was on no cycle before may be on one now.
+        let cyclic = on_a_cycle(&out);
+        let mut small_names: Vec<String> = Vec::new();
+        let mut small_funcs: Vec<tir::Func> = Vec::new();
+        let mut i: taddr = 0;
+        while i < out.funcs.len() {
+            if worth_inlining(&out.funcs[i]) && !canon::sset_has(&cyclic, &out.funcs[i].sig.name) {
+                small_names.push(out.funcs[i].sig.name.to_string());
+                small_funcs.push(canon::clone_func(&out.funcs[i]));
+            }
+            i += 1;
+        }
+        if small_names.len() == 0 {
+            return out;
+        }
+        let mut changed = false;
+        let mut i: taddr = 0;
+        while i < out.funcs.len() {
+            // The tag has to be unique across rounds as well as within one,
+            // or a second splice renames a value to a name the first made.
+            // And the table is borrowed, the exclusion a name rather than a
+            // removal: a snapshot of the round's start is what every splice
+            // reads, not the module mid-splicing.
+            let me = out.funcs[i].sig.name.to_string();
+            if inline_into(&mut out.funcs[i], &small_names, &small_funcs, &me, &mut tag) {
+                changed = true;
+            }
+            i += 1;
+        }
+        if !changed {
+            return out;
+        }
+        r += 1;
+    }
+    out
+}
+
+/// Whether a function is small enough to splice. Being on a call cycle is
+/// the other half of the test.
+fn worth_inlining(f: &tir::Func) -> bool {
+    let mut total: taddr = 0;
+    let mut i: taddr = 0;
+    while i < f.blocks.len() {
+        total += f.blocks[i].insts.len();
+        i += 1;
+    }
+    total <= budget()
+}
+
+/// The functions that lie on a call cycle, by name. None of them may be
+/// spliced: splicing `is_even` into `main` brings a call to `is_odd`, and
+/// the scan walks forward into the body it just spliced (G9.28).
+///
+/// Tarjan's algorithm, and iterative rather than recursive: a compiler
+/// that compiles itself is one large call graph, and running out of stack
+/// while working out where the cycles are would be a poor way to find out.
+fn on_a_cycle(m: &tir::Module) -> canon::SSet {
+    let mut names: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < m.funcs.len() {
+        names.push(m.funcs[i].sig.name.to_string());
+        i += 1;
+    }
+    let n = names.len();
+
+    // The call graph, as sorted unique index lists.
+    let mut edges: Vec<Vec<taddr>> = Vec::new();
+    let mut i: taddr = 0;
+    while i < n {
+        let mut es: Vec<taddr> = Vec::new();
+        let mut b: taddr = 0;
+        while b < m.funcs[i].blocks.len() {
+            let mut k: taddr = 0;
+            while k < m.funcs[i].blocks[b].insts.len() {
+                match &m.funcs[i].blocks[b].insts[k].kind {
+                    tir::Kind::Call(tir::Callee::Direct(c), _, _) => {
+                        let id = canon::name_in(&names, c);
+                        if id {
+                            let mut j: taddr = 0;
+                            while !names[j].same(c) {
+                                j += 1;
+                            }
+                            push_taddr_unique(&mut es, j);
+                        }
+                    }
+                    _ => {}
+                }
+                k += 1;
+            }
+            b += 1;
+        }
+        sort_taddrs(&mut es);
+        edges.push(es);
+        i += 1;
+    }
+
+    let none: taddr = 1_000_000;
+    let mut index: Vec<taddr> = Vec::new();
+    let mut low: Vec<taddr> = Vec::new();
+    let mut on_stack: Vec<bool> = Vec::new();
+    let mut i: taddr = 0;
+    while i < n {
+        index.push(none);
+        low.push(0);
+        on_stack.push(false);
+        i += 1;
+    }
+    let mut stack: Vec<taddr> = Vec::new();
+    let mut work_v: Vec<taddr> = Vec::new();
+    let mut work_k: Vec<taddr> = Vec::new();
+    let mut next: taddr = 0;
+    let mut cyclic = canon::sset_new();
+
+    let mut start: taddr = 0;
+    while start < n {
+        if index[start] != none {
+            start += 1;
+            continue;
+        }
+        index[start] = next;
+        low[start] = next;
+        next += 1;
+        stack.push(start);
+        on_stack[start] = true;
+        work_v.push(start);
+        work_k.push(0);
+        while work_v.len() > 0 {
+            let v = work_v[work_v.len() - 1];
+            let child = work_k[work_k.len() - 1];
+            if child < edges[v].len() {
+                work_k[work_k.len() - 1] = child + 1;
+                let w = edges[v][child];
+                if index[w] == none {
+                    index[w] = next;
+                    low[w] = next;
+                    next += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    work_v.push(w);
+                    work_k.push(0);
+                } else if on_stack[w] {
+                    if index[w] < low[v] {
+                        low[v] = index[w];
+                    }
+                }
+                continue;
+            }
+            work_v.pop();
+            work_k.pop();
+            if work_v.len() > 0 {
+                let parent = work_v[work_v.len() - 1];
+                if low[v] < low[parent] {
+                    low[parent] = low[v];
+                }
+            }
+            if low[v] == index[v] {
+                // One component. It is a cycle if it holds more than one
+                // function, or one that calls itself.
+                let mut scc: Vec<taddr> = Vec::new();
+                let mut done = false;
+                while !done && stack.len() > 0 {
+                    let w = stack[stack.len() - 1];
+                    stack.pop();
+                    on_stack[w] = false;
+                    scc.push(w);
+                    if w == v {
+                        done = true;
+                    }
+                }
+                let mut self_call = false;
+                let mut k: taddr = 0;
+                while k < edges[v].len() {
+                    if edges[v][k] == v {
+                        self_call = true;
+                    }
+                    k += 1;
+                }
+                if scc.len() > 1 || self_call {
+                    let mut k: taddr = 0;
+                    while k < scc.len() {
+                        canon::sset_add(&mut cyclic, &names[scc[k]]);
+                        k += 1;
+                    }
+                }
+            }
+        }
+        start += 1;
+    }
+    cyclic
+}
+
+fn push_taddr_unique(v: &mut Vec<taddr>, x: taddr) {
+    let mut i: taddr = 0;
+    while i < v.len() {
+        if v[i] == x {
+            return;
+        }
+        i += 1;
+    }
+    v.push(x);
+}
+
+fn sort_taddrs(v: &mut Vec<taddr>) {
+    let mut a: taddr = 1;
+    while a < v.len() {
+        let mut b = a;
+        while b > 0 && v[b] < v[b - 1] {
+            let t = v[b];
+            v[b] = v[b - 1];
+            v[b - 1] = t;
+            b -= 1;
+        }
+        a += 1;
+    }
+}
+
+/// Splice every eligible call in one function. Returns whether anything
+/// moved. The scan resumes where the splice happened rather than starting
+/// over, which is what gives a call inside an inlined body its chance in
+/// the same round.
+fn inline_into(f: &mut tir::Func, names: &Vec<String>, funcs: &Vec<tir::Func>, me: &str, tag: &mut taddr) -> bool {
+    let mut changed = false;
+    let mut from: taddr = 0;
+    loop {
+        match find_call(f, names, me, from) {
+            Option::Some(hit) => {
+                *tag += 1;
+                let mut ci: taddr = 0;
+                while !names[ci].same(&hit.name) {
+                    ci += 1;
+                }
+                splice(f, hit.block, hit.inst, &funcs[ci], *tag);
+                changed = true;
+                from = hit.block + 1;
+            }
+            Option::None => return changed,
+        }
+    }
+}
+
+/// Where a call worth splicing sits: block, instruction, callee name.
+pub struct CallHit {
+    pub block: taddr,
+    pub inst: taddr,
+    pub name: String,
+}
+
+/// The first call at or after block `from`, in block order, whose callee
+/// is worth splicing.
+fn find_call(f: &tir::Func, small: &Vec<String>, me: &str, from: taddr) -> Option<CallHit> {
+    let mut bi = from;
+    while bi < f.blocks.len() {
+        let mut ii: taddr = 0;
+        while ii < f.blocks[bi].insts.len() {
+            match &f.blocks[bi].insts[ii].kind {
+                tir::Kind::Call(tir::Callee::Direct(c), _, _) => {
+                    if !c.same(me) && canon::name_in(small, c) {
+                        return Option::Some(CallHit {
+                            block: bi,
+                            inst: ii,
+                            name: c.to_string(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+            ii += 1;
+        }
+        bi += 1;
+    }
+    Option::None
+}
+
+/// Replace the call at `blocks[bi].insts[ii]` with the callee's body.
+fn splice(f: &mut tir::Func, bi: taddr, ii: taddr, callee: &tir::Func, tag: taddr) {
+    // The call's arguments and results, first: the splice replaces the
+    // instruction that carried them.
+    let mut args: Vec<tir::Opnd> = Vec::new();
+    match &f.blocks[bi].insts[ii].kind {
+        tir::Kind::Call(_, as2, _) => {
+            let mut a: taddr = 0;
+            while a < as2.len() {
+                args.push(canon::clone_opnd(&as2[a]));
+                a += 1;
+            }
+        }
+        _ => {}
+    }
+    let results = canon::clone_names(&f.blocks[bi].insts[ii].results);
+
+    // The caller's block splits in two: what ran before the call, and what
+    // runs after it — and what runs after takes the call's result as a
+    // block parameter.
+    let mut after_label: String = Vec::new();
+    canon::push_str(&mut after_label, "inline.");
+    canon::push_int(&mut after_label, tag as t27);
+    canon::push_str(&mut after_label, ".after");
+
+    let mut tail: Vec<tir::Inst> = Vec::new();
+    let mut k = ii + 1;
+    while k < f.blocks[bi].insts.len() {
+        tail.push(canon::clone_inst(&f.blocks[bi].insts[k]));
+        k += 1;
+    }
+    let term = canon::clone_term(&f.blocks[bi].term);
+
+    let mut ret_param: Vec<tir::Param> = Vec::new();
+    if results.len() == 1 {
+        match &callee.sig.ret {
+            Option::Some(t) => {
+                ret_param.push(tir::Param { name: results[0].to_string(), ty: canon::clone_ty(&t) });
+            }
+            Option::None => {}
+        }
+    }
+    let mut before: Vec<tir::Inst> = Vec::new();
+    let mut k: taddr = 0;
+    while k < ii {
+        before.push(canon::clone_inst(&f.blocks[bi].insts[k]));
+        k += 1;
+    }
+    let head_label = f.blocks[bi].label.to_string();
+    let head_params = canon::clone_params(&f.blocks[bi].params);
+
+    // Rename everything the callee defines; a dot is what every generated
+    // name already separates with, and the tag is unique across the module.
+    let mut bound = canon::omap_new();
+    let mut p: taddr = 0;
+    while p < callee.sig.params.len() {
+        if p < args.len() {
+            canon::omap_set(&mut bound, &callee.sig.params[p].name, canon::clone_opnd(&args[p]));
+        }
+        p += 1;
+    }
+
+    let mut entry_label: String = Vec::new();
+    let mut spliced: Vec<tir::Block> = Vec::new();
+    let mut k: taddr = 0;
+    while k < callee.blocks.len() {
+        let nb = rename_block(&callee.blocks[k], k == 0, &bound, tag, &after_label, &callee.sig.ret);
+        if k == 0 {
+            entry_label = nb.label.to_string();
+        }
+        spliced.push(nb);
+        k += 1;
+    }
+
+    // A `slot` is a stack allocation of *function* lifetime, so the
+    // callee's belong in the caller's entry block.
+    let mut slots: Vec<tir::Inst> = Vec::new();
+    let mut k: taddr = 0;
+    while k < spliced.len() {
+        let mut kept: Vec<tir::Inst> = Vec::new();
+        let mut i: taddr = 0;
+        while i < spliced[k].insts.len() {
+            match &spliced[k].insts[i].kind {
+                tir::Kind::Slot(_) => slots.push(canon::clone_inst(&spliced[k].insts[i])),
+                _ => kept.push(canon::clone_inst(&spliced[k].insts[i])),
+            }
+            i += 1;
+        }
+        spliced[k].insts = kept;
+        k += 1;
+    }
+
+    // A callee that never returns leaves nothing branching to the
+    // continuation, and what followed the call is then code control cannot
+    // reach. Dropping it is not an optimization: an unreachable block is
+    // one the verifier rejects.
+    let mut returns = false;
+    let mut k: taddr = 0;
+    while k < spliced.len() {
+        let succ = canon::successors(&spliced[k].term);
+        let mut s: taddr = 0;
+        while s < succ.len() {
+            if succ[s].same(&after_label) {
+                returns = true;
+            }
+            s += 1;
+        }
+        k += 1;
+    }
+
+    // A `slot` is a stack allocation of *function* lifetime, so the
+    // callee's belong in the caller's entry block — where every other one
+    // is, and where the frame layout expects to find them.
+    let mut blocks: Vec<tir::Block> = Vec::new();
+    let mut j: taddr = 0;
+    while j < f.blocks.len() {
+        if j < bi {
+            blocks.push(canon::clone_block(&f.blocks[j]));
+        }
+        j += 1;
+    }
+    let head_term_args: Vec<tir::Opnd> = Vec::new();
+    blocks.push(tir::Block {
+        label: head_label,
+        params: head_params,
+        insts: before,
+        term: tir::Term::Br(tir::Target { label: entry_label, args: head_term_args }),
+    });
+    // The entry block of the rebuilt function is the clone when the call
+    // stood deeper, and the head when it stood in the entry itself: index
+    // zero either way.
+    if slots.len() > 0 {
+        let mut fronted: Vec<tir::Inst> = Vec::new();
+        let mut s: taddr = 0;
+        while s < slots.len() {
+            fronted.push(canon::clone_inst(&slots[s]));
+            s += 1;
+        }
+        let mut i: taddr = 0;
+        while i < blocks[0].insts.len() {
+            fronted.push(canon::clone_inst(&blocks[0].insts[i]));
+            i += 1;
+        }
+        blocks[0].insts = fronted;
+    }
+    let mut k: taddr = 0;
+    while k < spliced.len() {
+        blocks.push(canon::clone_block(&spliced[k]));
+        k += 1;
+    }
+    if returns {
+        blocks.push(tir::Block {
+            label: after_label,
+            params: ret_param,
+            insts: tail,
+            term: term,
+        });
+    }
+    let mut j = bi + 1;
+    while j < f.blocks.len() {
+        blocks.push(canon::clone_block(&f.blocks[j]));
+        j += 1;
+    }
+    f.blocks = blocks;
+}
+
+/// The callee's body, renamed and with its `ret` pointed at the
+/// continuation.
+fn rename_block(
+    b: &tir::Block,
+    is_entry: bool,
+    bound: &canon::OMap,
+    tag: taddr,
+    after_label: &str,
+    ret: &Option<tir::Ty>,
+) -> tir::Block {
+    let mut label = b.label.to_string();
+    push_itag(&mut label, tag);
+    let mut params: Vec<tir::Param> = Vec::new();
+    if !is_entry {
+        let mut i: taddr = 0;
+        while i < b.params.len() {
+            let mut name = b.params[i].name.to_string();
+            push_itag(&mut name, tag);
+            params.push(tir::Param { name: name, ty: canon::clone_ty(&b.params[i].ty) });
+            i += 1;
+        }
+    }
+    let mut insts: Vec<tir::Inst> = Vec::new();
+    let mut i: taddr = 0;
+    while i < b.insts.len() {
+        let inst = &b.insts[i];
+        let mut results = canon::clone_names(&inst.results);
+        let mut r: taddr = 0;
+        while r < results.len() {
+            let mut renamed = results[r].to_string();
+            push_itag(&mut renamed, tag);
+            results[r] = renamed;
+            r += 1;
+        }
+        insts.push(tir::Inst { results: results, kind: fix_kind(&inst.kind, bound, tag) });
+        i += 1;
+    }
+    let term = fix_term(&b.term, bound, tag, after_label, ret);
+    tir::Block { label: label, params: params, insts: insts, term: term }
+}
+
+/// `{name}.i{tag}` appended: the rename every spliced name takes.
+fn push_itag(out: &mut String, tag: taddr) {
+    canon::push_str(out, ".i");
+    canon::push_int(out, tag as t27);
+}
+
+/// An operand of the callee, rebound: the argument it names where a
+/// parameter stood, the renamed value otherwise.
+fn fix_opnd(o: &tir::Opnd, bound: &canon::OMap, tag: taddr) -> tir::Opnd {
+    match o {
+        tir::Opnd::Val(v) => {
+            match canon::omap_get(bound, v) {
+                Option::Some(a) => a,
+                Option::None => {
+                    let mut renamed = v.to_string();
+                    push_itag(&mut renamed, tag);
+                    tir::Opnd::Val(renamed)
+                }
+            }
+        }
+        _ => canon::clone_opnd(o),
+    }
+}
+
+fn fix_target(t: &tir::Target, bound: &canon::OMap, tag: taddr) -> tir::Target {
+    let mut label = t.label.to_string();
+    push_itag(&mut label, tag);
+    let mut args: Vec<tir::Opnd> = Vec::new();
+    let mut i: taddr = 0;
+    while i < t.args.len() {
+        args.push(fix_opnd(&t.args[i], bound, tag));
+        i += 1;
+    }
+    tir::Target { label: label, args: args }
+}
+
+fn fix_kind(k: &tir::Kind, bound: &canon::OMap, tag: taddr) -> tir::Kind {
+    match k {
+        tir::Kind::Flav(op, fl, ty, a, b) => {
+            tir::Kind::Flav(op, fl, canon::clone_ty(&ty), fix_opnd(a, bound, tag), fix_opnd(b, bound, tag))
+        }
+        tir::Kind::Plain(op, ty, a, b) => {
+            tir::Kind::Plain(op, canon::clone_ty(&ty), fix_opnd(a, bound, tag), fix_opnd(b, bound, tag))
+        }
+        tir::Kind::Neg(ty, a) => tir::Kind::Neg(canon::clone_ty(&ty), fix_opnd(a, bound, tag)),
+        tir::Kind::Cmp(ty, a, b) => {
+            tir::Kind::Cmp(canon::clone_ty(&ty), fix_opnd(a, bound, tag), fix_opnd(b, bound, tag))
+        }
+        tir::Kind::Select3(t, ty, n, z, p) => tir::Kind::Select3(
+            fix_opnd(t, bound, tag),
+            canon::clone_ty(&ty),
+            fix_opnd(n, bound, tag),
+            fix_opnd(z, bound, tag),
+            fix_opnd(p, bound, tag),
+        ),
+        tir::Kind::Slot(n) => tir::Kind::Slot(n),
+        tir::Kind::Load(ty, p) => tir::Kind::Load(canon::clone_ty(&ty), fix_opnd(p, bound, tag)),
+        tir::Kind::Store(ty, v, p) => {
+            tir::Kind::Store(canon::clone_ty(&ty), fix_opnd(v, bound, tag), fix_opnd(p, bound, tag))
+        }
+        tir::Kind::Offset(p, d) => tir::Kind::Offset(fix_opnd(p, bound, tag), fix_opnd(d, bound, tag)),
+        tir::Kind::Widen(from, a, to) => {
+            tir::Kind::Widen(canon::clone_ty(&from), fix_opnd(a, bound, tag), canon::clone_ty(&to))
+        }
+        tir::Kind::Trunc(from, a, to) => {
+            tir::Kind::Trunc(canon::clone_ty(&from), fix_opnd(a, bound, tag), canon::clone_ty(&to))
+        }
+        tir::Kind::Call(callee, args, rett) => {
+            let c2 = match callee {
+                tir::Callee::Direct(n) => tir::Callee::Direct(n.to_string()),
+                tir::Callee::Indirect(o) => tir::Callee::Indirect(fix_opnd(o, bound, tag)),
+            };
+            let mut as2: Vec<tir::Opnd> = Vec::new();
+            let mut i: taddr = 0;
+            while i < args.len() {
+                as2.push(fix_opnd(&args[i], bound, tag));
+                i += 1;
+            }
+            let ret2: Option<tir::Ty> = match rett {
+                Option::Some(t) => Option::Some(canon::clone_ty(&t)),
+                Option::None => Option::None,
+            };
+            tir::Kind::Call(c2, as2, ret2)
+        }
+    }
+}
+
+fn fix_term(t: &tir::Term, bound: &canon::OMap, tag: taddr, after_label: &str, ret: &Option<tir::Ty>) -> tir::Term {
+    match t {
+        tir::Term::Br3(sel, n, z, p) => tir::Term::Br3(
+            fix_opnd(sel, bound, tag),
+            fix_target(n, bound, tag),
+            fix_target(z, bound, tag),
+            fix_target(p, bound, tag),
+        ),
+        tir::Term::Br(d) => tir::Term::Br(fix_target(d, bound, tag)),
+        tir::Term::Ret(v) => {
+            // A `ret` is where the callee's control flow rejoins the caller's.
+            let mut args: Vec<tir::Opnd> = Vec::new();
+            match v {
+                Option::Some(o) => {
+                    match ret {
+                        Option::Some(_) => args.push(fix_opnd(o, bound, tag)),
+                        Option::None => {}
+                    }
+                }
+                Option::None => {}
+            }
+            tir::Term::Br(tir::Target { label: after_label.to_string(), args: args })
+        }
+        tir::Term::Trap(code) => tir::Term::Trap(code.to_string()),
+        tir::Term::Unreachable => tir::Term::Unreachable,
+    }
+}
+
+fn clone_module(m: &tir::Module) -> tir::Module {
+    let mut funcs: Vec<tir::Func> = Vec::new();
+    let mut i: taddr = 0;
+    while i < m.funcs.len() {
+        funcs.push(canon::clone_func(&m.funcs[i]));
+        i += 1;
+    }
+    let mut decls: Vec<tir::Sig> = Vec::new();
+    let mut d: taddr = 0;
+    while d < m.decls.len() {
+        decls.push(clone_sig(&m.decls[d]));
+        d += 1;
+    }
+    let mut globals: Vec<tir::Global> = Vec::new();
+    let mut g: taddr = 0;
+    while g < m.globals.len() {
+        globals.push(clone_global(&m.globals[g]));
+        g += 1;
+    }
+    tir::Module {
+        version: m.version.to_string(),
+        target: m.target.to_string(),
+        globals: globals,
+        decls: decls,
+        funcs: funcs,
+    }
+}
+
+fn clone_sig(s: &tir::Sig) -> tir::Sig {
+    let mut ps: Vec<tir::Param> = Vec::new();
+    let mut i: taddr = 0;
+    while i < s.params.len() {
+        ps.push(tir::Param { name: s.params[i].name.to_string(), ty: canon::clone_ty(&s.params[i].ty) });
+        i += 1;
+    }
+    let ret: Option<tir::Ty> = match &s.ret {
+        Option::Some(t) => Option::Some(canon::clone_ty(&t)),
+        Option::None => Option::None,
+    };
+    tir::Sig { name: s.name.to_string(), params: ps, ret: ret }
+}
+
+fn clone_global(g: &tir::Global) -> tir::Global {
+    let init: Option<Vec<tir::InitItem>> = match &g.init {
+        Option::Some(items) => {
+            let mut out: Vec<tir::InitItem> = Vec::new();
+            let mut i: taddr = 0;
+            while i < items.len() {
+                match &items[i] {
+                    tir::InitItem::Tryte(v) => out.push(tir::InitItem::Tryte(v)),
+                    tir::InitItem::Addr(n) => out.push(tir::InitItem::Addr(n.to_string())),
+                }
+                i += 1;
+            }
+            Option::Some(out)
+        }
+        Option::None => Option::None,
+    };
+    tir::Global { name: g.name.to_string(), trytes: g.trytes, init: init }
+}
+
+/// Drop functions nothing calls any more — `main` and anything a global's
+/// initializer names stay, and a live global keeps the functions it names
+/// alive (G9.95).
+pub fn drop_uncalled(m: tir::Module, root: &str) -> tir::Module {
+    let mut live = canon::sset_new();
+    let mut queue: Vec<String> = Vec::new();
+    queue.push(root.to_string());
+    while queue.len() > 0 {
+        let name = queue[queue.len() - 1].to_string();
+        queue.pop();
+        if canon::sset_has(&live, &name) {
+            continue;
+        }
+        canon::sset_add(&mut live, &name);
+        let mut fi: taddr = 0;
+        while fi < m.funcs.len() {
+            if m.funcs[fi].sig.name.same(&name) {
+                let f = &m.funcs[fi];
+                let mut bi: taddr = 0;
+                while bi < f.blocks.len() {
+                    let b = &f.blocks[bi];
+                    let mut ii: taddr = 0;
+                    while ii < b.insts.len() {
+                        match &b.insts[ii].kind {
+                            tir::Kind::Call(tir::Callee::Direct(c), _, _) => {
+                                queue.push(c.to_string());
+                            }
+                            _ => {}
+                        }
+                        note_kind_globals(&b.insts[ii].kind, &mut queue);
+                        ii += 1;
+                    }
+                    note_term_globals(&b.term, &mut queue);
+                    bi += 1;
+                }
+            }
+            fi += 1;
+        }
+        let mut gi: taddr = 0;
+        while gi < m.globals.len() {
+            if m.globals[gi].name.same(&name) {
+                match &m.globals[gi].init {
+                    Option::Some(items) => {
+                        let mut i: taddr = 0;
+                        while i < items.len() {
+                            match &items[i] {
+                                tir::InitItem::Addr(n) => queue.push(n.to_string()),
+                                _ => {}
+                            }
+                            i += 1;
+                        }
+                    }
+                    Option::None => {}
+                }
+            }
+            gi += 1;
+        }
+    }
+
+    let mut funcs: Vec<tir::Func> = Vec::new();
+    let mut fi: taddr = 0;
+    while fi < m.funcs.len() {
+        if canon::sset_has(&live, &m.funcs[fi].sig.name) {
+            funcs.push(canon::clone_func(&m.funcs[fi]));
+        }
+        fi += 1;
+    }
+    let mut globals: Vec<tir::Global> = Vec::new();
+    let mut gi: taddr = 0;
+    while gi < m.globals.len() {
+        if canon::sset_has(&live, &m.globals[gi].name) {
+            globals.push(clone_global(&m.globals[gi]));
+        }
+        gi += 1;
+    }
+    let mut called = canon::sset_new();
+    let mut fi: taddr = 0;
+    while fi < funcs.len() {
+        let mut bi: taddr = 0;
+        while bi < funcs[fi].blocks.len() {
+            let mut ii: taddr = 0;
+            while ii < funcs[fi].blocks[bi].insts.len() {
+                match &funcs[fi].blocks[bi].insts[ii].kind {
+                    tir::Kind::Call(tir::Callee::Direct(c), _, _) => {
+                        canon::sset_add(&mut called, c);
+                    }
+                    _ => {}
+                }
+                ii += 1;
+            }
+            bi += 1;
+        }
+        fi += 1;
+    }
+    let mut decls: Vec<tir::Sig> = Vec::new();
+    let mut di: taddr = 0;
+    while di < m.decls.len() {
+        if canon::sset_has(&called, &m.decls[di].name) {
+            decls.push(clone_sig(&m.decls[di]));
+        }
+        di += 1;
+    }
+    tir::Module {
+        version: m.version.to_string(),
+        target: m.target.to_string(),
+        globals: globals,
+        decls: decls,
+        funcs: funcs,
+    }
+}
+
+fn note_kind_globals(k: &tir::Kind, queue: &mut Vec<String>) {
+    match k {
+        tir::Kind::Flav(_, _, _, a, b) => {
+            note_opnd_global(a, queue);
+            note_opnd_global(b, queue);
+        }
+        tir::Kind::Plain(_, _, a, b) => {
+            note_opnd_global(a, queue);
+            note_opnd_global(b, queue);
+        }
+        tir::Kind::Neg(_, a) => note_opnd_global(a, queue),
+        tir::Kind::Cmp(_, a, b) => {
+            note_opnd_global(a, queue);
+            note_opnd_global(b, queue);
+        }
+        tir::Kind::Select3(t, _, n, z, p) => {
+            note_opnd_global(t, queue);
+            note_opnd_global(n, queue);
+            note_opnd_global(z, queue);
+            note_opnd_global(p, queue);
+        }
+        tir::Kind::Slot(_) => {}
+        tir::Kind::Load(_, p) => note_opnd_global(p, queue),
+        tir::Kind::Store(_, v, p) => {
+            note_opnd_global(v, queue);
+            note_opnd_global(p, queue);
+        }
+        tir::Kind::Offset(p, d) => {
+            note_opnd_global(p, queue);
+            note_opnd_global(d, queue);
+        }
+        tir::Kind::Widen(_, a, _) => note_opnd_global(a, queue),
+        tir::Kind::Trunc(_, a, _) => note_opnd_global(a, queue),
+        tir::Kind::Call(callee, args, _) => {
+            match callee {
+                tir::Callee::Indirect(o) => note_opnd_global(o, queue),
+                _ => {}
+            }
+            let mut i: taddr = 0;
+            while i < args.len() {
+                note_opnd_global(&args[i], queue);
+                i += 1;
+            }
+        }
+    }
+}
+
+fn note_opnd_global(o: &tir::Opnd, queue: &mut Vec<String>) {
+    match o {
+        tir::Opnd::Glob(g) => queue.push(g.to_string()),
+        _ => {}
+    }
+}
+
+fn note_term_globals(t: &tir::Term, queue: &mut Vec<String>) {
+    match t {
+        tir::Term::Br3(sel, n, z, p) => {
+            note_opnd_global(sel, queue);
+            note_target_globals(n, queue);
+            note_target_globals(z, queue);
+            note_target_globals(p, queue);
+        }
+        tir::Term::Br(d) => note_target_globals(d, queue),
+        tir::Term::Ret(v) => {
+            match v {
+                Option::Some(o) => note_opnd_global(o, queue),
+                Option::None => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+fn note_target_globals(t: &tir::Target, queue: &mut Vec<String>) {
+    let mut i: taddr = 0;
+    while i < t.args.len() {
+        note_opnd_global(&t.args[i], queue);
+        i += 1;
+    }
+}

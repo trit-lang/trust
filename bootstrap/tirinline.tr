@@ -1,0 +1,28 @@
+// The target-independent half of `compile`, in Trust: canonicalize,
+// inline, drop, canonicalize again — printed at the seam where the module
+// stops changing shape by agreement and starts changing for a target
+// (TIR §6). `trustc preopt` is this oracle's other side; the passes are
+// `bootstrap/canon.tr`'s and `bootstrap/inline.tr`'s, and what both of
+// those are is written down at their heads.
+
+mod canon;
+mod inline;
+mod input;
+mod tir;
+
+fn main() -> t27 {
+    let src = input::read_all();
+    match tir::parse(&src) {
+        Result::Ok(m) => {
+            let out = canon::canonicalize(m);
+            let out = inline::preopt(out);
+            let out = canon::canonicalize(out);
+            tir::print_module(&out);
+            0
+        }
+        Result::Err(e) => {
+            let _ = e;
+            1
+        }
+    }
+}
