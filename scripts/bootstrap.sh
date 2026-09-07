@@ -588,6 +588,50 @@ for f in bootstrap/lowered/*.tr; do
             } > "$tmp/$idx.err"
             exit 1
         fi
+        # And then legalized, for the only target either knows: `tritium`'s
+        # one legal width is the word, and a `cmp`'s t1 is the shape every
+        # condition arrives in (TIR §6). The seam is the one `compile`
+        # crosses — what is legalized here is the preopt text, since that
+        # is what code generation will see — and `bootstrap/tirlegal.tr`
+        # holds its promotion to `trustc legalize` on every module.
+        printf '%s\n' "$rpre" > "$tmp/$idx.pre"
+        if rleg=$("$trustc" legalize "$tmp/$idx.pre" 2>/dev/null); then
+            mleg=$(printf '%s\n' "$rpre" | "$trust" run bootstrap/tirlegal.tr 2>/dev/null)
+            if [ "$rleg" != "$mleg" ]; then
+                {
+                    echo "bootstrap: the two legalize $f differently"
+                    diff <(printf '%s\n' "$rleg") <(printf '%s\n' "$mleg") | head -10
+                } > "$tmp/$idx.err"
+                exit 1
+            fi
+        elif printf '%s\n' "$rpre" | "$trust" run bootstrap/tirlegal.tr > /dev/null 2>&1; then
+            {
+                echo "bootstrap: $f legalizes under one implementation and not the other"
+            } > "$tmp/$idx.err"
+            exit 1
+        fi
+        # And then the whole way: TRISC-27 assembly, instruction for
+        # instruction, `li`'s immediates folded, `br3`'s reach measured in
+        # the first of two passes, the registers a linear scan decided and
+        # the moves a parallel copy made of the edges. `bootstrap/tirgen.tr`
+        # is the whole pipeline — canon, inline, drop, canon, legalize,
+        # generate — piping its own stages, held to `trustc compile`. A
+        # module with no `main` is refused by both, like every other refusal.
+        if rasm=$("$trustc" compile "$tmp/$idx.tir" 2>/dev/null); then
+            miasm=$(printf '%s\n' "$rust" | "$trust" run bootstrap/tirgen.tr 2>/dev/null)
+            if [ "$rasm" != "$miasm" ]; then
+                {
+                    echo "bootstrap: the two compile $f differently"
+                    diff <(printf '%s\n' "$rasm") <(printf '%s\n' "$miasm") | head -10
+                } > "$tmp/$idx.err"
+                exit 1
+            fi
+        elif printf '%s\n' "$rust" | "$trust" run bootstrap/tirgen.tr > /dev/null 2>&1; then
+            {
+                echo "bootstrap: $f assembles under one implementation and not the other"
+            } > "$tmp/$idx.err"
+            exit 1
+        fi
         printf '%s\n' "$rust" | wc -l > "$tmp/$idx.n"
     ) &
     idx=$((idx + 1))

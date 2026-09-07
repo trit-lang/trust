@@ -1,0 +1,2841 @@
+// Code generation: legalized TIR to TRISC-27 assembly, in Trust.
+//
+// `compiler/src/codegen.rs` written again in the language it helps
+// compile. The output is assembly text — the assembler owns label
+// resolution, instruction encoding and layout — so the backend's output
+// is readable, and so the way to hold this second writing of it to the
+// first is what it always is here: the two print the same text, character
+// for character, on every module the suite lowers. `bootstrap/tirgen.tr`
+// composes this with the passes in front of it and holds the whole to
+// `trustc compile`.
+//
+// Where a value lives is written down with the arithmetic: every value
+// has a frame slot, and above that floor sits the linear scan over live
+// intervals that decides, once per function, which values never touch
+// memory at all. A `br3` displacement reaches ±1093 words, and a branch
+// that cannot reach is an assembly-time error — which is why a function
+// is generated twice: the first pass sends every arm through a stub and
+// records where each block landed, and the second lets `br3` name the
+// arms it can reach.
+
+use canon;
+use tir;
+
+// ---------------------------------------------------------------- constants
+
+/// Trytes in a word.
+fn word() -> taddr {
+    3
+}
+
+// The name `parallel_copy` parks a register under. No TIR value can be
+// called this: TIR values are named by the frontend, which mangles with
+// `.`, and this has a character no identifier may contain.
+fn scratch_name() -> String {
+    let mut out: String = Vec::new();
+    out.push('\u{1}');
+    out.push('t');
+    out.push('0');
+    out
+}
+
+// The reach of an I-format immediate: 14 trits, so (3¹⁴ − 1)/2 either way
+// (TRISC-27 §3.2).
+fn imm_max() -> t27 {
+    2_391_484
+}
+
+// How far a `br3` displacement reaches: seven trits of words, so ±1093 —
+// with a margin, because the estimate has to agree with the assembler's
+// own sizing, and being wrong here is an assembly-time error.
+fn br3_reach() -> taddr {
+    1000
+}
+
+fn pool_always(i: taddr) -> String {
+    if i == 0 {
+        "t4".to_string()
+    } else if i == 1 {
+        "t5".to_string()
+    } else if i == 2 {
+        "t6".to_string()
+    } else {
+        "t7".to_string()
+    }
+}
+
+fn pool_call_free(i: taddr) -> String {
+    let mut out: String = Vec::new();
+    out.push('a');
+    canon::push_int(&mut out, i as t27);
+    out
+}
+
+fn pool_saved(i: taddr) -> String {
+    let mut out: String = Vec::new();
+    out.push('s');
+    canon::push_int(&mut out, i as t27);
+    out
+}
+
+// ---------------------------------------------------------------- helpers
+
+/// `3^0`‑aligned rounding up, to a whole number of words.
+fn round_up(v: taddr) -> taddr {
+    let r = v % 3;
+    if r == 0 {
+        return v;
+    }
+    if r == 1 {
+        return v + 2;
+    }
+    v + 1
+}
+
+/// The immediate an operand carries, if it is a constant the I formats can
+/// hold.
+fn immediate(o: &tir::Opnd) -> Option<t27> {
+    match o {
+        tir::Opnd::Konst(_, v) => {
+            let a = if v < 0 { 0 - v } else { v };
+            if a <= imm_max() {
+                return Option::Some(v);
+            }
+            Option::None
+        }
+        _ => Option::None,
+    }
+}
+
+/// How many words a line of generated assembly assembles to.
+///
+/// Every instruction is one word. The two pseudo-instructions that are not
+/// are `li`, which is one word when the value fits the fourteen-trit
+/// immediate and two otherwise, and `la`, which is always two — a forward
+/// reference must not change a statement's size.
+fn words_of(line: &str) -> taddr {
+    let mut at: taddr = 0;
+    while at < line.len() && line[at] == ' ' {
+        at += 1;
+    }
+    if starts_at(line, at, "li ") {
+        // The last operand, after the final comma.
+        let mut last_comma: taddr = 0;
+        let mut found = false;
+        let mut i: taddr = at + 3;
+        while i < line.len() {
+            if line[i] == ',' {
+                last_comma = i;
+                found = true;
+            }
+            i += 1;
+        }
+        if !found {
+            return 2;
+        }
+        // Trim, and read a decimal with an optional leading minus.
+        let mut from = last_comma + 1;
+        while from < line.len() && line[from] == ' ' {
+            from += 1;
+        }
+        let mut to = line.len();
+        while to > from && line[to - 1] == ' ' {
+            to -= 1;
+        }
+        if to <= from {
+            return 2;
+        }
+        let mut k = from;
+        if line[k] == '-' {
+            k += 1;
+        }
+        if k >= to {
+            return 2;
+        }
+        let mut v: taddr = 0;
+        let mut digits = true;
+        let mut i = k;
+        while i < to {
+            let c = line[i];
+            if c < '0' || c > '9' {
+                digits = false;
+            } else {
+                v = v * 10 + (((c as t27) - ('0' as t27)) as taddr);
+            }
+            i += 1;
+        }
+        if !digits {
+            return 2;
+        }
+        if v <= imm_max() as taddr {
+            return 1;
+        }
+        return 2;
+    }
+    if starts_at(line, at, "la ") {
+        return 2;
+    }
+    1
+}
+
+fn starts_at(s: &str, at: taddr, p: &str) -> bool {
+    if at + p.len() > s.len() {
+        return false;
+    }
+    let mut i: taddr = 0;
+    while i < p.len() {
+        if s[at + i] != p[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+// ---------------------------------------------------------------- frame
+
+/// Where a value lives: a displacement from `sp`.
+pub struct Frame {
+    /// Slot of each SSA value, in trytes from `sp`.
+    pub slot_names: Vec<String>,
+    pub slot_ats: Vec<taddr>,
+    /// Slots holding branch arguments in transit.
+    pub transfer: Vec<taddr>,
+    /// Total frame size in trytes.
+    pub size: taddr,
+}
+
+fn frame_slot(f: &Frame, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < f.slot_names.len() {
+        if f.slot_names[i].same(name) {
+            return f.slot_ats[i];
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
+fn storage_name(name: &str) -> String {
+    let mut out: String = Vec::new();
+    out.push('\u{1}');
+    canon::push_str(&mut out, "storage.");
+    canon::push_str(&mut out, name);
+    out
+}
+
+fn saved_name(r: &str) -> String {
+    let mut out: String = Vec::new();
+    out.push('\u{1}');
+    canon::push_str(&mut out, "saved.");
+    canon::push_str(&mut out, r);
+    out
+}
+
+/// Lay out the frame: one word per SSA value, plus `slot` storage, plus a
+/// transfer area wide enough for the widest block parameter list. Word 0
+/// holds the saved return address.
+fn layout(f: &tir::Func, saved: &Vec<String>) -> Frame {
+    let mut names: Vec<String> = Vec::new();
+    let mut ats: Vec<taddr> = Vec::new();
+    let mut cursor: taddr = word();
+
+    let mut i: taddr = 0;
+    while i < saved.len() {
+        names.push(saved_name(&saved[i]));
+        ats.push(cursor);
+        cursor += word();
+        i += 1;
+    }
+
+    let mut give_at: taddr = 0;
+    let mut i: taddr = 0;
+    while i < f.sig.params.len() {
+        let n = &f.sig.params[i].name;
+        if frame_slot_names(&names, n) == 0 - 1 {
+            names.push(n.to_string());
+            ats.push(cursor);
+            cursor += word();
+        }
+        i += 1;
+    }
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let b = &f.blocks[bi];
+        let mut i: taddr = 0;
+        while i < b.params.len() {
+            let n = &b.params[i].name;
+            if frame_slot_names(&names, n) == 0 - 1 {
+                names.push(n.to_string());
+                ats.push(cursor);
+                cursor += word();
+            }
+            i += 1;
+        }
+        let mut j: taddr = 0;
+        while j < b.insts.len() {
+            let mut r: taddr = 0;
+            while r < b.insts[j].results.len() {
+                let n = &b.insts[j].results[r];
+                if frame_slot_names(&names, n) == 0 - 1 {
+                    names.push(n.to_string());
+                    ats.push(cursor);
+                    cursor += word();
+                }
+                r += 1;
+            }
+            j += 1;
+        }
+        bi += 1;
+    }
+    let _ = give_at;
+
+    // `slot` allocations are storage, not values: the value is the address.
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let b = &f.blocks[bi];
+        let mut j: taddr = 0;
+        while j < b.insts.len() {
+            match &b.insts[j].kind {
+                tir::Kind::Slot(trytes) => {
+                    let aligned = round_up(cursor);
+                    cursor = aligned + round_up(trytes);
+                    if b.insts[j].results.len() > 0 {
+                        names.push(storage_name(&b.insts[j].results[0]));
+                        ats.push(aligned);
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        bi += 1;
+    }
+
+    let mut widest: taddr = 0;
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        if f.blocks[bi].params.len() > widest {
+            widest = f.blocks[bi].params.len();
+        }
+        bi += 1;
+    }
+    let mut transfer: Vec<taddr> = Vec::new();
+    let mut i: taddr = 0;
+    while i < widest {
+        transfer.push(cursor);
+        cursor += word();
+        i += 1;
+    }
+
+    Frame {
+        slot_names: names,
+        slot_ats: ats,
+        transfer: transfer,
+        size: round_up(cursor),
+    }
+}
+
+fn frame_slot_names(names: &Vec<String>, n: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < names.len() {
+        if names[i].same(n) {
+            return i;
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
+// ---------------------------------------------------------------- folds
+
+/// An address a load or store can carry in its own displacement field.
+pub struct Folded {
+    /// Set for `slot n`: the frame at the storage. Unset base means the
+    /// frame at a slot's storage; a `Some` base is another value, which
+    /// has to be in a register at the access.
+    pub base_is_value: bool,
+    /// The slot's name.
+    pub name: String,
+    /// The value the address is computed from, when it is one.
+    pub base: Option<tir::Opnd>,
+    /// Trytes from that base.
+    pub disp: t27,
+}
+
+/// Addresses the accesses of one block absorb into their own displacement.
+pub struct FoldMap {
+    pub names: Vec<String>,
+    pub foldeds: Vec<Folded>,
+}
+
+fn foldmap_get(m: &FoldMap, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < m.names.len() {
+        if m.names[i].same(name) {
+            return i;
+        }
+        i += 1;
+    }
+    m.names.len()
+}
+
+fn foldmap_has(m: &FoldMap, name: &str) -> bool {
+    foldmap_get(m, name) < m.names.len()
+}
+
+/// The addresses this block computes that its loads and stores can carry
+/// themselves. Two shapes produce a foldable address: `%p = offset %b,
+/// const k`, and `%p = slot n` — and only when **every** use of the value
+/// is a pointer operand of an access, and every one of those is in this
+/// block.
+fn block_folds(f: &tir::Func, block: &tir::Block) -> FoldMap {
+    let mut m = FoldMap { names: Vec::new(), foldeds: Vec::new() };
+    let mut i: taddr = 0;
+    while i < block.insts.len() {
+        let inst = &block.insts[i];
+        if inst.results.len() > 0 {
+            let r = &inst.results[0];
+            match &inst.kind {
+                tir::Kind::Slot(_) => {
+                    m.names.push(r.to_string());
+                    m.foldeds.push(Folded {
+                        base_is_value: false,
+                        name: r.to_string(),
+                        base: Option::None,
+                        disp: 0,
+                    });
+                }
+                tir::Kind::Offset(p, d) => {
+                    match immediate(d) {
+                        Option::Some(k) => {
+                            m.names.push(r.to_string());
+                            m.foldeds.push(Folded {
+                                base_is_value: true,
+                                name: r.to_string(),
+                                base: Option::Some(canon::clone_opnd(p)),
+                                disp: k,
+                            });
+                        }
+                        Option::None => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    if m.names.len() == 0 {
+        return m;
+    }
+
+    // Every use, counted twice: once for all of them, once for the ones an
+    // access could carry. A candidate survives iff the two agree.
+    let mut foldable_names: Vec<String> = Vec::new();
+    let mut foldable_counts: Vec<taddr> = Vec::new();
+    let mut all_names: Vec<String> = Vec::new();
+    let mut all_counts: Vec<taddr> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let b = &f.blocks[bi];
+        let here = b.label.same(&block.label);
+        let mut i: taddr = 0;
+        while i < b.insts.len() {
+            let inst = &b.insts[i];
+            if here {
+                match &inst.kind {
+                    tir::Kind::Load(_, tir::Opnd::Val(n)) => {
+                        count_one(&mut foldable_names, &mut foldable_counts, n);
+                    }
+                    tir::Kind::Store(_, _, tir::Opnd::Val(n)) => {
+                        count_one(&mut foldable_names, &mut foldable_counts, n);
+                    }
+                    _ => {}
+                }
+            }
+            count_kind_operands(&inst.kind, &mut all_names, &mut all_counts);
+            i += 1;
+        }
+        count_term_operands(&b.term, &mut all_names, &mut all_counts);
+        bi += 1;
+    }
+
+    let mut kept = FoldMap { names: Vec::new(), foldeds: Vec::new() };
+    let mut i: taddr = 0;
+    while i < m.names.len() {
+        let n = &m.names[i];
+        let foldn = count_of(&foldable_names, &foldable_counts, n);
+        let alln = count_of(&all_names, &all_counts, n);
+        if foldn > 0 && foldn == alln {
+            kept.names.push(n.to_string());
+            kept.foldeds.push(Folded {
+                base_is_value: m.foldeds[i].base_is_value,
+                name: m.foldeds[i].name.to_string(),
+                base: clone_opt_opnd(&m.foldeds[i].base),
+                disp: m.foldeds[i].disp,
+            });
+        }
+        i += 1;
+    }
+    kept
+}
+
+fn clone_opt_opnd(o: &Option<tir::Opnd>) -> Option<tir::Opnd> {
+    match o {
+        Option::Some(p) => Option::Some(canon::clone_opnd(p)),
+        Option::None => Option::None,
+    }
+}
+
+fn count_one(names: &mut Vec<String>, counts: &mut Vec<taddr>, n: &str) {
+    let mut i: taddr = 0;
+    while i < names.len() {
+        if names[i].same(n) {
+            counts[i] += 1;
+            return;
+        }
+        i += 1;
+    }
+    names.push(n.to_string());
+    counts.push(1);
+}
+
+fn count_of(names: &Vec<String>, counts: &Vec<taddr>, n: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < names.len() {
+        if names[i].same(n) {
+            return counts[i];
+        }
+        i += 1;
+    }
+    0
+}
+
+// The operand walks, in counting form: every value a kind or a terminator
+// reads, named once per read.
+fn count_kind_operands(k: &tir::Kind, names: &mut Vec<String>, counts: &mut Vec<taddr>) {
+    match k {
+        tir::Kind::Flav(_, _, _, a, b) => {
+            count_opnd(a, names, counts);
+            count_opnd(b, names, counts);
+        }
+        tir::Kind::Plain(_, _, a, b) => {
+            count_opnd(a, names, counts);
+            count_opnd(b, names, counts);
+        }
+        tir::Kind::Neg(_, a) => count_opnd(a, names, counts),
+        tir::Kind::Cmp(_, a, b) => {
+            count_opnd(a, names, counts);
+            count_opnd(b, names, counts);
+        }
+        tir::Kind::Select3(t, _, n, z, p) => {
+            count_opnd(t, names, counts);
+            count_opnd(n, names, counts);
+            count_opnd(z, names, counts);
+            count_opnd(p, names, counts);
+        }
+        tir::Kind::Slot(_) => {}
+        tir::Kind::Load(_, p) => count_opnd(p, names, counts),
+        tir::Kind::Store(_, v, p) => {
+            count_opnd(v, names, counts);
+            count_opnd(p, names, counts);
+        }
+        tir::Kind::Offset(p, d) => {
+            count_opnd(p, names, counts);
+            count_opnd(d, names, counts);
+        }
+        tir::Kind::Widen(_, a, _) => count_opnd(a, names, counts),
+        tir::Kind::Trunc(_, a, _) => count_opnd(a, names, counts),
+        tir::Kind::Call(callee, args, _) => {
+            match callee {
+                tir::Callee::Indirect(p) => count_opnd(p, names, counts),
+                _ => {}
+            }
+            let mut i: taddr = 0;
+            while i < args.len() {
+                count_opnd(&args[i], names, counts);
+                i += 1;
+            }
+        }
+    }
+}
+
+fn count_opnd(o: &tir::Opnd, names: &mut Vec<String>, counts: &mut Vec<taddr>) {
+    match o {
+        tir::Opnd::Val(n) => count_one(names, counts, n),
+        _ => {}
+    }
+}
+
+fn count_term_operands(t: &tir::Term, names: &mut Vec<String>, counts: &mut Vec<taddr>) {
+    match t {
+        tir::Term::Br3(sel, neg, zero, pos) => {
+            count_opnd(sel, names, counts);
+            count_target_args(neg, names, counts);
+            count_target_args(zero, names, counts);
+            count_target_args(pos, names, counts);
+        }
+        tir::Term::Br(d) => count_target_args(d, names, counts),
+        tir::Term::Ret(v) => {
+            match v {
+                Option::Some(o) => count_opnd(o, names, counts),
+                Option::None => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+fn count_target_args(t: &tir::Target, names: &mut Vec<String>, counts: &mut Vec<taddr>) {
+    let mut i: taddr = 0;
+    while i < t.args.len() {
+        count_opnd(&t.args[i], names, counts);
+        i += 1;
+    }
+}
+
+// ---------------------------------------------------------------- positions
+
+/// Where each block begins and ends in one linear numbering of the
+/// function, and where the calls are. A block's *entry* gets a position of
+/// its own, strictly before its first instruction, and so does its
+/// terminator.
+pub struct Positions {
+    pub block_start: Vec<taddr>,
+    pub block_term: Vec<taddr>,
+    pub calls: Vec<taddr>,
+}
+
+fn positions(f: &tir::Func) -> Positions {
+    let mut p = Positions { block_start: Vec::new(), block_term: Vec::new(), calls: Vec::new() };
+    let mut at: taddr = 0;
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        p.block_start.push(at);
+        at += 1;
+        let b = &f.blocks[bi];
+        let mut i: taddr = 0;
+        while i < b.insts.len() {
+            match &b.insts[i].kind {
+                tir::Kind::Call(_, _, _) => p.calls.push(at),
+                _ => {}
+            }
+            at += 1;
+            i += 1;
+        }
+        p.block_term.push(at);
+        at += 1;
+        bi += 1;
+    }
+    p
+}
+
+// ---------------------------------------------------------------- liveness
+
+/// Whether an instruction's result list mentions a value the accesses
+/// absorbed.
+fn results_folded(inst: &tir::Inst, folds: &FoldMap) -> bool {
+    let mut r: taddr = 0;
+    while r < inst.results.len() {
+        if foldmap_has(folds, &inst.results[r]) {
+            return true;
+        }
+        r += 1;
+    }
+    false
+}
+
+/// Mark every operand an instruction reads, as the emitter will actually
+/// read it: an access whose address was folded reads the base instead of
+/// the address, and the folded-away computation reads nothing at all.
+fn mark_effective(k: &tir::Kind, folds: &FoldMap, at: taddr, spans: &mut SpanMap, uses: &mut Vec<taddr>, mark_uses: bool) {
+    match k {
+        tir::Kind::Load(_, p) => {
+            mark_base_or(p, folds, at, spans, uses, mark_uses);
+        }
+        tir::Kind::Store(_, v, p) => {
+            mark_opnd(v, at, spans, uses, mark_uses);
+            mark_base_or(p, folds, at, spans, uses, mark_uses);
+        }
+        _ => mark_kind_operands(k, at, spans, uses, mark_uses),
+    }
+}
+
+fn mark_base_or(p: &tir::Opnd, folds: &FoldMap, at: taddr, spans: &mut SpanMap, uses: &mut Vec<taddr>, mark_uses: bool) {
+    match p {
+        tir::Opnd::Val(n) => {
+            let fi = foldmap_get(folds, n);
+            if fi < folds.names.len() {
+                if folds.foldeds[fi].base_is_value {
+                    match &folds.foldeds[fi].base {
+                        Option::Some(b) => mark_opnd(b, at, spans, uses, mark_uses),
+                        Option::None => {}
+                    }
+                }
+                // Folded into the frame's base: nothing to read.
+                return;
+            }
+            mark_opnd(p, at, spans, uses, mark_uses);
+        }
+        _ => mark_opnd(p, at, spans, uses, mark_uses),
+    }
+}
+
+pub struct SpanMap {
+    pub names: Vec<String>,
+    pub los: Vec<taddr>,
+    pub his: Vec<taddr>,
+    pub uses: Vec<taddr>,
+}
+
+fn mark_opnd(o: &tir::Opnd, at: taddr, spans: &mut SpanMap, uses: &mut Vec<taddr>, mark_uses: bool) {
+    let _ = uses;
+    match o {
+        tir::Opnd::Val(v) => {
+            span_mark(spans, v, at);
+            if mark_uses {
+                let mut i: taddr = 0;
+                while i < spans.names.len() {
+                    if spans.names[i].same(v) {
+                        spans.uses[i] += 1;
+                        i = spans.names.len();
+                    }
+                    i += 1;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn span_mark(spans: &mut SpanMap, v: &str, at: taddr) {
+    let mut i: taddr = 0;
+    while i < spans.names.len() {
+        if spans.names[i].same(v) {
+            if at < spans.los[i] {
+                spans.los[i] = at;
+            }
+            if at > spans.his[i] {
+                spans.his[i] = at;
+            }
+            return;
+        }
+        i += 1;
+    }
+    spans.names.push(v.to_string());
+    spans.los.push(at);
+    spans.his.push(at);
+    spans.uses.push(0);
+}
+
+fn mark_kind_operands(k: &tir::Kind, at: taddr, spans: &mut SpanMap, uses: &mut Vec<taddr>, mark_uses: bool) {
+    match k {
+        tir::Kind::Flav(_, _, _, a, b) => {
+            mark_opnd(a, at, spans, uses, mark_uses);
+            mark_opnd(b, at, spans, uses, mark_uses);
+        }
+        tir::Kind::Plain(_, _, a, b) => {
+            mark_opnd(a, at, spans, uses, mark_uses);
+            mark_opnd(b, at, spans, uses, mark_uses);
+        }
+        tir::Kind::Neg(_, a) => mark_opnd(a, at, spans, uses, mark_uses),
+        tir::Kind::Cmp(_, a, b) => {
+            mark_opnd(a, at, spans, uses, mark_uses);
+            mark_opnd(b, at, spans, uses, mark_uses);
+        }
+        tir::Kind::Select3(t, _, n, z, p) => {
+            mark_opnd(t, at, spans, uses, mark_uses);
+            mark_opnd(n, at, spans, uses, mark_uses);
+            mark_opnd(z, at, spans, uses, mark_uses);
+            mark_opnd(p, at, spans, uses, mark_uses);
+        }
+        tir::Kind::Slot(_) => {}
+        tir::Kind::Load(_, p) => mark_opnd(p, at, spans, uses, mark_uses),
+        tir::Kind::Store(_, v, p) => {
+            mark_opnd(v, at, spans, uses, mark_uses);
+            mark_opnd(p, at, spans, uses, mark_uses);
+        }
+        tir::Kind::Offset(p, d) => {
+            mark_opnd(p, at, spans, uses, mark_uses);
+            mark_opnd(d, at, spans, uses, mark_uses);
+        }
+        tir::Kind::Widen(_, a, _) => mark_opnd(a, at, spans, uses, mark_uses),
+        tir::Kind::Trunc(_, a, _) => mark_opnd(a, at, spans, uses, mark_uses),
+        tir::Kind::Call(callee, args, _) => {
+            match callee {
+                tir::Callee::Indirect(p) => mark_opnd(p, at, spans, uses, mark_uses),
+                _ => {}
+            }
+            let mut i: taddr = 0;
+            while i < args.len() {
+                mark_opnd(&args[i], at, spans, uses, mark_uses);
+                i += 1;
+            }
+        }
+    }
+}
+
+fn mark_term_operands(t: &tir::Term, at: taddr, spans: &mut SpanMap, uses: &mut Vec<taddr>) {
+    match t {
+        tir::Term::Br3(sel, neg, zero, pos) => {
+            mark_opnd(sel, at, spans, uses, true);
+            mark_target_args(neg, at, spans, uses);
+            mark_target_args(zero, at, spans, uses);
+            mark_target_args(pos, at, spans, uses);
+        }
+        tir::Term::Br(d) => mark_target_args(d, at, spans, uses),
+        tir::Term::Ret(v) => {
+            match v {
+                Option::Some(o) => mark_opnd(o, at, spans, uses, true),
+                Option::None => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+fn mark_target_args(t: &tir::Target, at: taddr, spans: &mut SpanMap, uses: &mut Vec<taddr>) {
+    let mut i: taddr = 0;
+    while i < t.args.len() {
+        mark_opnd(&t.args[i], at, spans, uses, true);
+        i += 1;
+    }
+}
+
+/// use[b] is what the block reads before defining; def[b] what it defines
+/// — its parameters included, since they are bound on entry.
+fn liveness(f: &tir::Func, folds: &Vec<FoldMap>) -> LiveSets {
+    let n = f.blocks.len();
+    let mut used: Vec<canon::SSet> = Vec::new();
+    let mut defined: Vec<canon::SSet> = Vec::new();
+    let mut succ: Vec<Vec<taddr>> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < n {
+        used.push(canon::sset_new());
+        defined.push(canon::sset_new());
+        succ.push(Vec::new());
+        bi += 1;
+    }
+
+    let mut bi: taddr = 0;
+    while bi < n {
+        let b = &f.blocks[bi];
+        let mut i: taddr = 0;
+        while i < b.params.len() {
+            canon::sset_add(&mut defined[bi], &b.params[i].name);
+            i += 1;
+        }
+        let mut i: taddr = 0;
+        while i < b.insts.len() {
+            let inst = &b.insts[i];
+            if !results_folded(inst, &folds[bi]) {
+                mark_liveness_operands(&inst.kind, &folds[bi], &mut used[bi], &mut defined[bi]);
+            }
+            let mut r: taddr = 0;
+            while r < inst.results.len() {
+                canon::sset_add(&mut defined[bi], &inst.results[r]);
+                r += 1;
+            }
+            i += 1;
+        }
+        let mut reads = canon::sset_new();
+        note_term_values_c(&b.term, &mut reads);
+        let mut r: taddr = 0;
+        while r < reads.names.len() {
+            if !canon::sset_has(&defined[bi], &reads.names[r]) {
+                canon::sset_add(&mut used[bi], &reads.names[r]);
+            }
+            r += 1;
+        }
+        let succs = canon::successors(&b.term);
+        let mut s: taddr = 0;
+        while s < succs.len() {
+            let j = canon::block_index(f, &succs[s]);
+            if j < n {
+                succ[bi].push(j);
+            }
+            s += 1;
+        }
+        bi += 1;
+    }
+
+    let mut live_in: Vec<canon::SSet> = Vec::new();
+    let mut live_out: Vec<canon::SSet> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < n {
+        live_in.push(canon::sset_new());
+        live_out.push(canon::sset_new());
+        bi += 1;
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let mut bi = n;
+        while bi > 0 {
+            bi -= 1;
+            let mut out = canon::sset_new();
+            let mut s: taddr = 0;
+            while s < succ[bi].len() {
+                let j = succ[bi][s];
+                let mut k: taddr = 0;
+                while k < live_in[j].names.len() {
+                    canon::sset_add(&mut out, &live_in[j].names[k]);
+                    k += 1;
+                }
+                s += 1;
+            }
+            let mut into = canon::sset_new();
+            let mut k: taddr = 0;
+            while k < used[bi].names.len() {
+                canon::sset_add(&mut into, &used[bi].names[k]);
+                k += 1;
+            }
+            let mut k: taddr = 0;
+            while k < out.names.len() {
+                if !canon::sset_has(&defined[bi], &out.names[k]) {
+                    canon::sset_add(&mut into, &out.names[k]);
+                }
+                k += 1;
+            }
+            if !set_same(&out, &live_out[bi]) || !set_same(&into, &live_in[bi]) {
+                live_out[bi] = out;
+                live_in[bi] = into;
+                changed = true;
+            }
+        }
+    }
+    LiveSets { live_in: live_in, live_out: live_out }
+}
+
+pub struct LiveSets {
+    pub live_in: Vec<canon::SSet>,
+    pub live_out: Vec<canon::SSet>,
+}
+
+fn set_same(a: &canon::SSet, b: &canon::SSet) -> bool {
+    if a.names.len() != b.names.len() {
+        return false;
+    }
+    let mut i: taddr = 0;
+    while i < a.names.len() {
+        if !canon::sset_has(b, &a.names[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Every operand a live-analysis reads of one instruction, into `used`
+/// when the block has not defined it yet.
+fn mark_liveness_operands(k: &tir::Kind, folds: &FoldMap, used: &mut canon::SSet, defined: &mut canon::SSet) {
+    match k {
+        tir::Kind::Load(_, p) => {
+            liveness_base_or(p, folds, used, defined);
+        }
+        tir::Kind::Store(_, v, p) => {
+            liveness_opnd(v, used, defined);
+            liveness_base_or(p, folds, used, defined);
+        }
+        _ => liveness_kind(k, used, defined),
+    }
+}
+
+fn liveness_base_or(p: &tir::Opnd, folds: &FoldMap, used: &mut canon::SSet, defined: &mut canon::SSet) {
+    match p {
+        tir::Opnd::Val(n) => {
+            let fi = foldmap_get(folds, n);
+            if fi < folds.names.len() {
+                if folds.foldeds[fi].base_is_value {
+                    match &folds.foldeds[fi].base {
+                        Option::Some(b) => liveness_opnd(b, used, defined),
+                        Option::None => {}
+                    }
+                }
+                return;
+            }
+            liveness_opnd(p, used, defined);
+        }
+        _ => liveness_opnd(p, used, defined),
+    }
+}
+
+fn liveness_opnd(o: &tir::Opnd, used: &mut canon::SSet, defined: &mut canon::SSet) {
+    match o {
+        tir::Opnd::Val(v) => {
+            if !canon::sset_has(defined, v) {
+                canon::sset_add(used, v);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn liveness_kind(k: &tir::Kind, used: &mut canon::SSet, defined: &mut canon::SSet) {
+    match k {
+        tir::Kind::Flav(_, _, _, a, b) => {
+            liveness_opnd(a, used, defined);
+            liveness_opnd(b, used, defined);
+        }
+        tir::Kind::Plain(_, _, a, b) => {
+            liveness_opnd(a, used, defined);
+            liveness_opnd(b, used, defined);
+        }
+        tir::Kind::Neg(_, a) => liveness_opnd(a, used, defined),
+        tir::Kind::Cmp(_, a, b) => {
+            liveness_opnd(a, used, defined);
+            liveness_opnd(b, used, defined);
+        }
+        tir::Kind::Select3(t, _, n, z, p) => {
+            liveness_opnd(t, used, defined);
+            liveness_opnd(n, used, defined);
+            liveness_opnd(z, used, defined);
+            liveness_opnd(p, used, defined);
+        }
+        tir::Kind::Slot(_) => {}
+        tir::Kind::Load(_, p) => liveness_opnd(p, used, defined),
+        tir::Kind::Store(_, v, p) => {
+            liveness_opnd(v, used, defined);
+            liveness_opnd(p, used, defined);
+        }
+        tir::Kind::Offset(p, d) => {
+            liveness_opnd(p, used, defined);
+            liveness_opnd(d, used, defined);
+        }
+        tir::Kind::Widen(_, a, _) => liveness_opnd(a, used, defined),
+        tir::Kind::Trunc(_, a, _) => liveness_opnd(a, used, defined),
+        tir::Kind::Call(callee, args, _) => {
+            match callee {
+                tir::Callee::Indirect(p) => liveness_opnd(p, used, defined),
+                _ => {}
+            }
+            let mut i: taddr = 0;
+            while i < args.len() {
+                liveness_opnd(&args[i], used, defined);
+                i += 1;
+            }
+        }
+    }
+}
+
+/// A terminator's read names, as a set.
+fn note_term_values_c(t: &tir::Term, s: &mut canon::SSet) {
+    match t {
+        tir::Term::Br3(sel, neg, zero, pos) => {
+            note_value_c(sel, s);
+            note_target_c(neg, s);
+            note_target_c(zero, s);
+            note_target_c(pos, s);
+        }
+        tir::Term::Br(d) => note_target_c(d, s),
+        tir::Term::Ret(v) => {
+            match v {
+                Option::Some(o) => note_value_c(o, s),
+                Option::None => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+fn note_value_c(o: &tir::Opnd, s: &mut canon::SSet) {
+    match o {
+        tir::Opnd::Val(v) => canon::sset_add(s, v),
+        _ => {}
+    }
+}
+
+fn note_target_c(t: &tir::Target, s: &mut canon::SSet) {
+    let mut i: taddr = 0;
+    while i < t.args.len() {
+        note_value_c(&t.args[i], s);
+        i += 1;
+    }
+}
+
+// ---------------------------------------------------------------- allocate
+
+/// Where every value lives, decided once for the whole function: a linear
+/// scan over live intervals. A value not in the returned map lives in its
+/// frame slot, as every value did before there was an allocator.
+pub struct RegMap {
+    pub names: Vec<String>,
+    pub regs: Vec<String>,
+}
+
+fn regmap_get(m: &RegMap, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < m.names.len() {
+        if m.names[i].same(name) {
+            return i;
+        }
+        i += 1;
+    }
+    m.names.len()
+}
+
+fn regmap_has(m: &RegMap, name: &str) -> bool {
+    regmap_get(m, name) < m.names.len()
+}
+
+fn regmap_set(m: &mut RegMap, name: &str, r: &str) {
+    let i = regmap_get(m, name);
+    if i < m.names.len() {
+        m.regs[i] = r.to_string();
+        return;
+    }
+    m.names.push(name.to_string());
+    m.regs.push(r.to_string());
+}
+
+fn allocate(f: &tir::Func, folds: &Vec<FoldMap>) -> RegMap {
+    let pos = positions(f);
+    let live = liveness(f, folds);
+    let n = f.blocks.len();
+
+    // A block parameter is written by the edge, in the predecessor, so its
+    // interval reaches back to every predecessor's terminator.
+    let mut edge_names: Vec<String> = Vec::new();
+    let mut edge_ats: Vec<taddr> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < n {
+        let succs = canon::successors(&f.blocks[bi].term);
+        let mut s: taddr = 0;
+        while s < succs.len() {
+            let j = canon::block_index(f, &succs[s]);
+            if j < n {
+                let mut p: taddr = 0;
+                while p < f.blocks[j].params.len() {
+                    edge_names.push(f.blocks[j].params[p].name.to_string());
+                    edge_ats.push(pos.block_term[bi]);
+                    p += 1;
+                }
+            }
+            s += 1;
+        }
+        bi += 1;
+    }
+
+    // Every point each value is live at, collapsed to a first and a last.
+    let mut spans = SpanMap { names: Vec::new(), los: Vec::new(), his: Vec::new(), uses: Vec::new() };
+    let mut uses: Vec<taddr> = Vec::new();
+    let mut i: taddr = 0;
+    while i < f.sig.params.len() {
+        span_mark(&mut spans, &f.sig.params[i].name, 0);
+        i += 1;
+    }
+    let mut bi: taddr = 0;
+    while bi < n {
+        let b = &f.blocks[bi];
+        let mut i: taddr = 0;
+        while i < live.live_in[bi].names.len() {
+            span_mark(&mut spans, &live.live_in[bi].names[i], pos.block_start[bi]);
+            i += 1;
+        }
+        let mut i: taddr = 0;
+        while i < live.live_out[bi].names.len() {
+            span_mark(&mut spans, &live.live_out[bi].names[i], pos.block_term[bi]);
+            i += 1;
+        }
+        let mut at = pos.block_start[bi] + 1;
+        let mut i: taddr = 0;
+        while i < b.insts.len() {
+            let inst = &b.insts[i];
+
+            if !results_folded(inst, &folds[bi]) {
+                mark_effective(&inst.kind, &folds[bi], at, &mut spans, &mut uses, true);
+            }
+            let mut r: taddr = 0;
+            while r < inst.results.len() {
+                span_mark(&mut spans, &inst.results[r], at);
+                r += 1;
+            }
+            at += 1;
+            i += 1;
+        }
+        mark_term_operands(&b.term, at, &mut spans, &mut uses);
+        bi += 1;
+    }
+    let mut i: taddr = 0;
+    while i < edge_names.len() {
+        span_mark(&mut spans, &edge_names[i], edge_ats[i]);
+        i += 1;
+    }
+
+    // A value the accesses absorbed, or one nothing ever reads, needs
+    // nowhere to be.
+    let mut keep_names: Vec<String> = Vec::new();
+    let mut keep_los: Vec<taddr> = Vec::new();
+    let mut keep_his: Vec<taddr> = Vec::new();
+    let mut i: taddr = 0;
+    while i < spans.names.len() {
+        let name = &spans.names[i];
+        let mut folded = false;
+        let mut bi: taddr = 0;
+        while bi < n {
+            if foldmap_has(&folds[bi], name) {
+                folded = true;
+            }
+            bi += 1;
+        }
+        if !folded && uses_count(&spans, name) > 0 {
+            keep_names.push(name.to_string());
+            keep_los.push(spans.los[i]);
+            keep_his.push(spans.his[i]);
+        }
+        i += 1;
+    }
+
+    let function_calls = pos.calls.len() > 0;
+
+    let mut fast: Vec<String> = Vec::new();
+    fast.push(pool_always(0));
+    fast.push(pool_always(1));
+    fast.push(pool_always(2));
+    fast.push(pool_always(3));
+    if !function_calls {
+        let mut i: taddr = 0;
+        while i < 8 {
+            fast.push(pool_call_free(i));
+            i += 1;
+        }
+    }
+    let mut saved: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < 7 {
+        saved.push(pool_saved(i));
+        i += 1;
+    }
+    let mut regs = RegMap { names: Vec::new(), regs: Vec::new() };
+    let mut active_end: Vec<taddr> = Vec::new();
+    let mut active_reg: Vec<String> = Vec::new();
+    let mut active_saved: Vec<bool> = Vec::new();
+
+    // A parameter arrives in `a0`…`a7`, and in a function that makes no
+    // call nothing can take it from there.
+    if !function_calls {
+        let mut i: taddr = 0;
+        while i < f.sig.params.len() && i < 8 {
+            let pname = &f.sig.params[i].name;
+            let mut has = false;
+            let mut hi: taddr = 0;
+            let mut k: taddr = 0;
+            while k < keep_names.len() {
+                if keep_names[k].same(pname) {
+                    has = true;
+                    hi = keep_his[k];
+                }
+                k += 1;
+            }
+            if has {
+                let r = pool_call_free(i);
+                if pool_contains(&fast, &r) {
+                    pool_remove(&mut fast, &r);
+                    regmap_set(&mut regs, pname, &r);
+                    active_end.push(hi);
+                    active_reg.push(r.to_string());
+                    active_saved.push(false);
+                }
+            }
+            i += 1;
+        }
+    }
+
+    // Linear scan: intervals in order of where they begin, ties by where
+    // they end and then by name.
+    let mut order_lo: Vec<taddr> = Vec::new();
+    let mut order_hi: Vec<taddr> = Vec::new();
+    let mut order_name: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < keep_names.len() {
+        if !regmap_has(&regs, &keep_names[i]) {
+            order_lo.push(keep_los[i]);
+            order_hi.push(keep_his[i]);
+            order_name.push(keep_names[i].to_string());
+        }
+        i += 1;
+    }
+    sort_intervals(&mut order_lo, &mut order_hi, &mut order_name);
+
+    let mut oi: taddr = 0;
+    while oi < order_name.len() {
+        let lo = order_lo[oi];
+        let hi = order_hi[oi];
+        let name = order_name[oi].to_string();
+        // Registers whose intervals have died are free again, released in
+        // the walk's own order — the survivor list keeps it.
+        let mut k: taddr = 0;
+        let mut keep_end: Vec<taddr> = Vec::new();
+        let mut keep_reg: Vec<String> = Vec::new();
+        let mut keep_saved: Vec<bool> = Vec::new();
+        while k < active_end.len() {
+            if active_end[k] < lo {
+                if active_saved[k] {
+                    saved.push(active_reg[k].to_string());
+                } else {
+                    fast.push(active_reg[k].to_string());
+                }
+            } else {
+                keep_end.push(active_end[k]);
+                keep_reg.push(active_reg[k].to_string());
+                keep_saved.push(active_saved[k]);
+            }
+            k += 1;
+        }
+        active_end = keep_end;
+        active_reg = keep_reg;
+        active_saved = keep_saved;
+
+        let needs_saved = crosses_call(&pos.calls, lo, hi);
+        if needs_saved && uses_count(&spans, &name) < 2 {
+            oi += 1;
+            continue;
+        }
+        let mut picked: taddr = 0;
+        let mut picked_saved = false;
+        if needs_saved {
+            if saved.len() > 0 {
+                picked = 1;
+                picked_saved = true;
+            }
+        } else if fast.len() > 0 {
+            picked = 2;
+        } else if saved.len() > 0 {
+            picked = 1;
+            picked_saved = true;
+        }
+        if picked > 0 {
+            let r = if picked_saved {
+                let r = saved[saved.len() - 1].to_string();
+                saved.pop();
+                r
+            } else {
+                let r = fast[fast.len() - 1].to_string();
+                fast.pop();
+                r
+            };
+            regmap_set(&mut regs, &name, &r);
+            active_end.push(hi);
+            active_reg.push(r.to_string());
+            active_saved.push(picked_saved);
+            oi += 1;
+            continue;
+        }
+
+        // Nothing free. Spilling *this* interval is the easy answer and the
+        // wrong one: take from the active interval that runs longest, if it
+        // runs longer than this.
+        let mut cand: taddr = active_end.len();
+        let mut cand_end: taddr = 0;
+        let mut k: taddr = 0;
+        while k < active_end.len() {
+            let r = &active_reg[k];
+            let eligible = active_saved[k]
+                || (!needs_saved && (pool_contains_always(r) || pool_contains_call_free(r)));
+            if eligible && (cand >= active_end.len() || active_end[k] >= cand_end) {
+                cand = k;
+                cand_end = active_end[k];
+            }
+            k += 1;
+        }
+        if cand >= active_end.len() || cand_end <= hi {
+            oi += 1;
+            continue;
+        }
+        // The evicted value goes back to its frame slot.
+        let r = active_reg[cand].to_string();
+        let is_saved = active_saved[cand];
+        regmap_remove_reg(&mut regs, &r);
+        let last = active_end.len() - 1;
+        active_end[cand] = active_end[last];
+        active_reg[cand] = active_reg[last].to_string();
+        active_saved[cand] = active_saved[last];
+        active_end.pop();
+        active_reg.pop();
+        active_saved.pop();
+        regmap_set(&mut regs, &name, &r);
+        active_end.push(hi);
+        active_reg.push(r.to_string());
+        active_saved.push(is_saved);
+        oi += 1;
+    }
+    regs
+}
+
+fn uses_count(spans: &SpanMap, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < spans.names.len() {
+        if spans.names[i].same(name) {
+            return spans.uses[i];
+        }
+        i += 1;
+    }
+    0
+}
+
+fn crosses_call(calls: &Vec<taddr>, lo: taddr, hi: taddr) -> bool {
+    let mut i: taddr = 0;
+    while i < calls.len() {
+        if lo < calls[i] && calls[i] < hi {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn pool_contains(pool: &Vec<String>, r: &str) -> bool {
+    let mut i: taddr = 0;
+    while i < pool.len() {
+        if pool[i].same(r) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn pool_remove(pool: &mut Vec<String>, r: &str) {
+    let mut i: taddr = 0;
+    while i < pool.len() {
+        if pool[i].same(r) {
+            // Order is the pool's meaning: a select takes from the end,
+            // so a name leaves by the rest sliding down, not by swap.
+            let mut k = i;
+            while k + 1 < pool.len() {
+                pool[k] = pool[k + 1].to_string();
+                k += 1;
+            }
+            pool.pop();
+            return;
+        }
+        i += 1;
+    }
+}
+
+fn pool_contains_always(r: &str) -> bool {
+    r.same("t4") || r.same("t5") || r.same("t6") || r.same("t7")
+}
+
+fn pool_contains_call_free(r: &str) -> bool {
+    r.len() == 2 && r[0] == 'a' && r[1] >= '0' && r[1] <= '7'
+}
+
+fn regmap_remove_reg(m: &mut RegMap, r: &str) {
+    let mut i: taddr = 0;
+    while i < m.regs.len() {
+        if m.regs[i].same(r) {
+            let last = m.names.len() - 1;
+            m.names[i] = m.names[last].to_string();
+            m.regs[i] = m.regs[last].to_string();
+            m.names.pop();
+            m.regs.pop();
+            return;
+        }
+        i += 1;
+    }
+}
+
+/// Sort by (lo, hi, name): insertion sort is what the corpus can afford.
+fn sort_intervals(los: &mut Vec<taddr>, his: &mut Vec<taddr>, names: &mut Vec<String>) {
+    let mut a: taddr = 1;
+    while a < names.len() {
+        let mut b = a;
+        while b > 0 && interval_less(los[b], his[b], &names[b], los[b - 1], his[b - 1], &names[b - 1]) {
+            let tl = los[b];
+            los[b] = los[b - 1];
+            los[b - 1] = tl;
+            let th = his[b];
+            his[b] = his[b - 1];
+            his[b - 1] = th;
+            let tn = names[b].to_string();
+            names[b] = names[b - 1].to_string();
+            names[b - 1] = tn;
+            b -= 1;
+        }
+        a += 1;
+    }
+}
+
+fn interval_less(l1: taddr, h1: taddr, n1: &str, l2: taddr, h2: taddr, n2: &str) -> bool {
+    if l1 != l2 {
+        return l1 < l2;
+    }
+    if h1 != h2 {
+        return h1 < h2;
+    }
+    canon::str_less(n1, n2)
+}
+
+/// The callee-saved registers a function's allocation uses, in order —
+/// what the prologue must save and the epilogue restore.
+fn saved_registers(regs: &RegMap) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < 7 {
+        let r = pool_saved(i);
+        let mut used = false;
+        let mut k: taddr = 0;
+        while k < regs.regs.len() {
+            if regs.regs[k].same(&r) {
+                used = true;
+            }
+            k += 1;
+        }
+        if used {
+            out.push(r);
+        }
+        i += 1;
+    }
+    out
+}
+
+// ---------------------------------------------------------------- emitter
+
+/// The text one function becomes, twice over.
+pub struct Gen {
+    pub fn_name: String,
+    pub frame: Frame,
+    pub errs: Vec<String>,
+    pub counter: taddr,
+    /// The measuring pass counts and watches; the final pass prints.
+    pub silent: bool,
+    /// Words emitted so far, counted the way the assembler counts them.
+    pub here: taddr,
+    /// Word offset of each block, from the measuring pass. Empty during
+    /// that pass, when every branch takes the long way.
+    pub offset_names: Vec<String>,
+    pub offset_ats: Vec<taddr>,
+    /// The block emitted after the one being emitted, if any: a branch to
+    /// it needs no jump at all.
+    pub next_block: String,
+    /// Addresses the block's accesses carry in their own displacement,
+    /// whose computations are therefore not emitted at all.
+    pub folds: FoldMap,
+    /// Whether anything in the body actually touched the frame.
+    pub frame_used: bool,
+    /// What the measuring pass concluded.
+    pub frame_needed: bool,
+    /// Where every value lives, for the whole function.
+    pub regs: RegMap,
+    /// Where the function's blocks are, for `move_args`.
+    pub blocks: Vec<tir::Block>,
+    /// The callee-saved registers the prologue stored, in order.
+    pub saved: Vec<String>,
+}
+
+fn offsets_at(g: &Gen, label: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < g.offset_names.len() {
+        if g.offset_names[i].same(label) {
+            return g.offset_ats[i];
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
+fn offsets_set(g: &mut Gen, label: &str, at: taddr) {
+    g.offset_names.push(label.to_string());
+    g.offset_ats.push(at);
+}
+
+/// One line of body text: indented, counted, and watched for frame use.
+fn gen_line(g: &mut Gen, text: &str) {
+    g.here += words_of(text);
+    // Any mention of `sp` but the frame adjust itself.
+    if text_contains(text, "sp") && !starts_at(text, 0, "addi.trap sp, sp,") {
+        g.frame_used = true;
+    }
+    if !g.silent {
+        print("    ");
+        println(text);
+    }
+}
+
+fn gen_label(g: &mut Gen, text: &str) {
+    if !g.silent {
+        print(text);
+        println(":");
+    }
+}
+
+fn text_contains(s: &str, p: &str) -> bool {
+    if p.len() > s.len() {
+        return false;
+    }
+    let mut at: taddr = 0;
+    while at + p.len() <= s.len() {
+        let mut i: taddr = 0;
+        let mut ok = true;
+        while i < p.len() {
+            if s[at + i] != p[i] {
+                ok = false;
+            }
+            i += 1;
+        }
+        if ok {
+            return true;
+        }
+        at += 1;
+    }
+    false
+}
+
+/// Whether a `br3` here can name this target itself, rather than a jump
+/// standing in for it. Two things stop it: a target with block arguments,
+/// and a target out of the displacement's reach.
+fn reaches(g: &Gen, target: &tir::Target) -> bool {
+    if target.args.len() > 0 {
+        return false;
+    }
+    let at = offsets_at(g, &target.label);
+    if at < 0 {
+        return false;
+    }
+    let d = if at > g.here { at - g.here } else { g.here - at };
+    d <= br3_reach()
+}
+
+/// A local label, file-scoped: the function's name is part of it, and the
+/// counter restarts with every function.
+fn fresh_label(g: &mut Gen, f: &tir::Func) -> String {
+    g.counter += 1;
+    let mut out: String = Vec::new();
+    canon::push_str(&mut out, ".L");
+    canon::push_str(&mut out, &f.sig.name);
+    canon::push_str(&mut out, ".b");
+    canon::push_int(&mut out, g.counter as t27);
+    out
+}
+
+fn gen_slot(g: &mut Gen, name: &str) -> taddr {
+    let at = frame_slot(&g.frame, name);
+    if at < 0 {
+        let mut msg: String = Vec::new();
+        canon::push_str(&mut msg, "no slot");
+        g.errs.push(msg);
+        return 0;
+    }
+    at
+}
+
+/// The register an operand's value is in, materializing it into `scratch`
+/// when it is not already somewhere.
+fn gen_read(g: &mut Gen, o: &tir::Opnd, scratch: &str) -> String {
+    match o {
+        tir::Opnd::Val(name) => {
+            let ri = regmap_get(&g.regs, name);
+            if ri < g.regs.names.len() {
+                return g.regs.regs[ri].to_string();
+            }
+            let at = gen_slot(g, name);
+            let mut text: String = Vec::new();
+            canon::push_str(&mut text, "ld.word ");
+            canon::push_str(&mut text, scratch);
+            canon::push_str(&mut text, ", ");
+            canon::push_int(&mut text, at as t27);
+            canon::push_str(&mut text, "(sp)");
+            gen_line(g, &text);
+        }
+        tir::Opnd::Konst(_, v) => {
+            let mut text: String = Vec::new();
+            canon::push_str(&mut text, "li      ");
+            canon::push_str(&mut text, scratch);
+            canon::push_str(&mut text, ", ");
+            canon::push_int(&mut text, v);
+            gen_line(g, &text);
+        }
+        tir::Opnd::Glob(name) => {
+            let mut text: String = Vec::new();
+            canon::push_str(&mut text, "la      ");
+            canon::push_str(&mut text, scratch);
+            canon::push_str(&mut text, ", g.");
+            canon::push_str(&mut text, name);
+            gen_line(g, &text);
+        }
+    }
+    scratch.to_string()
+}
+
+/// Where to compute a result: its own register if it has one, otherwise
+/// the scratch it will be stored from.
+fn gen_dest(g: &Gen, name: &Option<String>, scratch: &str) -> String {
+    match name {
+        Option::Some(n) => {
+            let ri = regmap_get(&g.regs, n);
+            if ri < g.regs.names.len() {
+                return g.regs.regs[ri].to_string();
+            }
+            scratch.to_string()
+        }
+        Option::None => scratch.to_string(),
+    }
+}
+
+/// Store a result to its slot, unless it lives in a register.
+fn gen_write(g: &mut Gen, name: &str, reg: &str) {
+    if regmap_has(&g.regs, name) {
+        return;
+    }
+    let at = gen_slot(g, name);
+    let mut text: String = Vec::new();
+    canon::push_str(&mut text, "st.word ");
+    canon::push_str(&mut text, reg);
+    canon::push_str(&mut text, ", ");
+    canon::push_int(&mut text, at as t27);
+    canon::push_str(&mut text, "(sp)");
+    gen_line(g, &text);
+}
+
+/// Emit a binary operation, taking the immediate form when an operand is
+/// a constant the field can hold.
+fn gen_binary(g: &mut Gen, stem: &str, suffix: &str, commutative: bool, a: &tir::Opnd, b: &tir::Opnd, result: &Option<String>) {
+    let mut folded = false;
+    let mut other_is_a = true;
+    let mut n: t27 = 0;
+    match immediate(b) {
+        Option::Some(k) => {
+            folded = true;
+            other_is_a = true;
+            n = k;
+        }
+        Option::None => {
+            match immediate(a) {
+                Option::Some(k) => {
+                    if commutative {
+                        folded = true;
+                        other_is_a = false;
+                        n = k;
+                    }
+                }
+                Option::None => {}
+            }
+        }
+    }
+    if folded {
+        let other = if other_is_a { a } else { b };
+        let ro = gen_read(g, other, "t0");
+        let rd = gen_dest(g, result, "t2");
+        let mut m: String = Vec::new();
+        canon::push_str(&mut m, stem);
+        m.push('i');
+        canon::push_str(&mut m, suffix);
+        let mut text: String = Vec::new();
+        push_padded(&mut text, &m);
+        text.push(' ');
+        canon::push_str(&mut text, &rd);
+        canon::push_str(&mut text, ", ");
+        canon::push_str(&mut text, &ro);
+        canon::push_str(&mut text, ", ");
+        canon::push_int(&mut text, n);
+        gen_line(g, &text);
+        match result {
+            Option::Some(r) => gen_write(g, r, &rd),
+            Option::None => {}
+        }
+        return;
+    }
+    let ra = gen_read(g, a, "t0");
+    let rb = gen_read(g, b, "t1");
+    let rd = gen_dest(g, result, "t2");
+    let mut m: String = Vec::new();
+    canon::push_str(&mut m, stem);
+    canon::push_str(&mut m, suffix);
+    let mut text: String = Vec::new();
+    push_padded(&mut text, &m);
+    text.push(' ');
+    canon::push_str(&mut text, &rd);
+    canon::push_str(&mut text, ", ");
+    canon::push_str(&mut text, &ra);
+    canon::push_str(&mut text, ", ");
+    canon::push_str(&mut text, &rb);
+    gen_line(g, &text);
+    match result {
+        Option::Some(r) => gen_write(g, r, &rd),
+        Option::None => {}
+    }
+}
+
+/// The mnemonic, left-padded to seven the way the formatter writes it.
+fn push_padded(out: &mut String, m: &str) {
+    canon::push_str(out, m);
+    let mut i = m.len();
+    while i < 7 {
+        out.push(' ');
+        i += 1;
+    }
+}
+
+/// The base register and displacement an access should use.
+fn gen_address(g: &mut Gen, p: &tir::Opnd, scratch: &str) -> (taddr, String) {
+    match p {
+        tir::Opnd::Val(n) => {
+            let fi = foldmap_get(&g.folds, n);
+            if fi < g.folds.names.len() {
+                let fo = &g.folds.foldeds[fi];
+                if !fo.base_is_value {
+                    let sname = storage_name(&fo.name);
+                    let at = gen_slot(g, &sname);
+                    return (as_disp(at + (fo.disp as taddr)), "sp".to_string());
+                }
+                match &fo.base {
+                    Option::Some(b) => {
+                        let rb = gen_read(g, b, scratch);
+                        return (fo.disp as taddr, rb);
+                    }
+                    Option::None => {}
+                }
+            }
+            (0, gen_read(g, p, scratch))
+        }
+        _ => (0, gen_read(g, p, scratch)),
+    }
+}
+
+fn as_disp(v: taddr) -> taddr {
+    v
+}
+
+fn block_label(f: &tir::Func, block: &str) -> String {
+    let mut out: String = Vec::new();
+    canon::push_str(&mut out, "f.");
+    canon::push_str(&mut out, &f.sig.name);
+    out.push('.');
+    canon::push_str(&mut out, block);
+    out
+}
+
+// ---------------------------------------------------------------- function
+
+/// Generate a function, twice. The first pass measures: it emits every
+/// branch the long way and records where each block landed. The second
+/// uses those offsets to let a `br3` name its targets directly wherever
+/// they are in reach.
+pub fn generate_fn(f: &tir::Func, out: &mut bool) -> bool {
+    let _ = out;
+    let mut folds: Vec<FoldMap> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        folds.push(block_folds(f, &f.blocks[bi]));
+        bi += 1;
+    }
+    let regs = allocate(f, &folds);
+    let saved = saved_registers(&regs);
+    let measured = emit_function(f, &saved, &regs, true, true);
+    let fin = emit_function_offsets(f, &saved, &regs, measured.frame_used, &measured);
+    fin
+}
+
+pub struct Measured {
+    pub offset_names: Vec<String>,
+    pub offset_ats: Vec<taddr>,
+    pub frame_used: bool,
+}
+
+fn emit_function(f: &tir::Func, saved: &Vec<String>, regs: &RegMap, needs_frame: bool, measure: bool) -> Measured {
+    let dummy_offsets: Vec<String> = Vec::new();
+    let dummy_ats: Vec<taddr> = Vec::new();
+    let mut g = make_gen(f, saved, regs, needs_frame, &dummy_offsets, &dummy_ats, true);
+    emit_body(f, &mut g);
+    let _ = measure;
+    // The measuring pass's text goes nowhere: only its layout stays.
+    let mut ons: Vec<String> = Vec::new();
+    let mut oats: Vec<taddr> = Vec::new();
+    let mut i: taddr = 0;
+    while i < g.offset_names.len() {
+        ons.push(g.offset_names[i].to_string());
+        oats.push(g.offset_ats[i]);
+        i += 1;
+    }
+    Measured { offset_names: ons, offset_ats: oats, frame_used: g.frame_used }
+}
+
+fn emit_function_offsets(f: &tir::Func, saved: &Vec<String>, regs: &RegMap, needs_frame: bool, measured: &Measured) -> bool {
+    let mut g = make_gen(f, saved, regs, needs_frame, &measured.offset_names, &measured.offset_ats, false);
+    emit_body(f, &mut g);
+    g.errs.len() == 0
+}
+
+fn make_gen(
+    f: &tir::Func,
+    saved: &Vec<String>,
+    regs: &RegMap,
+    needs_frame: bool,
+    offset_names: &Vec<String>,
+    offset_ats: &Vec<taddr>,
+    silent: bool,
+) -> Gen {
+    let frame = layout(f, saved);
+    let mut regs2 = RegMap { names: Vec::new(), regs: Vec::new() };
+    let mut i: taddr = 0;
+    while i < regs.names.len() {
+        regs2.names.push(regs.names[i].to_string());
+        regs2.regs.push(regs.regs[i].to_string());
+        i += 1;
+    }
+    // `parallel_copy` parks a register here; `read` finds it like any other.
+    let sn = scratch_name();
+    regmap_set(&mut regs2, &sn, "t0");
+    let mut ons: Vec<String> = Vec::new();
+    let mut oats: Vec<taddr> = Vec::new();
+    let mut i: taddr = 0;
+    while i < offset_names.len() {
+        ons.push(offset_names[i].to_string());
+        oats.push(offset_ats[i]);
+        i += 1;
+    }
+    let mut blocks: Vec<tir::Block> = Vec::new();
+    let mut i: taddr = 0;
+    while i < f.blocks.len() {
+        blocks.push(canon::clone_block(&f.blocks[i]));
+        i += 1;
+    }
+    let mut saved2: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < saved.len() {
+        saved2.push(saved[i].to_string());
+        i += 1;
+    }
+    let mut empty_folds = FoldMap { names: Vec::new(), foldeds: Vec::new() };
+    let _ = &empty_folds;
+    Gen {
+        fn_name: f.sig.name.to_string(),
+        frame: frame,
+        errs: Vec::new(),
+        counter: 0,
+        silent: silent,
+        here: 0,
+        offset_names: ons,
+        offset_ats: oats,
+        next_block: "".to_string(),
+        folds: empty_folds,
+        frame_used: false,
+        frame_needed: needs_frame,
+        regs: regs2,
+        blocks: blocks,
+        saved: saved2,
+    }
+}
+
+fn emit_body(f: &tir::Func, g: &mut Gen) {
+    let calls = fn_makes_calls(f);
+
+    // The function's header: the frame it will open, and alignment for the
+    // instructions after whatever data preceded it.
+    if !g.silent {
+        println("");
+        print("; ");
+        print(&f.sig.name);
+        let mut size_text: String = Vec::new();
+        canon::push_int(&mut size_text, g.frame.size as t27);
+        print(" — frame ");
+        print(&size_text);
+        println(" trytes");
+        println(".align 3");
+    }
+    let mut flabel: String = Vec::new();
+    canon::push_str(&mut flabel, "f.");
+    canon::push_str(&mut flabel, &f.sig.name);
+    gen_label(g, &flabel);
+
+    // Prologue. `sp` grows downward and stays word-aligned. A function
+    // whose values all fit in registers touches no frame and opens none.
+    let size = g.frame.size;
+    if g.frame_needed {
+        let mut text: String = Vec::new();
+        canon::push_str(&mut text, "addi.trap sp, sp, -");
+        canon::push_int(&mut text, size as t27);
+        gen_line(g, &text);
+    }
+    if calls {
+        gen_line(g, "st.word ra, 0(sp)");
+    }
+    let mut i: taddr = 0;
+    while i < g.saved.len() {
+        let rr = g.saved[i].to_string();
+        let sname = saved_name(&rr);
+        let at = gen_slot(g, &sname);
+        let mut text: String = Vec::new();
+        canon::push_str(&mut text, "st.word ");
+        canon::push_str(&mut text, &rr);
+        canon::push_str(&mut text, ", ");
+        canon::push_int(&mut text, at as t27);
+        canon::push_str(&mut text, "(sp)");
+        gen_line(g, &text);
+        i += 1;
+    }
+
+    // Arguments arrive in a0…a7. One the allocator left where it arrived
+    // needs nothing; one it put elsewhere is moved there once; the rest
+    // are spilled to their slots.
+    let mut i: taddr = 0;
+    while i < f.sig.params.len() {
+        if i >= 8 {
+            g.errs.push("more than eight arguments is not implemented".to_string());
+            break;
+        }
+        let pname = f.sig.params[i].name.to_string();
+        let ri = regmap_get(&g.regs, &pname);
+        let mut kept = false;
+        if ri < g.regs.names.len() {
+            let r = g.regs.regs[ri].to_string();
+            let cf = pool_call_free(i);
+            if r.same(&cf) {
+                kept = true;
+            } else {
+                let mut text: String = Vec::new();
+                canon::push_str(&mut text, "add.wrap ");
+                canon::push_str(&mut text, &r);
+                canon::push_str(&mut text, ", ");
+                canon::push_str(&mut text, &cf);
+                canon::push_str(&mut text, ", zero");
+                gen_line(g, &text);
+                kept = true;
+            }
+        }
+        if !kept {
+            let at = gen_slot(g, &pname);
+            let cf = pool_call_free(i);
+            let mut text: String = Vec::new();
+            canon::push_str(&mut text, "st.word ");
+            canon::push_str(&mut text, &cf);
+            canon::push_str(&mut text, ", ");
+            canon::push_int(&mut text, at as t27);
+            canon::push_str(&mut text, "(sp)");
+            gen_line(g, &text);
+        }
+        i += 1;
+    }
+
+    // The entry block is emitted next, so the prologue falls into it.
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let fm = g_fold_at(f, bi);
+        g.folds = clone_foldmap(&fm);
+        offsets_set(g, &f.blocks[bi].label, g.here);
+        let label = block_label(f, &f.blocks[bi].label);
+        gen_label(g, &label);
+        if bi + 1 < f.blocks.len() {
+            g.next_block = f.blocks[bi + 1].label.to_string();
+        } else {
+            g.next_block = "".to_string();
+        }
+        let mut i: taddr = 0;
+        while i < f.blocks[bi].insts.len() {
+            emit_inst(g, &f.blocks[bi].insts[i], f);
+            i += 1;
+        }
+        emit_term(g, &f.blocks[bi].term, calls, f);
+        bi += 1;
+    }
+}
+
+fn g_fold_at(f: &tir::Func, bi: taddr) -> FoldMap {
+    block_folds(f, &f.blocks[bi])
+}
+
+fn clone_foldmap(m: &FoldMap) -> FoldMap {
+    let mut out = FoldMap { names: Vec::new(), foldeds: Vec::new() };
+    let mut i: taddr = 0;
+    while i < m.names.len() {
+        out.names.push(m.names[i].to_string());
+        out.foldeds.push(Folded {
+            base_is_value: m.foldeds[i].base_is_value,
+            name: m.foldeds[i].name.to_string(),
+            base: clone_opt_opnd(&m.foldeds[i].base),
+            disp: m.foldeds[i].disp,
+        });
+        i += 1;
+    }
+    out
+}
+
+fn fn_makes_calls(f: &tir::Func) -> bool {
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let mut i: taddr = 0;
+        while i < f.blocks[bi].insts.len() {
+            match &f.blocks[bi].insts[i].kind {
+                tir::Kind::Call(_, _, _) => return true,
+                _ => {}
+            }
+            i += 1;
+        }
+        bi += 1;
+    }
+    false
+}
+
+/// The epilogue, emitted at every `ret`.
+fn epilogue(g: &mut Gen, calls: bool) {
+    if calls {
+        gen_line(g, "ld.word ra, 0(sp)");
+    }
+    // The callee-saved registers, in the order the frame keeps them.
+    let mut saved_names: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < g.frame.slot_names.len() {
+        let n = &g.frame.slot_names[i];
+        if starts_with_saved(n) {
+            saved_names.push(n.to_string());
+        }
+        i += 1;
+    }
+    sort_names(&mut saved_names);
+    let mut i: taddr = 0;
+    while i < saved_names.len() {
+        let r = after_saved(&saved_names[i]);
+        let at = gen_slot(g, &saved_names[i]);
+        let mut text: String = Vec::new();
+        canon::push_str(&mut text, "ld.word ");
+        canon::push_str(&mut text, &r);
+        canon::push_str(&mut text, ", ");
+        canon::push_int(&mut text, at as t27);
+        canon::push_str(&mut text, "(sp)");
+        gen_line(g, &text);
+        i += 1;
+    }
+    let size = g.frame.size;
+    if g.frame_needed {
+        let mut text: String = Vec::new();
+        canon::push_str(&mut text, "addi.trap sp, sp, ");
+        canon::push_int(&mut text, size as t27);
+        gen_line(g, &text);
+    }
+    gen_line(g, "ret");
+}
+
+fn starts_with_saved(n: &str) -> bool {
+    n.len() > 6 && n[0] == '\u{1}' && starts_at(n, 1, "saved.")
+}
+
+fn after_saved(n: &str) -> String {
+    let mut out: String = Vec::new();
+    let mut i: taddr = 7;
+    while i < n.len() {
+        out.push(n[i]);
+        i += 1;
+    }
+    out
+}
+
+fn sort_names(v: &mut Vec<String>) {
+    let mut a: taddr = 1;
+    while a < v.len() {
+        let mut b = a;
+        while b > 0 && canon::str_less(&v[b], &v[b - 1]) {
+            let t = v[b].to_string();
+            v[b] = v[b - 1].to_string();
+            v[b - 1] = t;
+            b -= 1;
+        }
+        a += 1;
+    }
+}
+
+// ---------------------------------------------------------------- instructions
+
+fn check_width(g: &mut Gen, ty: &tir::Ty) {
+    match ty {
+        tir::Ty::Int(w) => {
+            if w != 27 && w != 1 {
+                g.errs.push("arithmetic width reached the backend unlegalized".to_string());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn emit_inst(g: &mut Gen, inst: &tir::Inst, f: &tir::Func) {
+    let _ = f;
+    // An address the accesses that use it absorbed needs no instruction.
+    if inst.results.len() > 0 && foldmap_has(&g.folds, &inst.results[0]) {
+        return;
+    }
+    match &inst.kind {
+        tir::Kind::Flav(op, flavor, ty, a, b) => {
+            check_width(g, &ty);
+            let stem = if op == 0 {
+                "add".to_string()
+            } else if op == 1 {
+                "sub".to_string()
+            } else if op == 2 {
+                "mul".to_string()
+            } else {
+                "shl".to_string()
+            };
+            let suffix = if flavor == 0 {
+                ".wrap".to_string()
+            } else if flavor == 1 {
+                ".trap".to_string()
+            } else {
+                ".flag".to_string()
+            };
+            if flavor == 2 {
+                // The flag flavor names a second destination, and the
+                // immediate form has no field for it.
+                let ra = gen_read(g, a, "t0");
+                let rb = gen_read(g, b, "t1");
+                let of = opt_first(inst);
+                let os = opt_second(inst);
+                let rd = gen_dest(g, &of, "t2");
+                let rf = gen_dest(g, &os, "t3");
+                let mut text: String = Vec::new();
+                canon::push_str(&mut text, &stem);
+                canon::push_str(&mut text, &suffix);
+                text.push(' ');
+                canon::push_str(&mut text, &rd);
+                canon::push_str(&mut text, ", ");
+                canon::push_str(&mut text, &ra);
+                canon::push_str(&mut text, ", ");
+                canon::push_str(&mut text, &rb);
+                canon::push_str(&mut text, ", ");
+                canon::push_str(&mut text, &rf);
+                gen_line(g, &text);
+                if inst.results.len() > 0 {
+                    gen_write(g, &inst.results[0], &rd);
+                }
+                if inst.results.len() > 1 {
+                    gen_write(g, &inst.results[1], &rf);
+                }
+            } else {
+                let commutative = op == 0 || op == 2;
+                let of = opt_first(inst);
+                gen_binary(g, &stem, &suffix, commutative, a, b, &of);
+            }
+        }
+        tir::Kind::Plain(op, ty, a, b) => {
+            check_width(g, &ty);
+            let stem = if op == 0 {
+                "mulh".to_string()
+            } else if op == 1 {
+                "div".to_string()
+            } else if op == 2 {
+                "rem".to_string()
+            } else if op == 3 {
+                "shr".to_string()
+            } else if op == 4 {
+                "tmin".to_string()
+            } else if op == 5 {
+                "tmax".to_string()
+            } else {
+                "tmul".to_string()
+            };
+            let commutative = op == 0 || op >= 4;
+            let of = opt_first(inst);
+            gen_binary(g, &stem, "", commutative, a, b, &of);
+        }
+        // Negation is `0 − x`; the machine needs no separate instruction
+        // because `r0` is a register like any other.
+        tir::Kind::Neg(ty, a) => {
+            check_width(g, &ty);
+            let ra = gen_read(g, a, "t0");
+            let of = opt_first(inst);
+            let rd = gen_dest(g, &of, "t2");
+            let mut text: String = Vec::new();
+            canon::push_str(&mut text, "neg     ");
+            canon::push_str(&mut text, &rd);
+            canon::push_str(&mut text, ", ");
+            canon::push_str(&mut text, &ra);
+            gen_line(g, &text);
+            if inst.results.len() > 0 {
+                gen_write(g, &inst.results[0], &rd);
+            }
+        }
+        tir::Kind::Cmp(ty, a, b) => {
+            check_width(g, &ty);
+            let of = opt_first(inst);
+            gen_binary(g, "cmp", "", false, a, b, &of);
+        }
+        // One instruction, three arms, no branch.
+        tir::Kind::Select3(t, ty, neg, zero, pos) => {
+            check_width(g, &ty);
+            let rt = gen_read(g, t, "t0");
+            let rn = gen_read(g, neg, "t1");
+            let rz = gen_read(g, zero, "t2");
+            let rp = gen_read(g, pos, "t3");
+            // The destination may alias a source: `sel3` reads its selector
+            // and the chosen arm before it writes.
+            let of = opt_first(inst);
+            let rd = gen_dest(g, &of, "t2");
+            let mut text: String = Vec::new();
+            canon::push_str(&mut text, "sel3    ");
+            canon::push_str(&mut text, &rd);
+            canon::push_str(&mut text, ", ");
+            canon::push_str(&mut text, &rt);
+            canon::push_str(&mut text, ", ");
+            canon::push_str(&mut text, &rn);
+            canon::push_str(&mut text, ", ");
+            canon::push_str(&mut text, &rz);
+            canon::push_str(&mut text, ", ");
+            canon::push_str(&mut text, &rp);
+            gen_line(g, &text);
+            if inst.results.len() > 0 {
+                gen_write(g, &inst.results[0], &rd);
+            }
+        }
+        // The value of a `slot` is the address of its storage in the frame.
+        tir::Kind::Slot(_) => {
+            if inst.results.len() > 0 {
+                let sname = storage_name(&inst.results[0]);
+                let at = gen_slot(g, &sname);
+                let of = opt_first(inst);
+                let rd = gen_dest(g, &of, "t0");
+                let mut text: String = Vec::new();
+                canon::push_str(&mut text, "addi.trap ");
+                canon::push_str(&mut text, &rd);
+                canon::push_str(&mut text, ", sp, ");
+                canon::push_int(&mut text, at as t27);
+                gen_line(g, &text);
+                gen_write(g, &inst.results[0], &rd);
+            }
+        }
+        tir::Kind::Load(ty, p) => {
+            let addr = gen_address(g, p, "t0");
+            let disp = addr.0;
+            let rp = addr.1;
+            let width = access_width(g, &ty);
+            let of = opt_first(inst);
+            let rd = gen_dest(g, &of, "t2");
+            let mut text: String = Vec::new();
+            canon::push_str(&mut text, "ld.");
+            canon::push_str(&mut text, &width);
+            text.push(' ');
+            canon::push_str(&mut text, &rd);
+            canon::push_str(&mut text, ", ");
+            canon::push_int(&mut text, disp as t27);
+            text.push('(');
+            canon::push_str(&mut text, &rp);
+            text.push(')');
+            gen_line(g, &text);
+            if inst.results.len() > 0 {
+                gen_write(g, &inst.results[0], &rd);
+            }
+        }
+        tir::Kind::Store(ty, v, p) => {
+            let rv = gen_read(g, v, "t1");
+            let addr = gen_address(g, p, "t0");
+            let disp = addr.0;
+            let rp = addr.1;
+            let width = access_width(g, &ty);
+            let mut text: String = Vec::new();
+            canon::push_str(&mut text, "st.");
+            canon::push_str(&mut text, &width);
+            text.push(' ');
+            canon::push_str(&mut text, &rv);
+            canon::push_str(&mut text, ", ");
+            canon::push_int(&mut text, disp as t27);
+            text.push('(');
+            canon::push_str(&mut text, &rp);
+            text.push(')');
+            gen_line(g, &text);
+        }
+        // Address arithmetic is ordinary addition; there is no GEP.
+        tir::Kind::Offset(p, d) => {
+            let of = opt_first(inst);
+            gen_binary(g, "add", ".trap", false, p, d, &of);
+        }
+        // Widening is a copy: a balanced value's high trits are already
+        // zero.
+        tir::Kind::Widen(_, a, _) => {
+            let ra = gen_read(g, a, "t0");
+            if inst.results.len() > 0 {
+                let r = &inst.results[0];
+                let ri = regmap_get(&g.regs, r);
+                if ri < g.regs.names.len() {
+                    let own = g.regs.regs[ri].to_string();
+                    if !own.same(&ra) {
+                        let mut text: String = Vec::new();
+                        canon::push_str(&mut text, "add.wrap ");
+                        canon::push_str(&mut text, &own);
+                        canon::push_str(&mut text, ", ");
+                        canon::push_str(&mut text, &ra);
+                        canon::push_str(&mut text, ", zero");
+                        gen_line(g, &text);
+                    }
+                } else {
+                    gen_write(g, r, &ra);
+                }
+            }
+        }
+        // Narrowing is `wrap`, the instruction the legalizer's mask becomes.
+        tir::Kind::Trunc(_, a, to) => {
+            let ra = gen_read(g, a, "t0");
+            let n: taddr = match to {
+                tir::Ty::Int(w) => w,
+                tir::Ty::Ptr => 27,
+            };
+            let of = opt_first(inst);
+            let rd = gen_dest(g, &of, "t2");
+            let mut text: String = Vec::new();
+            canon::push_str(&mut text, "wrap    ");
+            canon::push_str(&mut text, &rd);
+            canon::push_str(&mut text, ", ");
+            canon::push_str(&mut text, &ra);
+            canon::push_str(&mut text, ", ");
+            canon::push_int(&mut text, n as t27);
+            gen_line(g, &text);
+            if inst.results.len() > 0 {
+                gen_write(g, &inst.results[0], &rd);
+            }
+        }
+        tir::Kind::Call(callee, args, _) => {
+            if args.len() > 8 {
+                g.errs.push("more than eight arguments is not implemented".to_string());
+                return;
+            }
+            // Arguments are read into `a0`…`a7` in order. Nothing allocated
+            // is live here, so writing them is safe.
+            let mut i: taddr = 0;
+            while i < args.len() {
+                let reg = pool_call_free(i);
+                let from = gen_read(g, &args[i], &reg);
+                if !from.same(&reg) {
+                    let mut text: String = Vec::new();
+                    canon::push_str(&mut text, "add.wrap ");
+                    canon::push_str(&mut text, &reg);
+                    canon::push_str(&mut text, ", ");
+                    canon::push_str(&mut text, &from);
+                    canon::push_str(&mut text, ", zero");
+                    gen_line(g, &text);
+                }
+                i += 1;
+            }
+            match callee {
+                tir::Callee::Direct(name) => {
+                    let mut text: String = Vec::new();
+                    canon::push_str(&mut text, "call    f.");
+                    canon::push_str(&mut text, name);
+                    gen_line(g, &text);
+                }
+                tir::Callee::Indirect(p) => {
+                    let rp = gen_read(g, p, "t0");
+                    let mut text: String = Vec::new();
+                    canon::push_str(&mut text, "jalr    ra, 0(");
+                    canon::push_str(&mut text, &rp);
+                    text.push(')');
+                    gen_line(g, &text);
+                }
+            }
+            if inst.results.len() > 0 {
+                let r = &inst.results[0];
+                let ri = regmap_get(&g.regs, r);
+                if ri < g.regs.names.len() {
+                    let own = g.regs.regs[ri].to_string();
+                    if !own.same("a0") {
+                        let mut text: String = Vec::new();
+                        canon::push_str(&mut text, "add.wrap ");
+                        canon::push_str(&mut text, &own);
+                        canon::push_str(&mut text, ", a0, zero");
+                        gen_line(g, &text);
+                    }
+                } else {
+                    gen_write(g, r, "a0");
+                }
+            }
+        }
+    }
+}
+
+fn opt_first(inst: &tir::Inst) -> Option<String> {
+    if inst.results.len() > 0 {
+        return Option::Some(inst.results[0].to_string());
+    }
+    Option::None
+}
+
+fn opt_second(inst: &tir::Inst) -> Option<String> {
+    if inst.results.len() > 1 {
+        return Option::Some(inst.results[1].to_string());
+    }
+    Option::None
+}
+
+fn access_width(g: &mut Gen, ty: &tir::Ty) -> String {
+    match ty {
+        tir::Ty::Ptr => return "word".to_string(),
+        tir::Ty::Int(w) => {
+            if w == 27 {
+                return "word".to_string();
+            }
+            if w <= 9 {
+                return "tryte".to_string();
+            }
+            g.errs.push("no machine access width".to_string());
+            "word".to_string()
+        }
+    }
+}
+
+// ---------------------------------------------------------------- terminators
+
+fn emit_term(g: &mut Gen, t: &tir::Term, calls: bool, f: &tir::Func) {
+    match t {
+        tir::Term::Ret(v) => {
+            match v {
+                Option::Some(o) => {
+                    let from = gen_read(g, o, "a0");
+                    if !from.same("a0") {
+                        let mut text: String = Vec::new();
+                        canon::push_str(&mut text, "add.wrap a0, ");
+                        canon::push_str(&mut text, &from);
+                        canon::push_str(&mut text, ", zero");
+                        gen_line(g, &text);
+                    }
+                }
+                Option::None => {}
+            }
+            epilogue(g, calls);
+        }
+        tir::Term::Br(target) => {
+            move_args(g, target, f);
+            // A jump to the block emitted next is a jump to the next
+            // instruction.
+            if !g.next_block.same(&target.label) {
+                let label = block_label(f, &target.label);
+                let mut text: String = Vec::new();
+                canon::push_str(&mut text, "j       ");
+                canon::push_str(&mut text, &label);
+                gen_line(g, &text);
+            }
+        }
+        tir::Term::Br3(sel, neg, zero, pos) => {
+            let rt = gen_read(g, sel, "t0");
+            let neg_stub = if reaches(g, neg) { "".to_string() } else { fresh_label(g, f) };
+            let zero_stub = if reaches(g, zero) { "".to_string() } else { fresh_label(g, f) };
+            let pos_stub = if reaches(g, pos) { "".to_string() } else { fresh_label(g, f) };
+            let named_neg = name_or_stub(g, f, neg, &neg_stub);
+            let named_zero = name_or_stub(g, f, zero, &zero_stub);
+            let named_pos = name_or_stub(g, f, pos, &pos_stub);
+            let mut text: String = Vec::new();
+            canon::push_str(&mut text, "br3     ");
+            canon::push_str(&mut text, &rt);
+            canon::push_str(&mut text, ", ");
+            canon::push_str(&mut text, &named_neg);
+            canon::push_str(&mut text, ", ");
+            canon::push_str(&mut text, &named_zero);
+            canon::push_str(&mut text, ", ");
+            canon::push_str(&mut text, &named_pos);
+            gen_line(g, &text);
+            if neg_stub.len() > 0 {
+                gen_label(g, &neg_stub);
+                move_args(g, neg, f);
+                let label = block_label(f, &neg.label);
+                let mut jt: String = Vec::new();
+                canon::push_str(&mut jt, "j       ");
+                canon::push_str(&mut jt, &label);
+                gen_line(g, &jt);
+            }
+            if zero_stub.len() > 0 {
+                gen_label(g, &zero_stub);
+                move_args(g, zero, f);
+                let label = block_label(f, &zero.label);
+                let mut jt: String = Vec::new();
+                canon::push_str(&mut jt, "j       ");
+                canon::push_str(&mut jt, &label);
+                gen_line(g, &jt);
+            }
+            if pos_stub.len() > 0 {
+                gen_label(g, &pos_stub);
+                move_args(g, pos, f);
+                let label = block_label(f, &pos.label);
+                let mut jt: String = Vec::new();
+                canon::push_str(&mut jt, "j       ");
+                canon::push_str(&mut jt, &label);
+                gen_line(g, &jt);
+            }
+        }
+        tir::Term::Trap(code) => {
+            let mut text: String = Vec::new();
+            canon::push_str(&mut text, "trap    ");
+            canon::push_str(&mut text, code);
+            gen_line(g, &text);
+        }
+        // Reaching `unreachable` is UB (TIR §4 item 1). A trap is the most
+        // useful thing an implementation can do with it.
+        tir::Term::Unreachable => {
+            gen_line(g, "trap    F_TRAP");
+        }
+    }
+}
+
+fn name_or_stub(g: &Gen, f: &tir::Func, d: &tir::Target, stub: &str) -> String {
+    if stub.len() > 0 {
+        return stub.to_string();
+    }
+    block_label(f, &d.label)
+}
+
+/// Bind a destination's block parameters, via the transfer area so that an
+/// argument reading a slot another argument overwrites still sees the old
+/// value.
+fn move_args(g: &mut Gen, target: &tir::Target, f: &tir::Func) {
+    if target.args.len() == 0 {
+        return;
+    }
+    let di = canon::block_index(f, &target.label);
+    if di >= f.blocks.len() {
+        g.errs.push("not a block".to_string());
+        return;
+    }
+    let dparams = &f.blocks[di].params;
+    if dparams.len() != target.args.len() {
+        g.errs.push("parameter count".to_string());
+        return;
+    }
+
+    // Three groups, in an order that reads every source before writing
+    // any destination that another source depends on.
+    let mut in_slots: Vec<taddr> = Vec::new();
+    let mut copy_regs: Vec<String> = Vec::new();
+    let mut copy_ops: Vec<tir::Opnd> = Vec::new();
+    let mut i: taddr = 0;
+    while i < dparams.len() {
+        let p = &dparams[i].name;
+        let ri = regmap_get(&g.regs, p);
+        if ri < g.regs.names.len() {
+            copy_regs.push(g.regs.regs[ri].to_string());
+            copy_ops.push(canon::clone_opnd(&target.args[i]));
+        } else {
+            in_slots.push(i);
+        }
+        i += 1;
+    }
+
+    let mut k: taddr = 0;
+    while k < in_slots.len() {
+        let i = in_slots[k];
+        let from = gen_read(g, &target.args[i], "t0");
+        let at = g.frame.transfer[i];
+        let mut text: String = Vec::new();
+        canon::push_str(&mut text, "st.word ");
+        canon::push_str(&mut text, &from);
+        canon::push_str(&mut text, ", ");
+        canon::push_int(&mut text, at as t27);
+        canon::push_str(&mut text, "(sp)");
+        gen_line(g, &text);
+        k += 1;
+    }
+
+    parallel_copy(g, &copy_regs, &copy_ops);
+
+    let mut k: taddr = 0;
+    while k < in_slots.len() {
+        let i = in_slots[k];
+        let at = g.frame.transfer[i];
+        let mut text: String = Vec::new();
+        canon::push_str(&mut text, "ld.word t0, ");
+        canon::push_int(&mut text, at as t27);
+        canon::push_str(&mut text, "(sp)");
+        gen_line(g, &text);
+        gen_write(g, &dparams[i].name, "t0");
+        k += 1;
+    }
+}
+
+/// Emit a set of moves that all take effect at once: a move whose
+/// destination no remaining move reads is always safe; when no such move
+/// is left, what remains is a cycle, and one register is parked in
+/// scratch to break it. `t0` is scratch here as everywhere.
+fn parallel_copy(g: &mut Gen, regs: &Vec<String>, ops: &Vec<tir::Opnd>) {
+    // Identity moves are not moves.
+    let mut todo_regs: Vec<String> = Vec::new();
+    let mut todo_ops: Vec<tir::Opnd> = Vec::new();
+    let mut i: taddr = 0;
+    while i < regs.len() {
+        let mut identity = false;
+        match &ops[i] {
+            tir::Opnd::Val(n) => {
+                let ri = regmap_get(&g.regs, n);
+                if ri < g.regs.names.len() && g.regs.regs[ri].same(&regs[i]) {
+                    identity = true;
+                }
+            }
+            _ => {}
+        }
+        if !identity {
+            todo_regs.push(regs[i].to_string());
+            todo_ops.push(canon::clone_opnd(&ops[i]));
+        }
+        i += 1;
+    }
+
+    loop {
+        // Emit everything that is safe.
+        loop {
+            let mut sources: Vec<String> = Vec::new();
+            let mut i: taddr = 0;
+            while i < todo_ops.len() {
+                match &todo_ops[i] {
+                    tir::Opnd::Val(n) => {
+                        let ri = regmap_get(&g.regs, n);
+                        if ri < g.regs.names.len() {
+                            push_str_unique(&mut sources, &g.regs.regs[ri]);
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            let mut at: taddr = todo_regs.len();
+            let mut i: taddr = 0;
+            while i < todo_regs.len() {
+                if !str_in(&sources, &todo_regs[i]) {
+                    at = i;
+                    i = todo_regs.len();
+                }
+                i += 1;
+            }
+            if at >= todo_regs.len() {
+                break;
+            }
+            let r = todo_regs[at].to_string();
+            let o = canon::clone_opnd(&todo_ops[at]);
+            let last = todo_regs.len() - 1;
+            todo_regs[at] = todo_regs[last].to_string();
+            todo_ops[at] = canon::clone_opnd(&todo_ops[last]);
+            todo_regs.pop();
+            todo_ops.pop();
+            let from = gen_read(g, &o, &r);
+            if !from.same(&r) {
+                let mut text: String = Vec::new();
+                canon::push_str(&mut text, "add.wrap ");
+                canon::push_str(&mut text, &r);
+                canon::push_str(&mut text, ", ");
+                canon::push_str(&mut text, &from);
+                canon::push_str(&mut text, ", zero");
+                gen_line(g, &text);
+            }
+        }
+        if todo_regs.len() == 0 {
+            return;
+        }
+
+        // What is left is a cycle: every destination is still someone's
+        // source. Park one register in scratch and let whoever wanted it
+        // read that instead, which turns the cycle into a chain.
+        let r = todo_regs[0].to_string();
+        let mut text: String = Vec::new();
+        canon::push_str(&mut text, "add.wrap t0, ");
+        canon::push_str(&mut text, &r);
+        canon::push_str(&mut text, ", zero");
+        gen_line(g, &text);
+        let mut i: taddr = 0;
+        while i < todo_ops.len() {
+            match &todo_ops[i] {
+                tir::Opnd::Val(n) => {
+                    let ri = regmap_get(&g.regs, n);
+                    if ri < g.regs.names.len() && g.regs.regs[ri].same(&r) {
+                        todo_ops[i] = tir::Opnd::Val(scratch_name());
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+}
+
+fn push_str_unique(v: &mut Vec<String>, s: &str) {
+    if !str_in(v, s) {
+        v.push(s.to_string());
+    }
+}
+
+fn str_in(v: &Vec<String>, s: &str) -> bool {
+    let mut i: taddr = 0;
+    while i < v.len() {
+        if v[i].same(s) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+// ---------------------------------------------------------------- driver
+
+/// Compile a legalized module to TRISC-27 assembly, entry named.
+pub fn compile(m: &tir::Module, entry: &str) -> bool {
+    let mut have_entry = false;
+    let mut i: taddr = 0;
+    while i < m.funcs.len() {
+        if m.funcs[i].sig.name.same(entry) {
+            have_entry = true;
+        }
+        i += 1;
+    }
+    if !have_entry {
+        return false;
+    }
+
+    // Only what the generated code actually uses: the device region is
+    // unreachable from TIR, so the character ports are the runtime's
+    // business, not this file's.
+    println("; Generated by trustc from TIR. Target: TRISC-27.");
+    println("");
+    println(".equ MEM_SIZE, -6");
+    println("");
+
+    // Execution begins at address 0, so the start code is first: give the
+    // program a stack, call the entry function, halt with its result.
+    println("_start:");
+    println("    ld.word sp, MEM_SIZE(zero)");
+    print("    call    f.");
+    println(entry);
+    println("    halt    a0");
+    println("");
+
+    let mut any_err = false;
+    let mut i: taddr = 0;
+    while i < m.funcs.len() {
+        let ok = generate_fn(&m.funcs[i], &mut have_entry);
+        if !ok {
+            any_err = true;
+        }
+        i += 1;
+    }
+
+    let mut gi: taddr = 0;
+    while gi < m.globals.len() {
+        let g = &m.globals[gi];
+        println("");
+        println(".align 3");
+        let mut label: String = Vec::new();
+        canon::push_str(&mut label, "g.");
+        canon::push_str(&mut label, &g.name);
+        print(&label);
+        println(":");
+        match &g.init {
+            Option::None => {
+                let mut text: String = Vec::new();
+                canon::push_str(&mut text, "    .zero ");
+                canon::push_int(&mut text, g.trytes as t27);
+                println(&text);
+            }
+            Option::Some(items) => {
+                let mut k: taddr = 0;
+                while k < items.len() {
+                    match &items[k] {
+                        tir::InitItem::Tryte(v) => {
+                            let mut text: String = Vec::new();
+                            canon::push_str(&mut text, "    .tryte ");
+                            canon::push_int(&mut text, v);
+                            println(&text);
+                        }
+                        tir::InitItem::Addr(n) => {
+                            let mut text: String = Vec::new();
+                            canon::push_str(&mut text, "    .word f.");
+                            canon::push_str(&mut text, n);
+                            println(&text);
+                        }
+                    }
+                    k += 1;
+                }
+            }
+        }
+        gi += 1;
+    }
+    !any_err
+}

@@ -1,0 +1,40 @@
+// The whole way to TRISC-27 assembly, in Trust: canonicalize, inline,
+// drop, canonicalize again, legalize, generate — the pipeline `trustc
+// compile` runs, held to it character for character on every module the
+// suite lowers. The passes live in `bootstrap/canon.tr`,
+// `bootstrap/inline.tr`, `bootstrap/legalize.tr`, `bootstrap/gen.tr`.
+
+mod canon;
+mod gen;
+mod inline;
+mod input;
+mod legalize;
+mod tir;
+
+fn main() -> t27 {
+    let src = input::read_all();
+    match tir::parse(&src) {
+        Result::Ok(m) => {
+            let out = canon::canonicalize(m);
+            let out = inline::preopt(out);
+            let out = canon::canonicalize(out);
+            match legalize::legalize(&out) {
+                Result::Ok(ready) => {
+                    if gen::compile(&ready, "main") {
+                        0
+                    } else {
+                        1
+                    }
+                }
+                Result::Err(e) => {
+                    let _ = e;
+                    1
+                }
+            }
+        }
+        Result::Err(e) => {
+            let _ = e;
+            1
+        }
+    }
+}

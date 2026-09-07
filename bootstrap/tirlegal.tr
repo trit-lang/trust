@@ -1,0 +1,31 @@
+// Legalization for the `tritium` target, in Trust, held to
+// `trustc legalize` (TIR §6) — the promotion half of the pass pair, on the
+// corpus as `trustc preopt` prints it. The passes live in
+// `bootstrap/legalize.tr`.
+
+mod canon;
+mod input;
+mod legalize;
+mod tir;
+
+fn main() -> t27 {
+    let src = input::read_all();
+    match tir::parse(&src) {
+        Result::Ok(m) => {
+            match legalize::legalize(&m) {
+                Result::Ok(out) => {
+                    tir::print_module(&out);
+                    0
+                }
+                Result::Err(e) => {
+                    let _ = e;
+                    1
+                }
+            }
+        }
+        Result::Err(e) => {
+            let _ = e;
+            1
+        }
+    }
+}

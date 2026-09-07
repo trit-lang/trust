@@ -2770,6 +2770,44 @@ macros parity is covered by `programs/macros/main.tr` (the suite's own,
 including the iterator spread over take-of-any) and
 `examples/trust/macros.tr` at the same line.
 
+**G9.187 — an allocator's order of business is part of the program it
+writes: who frees first is who picks next.** The linear scan's
+registers come from a pool taken off the end, so every choice after a
+release sees the pool *as the pool was ordered*, and two
+implementations of that scan agree on the assembly only while they
+agree on the ordering rules twice over: `retain` preserves it, which a
+swap-remove did not (a register came off the back of the bag instead of
+the front of the shelf, and a0 and a1 walked out of the door in the
+wrong shoes); and a claim behaves the same wherever the parameter's
+span says it died, released in the walk's own order. With the pool
+treated as an order rather than a set the whole lane went quiet:
+`bootstrap/gen.tr`'s allocator, folds, frame layout, immediate forms
+and two-pass branch naming, at the end of the pipeline it shares with
+five earlier passes, prints the same TRISC-27 as `trustc compile` on
+every whole module of the corpus — main kept and what it reaches —
+which is the first text either side can ask the machine about.
+
+**G9.186 — legalization for the reference target is one direction, and
+renormalization is its price.** `tritium`'s legal widths are the word
+and `ptr`, so a promoted `t9` is widened, operated on, and masked back
+into its own symmetric range with a `tmul` of `(3^w − 1)/2` — computed
+trit-wise, no carries (AM §3.1) — rather than by a `trunc` that would
+put an illegal width back into the output. The invariants the second
+implementation shares with the first are all in the text now: a `t1`
+survives only as a comparison result, a `.flag` trit or a selector;
+`widen` to the already-legal width is an identity nobody emits;
+`mulh`'s promoted recomputation is `mul` then `shr` by the narrow
+width; a shift beyond the logical width ends the block in `F_SHIFT`
+when the amount is a constant and in a `fault`/`cont` pair when it is
+not; and a name the pass invents is `lz.xN` under the shared counter
+that every tag — `r c h n s t w m fault cont` — counts with. The seam
+the suite asks it across is the one `compile` crosses:
+`bootstrap/tirlegal.tr` against `trustc legalize`, on the corpus as
+`trustc preopt` prints it, character for character. A value too *wide*
+for the target — parts and a hidden pointer — is in neither corpus and
+is refused by both where it would appear, and when it does G6.5's
+expansion is what gets a second writing.
+
 **G9.185 — the inliner's contract is a snapshot: every splice of a round
 reads the round's start, never the module mid-splicing.** A small callee
 dead in one round is spliced from the body it *had* when the round

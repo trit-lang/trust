@@ -1,0 +1,1004 @@
+// Legalization of TIR for the `tritium` target, in Trust.
+//
+// `compiler/src/tir/legalize/mod.rs` written again in the language it helps
+// compile: the mandatory pass between target-independent optimization and
+// instruction selection (TIR §6). The reference target's legal widths are
+// `t27` and `ptr` and nothing else, so on the tritium target this is one
+// direction — **promotion**: a width below the word is widened, operated
+// on, and renormalized, with a `t1` surviving only as a comparison result,
+// a `.flag` trit, or a branch selector. `bootstrap/tirlegal.tr` holds this
+// to `trustc legalize`, character for character, on the corpus as
+// `trustc preopt` prints it.
+//
+// What is *not* here is the other direction: a value too wide for the
+// target becoming parts (`expand.rs`). Every width the lowered corpus
+// names is at most the word, so for the corpus it exist on neither side —
+// and the pass refuses to carry one, the way `legalize_module` reports a
+// wide signature rather than inventing a convention.
+
+use canon;
+use tir;
+
+// ---------------------------------------------------------------- target
+
+/// The reference target, `tritium` (compiler/src/tir/target.rs): every
+/// width at most the word promotes to it, and a pointer is one word.
+fn legal_width_at_least(w: taddr) -> taddr {
+    if w <= 27 {
+        27
+    } else {
+        0
+    }
+}
+
+/// A width this target cannot arithmetize at all: too wide.
+fn arith(w: taddr) -> taddr {
+    legal_width_at_least(w)
+}
+
+// ---------------------------------------------------------------- emitter
+
+/// Builds one legalized function, splitting blocks where a promoted
+/// operation needs a conditional fault.
+pub struct Emit {
+    /// Finished blocks, in order.
+    pub blocks: Vec<tir::Block>,
+    /// The block being built.
+    pub label: String,
+    pub params: Vec<tir::Param>,
+    pub insts: Vec<tir::Inst>,
+    /// Actual type of every value defined so far: 27, 1, or −1 for `ptr`.
+    pub actual_names: Vec<String>,
+    pub actual_tys: Vec<taddr>,
+    /// Values replaced by another operand (identity conversions).
+    pub subst: canon::OMap,
+    /// The type each block's parameters legalized to, by block label
+    /// (index-aligned with `shape_labels`, the block's own order).
+    pub shape_labels: Vec<String>,
+    pub shape_tys: Vec<Vec<taddr>>,
+    pub prefix: String,
+    pub counter: taddr,
+    pub errs: Vec<String>,
+    /// Set when the rest of the block provably cannot execute: a shift
+    /// whose constant amount is out of range always faults, so everything
+    /// after it is dead and the block ends there.
+    pub halted: bool,
+    pub halts_with: String,
+}
+
+// Types are coded taddr here: 1 for t1, 27 for t27, −1 for `ptr`.
+const TY_PTR: taddr = 0 - 1;
+
+fn ty_code(t: &tir::Ty) -> taddr {
+    match t {
+        tir::Ty::Int(n) => n,
+        tir::Ty::Ptr => TY_PTR,
+    }
+}
+
+fn code_ty(c: taddr) -> tir::Ty {
+    if c == TY_PTR {
+        return tir::Ty::Ptr;
+    }
+    tir::Ty::Int(c)
+}
+
+fn fresh(e: &mut Emit, what: &str) -> String {
+    e.counter += 1;
+    let mut out = e.prefix.to_string();
+    canon::push_str(&mut out, what);
+    canon::push_int(&mut out, e.counter as t27);
+    out
+}
+
+fn push_inst(e: &mut Emit, results: Vec<String>, kind: tir::Kind) {
+    e.insts.push(tir::Inst { results: results, kind: kind });
+}
+
+/// Emit an instruction with one fresh result of the given type.
+fn emit1(e: &mut Emit, what: &str, ty: taddr, kind: tir::Kind) -> tir::Opnd {
+    let name = fresh(e, what);
+    actual_set(e, &name, ty);
+    push_inst(e, clone_one(&name), kind);
+    tir::Opnd::Val(name)
+}
+
+fn clone_one(name: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    out.push(name.to_string());
+    out
+}
+
+fn actual_set(e: &mut Emit, name: &str, ty: taddr) {
+    let mut i: taddr = 0;
+    while i < e.actual_names.len() {
+        if e.actual_names[i].same(name) {
+            e.actual_tys[i] = ty;
+            return;
+        }
+        i += 1;
+    }
+    e.actual_names.push(name.to_string());
+    e.actual_tys.push(ty);
+}
+
+fn actual_get(e: &Emit, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < e.actual_names.len() {
+        if e.actual_names[i].same(name) {
+            return e.actual_tys[i];
+        }
+        i += 1;
+    }
+    0 - 2
+}
+
+fn finish_block(e: &mut Emit, term: tir::Term) {
+    let label = e.label.to_string();
+    let mut params: Vec<tir::Param> = Vec::new();
+    let mut i: taddr = 0;
+    while i < e.params.len() {
+        params.push(tir::Param {
+            name: e.params[i].name.to_string(),
+            ty: canon::clone_ty(&e.params[i].ty),
+        });
+        i += 1;
+    }
+    let mut insts: Vec<tir::Inst> = Vec::new();
+    let mut i: taddr = 0;
+    while i < e.insts.len() {
+        insts.push(canon::clone_inst(&e.insts[i]));
+        i += 1;
+    }
+    e.blocks.push(tir::Block {
+        label: label,
+        params: params,
+        insts: insts,
+        term: term,
+    });
+}
+
+fn start_block(e: &mut Emit, label: &str) {
+    e.label = label.to_string();
+    e.params = Vec::new();
+    e.insts = Vec::new();
+}
+
+/// End the current block with a three-way test that faults on the arms
+/// marked in `trap_on` (neg, zero, pos), and continue into a fresh block.
+fn trap_if(e: &mut Emit, cond: tir::Opnd, tn: bool, tz: bool, tp: bool, code: &str) {
+    let fault_label = fresh(e, "fault");
+    let cont_label = fresh(e, "cont");
+    let arm_neg = fault_or_cont(&fault_label, &cont_label, tn);
+    let arm_zero = fault_or_cont(&fault_label, &cont_label, tz);
+    let arm_pos = fault_or_cont(&fault_label, &cont_label, tp);
+    finish_block(e, tir::Term::Br3(cond, arm_neg, arm_zero, arm_pos));
+    e.blocks.push(tir::Block {
+        label: fault_label,
+        params: Vec::new(),
+        insts: Vec::new(),
+        term: tir::Term::Trap(code.to_string()),
+    });
+    start_block(e, &cont_label);
+}
+
+fn fault_or_cont(fault: &str, cont: &str, trap_arm: bool) -> tir::Target {
+    let empty: Vec<tir::Opnd> = Vec::new();
+    if trap_arm {
+        return tir::Target { label: fault.to_string(), args: empty };
+    }
+    tir::Target { label: cont.to_string(), args: empty }
+}
+
+/// The type an operand currently has, coded.
+fn type_of(e: &Emit, o: &tir::Opnd) -> taddr {
+    match o {
+        tir::Opnd::Konst(t, _) => ty_code(&t),
+        tir::Opnd::Glob(_) => TY_PTR,
+        tir::Opnd::Val(v) => actual_get(e, v),
+    }
+}
+
+/// Resolve substitutions introduced by identity conversions.
+fn resolve_op(e: &Emit, o: &tir::Opnd) -> tir::Opnd {
+    match o {
+        tir::Opnd::Val(v) => {
+            match canon::omap_get(&e.subst, v) {
+                Option::Some(w) => w,
+                Option::None => canon::clone_opnd(o),
+            }
+        }
+        _ => canon::clone_opnd(o),
+    }
+}
+
+/// The balanced-ternary length of a value.
+fn trit_len(v: t27) -> taddr {
+    let mut x = v;
+    let mut n: taddr = 0;
+    while x != 0 {
+        x = x / 3;
+        n += 1;
+    }
+    n
+}
+
+/// Convert an operand to the type a use site requires. The three
+/// conversions — `widen` up, `trunc` down for a narrower *memory* type,
+/// `cmp x, 0` down to a condition trit by sign — are each exact.
+fn coerce(e: &mut Emit, o: &tir::Opnd, want: taddr) -> tir::Opnd {
+    let o = resolve_op(e, o);
+    let have = type_of(e, &o);
+    if have == 0 - 2 {
+        return o;
+    }
+    if have == want {
+        return o;
+    }
+    // Retyping a constant is free as long as it still fits.
+    match &o {
+        tir::Opnd::Konst(_, v) => {
+            if want >= 0 && trit_len(v) <= want {
+                return tir::Opnd::Konst(code_ty(want), v);
+            }
+        }
+        _ => {}
+    }
+    if have >= 0 && want >= 0 && have < want {
+        return emit1(e, "w", want, tir::Kind::Widen(code_ty(have), o, code_ty(want)));
+    }
+    // A store to narrower memory. Not to `t1`: that one is a sign
+    // projection and is handled below.
+    if have > 1 && want > 1 && want < have {
+        return emit1(e, "t", want, tir::Kind::Trunc(code_ty(have), o, code_ty(want)));
+    }
+    if have > 0 && want == 1 {
+        return emit1(
+            e,
+            "s",
+            1,
+            tir::Kind::Cmp(code_ty(have), o, tir::Opnd::Konst(code_ty(have), 0)),
+        );
+    }
+    e.errs.push("cannot convert a value during legalization".to_string());
+    o
+}
+
+/// `(3^w − 1)/2` — the mask that renormalizes a promoted value.
+fn mask_of(w: taddr) -> t27 {
+    (pow3(w) - 1) / 2
+}
+
+fn pow3(k: taddr) -> t27 {
+    let mut v: t27 = 1;
+    let mut i: taddr = 0;
+    while i < k {
+        v = v * 3;
+        i += 1;
+    }
+    v
+}
+
+/// Renormalize a promoted value to the symmetric range of `w` trits, by
+/// `tmul` against a mask of `w` ones (AM §3.1), computed trit-wise.
+fn renormalize(e: &mut Emit, v: tir::Opnd, w: taddr, at: taddr) -> tir::Opnd {
+    if w == at {
+        return v;
+    }
+    emit1(
+        e,
+        "n",
+        at,
+        tir::Kind::Plain(6, tir::Ty::Int(at), v, tir::Opnd::Konst(tir::Ty::Int(at), mask_of(w))),
+    )
+}
+
+/// The trits at or above position `w` — zero exactly when the value fits.
+fn high_part(e: &mut Emit, v: tir::Opnd, w: taddr, at: taddr) -> tir::Opnd {
+    emit1(
+        e,
+        "h",
+        at,
+        tir::Kind::Plain(3, tir::Ty::Int(at), v, tir::Opnd::Konst(tir::Ty::Int(at), w as t27)),
+    )
+}
+
+fn clone_opnd_of(o: &tir::Opnd) -> tir::Opnd {
+    canon::clone_opnd(o)
+}
+
+fn sign_of(e: &mut Emit, v: tir::Opnd, at: taddr) -> tir::Opnd {
+    emit1(
+        e,
+        "c",
+        1,
+        tir::Kind::Cmp(tir::Ty::Int(at), v, tir::Opnd::Konst(tir::Ty::Int(at), 0)),
+    )
+}
+
+/// Guard a promoted shift: negative amounts and `k ≥ w` must fault at the
+/// *logical* width, not only at the machine's (AM §3.3).
+fn guard_shift(e: &mut Emit, k: &tir::Opnd, w: taddr, at: taddr) {
+    match k {
+        tir::Opnd::Konst(_, v) => {
+            if v < 0 || v >= w as t27 {
+                // Statically always a fault: the block ends here.
+                e.halted = true;
+                e.halts_with = "F_SHIFT".to_string();
+            }
+            return;
+        }
+        _ => {}
+    }
+    let neg = sign_of(e, canon::clone_opnd(k), at);
+    trap_if(e, neg, true, false, false, "F_SHIFT");
+    let over = emit1(
+        e,
+        "c",
+        1,
+        tir::Kind::Cmp(
+            tir::Ty::Int(at),
+            canon::clone_opnd(k),
+            tir::Opnd::Konst(tir::Ty::Int(at), (w - 1) as t27),
+        ),
+    );
+    trap_if(e, over, false, false, true, "F_SHIFT");
+}
+
+// ---------------------------------------------------------------- module
+
+/// Legalize a module for the reference target.
+pub fn legalize(m: &tir::Module) -> Result<tir::Module, Vec<String>> {
+    let mut errs: Vec<String> = Vec::new();
+    let mut out_decls: Vec<tir::Sig> = Vec::new();
+    let mut di: taddr = 0;
+    while di < m.decls.len() {
+        out_decls.push(reshape_sig(&m.decls[di]));
+        di += 1;
+    }
+
+    // Signatures first: a call has to agree with the callee's legalized
+    // shape. So the table is built before any body is walked.
+    let mut sig_names: Vec<String> = Vec::new();
+    let mut sig_shapes: Vec<tir::Sig> = Vec::new();
+    let mut i: taddr = 0;
+    while i < m.funcs.len() {
+        sig_names.push(m.funcs[i].sig.name.to_string());
+        sig_shapes.push(reshape_sig(&m.funcs[i].sig));
+        i += 1;
+    }
+    let mut i: taddr = 0;
+    while i < m.decls.len() {
+        sig_names.push(m.decls[i].name.to_string());
+        sig_shapes.push(reshape_sig(&m.decls[i]));
+        i += 1;
+    }
+
+    let mut out_funcs: Vec<tir::Func> = Vec::new();
+    let mut i: taddr = 0;
+    while i < m.funcs.len() {
+        let f = legalize_fn(&m.funcs[i], &sig_names, &sig_shapes);
+        match f {
+            Option::Some(func) => out_funcs.push(func),
+            Option::None => {
+                errs.push("could not legalize a function".to_string());
+            }
+        }
+        i += 1;
+    }
+
+    let mut globals: Vec<tir::Global> = Vec::new();
+    let mut gi: taddr = 0;
+    while gi < m.globals.len() {
+        globals.push(clone_global(&m.globals[gi]));
+        gi += 1;
+    }
+
+    if errs.len() > 0 {
+        return Result::Err(errs);
+    }
+    Result::Ok(tir::Module {
+        version: m.version.to_string(),
+        target: m.target.to_string(),
+        globals: globals,
+        decls: out_decls,
+        funcs: out_funcs,
+    })
+}
+
+fn clone_global(g: &tir::Global) -> tir::Global {
+    let init: Option<Vec<tir::InitItem>> = match &g.init {
+        Option::Some(items) => {
+            let mut out: Vec<tir::InitItem> = Vec::new();
+            let mut i: taddr = 0;
+            while i < items.len() {
+                match &items[i] {
+                    tir::InitItem::Tryte(v) => out.push(tir::InitItem::Tryte(v)),
+                    tir::InitItem::Addr(n) => out.push(tir::InitItem::Addr(n.to_string())),
+                }
+                i += 1;
+            }
+            Option::Some(out)
+        }
+        Option::None => Option::None,
+    };
+    tir::Global { name: g.name.to_string(), trytes: g.trytes, init: init }
+}
+
+/// Legalize a signature: a narrow parameter promotes to the word, a
+/// pointer stays one, and a narrow result the same. (A *wide* one would
+/// travel in parts with a hidden pointer, which the corpus never names.)
+fn reshape_sig(s: &tir::Sig) -> tir::Sig {
+    let mut params: Vec<tir::Param> = Vec::new();
+    let mut i: taddr = 0;
+    while i < s.params.len() {
+        let ty = match &s.params[i].ty {
+            tir::Ty::Int(w) => tir::Ty::Int(arith(w)),
+            tir::Ty::Ptr => tir::Ty::Ptr,
+        };
+        params.push(tir::Param { name: s.params[i].name.to_string(), ty: ty });
+        i += 1;
+    }
+    let ret: Option<tir::Ty> = match &s.ret {
+        Option::Some(t) => {
+            match t {
+                tir::Ty::Int(w) => Option::Some(tir::Ty::Int(arith(w))),
+                tir::Ty::Ptr => Option::Some(tir::Ty::Ptr),
+            }
+        }
+        Option::None => Option::None,
+    };
+    tir::Sig { name: s.name.to_string(), params: params, ret: ret }
+}
+
+// ---------------------------------------------------------------- function
+
+fn legalize_fn(f: &tir::Func, sig_names: &Vec<String>, sig_shapes: &Vec<tir::Sig>) -> Option<tir::Func> {
+    let mut sig = reshape_sig(&f.sig);
+    let mut si: taddr = 0;
+    while si < sig_names.len() {
+        if sig_names[si].same(&f.sig.name) {
+            sig = clone_sig(&sig_shapes[si]);
+        }
+        si += 1;
+    }
+
+    // A prefix no existing name starts with, so fresh names cannot collide.
+    let mut prefix = "lz".to_string();
+    let mut names: Vec<String> = Vec::new();
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let b = &f.blocks[bi];
+        names.push(b.label.to_string());
+        let mut i: taddr = 0;
+        while i < b.params.len() {
+            names.push(b.params[i].name.to_string());
+            i += 1;
+        }
+        let mut i: taddr = 0;
+        while i < b.insts.len() {
+            let mut r: taddr = 0;
+            while r < b.insts[i].results.len() {
+                names.push(b.insts[i].results[r].to_string());
+                r += 1;
+            }
+            i += 1;
+        }
+        bi += 1;
+    }
+    let mut i: taddr = 0;
+    while i < f.sig.params.len() {
+        names.push(f.sig.params[i].name.to_string());
+        i += 1;
+    }
+    let mut any = true;
+    while any {
+        any = false;
+        let mut i: taddr = 0;
+        while i < names.len() {
+            if starts_with(&names[i], &prefix) {
+                any = true;
+            }
+            i += 1;
+        }
+        if any {
+            prefix.push('z');
+        }
+    }
+    prefix.push('.');
+
+    let mut e = Emit {
+        blocks: Vec::new(),
+        label: Vec::new(),
+        params: Vec::new(),
+        insts: Vec::new(),
+        actual_names: Vec::new(),
+        actual_tys: Vec::new(),
+        subst: canon::omap_new(),
+        shape_labels: Vec::new(),
+        shape_tys: Vec::new(),
+        prefix: prefix,
+        counter: 0,
+        errs: Vec::new(),
+        halted: false,
+        halts_with: Vec::new(),
+    };
+
+    // The legalized signature's parameters, as values of the body.
+    let mut i: taddr = 0;
+    while i < sig.params.len() {
+        actual_set(&mut e, &sig.params[i].name, ty_code(&sig.params[i].ty));
+        i += 1;
+    }
+
+    // Block parameter shapes are fixed up front: a branch has to agree
+    // with its destination before that destination has been walked.
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let b = &f.blocks[bi];
+        let mut tys: Vec<taddr> = Vec::new();
+        let mut i: taddr = 0;
+        while i < b.params.len() {
+            let code = match &b.params[i].ty {
+                tir::Ty::Int(w) => arith(w),
+                tir::Ty::Ptr => TY_PTR,
+            };
+            actual_set(&mut e, &b.params[i].name, code);
+            tys.push(code);
+            i += 1;
+        }
+        e.shape_labels.push(b.label.to_string());
+        e.shape_tys.push(tys);
+        bi += 1;
+    }
+
+    let mut bi: taddr = 0;
+    while bi < f.blocks.len() {
+        let b = &f.blocks[bi];
+        start_block(&mut e, &b.label);
+        // The destination's own shapes: the block's parameters, legalized.
+        let mut si: taddr = 0;
+        while si < e.shape_labels.len() {
+            if e.shape_labels[si].same(&b.label) {
+                let mut pi: taddr = 0;
+                let mut ps: Vec<tir::Param> = Vec::new();
+                while pi < b.params.len() {
+                    ps.push(tir::Param {
+                        name: b.params[pi].name.to_string(),
+                        ty: code_ty(e.shape_tys[si][pi]),
+                    });
+                    pi += 1;
+                }
+                e.params = ps;
+            }
+            si += 1;
+        }
+        e.halted = false;
+
+        let mut i: taddr = 0;
+        while i < b.insts.len() {
+            if !e.halted {
+                legalize_inst(&mut e, &b.insts[i], sig_names, sig_shapes);
+            }
+            i += 1;
+        }
+        let term = if e.halted {
+            tir::Term::Trap(e.halts_with.to_string())
+        } else {
+            legalize_terminator(&mut e, &b.term, &sig)
+        };
+        finish_block(&mut e, term);
+        bi += 1;
+    }
+
+    if e.errs.len() > 0 {
+        return Option::None;
+    }
+    Option::Some(tir::Func { sig: sig, blocks: e.blocks })
+}
+
+fn clone_sig(s: &tir::Sig) -> tir::Sig {
+    let mut ps: Vec<tir::Param> = Vec::new();
+    let mut i: taddr = 0;
+    while i < s.params.len() {
+        ps.push(tir::Param { name: s.params[i].name.to_string(), ty: canon::clone_ty(&s.params[i].ty) });
+        i += 1;
+    }
+    let ret: Option<tir::Ty> = match &s.ret {
+        Option::Some(t) => Option::Some(canon::clone_ty(&t)),
+        Option::None => Option::None,
+    };
+    tir::Sig { name: s.name.to_string(), params: ps, ret: ret }
+}
+
+fn starts_with(s: &str, p: &str) -> bool {
+    if p.len() > s.len() {
+        return false;
+    }
+    let mut i: taddr = 0;
+    while i < p.len() {
+        if s[i] != p[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+fn legalize_terminator(e: &mut Emit, t: &tir::Term, sig: &tir::Sig) -> tir::Term {
+    match t {
+        tir::Term::Br3(cond, neg, zero, pos) => {
+            let cond2 = coerce(e, cond, 1);
+            tir::Term::Br3(
+                cond2,
+                legalize_target(e, neg),
+                legalize_target(e, zero),
+                legalize_target(e, pos),
+            )
+        }
+        tir::Term::Br(d) => tir::Term::Br(legalize_target(e, d)),
+        tir::Term::Ret(v) => {
+            match v {
+                Option::Some(o) => {
+                    let want: taddr = match &sig.ret {
+                        Option::Some(t) => ty_code(&t),
+                        Option::None => 0 - 2,
+                    };
+                    tir::Term::Ret(Option::Some(coerce(e, o, want)))
+                }
+                Option::None => tir::Term::Ret(Option::None),
+            }
+        }
+        _ => canon::clone_term(t),
+    }
+}
+
+fn legalize_target(e: &mut Emit, t: &tir::Target) -> tir::Target {
+    // Arguments are converted to the *destination's* parameter shapes,
+    // which were fixed before any block was emitted.
+    let mut shapes: Vec<taddr> = Vec::new();
+    let mut have = false;
+    let mut si: taddr = 0;
+    while si < e.shape_labels.len() {
+        if e.shape_labels[si].same(&t.label) {
+            let mut pi: taddr = 0;
+            while pi < e.shape_tys[si].len() {
+                shapes.push(e.shape_tys[si][pi]);
+                pi += 1;
+            }
+            have = true;
+        }
+        si += 1;
+    }
+    let _ = have;
+
+    let mut args: Vec<tir::Opnd> = Vec::new();
+    let mut i: taddr = 0;
+    while i < t.args.len() {
+        if i < shapes.len() {
+            args.push(coerce(e, &t.args[i], shapes[i]));
+        } else {
+            args.push(resolve_op(e, &t.args[i]));
+        }
+        i += 1;
+    }
+    tir::Target { label: t.label.to_string(), args: args }
+}
+
+// ---------------------------------------------------------------- instructions
+
+fn legalize_inst(e: &mut Emit, inst: &tir::Inst, sig_names: &Vec<String>, sig_shapes: &Vec<tir::Sig>) {
+    match &inst.kind {
+        tir::Kind::Flav(op, flavor, ty, a, b) => {
+            flavored(e, inst, op, flavor, ty_code(&ty), a, b);
+        }
+        tir::Kind::Plain(op, ty, a, b) => {
+            let w = ty_width(&ty);
+            let at = arith(w);
+            let a2 = coerce(e, a, at);
+            let b2 = coerce(e, b, at);
+            // `mulh` is the one operation promotion cannot carry through
+            // unchanged: at a wider type it is the high half of a
+            // *different* product. Recomputed, which is exact whenever the
+            // whole product fits.
+            if op == 0 && at != w {
+                if w + w > at {
+                    e.errs.push("mulh would need a wider product".to_string());
+                    return;
+                }
+                let p = emit1(e, "m", at, tir::Kind::Flav(2, 0, tir::Ty::Int(at), a2, b2));
+                define(
+                    e,
+                    inst,
+                    0,
+                    at,
+                    tir::Kind::Plain(3, tir::Ty::Int(at), p, tir::Opnd::Konst(tir::Ty::Int(at), w as t27)),
+                );
+                return;
+            }
+            if op == 3 && at != w {
+                guard_shift(e, &b2, w, at);
+                if e.halted {
+                    return;
+                }
+            }
+            // div, rem, shr and the trit-wise operations all preserve
+            // normalization: their results already lie inside tw's range.
+            define(e, inst, 0, at, tir::Kind::Plain(op, tir::Ty::Int(at), a2, b2));
+        }
+        tir::Kind::Neg(ty, a) => {
+            let w = ty_width(&ty);
+            let at = arith(w);
+            let a2 = coerce(e, a, at);
+            define(e, inst, 0, at, tir::Kind::Neg(tir::Ty::Int(at), a2));
+        }
+        tir::Kind::Cmp(ty, a, b) => {
+            let w = ty_width(&ty);
+            let at = arith(w);
+            let a2 = coerce(e, a, at);
+            let b2 = coerce(e, b, at);
+            define(e, inst, 0, 1, tir::Kind::Cmp(tir::Ty::Int(at), a2, b2));
+        }
+        tir::Kind::Select3(t, ty, neg, zero, pos) => {
+            let w = ty_width(&ty);
+            let at = arith(w);
+            let t2 = coerce(e, t, 1);
+            let neg2 = coerce(e, neg, at);
+            let zero2 = coerce(e, zero, at);
+            let pos2 = coerce(e, pos, at);
+            define(e, inst, 0, at, tir::Kind::Select3(t2, tir::Ty::Int(at), neg2, zero2, pos2));
+        }
+        tir::Kind::Slot(trytes) => {
+            define(e, inst, 0, TY_PTR, tir::Kind::Slot(trytes));
+        }
+        // A `ptr` access has no arithmetic width to legalize.
+        tir::Kind::Load(ty, p) => {
+            let p2 = coerce(e, p, TY_PTR);
+            define(e, inst, 0, ty_code(&ty), tir::Kind::Load(canon::clone_ty(&ty), p2));
+        }
+        tir::Kind::Store(ty, v, p) => {
+            let v2 = coerce(e, v, ty_code(&ty));
+            let p2 = coerce(e, p, TY_PTR);
+            push_inst(e, Vec::new(), tir::Kind::Store(canon::clone_ty(&ty), v2, p2));
+        }
+        tir::Kind::Offset(p, d) => {
+            let at = arith(27);
+            let p2 = coerce(e, p, TY_PTR);
+            let d2 = coerce(e, d, at);
+            define(e, inst, 0, TY_PTR, tir::Kind::Offset(p2, d2));
+        }
+        tir::Kind::Widen(from, a, to) => {
+            let lf = arith(ty_width(&from));
+            let lt = arith(ty_width(&to));
+            let a2 = coerce(e, a, lf);
+            if lf == lt {
+                // The promoted value is already exact at this width: the
+                // widen is an identity, so its uses read the source
+                // directly.
+                substitute(e, inst, a2);
+            } else {
+                define(e, inst, 0, lt, tir::Kind::Widen(tir::Ty::Int(lf), a2, tir::Ty::Int(lt)));
+            }
+        }
+        tir::Kind::Trunc(from, a, to) => {
+            let w = ty_width(&to);
+            let lf = arith(ty_width(&from));
+            let lt = arith(w);
+            let a2 = coerce(e, a, lf);
+            let narrowed = if lt < lf {
+                emit1(e, "t", lt, tir::Kind::Trunc(tir::Ty::Int(lf), a2, tir::Ty::Int(lt)))
+            } else {
+                a2
+            };
+            // Whatever legal width it now lives in, the value has to end
+            // up wrapped into tw's range.
+            let v = renormalize(e, narrowed, w, lt);
+            substitute(e, inst, v);
+        }
+        tir::Kind::Call(callee, args, ret) => {
+            legalize_call(e, inst, callee, args, &ret, sig_names, sig_shapes);
+        }
+    }
+}
+
+/// The width of an integer type.
+fn ty_width(t: &tir::Ty) -> taddr {
+    match t {
+        tir::Ty::Int(n) => n,
+        tir::Ty::Ptr => 27,
+    }
+}
+
+fn flavored(e: &mut Emit, inst: &tir::Inst, op: taddr, flavor: taddr, w: taddr, a: &tir::Opnd, b: &tir::Opnd) {
+    let at = arith(w);
+    let a2 = coerce(e, a, at);
+    let b2 = coerce(e, b, at);
+
+    if at == w {
+        let results = canon::clone_names(&inst.results);
+        let mut i: taddr = 0;
+        while i < results.len() {
+            let t: taddr = if i == 0 { w } else { 1 };
+            actual_set(e, &results[i], t);
+            i += 1;
+        }
+        push_inst(e, results, tir::Kind::Flav(op, flavor, tir::Ty::Int(w), a2, b2));
+        return;
+    }
+
+    if op == 3 {
+        guard_shift(e, &b2, w, at);
+        if e.halted {
+            return;
+        }
+    }
+
+    // Detecting overflow of the *logical* width needs the exact result,
+    // and for `mul` that is up to 2w trits wide.
+    if (op == 2 || op == 3) && flavor != 0 && !fits_exact(op, w, at) {
+        e.errs.push("promoted operation cannot detect overflow".to_string());
+        return;
+    }
+
+    // Compute wide and wrapping: at the promoted width the exact result
+    // fits, so this wrap never actually wraps.
+    let wide = emit1(e, "r", at, tir::Kind::Flav(op, 0, tir::Ty::Int(at), a2, b2));
+
+    if flavor == 0 {
+        let v = renormalize(e, wide, w, at);
+        substitute(e, inst, v);
+    } else if flavor == 1 {
+        let hi = high_part(e, clone_opnd_of(&wide), w, at);
+        let c = sign_of(e, hi, at);
+        trap_if(e, c, true, false, true, "F_OVERFLOW");
+        // Past the check the value provably fits tw, so it is already
+        // normalized.
+        substitute(e, inst, wide);
+    } else {
+        let hi = high_part(e, clone_opnd_of(&wide), w, at);
+        // The overflow trit is the direction of the overflow, which is
+        // the sign of the discarded high part.
+        let code_f = sign_of(e, hi, at);
+        let v = renormalize(e, wide, w, at);
+        substitute(e, inst, v);
+        if inst.results.len() > 1 {
+            let name = &inst.results[1];
+            match &code_f {
+                tir::Opnd::Val(fv) => {
+                    canon::omap_set(&mut e.subst, name, tir::Opnd::Val(fv.to_string()));
+                    actual_set(e, name, 1);
+                }
+                _ => canon::omap_set(&mut e.subst, name, code_f),
+            }
+        }
+    }
+}
+
+/// Can the exact result of `op` at logical width `w` be held in `at`
+/// trits? add: 0, sub: 1, mul: 2, shl: 3.
+fn fits_exact(op: taddr, w: taddr, at: taddr) -> bool {
+    if op <= 1 {
+        return at > w;
+    }
+    if op == 2 {
+        return at >= 2 * w;
+    }
+    at >= 2 * w - 1
+}
+
+fn legalize_call(
+    e: &mut Emit,
+    inst: &tir::Inst,
+    callee: &tir::Callee,
+    args: &Vec<tir::Opnd>,
+    ret: &Option<tir::Ty>,
+    sig_names: &Vec<String>,
+    sig_shapes: &Vec<tir::Sig>,
+) {
+    // A direct call takes its parameter types from the callee's legalized
+    // signature. An indirect one has no callee to ask: the call site's own
+    // types are the signature, and each argument is legalized on its own
+    // (TIR §3.7).
+    match callee {
+        tir::Callee::Direct(name) => {
+            let mut found = false;
+            let mut si: taddr = 0;
+            while si < sig_names.len() {
+                if sig_names[si].same(name) {
+                    found = true;
+                    let shape = clone_sig(&sig_shapes[si]);
+                    let mut actual_args: Vec<tir::Opnd> = Vec::new();
+                    let want_ret: Option<taddr> = match &shape.ret {
+                        Option::Some(t) => Option::Some(ty_code(&t)),
+                        Option::None => Option::None,
+                    };
+                    let mut i: taddr = 0;
+                    while i < args.len() {
+                        let want = if i < shape.params.len() {
+                            ty_code(&shape.params[i].ty)
+                        } else {
+                            TY_PTR
+                        };
+                        actual_args.push(coerce(e, &args[i], want));
+                        i += 1;
+                    }
+                    let kind = tir::Kind::Call(
+                        tir::Callee::Direct(name.to_string()),
+                        actual_args,
+                        match want_ret {
+                            Option::Some(c) => Option::Some(code_ty(c)),
+                            Option::None => Option::None,
+                        },
+                    );
+                    match ret {
+                        Option::Some(_) => {
+                            match want_ret {
+                                Option::Some(t) => define(e, inst, 0, t, kind),
+                                Option::None => push_inst(e, Vec::new(), kind),
+                            }
+                        }
+                        Option::None => push_inst(e, Vec::new(), kind),
+                    }
+                }
+                si += 1;
+            }
+            if !found {
+                e.errs.push("no legalized signature".to_string());
+            }
+        }
+        tir::Callee::Indirect(p) => {
+            let want_ret: Option<taddr> = match ret {
+                Option::Some(t) => Option::Some(ty_code(&t)),
+                Option::None => Option::None,
+            };
+            let mut actual_args: Vec<tir::Opnd> = Vec::new();
+            let mut i: taddr = 0;
+            while i < args.len() {
+                actual_args.push(resolve_op(e, &args[i]));
+                i += 1;
+            }
+            let p2 = coerce(e, p, TY_PTR);
+            let kind = tir::Kind::Call(
+                tir::Callee::Indirect(p2),
+                actual_args,
+                match want_ret {
+                    Option::Some(c) => Option::Some(code_ty(c)),
+                    Option::None => Option::None,
+                },
+            );
+            match ret {
+                Option::Some(_) => {
+                    match want_ret {
+                        Option::Some(t) => define(e, inst, 0, t, kind),
+                        Option::None => push_inst(e, Vec::new(), kind),
+                    }
+                }
+                Option::None => push_inst(e, Vec::new(), kind),
+            }
+        }
+    }
+}
+
+/// Bind one of the original instruction's results to a freshly emitted
+/// one, or emit it anonymously when it defined none.
+fn define(e: &mut Emit, inst: &tir::Inst, index: taddr, ty: taddr, kind: tir::Kind) {
+    if inst.results.len() > index {
+        let name = &inst.results[index];
+        actual_set(e, name, ty);
+        push_inst(e, clone_one(name), kind);
+        return;
+    }
+    push_inst(e, Vec::new(), kind);
+}
+
+/// The original instruction's result is whatever `value` names.
+fn substitute(e: &mut Emit, inst: &tir::Inst, value: tir::Opnd) {
+    if inst.results.len() > 0 {
+        let name = &inst.results[0];
+        let t = type_of(e, &value);
+        if t != 0 - 2 {
+            actual_set(e, name, t);
+        }
+        canon::omap_set(&mut e.subst, name, value);
+    }
+}
