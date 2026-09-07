@@ -651,7 +651,13 @@ rm -rf "$tmp"
 # same 7239 lines of TIR. That is what a bootstrap is for, and it is the
 # first program in this list that neither implementation was written to
 # handle — it was written to be *used*.
+#
+# Every one of them is then asked for its *assembly* as well, instruction for
+# instruction — main.tr among them, where the two agree instead about there
+# being none. A whole program compiling is the claim this file has been
+# building toward since its first token.
 q=0
+a=0
 tmp=$(mktemp -d)
 idx=0
 for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
@@ -688,6 +694,28 @@ for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
             } > "$tmp/$idx.err"
             exit 1
         fi
+        # And then the whole way, as the modules above go: TRISC-27 assembly,
+        # the whole pipeline piping its own stages under `bootstrap/tirgen.tr`,
+        # held to `trustc compile`. Four of the twenty-two have no answer to
+        # give — the reader refuses them at the character G9.183 names — and
+        # are compared on there being none, like every other refusal.
+        printf '%s\n' "$rust" > "$tmp/$idx.tir"
+        if rasm=$("$trustc" compile "$tmp/$idx.tir" 2>/dev/null); then
+            miasm=$(printf '%s\n' "$rust" | "$trust" run bootstrap/tirgen.tr 2>/dev/null)
+            if [ "$rasm" != "$miasm" ]; then
+                {
+                    echo "bootstrap: the two compile the program at $root differently"
+                    diff <(printf '%s\n' "$rasm") <(printf '%s\n' "$miasm") | head -10
+                } > "$tmp/$idx.err"
+                exit 1
+            fi
+            printf '%s\n' "$rasm" | wc -l > "$tmp/$idx.an"
+        elif printf '%s\n' "$rust" | "$trust" run bootstrap/tirgen.tr > /dev/null 2>&1; then
+            {
+                echo "bootstrap: the program at $root assembles under one implementation and not the other"
+            } > "$tmp/$idx.err"
+            exit 1
+        fi
         printf '%s\n' "$rust" | wc -l > "$tmp/$idx.n"
     ) &
     idx=$((idx + 1))
@@ -696,6 +724,7 @@ done
 wait
 report_errors "$tmp"
 q=$((q + $(sum_ns "$tmp")))
+if compgen -G "$tmp/*.an" > /dev/null; then for f in "$tmp"/*.an; do a=$((a + $(cat "$f"))); done; fi
 rm -rf "$tmp"
 
 # And a whole program that is *refused*, which the loop above cannot ask
@@ -716,5 +745,5 @@ for root in bootstrap/programs/nomain/main.tr bootstrap/programs/cannot/main.tr 
     fi
 done
 
-printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d lines about the library, %d modules of whole programs, %d names defined, %d names resolved, %d items rewritten, %d types laid out, %d bindings typed, %d functions checked, %d lines of TIR, %d of whole programs — all agreed\n' \
-    "$n" "$r" "$e" "$i" "$w" "$b" "$v" "$m" "$y" "$u" "$z" "$l" "$t" "$c" "$g" "$q"
+printf 'bootstrap: %d tokens, %d refusals, %d expression trees, %d function trees, %d items, %d items of the parser itself, %d lines about the library, %d modules of whole programs, %d names defined, %d names resolved, %d items rewritten, %d types laid out, %d bindings typed, %d functions checked, %d lines of TIR, %d of whole programs, %d of assembly — all agreed\n' \
+    "$n" "$r" "$e" "$i" "$w" "$b" "$v" "$m" "$y" "$u" "$z" "$l" "$t" "$c" "$g" "$q" "$a"

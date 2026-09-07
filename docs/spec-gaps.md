@@ -2770,6 +2770,21 @@ macros parity is covered by `programs/macros/main.tr` (the suite's own,
 including the iterator spread over take-of-any) and
 `examples/trust/macros.tr` at the same line.
 
+**G9.188 — the whole way down, for a whole program: eighteen assemble,
+and four agree there is nothing to assemble.** The suite's question was
+always the TIR; now it is the machine words the TIR stands for, asked of
+whole programs in the same harness. Eighteen of the twenty-two print the
+same TRISC-27 under both implementations — instruction for instruction,
+since that is how every lane above them is held — and the other four
+(`chars`, `failing`, `macros`, and `main.tr` itself) agree about there
+being none, because each one's TIR carries a `%#wild…` or `%#pat…` slot
+name, which is G9.183's hole rather than a new one: no reader parses its
+own printer's text there, so both compilers refuse and the refusal is the
+answer compared. main.tr's refusal lands at line 221, which is where the
+whole-program lane sits in this file's numbering too — the contract's
+alphabet is the one thing between this repository and a machine image of
+the compiler's own lexer.
+
 **G9.187 — an allocator's order of business is part of the program it
 writes: who frees first is who picks next.** The linear scan's
 registers come from a pool taken off the end, so every choice after a
