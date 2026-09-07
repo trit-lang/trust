@@ -81,9 +81,17 @@ out rather than looked up.
 ### 3.2 `bootstrap/` compiles Trust — **in progress**
 
 It reads the language (lexer, parser, Ch. 6's three passes), it answers
-Ch. 2 and Ch. 4's checking, and it **lowers to TIR** — every pass compared
-against `trustc` character for character, and the lowering compared
-including the names, since equality is on the text.
+Ch. 2 and Ch. 4's checking, **lowers to TIR**, and now **runs the whole
+pipeline below the lowering** — reads §8's text back (`bootstrap/tir.tr`),
+canonicalizes, inlines, legalizes and generates code (`bootstrap/canon.tr`,
+`inline.tr`, `legalize.tr`, `gen.tr`) — every pass compared against `trustc`
+character for character, the lowering compared including the names, since
+equality is on the text, and the assembly compared instruction for
+instruction on the eighteen whole programs that have any. The four that
+print none — `chars`, `failing`, `macros` and `bootstrap/main.tr` itself —
+agree there is none, refused by both readers at the `%#` name a `let _` is
+given (G9.183), which is the one thing between here and a machine image of
+this compiler's own lexer.
 
 What it lowers is the whole of the language it *reads*: generics —
 functions, methods and types alike — aggregates, enums and their variants,
@@ -438,6 +446,21 @@ Each step is checkable on its own, and none of them is only for DDC.
    substituting in the body too: the emitter carries the key, so `let y: T`
    and `x as T` are read under it. What is left of that limit is the list
    above, and every item on it is a refusal.
+
+   *The pipeline below the lowering is done, and compared the same way.*
+   `bootstrap/tir.tr` parses §8's text form and prints it back out;
+   `bootstrap/canon.tr`, `bootstrap/inline.tr`, `bootstrap/legalize.tr` and
+   `bootstrap/gen.tr` hold canonicalization, inlining, promotion legalization
+   and TRISC-27 code generation to `trustc canon`, `trustc preopt`,
+   `trustc legalize` and `trustc compile` — on every module of the corpus
+   character for character, and on eighteen whole programs instruction for
+   instruction, since that is the only way an assembly *can* be compared.
+   What this step's stage1 now waits on is nothing in the backend: it is
+   G9.183 — the printer names a `_` binding `%#wild…` and §8's reader
+   accepts no `#` — so `bootstrap/main.tr`, the program this whole plan is
+   about, is one of the four programs whose assembly both compilers agree
+   does not exist. Where the alphabet or the word table changes is a Naming
+   question; until it is answered, both refuse together.
 4. **Run the double compile.** `scripts/ddc.sh`: build `stage1` with
    `trustc`, build `stage2` with `stage1`, demand `stage2 == stage1`. Report
    the two hashes whether or not they match, because a number that is only
