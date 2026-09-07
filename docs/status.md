@@ -546,19 +546,21 @@ this section can hide.
 - ~~Moving a non-copyable **field** out was not tracked at all~~ —
   `take(o.a); take(o.a);` compiled and dropped one value three times. The
   first draft of this section called this "conservative"; it was unsound.
-  Reading a place of non-copyable type now moves it, per Ch. 3 §1.2, with
-  ownership still tracked per local rather than per place — *that* is the
-  conservative part.
+  Reading a place of non-copyable type now moves it, per Ch. 3 §1.2. The
+  per-local conservatism this sentence once ended with left too: ownership
+  has been per place since G9.46, and the two legal programs that wait for
+  it — `take(o.a); take(o.b);` and moving a field out and putting one
+  back — compile in `ownership_is_per_place_and_these_two_programs_are_legal`.
 - ~~An enum's payload was not dropped~~ — a leak, for any value inside an
   `Option`. Dropping is now a dispatch on the discriminant, one comparison per
   droppable variant.
 
 **The lesson worth carrying:** all three were on the `.tr → TIR` side, which
 §8.1 explains the differential invariant does not cover, and all three were
-invisible because the language has no resources yet. **Route A in §10 adds an
-allocator.** Anything of this shape still hiding here becomes a real
-double-free or leak on that day, in a session whose attention is on the
-allocator. Prefer finding it now.
+invisible because the language has no resources yet. Anything of this shape
+still hiding here becomes a real double-free or leak the day an allocator
+lands, in a session whose attention is on the allocator. Prefer finding it
+now.
 
 **Every entry below cites a test.** A claim about how the implementation
 falls short is worth no more than any other claim without something that
@@ -579,7 +581,6 @@ pointed the wrong way, about a memory-safety hole.
 | shadowing a prelude type breaks what named it | `known_limit_shadowing_a_prelude_type_breaks_what_named_it` |
 | a returned borrow is rooted syntactically | `known_limit_a_returned_borrow_is_rooted_syntactically` |
 | a closure captures by variable, not by place | `known_limit_a_closure_captures_by_variable_not_by_place` |
-| ownership is per local, not per place | `per_local_ownership_rejects_two_programs_that_are_legal` |
 | every owner drops exactly once | `every_owner_drops_exactly_once` (the ledger, §8.2a) |
 | diagnostics print mangled names | `known_limit_diagnostics_print_mangled_names` |
 
@@ -634,12 +635,6 @@ but nothing rests on the list being complete any more.
 
 The rest:
 
-- **Ownership is per local, not per place.** Ch. 3 §1.3 says moving out of a
-  place leaves *that place* uninitialized, not the whole variable. Moving out
-  of `o.a` here moves `o`. Two legal programs are rejected as a result —
-  moving out of disjoint fields, and moving a field out and putting one
-  back — and those two assertions are what must flip if per-place ownership
-  arrives.
 - **Region inference does not exist.** A returned borrow must be rooted
   syntactically at a parameter. Every program accepted would be accepted by
   full region inference; some rejected ones would not be, and those are the
