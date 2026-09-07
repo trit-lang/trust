@@ -58,7 +58,7 @@ core/      2 082 lines  crate trit-core — Bt, Tint, flavors, faults, literals
 compiler/ 26 037 lines  crate trustc   — frontend, TIR, layout, legalization, codegen
 vm/        4 566 lines  crate tritium  — machine, assembler, image format, profiler
 docs/
-├── spec-gaps.md               84 entries: every place the spec was silent or wrong
+├── spec-gaps.md               269 entries: every place the spec was silent or wrong
 └── status.md                  this file
 scripts/
 ├── stats.sh                   produces every number in this document
@@ -174,7 +174,6 @@ inference and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
 | Missing | Why |
 |---|---|
 
-| ranges, so `for i in 0..10` | Ch. 0 §4 reserves range expressions |
 | a type parameterized by a `const` | `const N` works as an array *length* (G8.2); `struct Grid<const N: taddr>` is Ch. 4 §2.4 and unimplemented |
 
 | returning a closure | needs `impl Trait` in return position or `Box<dyn Fn>`; Ch. 4 §4.5 |
@@ -182,7 +181,7 @@ inference and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
 | `IntoIterator`, so `for x in xs` over an array | array iterators are the library's; the blanket impl it needs now works (G0.14b) |
 | separate compilation, a unit larger than a program | Ch. 6 §6; there is no `crate` and no linking of one program to another. Modules, `use` and `pub` are **built** (Ch. 6) |
 | `unsafe`, raw pointers | reserved; `?` is built (G9.8) |
-| bounds checks a loop condition already implies | every array index still costs two comparisons and two branches; branches and comparisons are 36% of everything HPL executes (G8.13). Removing them needs range analysis, which nothing here does |
+| discharging a bounds check at a call site | needs a proof language, reserved in Ch. 4 §2.8; everything inside one function is done (§10 C — the loop condition's own checks now decide, −45.8% on HPL) |
 
 **Generic traits were the one substantial hole, and it is closed**
 (G0.14a, G0.14b). A trait may take type parameters, one type may implement it
@@ -334,7 +333,7 @@ this table on its first run. **Add a row before you add a feature test.** If
 you cannot say what the output should be, that is the bug.
 
 **2. `docs/spec-gaps.md` is not optional.** Every place the specification is
-silent gets an entry: what was ambiguous, what was decided, and why. 45
+silent gets an entry: what was ambiguous, what was decided, and why. 269
 entries. When you decide something the spec did not, write it down there in
 the same commit. When you find that the spec is *wrong*, say so there and fix
 the spec.

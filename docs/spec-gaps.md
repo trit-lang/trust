@@ -2919,8 +2919,11 @@ What remains outside answers honestly too: an impl's generics the
 self type does not carry (`impl<I: Iterator, B, F: Fn(I::Item) -> B>`)
 answer by *inference*, which no table can — `Map`'s `next` delegating
 by one further step — and closures nobody typed asking a bound naming
-an association — both recorded, not settled: fa1, fa2, fa4, fa6, fa7,
-fc6, fc10, fc12.
+an association — settled since, one by one: fa1, fa2, fa4, fa6 and fa7
+were rust's refusals all along and live in the refusal corpus now
+(G9.181), fa7's shape is also the `subst_ty` Name-arm, fc12 and fc10 are
+the map family settled from the Fn bound, and fc6 is the blanket impl's
+whole-name scan — both G9.179.
 
 **G9.176 — a trait's **own hand** is a family of the impl, and applying
 it is binding the receiver's key first.**
