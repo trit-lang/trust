@@ -5785,8 +5785,9 @@ And `needs_drop` learned to ask a *family*: whether `Held.t27` needs
 dropping is not written on `Held.t27`, which nobody declared, but on the
 `Held` it was made from.
 
-**G9.82 — a generic type cannot have a destructor, and `Vec` needs one.**
-Writing the prelude's `Vec` found the last prerequisite by hitting it:
+**G9.82 — settled as staged: a family's destructor is one per
+instantiation, and a library `Vec` drops its elements.** Writing the
+prelude's `Vec` found the last prerequisite by hitting it:
 
 ```
 struct Held<T> { v: T }
@@ -5796,22 +5797,23 @@ impl<T> Drop for Held<T> { fn drop(self) { } }
 `Held` cannot have a destructor: it is not declared in this file
 ```
 
-The check asks whether `types.structs` holds the impl's self type, and that
+The check asked whether `types.structs` held the impl's self type, and that
 table holds **instantiations** — `Held.t27` — not the family. So no generic
-type in this language has ever had a destructor, and nobody noticed because
+type in this language had ever had a destructor, and nobody noticed because
 the two things that needed one, `Box` and `Vec`, were the compiler's.
 
-A library `Vec` cannot do without: it must drop its elements before its room
-goes, and §2.6 says so. So the order gained a step, and it is the last one:
-a `Drop` written on a family is one destructor per instantiation, named the
-way every other monomorphized method is (Ch. 4 §2.5), and the drop glue asks
-for the instantiation's rather than the family's.
-
-The Trust `Vec` itself is written and is in this note's predecessor as a
-test; what it waits on is this. Recorded rather than half-done: switching
-the language item off is one edit, and it turns 596 passing tests red until
-everything above is finished, so it is the kind of change that starts from a
-clean tree and not from the end of a long day.
+A library `Vec` cannot do without: it must drop its elements before its
+room goes, and §2.6 says so. The step the order gained is the one this
+entry staged: the check names the family's tables too, and a `Drop`
+written on a family is one destructor per instantiation, named the way
+every other monomorphized method is (Ch. 4 §2.5) — `expand` makes it a
+generic function called `drop.Held`, an instantiation's glue is
+`drop.Held.t27`, which is what `mangle` produces from the two, so the two
+spellings coincide and nothing translates between them. The two it makes
+are both run — `a_family_may_have_a_destructor` shows the one written for
+`t27` is not the one written for `trit` — and what `Vec` needed from it is
+run too: `a_generic_collection_drops_its_elements` has the elements going
+before the room does, taken by the element's own destructor.
 
 **G9.81 — `Vec` is writable in Trust, and one word said it was not.**
 Growth doubling from four, indexing that is a place, `pop` moving an element
@@ -5832,9 +5834,10 @@ has to be named in every list that names the class, and nothing checks that
 a list is complete. Four lists, four separate discoveries, each by a program
 that did something the previous one had not.
 
-What is left is mechanical and large: the prelude's `Vec` and `String`
-become this, and the dozen intrinsics and `Ty::VecOf`'s thirty sites come
-out of the compiler.
+What was left is done: the prelude's `Vec` and `String` *are* this — a
+`Raw<T>` and a length, with `String` the one instantiation given a name —
+and the dozen intrinsics and `Ty::VecOf`'s thirty sites are out of the
+compiler.
 
 **G9.80 — `Raw<T>` needed four position operations, not two, and writing
 `Vec` is what said so.** §2.7 as written gave `read` and `write`. Starting
@@ -6047,12 +6050,19 @@ prelude, leaving `alloc` and `free` as the only things the compiler
 provides — which is right, because those are the target's and not the
 language's (Ch. 5 §2.1).
 
-It has a prerequisite the language does not meet. To write `Vec` in Trust,
-Trust must be able to **name a raw pointer**, and it cannot; this is why
-`Box` is the compiler's and not the library's, and `lower.rs` says so in as
-many words. So the order is: decide how a pointer is written, then move the
-library. Recorded here rather than started, because it is a decision about
-the *language* and not about either implementation of it.
+It had a prerequisite the language did not meet. To write `Vec` in Trust,
+Trust must be able to **name a raw pointer**, and it could not; that is why
+`Box` is the compiler's and not the library's, and `lower.rs` said so in as
+many words. So the order was: decide how a pointer is written, then move
+the library.
+
+The order ran. How a pointer is written was G9.75's answer — `Raw<T>`
+(Ch. 5 §2.7), the smallest thing that makes the rest ordinary — and the
+library moved: `Vec` is a `Raw<T>` and a length in the prelude, `String`
+is its one instantiation given a name, and the intrinsics and `Ty::VecOf`
+are out of the compiler (G9.81). `Box` stays the compiler's, and that is
+the chapter's design rather than the queue's remainder: Ch. 3 §6 reserves
+raw pointers, and a box is a raw pointer that owns.
 
 **G9.72 — a capture is a dereference, and a peek is not free.** Closures
 that capture work now. `k` inside the body is a field of the closure holding
