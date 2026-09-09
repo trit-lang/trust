@@ -7,8 +7,9 @@
 // printing again must reproduce it exactly — and must reproduce what
 // `trustc fmt` prints, which the suite holds this to on every module the
 // lowered corpus stands for. A module the text form cannot hold — one
-// naming a value `%#wild…` (G9.183) — is refused here as it is there, and
-// nothing is printed.
+// naming a value that is not `[A-Za-z0-9_.]` — is refused here as it is
+// there, and nothing is printed. (Before the counters were renamed to the
+// dot alphabet (G9.183) that was two modules of the corpus.)
 
 mod input;
 mod tir;

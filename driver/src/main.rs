@@ -966,7 +966,7 @@ fn show_block(b: &lang::ast::Block, out: &mut String) {
                 out.push_str(if *mutable { "(let-mut " } else { "(let " });
                 // `let _` is given an invented name (Ch. 0 §5.2), which is
                 // this compiler's business and not the tree's.
-                out.push_str(match name.starts_with("#wild") {
+                out.push_str(match name.starts_with("wild.") {
                     true => "_",
                     false => name,
                 });

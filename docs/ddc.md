@@ -87,11 +87,12 @@ canonicalizes, inlines, legalizes and generates code (`bootstrap/canon.tr`,
 `inline.tr`, `legalize.tr`, `gen.tr`) — every pass compared against `trustc`
 character for character, the lowering compared including the names, since
 equality is on the text, and the assembly compared instruction for
-instruction on the eighteen whole programs that have any. The four that
-print none — `chars`, `failing`, `macros` and `bootstrap/main.tr` itself —
-agree there is none, refused by both readers at the `%#` name a `let _` is
-given (G9.183), which is the one thing between here and a machine image of
-this compiler's own lexer.
+instruction on the whole programs — all twenty-two of them. Until the
+counters went dot-mangled (G9.183) eighteen printed and the four that did
+not — `chars`, `failing`, `macros` and `bootstrap/main.tr` itself —
+agreed there was none, refused by both readers at the `%#` name a `let _`
+was given; that refusal was the last thing between here and a machine
+image of this compiler's own lexer.
 
 What it lowers is the whole of the language it *reads*: generics —
 functions, methods and types alike — aggregates, enums and their variants,
@@ -453,14 +454,15 @@ Each step is checkable on its own, and none of them is only for DDC.
    `bootstrap/gen.tr` hold canonicalization, inlining, promotion legalization
    and TRISC-27 code generation to `trustc canon`, `trustc preopt`,
    `trustc legalize` and `trustc compile` — on every module of the corpus
-   character for character, and on eighteen whole programs instruction for
+   character for character, and on the whole programs instruction for
    instruction, since that is the only way an assembly *can* be compared.
-   What this step's stage1 now waits on is nothing in the backend: it is
-   G9.183 — the printer names a `_` binding `%#wild…` and §8's reader
-   accepts no `#` — so `bootstrap/main.tr`, the program this whole plan is
-   about, is one of the four programs whose assembly both compilers agree
-   does not exist. Where the alphabet or the word table changes is a Naming
-   question; until it is answered, both refuse together.
+   What this step's stage1 waited on was nothing in the backend: it was
+   G9.183 — the printer named a `_` binding `%#wild…` and §8's reader
+   accepted no `#` — so `bootstrap/main.tr`, the program this whole plan is
+   about, was one of the four programs whose assembly both compilers agreed
+   did not exist. The Naming question was answered on the counter's side:
+   every invented name is dot-mangled now, and all twenty-two assemble on
+   both.
 4. **Run the double compile.** `scripts/ddc.sh`: build `stage1` with
    `trustc`, build `stage2` with `stage1`, demand `stage2 == stage1`. Report
    the two hashes whether or not they match, because a number that is only

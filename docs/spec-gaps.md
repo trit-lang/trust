@@ -2770,20 +2770,21 @@ macros parity is covered by `programs/macros/main.tr` (the suite's own,
 including the iterator spread over take-of-any) and
 `examples/trust/macros.tr` at the same line.
 
-**G9.188 — the whole way down, for a whole program: eighteen assemble,
-and four agree there is nothing to assemble.** The suite's question was
-always the TIR; now it is the machine words the TIR stands for, asked of
-whole programs in the same harness. Eighteen of the twenty-two print the
-same TRISC-27 under both implementations — instruction for instruction,
-since that is how every lane above them is held — and the other four
-(`chars`, `failing`, `macros`, and `main.tr` itself) agree about there
-being none, because each one's TIR carries a `%#wild…` or `%#pat…` slot
-name, which is G9.183's hole rather than a new one: no reader parses its
-own printer's text there, so both compilers refuse and the refusal is the
-answer compared. main.tr's refusal lands at line 221, which is where the
-whole-program lane sits in this file's numbering too — the contract's
-alphabet is the one thing between this repository and a machine image of
-the compiler's own lexer.
+**G9.188 — the whole way down, for a whole program: twenty-two assemble,
+where eighteen did and four agreed there was nothing to assemble.** The
+suite's question was always the TIR; now it is the machine words the TIR
+stands for, asked of whole programs in the same harness. All twenty-two
+print the same TRISC-27 under both implementations — instruction for
+instruction, since that is how every lane above them is held. At the
+first asking, eighteen did and the other four (`chars`, `failing`,
+`macros`, and `main.tr` itself) agreed about there being none, because
+each one's TIR carried a `%#wild…` or `%#pat…` slot name, which was
+G9.183's hole rather than a new one: no reader parsed its own printer's
+text there, so both compilers refused and the refusal was the answer
+compared. main.tr's refusal landed at line 221, which is where the
+whole-program lane sits in this file's numbering too — and the counters
+going dot-mangled (G9.183) was the last thing between this repository and
+a machine image of the compiler's own lexer.
 
 **G9.187 — an allocator's order of business is part of the program it
 writes: who frees first is who picks next.** The linear scan's
@@ -2853,26 +2854,30 @@ canonicalizer exists twice now, `bootstrap/tircanon.tr` holds the seven
 passes to `trustc canon` on every module of the corpus, and the two
 print the same module.
 
-**G9.183 — recorded, not settled: the printer of TIR's text and the
-reader of it disagree about what a name is.** The lowering names its
-slots `%#wild1.slot.4` and `%#pat1.slot.4` — a `#` from the counter of
-bindings nobody wrote (Ch. 0 §5.2) — but TIR §8's lexer reads a name as
-letters, digits, `_` and `.` and nothing else, so `trustc fmt`, reading
-the canonical text the printer only just wrote, refuses
-`bootstrap/lowered/02.tr`'s module and `bootstrap/lowered/21.tr`'s on
-exactly that character. `compiler/src/codegen.rs` banked on the dot
-being the mangler ("TIR values are named by the frontend, which mangles
-with `.`"), which it mostly is; the `#` comes from the one place that
-never goes through the mangler, the pattern counter. It is a hole in
-the *contract*, not in either implementation, and now there are two
-readers to prove it says the same thing twice: `bootstrap/tir.tr`
-parses the text form from inside the language and `bootstrap/tirfmt.tr`
-holds it to `trustc fmt` on every module of the corpus — agreeing on
-the twenty-two that parse, and refusing the two that do not at the same
-word on the same line. Where the fix belongs — the counter's alphabet,
-or §8's table of word characters — is a Naming question, and until it
-is answered both readers keep the refusal rather than either one
-reading past it.
+**G9.183 — settled on the counter's side: an invented name is spelled
+like every other invented name, and the reader takes it back.** The
+lowering named its slots `%#wild1.slot.4` and `%#pat1.slot.4` — a `#`
+from the counter of bindings nobody wrote (Ch. 0 §5.2) — but TIR §8's
+lexer reads a name as letters, digits, `_` and `.` and nothing else, so
+`trustc fmt`, reading the canonical text the printer only just wrote,
+refused `bootstrap/lowered/02.tr`'s module and `bootstrap/lowered/21.tr`'s
+on exactly that character. It was a hole in the *contract*, not in
+either implementation, and the Naming question it opened had two
+doors: the counter's alphabet, or §8's table of word characters.
+§8's table stays: it names a smaller alphabet than the source's, not a
+larger one, and `#` there would be one more character the two lexers
+have to mean the same way forever. The counters moved instead:
+`wild.N` for the binding `let _` is given, `pat.N` for the whole a
+pattern takes apart, `t.N` for the mut tuple, `q.N` and `r.N` for the
+`?` arms — dot-mangled like `it.N`, `tmp.slot.N` and a macro's `.macN`,
+which no Trust identifier can hold, so the collision property `#`
+bought is bought by the dot of the mangler instead, and every invented
+name a lowerer may print now survives the round trip through §8. The
+two readers — `trustc`'s and `bootstrap/tir.tr` — read the same corpus
+with no refusal between them, and the four programs the hole had kept
+out of assembly — `chars`, `failing`, `macros`, and `bootstrap/main.tr`
+itself — assemble on both sides, `main.tr`'s gate having stood at line
+221 of the old text, `%#pat2.slot.44`.
  And in a *non-chained* receiver the answer is not read
 *first*: `f.inner.next()` in a member's own body answers where the
 receiver's own method answers, `Range.next.t27` with the `option.t27`

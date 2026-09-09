@@ -1017,7 +1017,7 @@ fn let_stmt(p: &mut Parser) -> Result<ast::Stmt, lex::Error> {
         expect_op(p, ";")?;
         p.counter = p.counter + 1;
         let mut held: String = Vec::new();
-        held.push_str("#pat");
+        held.push_str("pat.");
         ast::push_int(&mut held, p.counter as t27);
         return Result::Ok(ast::Stmt::LetPattern(held, pat, e));
     }
@@ -1030,14 +1030,16 @@ fn let_stmt(p: &mut Parser) -> Result<ast::Stmt, lex::Error> {
         _ => false,
     };
     // `let _ = e;` — §5.2's grammar says a *pattern*, and `_` is the one
-    // that binds nothing (§4). It is given a name no program can write, so
-    // the value is dropped where any other binding would be: at the end of
-    // the scope, and not at the end of the statement.
+    // that binds nothing (§4). It is given a name no program can write —
+    // `wild.N`, dot-mangled like every other invented name, so TIR's reader
+    // takes it back (G9.183) — so the value is dropped where any other
+    // binding would be: at the end of the scope, and not at the end of the
+    // statement.
     let name = if wild {
         p.at = at1;
         p.counter = p.counter + 1;
         let mut held: String = Vec::new();
-        held.push_str("#wild");
+        held.push_str("wild.");
         ast::push_int(&mut held, p.counter as t27);
         held
     } else {

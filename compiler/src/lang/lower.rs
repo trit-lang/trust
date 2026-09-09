@@ -8656,8 +8656,16 @@ impl Fn<'_> {
         };
         let bound = self.bind_existing(slot, ty.clone());
         let scrutinee = ast::Expr::Path(bound, span);
-        let ok_bind = format!("#q{}", self.counter);
-        let bad_bind = format!("#r{}", self.counter);
+        // The two names are invented — `q.N` and `r.N` are dot-mangled like
+        // every other name this compiler makes (`it.N`, `tmp.slot.N`, a
+        // macro's `.macN`), and no program can write a dot in an identifier
+        // — and their number is the value counter's, taken **after** the
+        // value is lowered and before anything else is. They name storage,
+        // so they reach TIR and are text the two implementations agree about.
+        // (The `#`-prefixed spelling they replaced was the one set of
+        // invented names TIR's reader could not take back (G9.183).)
+        let ok_bind = format!("q.{}", self.counter);
+        let bad_bind = format!("r.{}", self.counter);
 
         let arm = |name: &str, payload: Vec<(String, ast::Pattern)>, body: ast::Expr| ast::Arm {
             patterns: vec![ast::Pattern::Aggregate(

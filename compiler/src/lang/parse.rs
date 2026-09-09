@@ -1504,15 +1504,16 @@ impl Parser {
             return self.let_pattern(span);
         }
         // `let _ = e;` — §5.2's grammar says a *pattern*, and `_` is the one
-        // that binds nothing (§4). It is given a name no program can write,
-        // so the value is dropped where any other binding would be: at the
-        // end of the scope, and not at the end of the statement as Rust's
-        // `let _` does.
+        // that binds nothing (§4). It is given a name no program can write —
+        // `wild.N`, dot-mangled like every other invented name, so TIR's
+        // reader takes it back (G9.183) — so the value is dropped where any
+        // other binding would be: at the end of the scope, and not at the
+        // end of the statement as Rust's `let _` does.
         let (name, name_span) = if self.at_op("_") {
             let at = self.span();
             self.bump();
             self.counter += 1;
-            (format!("#wild{}", self.counter), at)
+            (format!("wild.{}", self.counter), at)
         } else {
             self.expect_ident_at()?
         };
@@ -1547,12 +1548,13 @@ impl Parser {
         self.expect_op("=")?;
         let value = self.expr()?;
         self.expect_op(";")?;
-        // `#` is not an identifier character, so this cannot collide with
-        // anything a program can write.
+        // Dot-mangled like every other invented name: no Trust identifier
+        // can hold a dot, so it cannot collide with anything a program can
+        // write, and TIR's reader takes it back (G9.183).
         self.counter += 1;
         Ok(vec![Stmt::Let {
             mutable: false,
-            name: format!("#pat{}", self.counter),
+            name: format!("pat.{}", self.counter),
             name_span: span,
             ty,
             value,
@@ -1595,7 +1597,7 @@ impl Parser {
             self.counter += 1;
             return Ok(vec![Stmt::Let {
                 mutable: false,
-                name: format!("#pat{}", self.counter),
+                name: format!("pat.{}", self.counter),
                 name_span: span,
                 ty,
                 value,
@@ -1612,10 +1614,11 @@ impl Parser {
         let value = self.expr()?;
         self.expect_op(";")?;
 
-        // `#` is not an identifier character, so the whole-tuple binding
-        // cannot collide with anything a program can write.
+        // Dot-mangled like every other invented name: not writeable in the
+        // language, and readable back from TIR unlike the `#` it replaced
+        // (G9.183).
         self.counter += 1;
-        let whole = format!("#t{}", self.counter);
+        let whole = format!("t.{}", self.counter);
         let mut out = vec![Stmt::Let {
             mutable: false,
             pattern: None,

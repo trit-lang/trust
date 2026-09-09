@@ -530,9 +530,10 @@ for f in bootstrap/lowered/*.tr; do
         # And then the text is read back, by each implementation's own
         # reader: TIR's text form is the canonical serialization (TIR §8),
         # so `trustc fmt` and `bootstrap/tirfmt.tr` print the same module
-        # for it or it was not written down. Where the form cannot hold the
-        # module at all — the `%#wild…` slot names of G9.183 — refusal is
-        # agreement too: neither reader reads it.
+        # for it or it was not written down. If the form ever cannot hold a
+        # module at all, refusal is agreement too: neither reader reads it.
+        # For a while that was two of these, on the `%#wild…` slot names a
+        # `let _` was given; the counters are dot-mangled now (G9.183).
         printf '%s\n' "$rust" > "$tmp/$idx.tir"
         if rfmt=$("$trustc" fmt "$tmp/$idx.tir" 2>/dev/null); then
             mfmt=$(printf '%s\n' "$rust" | "$trust" run bootstrap/tirfmt.tr 2>/dev/null)
@@ -653,9 +654,9 @@ rm -rf "$tmp"
 # handle — it was written to be *used*.
 #
 # Every one of them is then asked for its *assembly* as well, instruction for
-# instruction — main.tr among them, where the two agree instead about there
-# being none. A whole program compiling is the claim this file has been
-# building toward since its first token.
+# instruction — main.tr among them, a program to both backends since the
+# counters went dot-mangled (G9.183). A whole program compiling is the claim
+# this file has been building toward since its first token.
 q=0
 a=0
 tmp=$(mktemp -d)
@@ -696,9 +697,9 @@ for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
         fi
         # And then the whole way, as the modules above go: TRISC-27 assembly,
         # the whole pipeline piping its own stages under `bootstrap/tirgen.tr`,
-        # held to `trustc compile`. Four of the twenty-two have no answer to
-        # give — the reader refuses them at the character G9.183 names — and
-        # are compared on there being none, like every other refusal.
+        # held to `trustc compile`. All twenty-two answer now — for a while
+        # four of them could not, refused at the `#` G9.183 named, and the
+        # refusal was the answer compared, as it is for any other.
         printf '%s\n' "$rust" > "$tmp/$idx.tir"
         if rasm=$("$trustc" compile "$tmp/$idx.tir" 2>/dev/null); then
             miasm=$(printf '%s\n' "$rust" | "$trust" run bootstrap/tirgen.tr 2>/dev/null)

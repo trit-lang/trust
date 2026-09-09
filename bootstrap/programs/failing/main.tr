@@ -1,17 +1,18 @@
 // `?`, which is a `match` and nothing else (§5.5, Ch. 5 §4.1).
 //
-//     e?   is   match e { Ok(#q) => #q, Err(#r) => return Err(#r) }
+//     e?   is   match e { Ok(q.N) => q.N, Err(r.N) => return Err(r.N) }
 //
 // So it is written that way and lowered by the arm that already knows how.
 // Two lowerings would be two things to keep in step over an operator that
 // is *defined* as the match it spells.
 //
-// The two names in it are **invented**: `#` is not a character a program
-// can write, so nothing they bind can be shadowed. Their number is the
-// value counter's, taken after the value is lowered and before anything
-// else is — they name storage, so `%#q7.slot.15` is text, and two
-// implementations that disagreed about the number would disagree about the
-// module.
+// The two names in it are **invented**: `q.N` and `r.N` are dot-mangled
+// like every other invented name — no Trust identifier can hold a dot —
+// so nothing they bind can be shadowed, and TIR's reader takes them back.
+// Their number is the value counter's, taken after the value is lowered
+// and before anything else is — they name storage, so `%q.7.slot.15` is
+// text, and two implementations that disagreed about the number would
+// disagree about the module.
 //
 // And the value is matched twice over, once per arm, so it is found **once**
 // and both arms are given the place. Lowering it again would call the

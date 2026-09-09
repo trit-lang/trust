@@ -11,9 +11,9 @@
 // What is mirrored is behavior, not just shape: `br2` is sugar for the
 // `br3` whose first two arms coincide and prints as sugar again, `tneg`
 // parses to `neg`, a `"0h"`-prefixed constant is heptavintimal, and a name
-// is `[A-Za-z0-9_.]` and nothing else — the last by proof: two files of the
-// lowered corpus name values `%#wild…`, and this reader refuses them
-// exactly where the Rust one does (G9.183).
+// is `[A-Za-z0-9_.]` and nothing else — the last once by proof: two files
+// of the lowered corpus named values `%#wild…`, which both readers refused
+// until the counters were renamed to the dot alphabet (G9.183).
 
 // ---------------------------------------------------------------- types
 

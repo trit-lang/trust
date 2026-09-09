@@ -3253,11 +3253,14 @@ fn match_expr(
 /// knows how. Two lowerings would be two things to keep in step over an
 /// operator that is *defined* as the match it spells.
 ///
-/// The two names are invented — `#` is not a character a program can write,
-/// so nothing it binds can be shadowed — and their number is the value
-/// counter's, taken **after** the value is lowered and before anything else
-/// is. They name storage, so they reach TIR and are text the two
-/// implementations agree about.
+/// The two names are invented — `q.N` and `r.N` are dot-mangled like every
+/// other name this compiler makes (`it.N`, `tmp.slot.N`, a macro's `.macN`),
+/// and no program can write a dot in an identifier — and their number is the
+/// value counter's, taken **after** the value is lowered and before anything
+/// else is. They name storage, so they reach TIR and are text the two
+/// implementations agree about. (The `#`-prefixed spelling they replaced —
+/// `Ok(#q) => #q` above — was the one set of invented names TIR's reader
+/// could not take back (G9.183).)
 ///
 /// The value is matched twice over, once per arm, so it is found **once**
 /// and both arms are given the place. Lowering it again would call the
@@ -3292,10 +3295,10 @@ fn try_expr(
     }
     let n = e.next - 1;
     let mut ok_bind: String = Vec::new();
-    ok_bind.push_str("#q");
+    ok_bind.push_str("q.");
     push_int(&mut ok_bind, n);
     let mut bad_bind: String = Vec::new();
-    bad_bind.push_str("#r");
+    bad_bind.push_str("r.");
     push_int(&mut bad_bind, n);
     let carried = kind.same("Result");
     let mut good: String = Vec::new();
@@ -6991,11 +6994,11 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
             line.push_str(&slot);
             emit(e, line);
         }
-        // `let (a, b) = e;` is `let #patN = e;` and then one `let` per
+        // `let (a, b) = e;` is `let pat.N = e;` and then one `let` per
         // element reading a field of it (§5.2). The whole is bound first,
         // under a name nobody can write, so nothing below the parser learns
         // a new shape and the ownership rules need no case of their own —
-        // moving out of `#patN.0` leaves `#patN.1` usable, which Ch. 3 §1.3
+        // moving out of `pat.N.0` leaves `pat.N.1` usable, which Ch. 3 §1.3
         // already says.
         ast::Stmt::LetPattern(name, pat, v) => {
             let whole = ast::Stmt::Let(

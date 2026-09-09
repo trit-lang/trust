@@ -861,9 +861,11 @@ pub fn show_block(b: &Block, out: &mut String) {
 /// Whether a name is one the parser invented for a `let _` (Ch. 0 §5.2).
 ///
 /// It is this compiler's business and not the tree's, so it prints as the
-/// `_` that was written.
+/// `_` that was written. The invented spelling is `wild.N` — dot-mangled
+/// like every other invented name, so the TIR it is lowered into is
+/// readable back (G9.183).
 pub fn invented(name: &str) -> bool {
-    let head = "#wild";
+    let head = "wild.";
     if name.len() <= head.len() {
         return false;
     }
