@@ -2735,6 +2735,77 @@ for every family-instance (`Map.Range.t27.main.closure1` for `Map<I,F>`
 by projection — `*map` is exactly as `I` — `into_iter` on it bakes the
 whole).
 
+**G9.193 — the glue was already there; only the key that asked for it
+was late.** An instantiation is asked for where a call reads its whole
+key off, and `v.push(Option::Some(Vec::new()))` reads it off the
+receiver — every parameter decided — before `Vec::new()` in the arm is
+a type at all. The queue that drains jobs most-recently-found first
+(G9.58) then puts the named call ahead of the constructor folded into
+its argument, which is where the other implementation has always put
+it. Where the key is *not* whole until the arguments answer, the ask
+waits, because the ask is the key. (Found by the drain being one
+position different on the first program to nest a family's constructor
+inside another family's constructor: `parse.tr`'s own
+`Ok(Some(Box::new(e)))` is the same shape, three deep.)
+
+**G9.192 — settled on one alphabet, again: a wrapped type argues in
+names like everything else.** A `Vec<Raw<t27>>` printed its methods
+`@Vec.push.Raw_t27_` where the second compiler printed
+`@Vec.push.raw.t27`, and a `Box` the same— the
+`sanitize-to-underscore` step `Raw<{t}>` and `Box<{t}>`'s Display
+forms fell into, where every other mangle was the dot of the mangler
+already (`Vec.char`, `drop.lex.Error`, `tmp.slot.N`). The dot was the
+whole point's second half: the first half said `raw.` and `box.` are
+names no program can write, and it is written in the source that says
+so. The counters' alphabet moved to match (G9.183's shape, one slot
+over): the parent now writes `raw.<T>` and `box.<T>` where it wrote
+`Raw_<T>_` and `Box_<T>_`, and the `types` lane's own flattener —
+where the same underscore had been kept as its own tradition (G9.86's
+generation) — writes the dotted form too. The corpus that never once
+instantiated at a wrapper until now reads the same under both.
+
+**G9.191 — an enum's discriminant lives in its payload, and so does
+its drop.** `Option<Box<t27>>` sets its None where only nothing
+points (Ch. 2 §6), and dropping what holds one is a `cmp` against the
+value nothing else may hold, the arm that carries the payload never
+tested — it is what the other tests fall through to, which is the only
+answer a niche has. The glue now exists (`drop_variant_niche`), its
+discriminant read where the layout keeps the spot, `niche_value` being
+the law a tag-of-its-own already obeyed. What is refused is what is
+not said: a niche's carrier needs its own answer.
+
+**G9.190 — the name a mangled name was made of is not the name.** An
+instantiation substitutes a family's parameters away, and what remains
+in the instantiated definition is a *string*: `Box<ast::Ty>` arrives
+in `Option.box.ast.Ty`'s variant as the text `box.ast.Ty` and nothing
+else, where `Raw<T>`'s analog always had a definition to find
+(`raw_def` makes one) because `Raw` is an aggregate. `Box` is a word
+and is not one — its def was deliberately unmade — so `named()` fell
+off the end of the table it could search. Now it answers the dotted
+form the `App` form always answered, one word and never null,
+which is the niche `Option<Box<T>>` was for all along.
+
+**G9.189 — recorded, not quite settled: a field may leave a value whose
+type has a destructor, and the glue is the whole's.** Ch. 3 §1.3 lets
+`let a = p.x;` stand — `p.y` remains usable, and what is left is dropped
+a field at a time — and Ch. 3 §1.4's drop order begins with "the
+destructor body runs, if it has one". Read side by side they do not say
+what a value owes when one of its fields is gone: the body is a function
+of the whole, and the one parameter it takes is the value that is no
+longer there to pass. Rust's answer is to refuse the field move. The
+answer here is the one §1.3's decomposition already implies — the value
+stops being one: `let x = h.v;` out of an `impl Drop for Held` is `x`
+dropped where its scope ends and then what remains of `h` a field at a
+time, and the body never runs, because a body written against the whole
+does not run on a part. Nothing is leaked — the moved field is somebody
+else's to drop, and the rest drops on its own — but nothing in either
+chapter says so, and a caller who wrote the destructor for its side
+effect has no sentence to point to when it does not run.
+`bootstrap/programs/scopes` now holds both shapes against both
+implementations — the plain `Two` and the destructor-holding `Owning` —
+and the two agree: the glue's call is written exactly for values whole,
+and for the rest the scope ends the way §1.3's field-at-a-time says.
+
 **G9.181 — settled the other way: three of the four are refusals, not
 gaps.** The suite now holds each refusal as a whole program it refuses:
 - `programs/fnno/` is a *named* fn against a generic `Fn` bound —

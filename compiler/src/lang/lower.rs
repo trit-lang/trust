@@ -3936,14 +3936,27 @@ const INSTANTIATION_LIMIT: u32 = 64;
 /// A dot, which is what `drop.Buffer` already uses and what both the TIR text
 /// format and the assembler accept in an identifier. Diagnostics therefore
 /// say `Pair.t27.t9` where the source said `Pair<t27, t9>`.
+/// The name a type argument has inside a mangled one. `Raw<T>` and
+/// `Box<T>` are the compiler's, so there is no family whose name spells
+/// them: they are written `raw.<T>` and `box.<T>` — dot-mangled like
+/// every other name this compiler makes, and the way the second
+/// implementation already writes them, so the two spellings coincide and
+/// nothing has to translate (Ch. 5 §2.3, §2.7).
+fn mangle_arg(ty: &Ty) -> String {
+    match ty {
+        Ty::RawOf(t) => format!("raw.{}", mangle_arg(t)),
+        Ty::Boxed(t) => format!("box.{}", mangle_arg(t)),
+        other => other
+            .to_string()
+            .replace([' ', ',', '&', '[', ']', '(', ')', '<', '>'], "_"),
+    }
+}
+
 fn mangle(name: &str, args: &[Ty]) -> String {
     let mut out = name.to_string();
     for a in args {
         out.push('.');
-        out.push_str(
-            &a.to_string()
-                .replace([' ', ',', '&', '[', ']', '(', ')', '<', '>'], "_"),
-        );
+        out.push_str(&mangle_arg(a));
     }
     out
 }

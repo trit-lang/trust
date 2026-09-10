@@ -206,6 +206,31 @@ fn gone(n: taddr) -> taddr {
     n + 1
 }
 
+// A field is not the whole of what it names: moving `two.a` out leaves
+// `two.b`, and what is dropped when the scope ends is what is left, a
+// field at a time (Ch. 3 §1.3) — recorded where the whole local's moves
+// already were.
+struct Two { a: Raw<t27>, b: Raw<t27> }
+
+fn field_two(n: taddr) -> taddr {
+    let two = Two { a: Raw::alloc(n), b: Raw::alloc(n) };
+    let a = two.a;
+    a.room()
+}
+
+// And the type's own glue is the *whole* value's and no part's: a field
+// taken out of a type with a destructor is not the destructor's business
+// any more, and what remains is dropped a field at a time without it
+// (Ch. 3 §1.4).
+struct Owning { a: Raw<t27>, b: Raw<t27> }
+impl Drop for Owning { fn drop(self) { } }
+
+fn field_of_owning(n: taddr) -> taddr {
+    let owes = Owning { a: Raw::alloc(n), b: Raw::alloc(n) };
+    let a = owes.a;
+    a.room() + owes.b.room()
+}
+
 enum Turn { Left, Right }
 
 // An arm that leaves is never asked what it answers with (G9.159), and a
@@ -227,5 +252,5 @@ fn main() -> t27 {
         + p.a + p.b + picked(Pick::One, 1) + nested(1) + holds(1)
         + hands_over(1) + given_away(1) + maybe_gone(1) + maybe_valued(1)
         + maybe_picked(Pick::Two, 1) + both_ways(1)
-        + gone(1) + turning(Turn::Left)) as t27
+        + gone(1) + turning(Turn::Left) + field_two(1) + field_of_owning(1)) as t27
 }

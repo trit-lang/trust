@@ -1646,16 +1646,34 @@ fn flattened(t: &ast::Ty) -> String {
     // becomes the word §5.2 says it is.
     // An argument that is itself a *type the program defines* is one type
     // by then, and contributes the name that type has: `Holder<Option<t27>>`
-    // is `Holder.Option.t27`. One the compiler keeps structural — a `Box`, a
-    // reference — has no such name, so what it contributes is what was
-    // written, with every character a name cannot hold made `_`. `Vec` was
-    // in that list while it was a type the compiler knew; it is a type the
-    // library defines now, and has a name like any other (G9.86).
-    let structural = match t {
+    // is `Holder.Option.t27`. A wrapper the compiler keeps structural — a
+    // `Box`, a `Raw` — contributes its dot-mangled name for the reason a
+    // mangle prints one (G9.192): `raw.` and `box.` are names no program
+    // can write, the guarantee the `_` this took the place of was for.
+    // `Vec` was in that list while it was a type the compiler knew; it is
+    // a type the library defines now, and has a name like any other (G9.86).
+    match t {
         ast::Ty::App(segments, args) => {
             let head = joined(segments);
-            head.same("Box")
+            if head.same("Box") {
+                let inner = flattened(&args[0]);
+                let mut made: String = Vec::new();
+                made.push_str("box.");
+                made.push_str(&inner);
+                return made;
+            }
+            if head.same("Raw") {
+                let inner = flattened(&args[0]);
+                let mut made: String = Vec::new();
+                made.push_str("raw.");
+                made.push_str(&inner);
+                return made;
+            }
         }
+        _ => {}
+    }
+    let structural = match t {
+        ast::Ty::App(segments, args) => false,
         ast::Ty::Name(segments) => false,
         _ => true,
     };
