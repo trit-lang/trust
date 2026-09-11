@@ -3921,9 +3921,13 @@ fn match_scalar(
                     reaches = true;
                 }
                 let after = owns_now(e);
-                if n == 0 {
+                // An arm that left has no continuation: what it moved is a
+                // fact about the path that ended there, and merging it into
+                // the join would tell every path that did not end the same
+                // story (Ch. 3 §1.2).
+                if reached && agreed.len() == 0 {
                     agreed = after;
-                } else {
+                } else if reached {
                     agreed = join_owns(&agreed, &after);
                 }
                 n += 1;
@@ -4018,9 +4022,13 @@ fn match_scalar(
             reaches = true;
         }
         let after = owns_now(e);
-        if n == 0 {
+        // An arm that left has no continuation: what it moved is a fact
+        // about the path that ended there, and merging it into the join
+        // would tell every path that did not end the same story
+        // (Ch. 3 §1.2).
+        if reached && agreed.len() == 0 {
             agreed = after;
-        } else {
+        } else if reached {
             agreed = join_owns(&agreed, &after);
         }
         if unconditional {
