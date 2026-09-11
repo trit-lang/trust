@@ -41,6 +41,10 @@ pub struct Family {
     /// be, so it is read off the receiver's own instantiation and the rest
     /// are inferred from the arguments as usual.
     pub from_self: taddr,
+    /// Whether the receiver is taken *by value* — `fn into_iter(self)`,
+    /// which is what makes a `for` the end of the name it consumes
+    /// (Ch. 3 §1.2). A `&self` is nobody's business twice.
+    pub by_self: bool,
     /// What the family's return application is written at, `,`-joined with
     /// the impl's `Self` kept as a word of its own — the term the answer
     /// is instantiated from once the key exists (Ch. 4 §1.7). Empty where
@@ -8747,6 +8751,22 @@ fn method_value(
 
     let fam = family_at(e, &under);
     if fam >= 0 {
+        // A receiver taken *by value* is the move every by-value argument
+        // already is, and the name goes from the scope by that rule before
+        // one argument of the call is lowered (Ch. 3 §1.2). A `for`'s
+        // `into_iter` consumes exactly this way — its `self` is the family
+        // type whole, not a reference to it.
+        if at >= 0 && e.families[fam].by_self {
+            match recv {
+                ast::Expr::Name(n) => {
+                    move_out(e, n);
+                    if e.stuck {
+                        return unknown_value();
+                    }
+                }
+                _ => {}
+            }
+        }
         // A family's answer in **tail position**, when it is an aggregate,
         // goes where this function's answer goes: what a lowering owes
         // `%sret` is exactly what the call owes — no one writes the
@@ -11540,6 +11560,21 @@ fn pointee(e: &Emit, owner: &str) -> String {
 /// walked now, after the storage an aggregate answer needs has been taken.
 /// A receiver the method takes **by value** is then loaded out of wherever
 /// it turned out to be (Ch. 3 §2.2).
+
+/// Whether the family's receiver is taken *by value*: `fn drop(self)` and
+/// `fn into_iter(self)` are the two shapes of it, written with a naked
+/// `self` parameter, which is what makes a `for` the end of the name it
+/// consumes (Ch. 3 §1.2).
+fn receiver_by_self(f: &ast::Fn) -> bool {
+    if f.params.len() == 0 || !f.params[0].name.same("self") {
+        return false;
+    }
+    match &f.params[0].ty {
+        ast::Ty::SelfTy => true,
+        _ => false,
+    }
+}
+
 fn receiver_at(
     e: &mut Emit,
     at: taddr,
@@ -11696,6 +11731,7 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                         from_self: 0,
                         ret_term: family_answer_term(&f.ret),
                         blanket: false,
+                        by_self: receiver_by_self(f),
                         params: written_params(f),
                         // The *head* of what it answers with, which is a
                         // name for a scalar and a family's name for
@@ -11774,6 +11810,7 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                                 from_self: outer.len() as taddr,
                                 ret_term: family_answer_term(&fns[k].ret),
                                 blanket: is_blanket,
+                                by_self: receiver_by_self(&fns[k]),
                                 params: written_params(&fns[k]),
                                 ret: family_answer(&fns[k].ret),
                                 fnsigs: sigs,
@@ -11836,6 +11873,7 @@ pub fn families(items: &Vec<ast::Item>) -> Vec<Family> {
                                                 from_self: outer.len() as taddr,
                                                 ret_term: family_answer_term(&tfns[m2].ret),
                                                 blanket: false,
+                                                by_self: receiver_by_self(&tfns[m2]),
                                                 params: written_params(&tfns[m2]),
                                                 ret: family_answer(&tfns[m2].ret),
                                                 fnsigs: sigs2,
