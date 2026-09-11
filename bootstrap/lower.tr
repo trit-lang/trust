@@ -4400,14 +4400,19 @@ fn match_place(
                 if e.stuck {
                     return unknown_value();
                 }
-                if !e.done {
+                // An arm that leaves has no continuation: what it moved is
+                // a fact about the path that ended there, and merging it
+                // into the join would tell every path that did not end the
+                // same story (Ch. 3 §1.2).
+                let reached = !e.done;
+                if reached {
                     reaches = true;
                     jump(e, &join);
                 }
                 let after = owns_now(e);
-                if n == 0 {
+                if reached && agreed.len() == 0 {
                     agreed = after;
-                } else {
+                } else if reached {
                     let mut j: taddr = 0;
                     let mut both: Vec<Owns> = Vec::new();
                     while j < agreed.len() && j < after.len() {
