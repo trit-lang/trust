@@ -64,6 +64,8 @@ scripts/
 ├── stats.sh                   produces every number in this document
 └── citations.sh               checks that every `Ch. N §M` in the source exists
 examples/{trust,tir,trisc}
+app/{wordfreq,recalc}          programs written to be used, not to show a
+                               feature — the stream-ranker and the calculator
 ```
 
 Ch. 1, Ch. 2, the AM, Naming and TIR are the author's. Ch. 0, Ch. 3, Ch. 4,

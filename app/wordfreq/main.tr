@@ -1,0 +1,214 @@
+// wordfreq — the input stream, counted and ranked.
+//
+//     printf 'the cat sat. The CAT smiled, the sea smiled.\n' | trust run app/wordfreq/main.tr
+//
+// What it prints is three counts — lines, words and code units — and then
+// the ten most frequent words, each with its count.
+//
+// The pieces are the prelude's: the counts live in a `HashMap`, the words in
+// first-seen order live beside it in a `Vec`, and the ranking is a bounded
+// insertion into a ten-slot list. Ch. 5 §7 reserves sorting, so the ranking
+// list *is* the sort, and it is the size of the answer rather than of the
+// input.
+//
+// What is decided here, so the output says what it means:
+//
+// - The port carries UTF-8 code units (ISA §2.2). A unit < 128 is ASCII and
+//   splits words the way `wc` does; a unit ≥ 128 is glue, which keeps a
+//   multi-unit character whole. The price is honest: a non-ASCII separator
+//   (a 、 or a ，, three units a piece) glues into the word beside it, and
+//   that is why the sample below spaces its CJK text out. The `chars` count
+//   is code units, exactly as `examples/trust/echo.tr` counts them, and not
+//   characters.
+// - ASCII case folds, so `The` and `the` are one word. Code units ≥ 128 do
+//   not fold — there is no casing table on this machine and inventing one
+//   here would be the same decision written in a worse place.
+// - A tie is broken by which word was seen first, because the insertion
+//   below is strict: later, equal counts go *below* what is already ranked.
+//   That makes the output a function of the input text alone — nothing in it
+//   depends on iterating the map, whose bucket order is Ch. 5's, not ours.
+//
+// Determinism is the point of that last rule, and of every rule above: the
+// exact output is a test, the way `the_demo_runs_the_whole_way` pins
+// demo.tr. A program whose answer can drift between runs is not one this
+// repository can hold a compiler to.
+
+fn getchar() -> t9;             // declared here, defined in runtime.t27
+
+const TOP: taddr = 10;
+
+struct Top {
+    count: t27,
+    at: taddr,
+}
+
+fn is_word_char(c: t27) -> bool {
+    c >= 128 || (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+}
+
+// ASCII A-Z folds to a-z; everything else is itself.
+fn fold(c: t27) -> t27 {
+    if c >= 65 && c <= 90 { c + 32 } else { c }
+}
+
+// One word, seen once more. `counts` answers how often, `words` remembers
+// the first-seen order — and a word enters `words` only here, which is what
+// keeps "first seen" *first*.
+// Reading a value out of the map is a `match`, not an `unwrap`: `get` hands
+// back `Option<&t27>`, and `unwrap` instantiated at a *reference* type has no
+// parameter to root the return in, which Ch. 3 §4.1 refuses. The pattern
+// copies the payload out instead, which asks nothing of rooting.
+fn record(words: &mut Vec<Vec<char>>, counts: &mut HashMap<Vec<char>, t27>, w: Vec<char>) {
+    let mut n: t27 = 1;
+    let mut known = false;
+    match counts.get(&w) {
+        Option::Some(r) => { n = *r + 1; known = true; },
+        Option::None => {},
+    }
+    if known {
+        counts.insert(w, n);
+    } else {
+        words.push(w.to_string());
+        counts.insert(w, 1);
+    }
+}
+
+// Offer a word to the ranking list. Strict `>` keeps equal counts in
+// first-seen order, and the list never exceeds TOP, so the whole ranking
+// costs one walk of the words times TOP comparisons.
+fn offer(top: &mut Vec<Top>, count: t27, at: taddr) {
+    let mut p: taddr = 0;
+    while p < top.len() {
+        if count > top[p].count { break; }
+        p += 1;
+    }
+    if p < TOP {
+        top.insert(p, Top { count: count, at: at });
+        while top.len() > TOP {
+            let _dropped = top.pop();
+        }
+    }
+}
+
+fn main() -> t27 {
+    let mut lines: t27 = 0;
+    let mut seen_words: t27 = 0;
+    let mut chars: t27 = 0;
+
+    let mut words: Vec<Vec<char>> = Vec::new();
+    let mut counts: HashMap<Vec<char>, t27> = HashMap::new();
+
+    let mut word: Vec<char> = Vec::new();
+    let mut in_word = false;
+    let mut done = false;
+
+    // The port's two non-answers are not one: −2 ends the run, −1 keeps it
+    // turning (ISA §2.2), and only ≥ 0 is a code unit.
+    while !done {
+        let c = getchar() as t27;
+        if c == 0 - 2 {
+            done = true;
+        } else {
+            if c >= 0 {
+                chars += 1;
+                if c == 10 { lines += 1; }
+                let f = fold(c);
+                if is_word_char(f) {
+                    word.push(char::try_from(f).unwrap());
+                    in_word = true;
+                } else {
+                    if in_word {
+                        seen_words += 1;
+                        record(&mut words, &mut counts, word);
+                        word = Vec::new();
+                        in_word = false;
+                    }
+                }
+            }
+        }
+    }
+    if in_word {
+        seen_words += 1;
+        record(&mut words, &mut counts, word);
+    }
+
+    print("lines ");
+    println_int(lines);
+    print("words ");
+    println_int(seen_words);
+    print("chars ");
+    println_int(chars);
+    println("");
+
+    let mut top: Vec<Top> = Vec::new();
+    let mut i: taddr = 0;
+    while i < words.len() {
+        let mut n: t27 = 0;
+        match counts.get(&words[i]) {
+            Option::Some(r) => { n = *r; },
+            Option::None => { trap(); },    // the two vecs move in lock-step
+        }
+        offer(&mut top, n, i);
+        i += 1;
+    }
+    let mut k: taddr = 0;
+    while k < top.len() {
+        print_int(top[k].count);
+        putchar(32);                        // ' '
+        print(&words[top[k].at]);
+        putchar(10);                        // '\n'
+        k += 1;
+    }
+    0
+}
+
+#[test]
+fn ascii_case_folds_and_nothing_else_does() {
+    if fold(65) != 97 { trap(); }           // A → a
+    if fold(90) != 122 { trap(); }          // Z → z
+    if fold(122) != 122 { trap(); }         // z is already down
+    if fold(200) != 200 { trap(); }         // a code unit above ASCII
+}
+
+#[test]
+fn a_twice_seen_word_counts_twice_and_lists_once() {
+    let mut words: Vec<Vec<char>> = Vec::new();
+    let mut counts: HashMap<Vec<char>, t27> = HashMap::new();
+    record(&mut words, &mut counts, "trust".to_string());
+    record(&mut words, &mut counts, "trust".to_string());
+    if words.len() != 1 { trap(); }
+    let mut n: t27 = 0;
+    let key = "trust".to_string();
+    match counts.get(&key) {
+        Option::Some(r) => { n = *r; },
+        Option::None => { trap(); },
+    }
+    if n != 2 { trap(); }
+}
+
+#[test]
+fn the_ranking_orders_by_count_and_a_tie_by_first_seen() {
+    let mut top: Vec<Top> = Vec::new();
+    offer(&mut top, 2, 0);
+    offer(&mut top, 5, 1);
+    offer(&mut top, 2, 2);
+    if top.len() != 3 { trap(); }
+    if top[0].at != 1 { trap(); }           // 5 ahead of 2
+    if top[1].at != 0 { trap(); }           // tie: 0 seen before 2
+    if top[2].at != 2 { trap(); }
+}
+
+#[test]
+fn the_ranking_holds_its_cap() {
+    let mut top: Vec<Top> = Vec::new();
+    let mut i: taddr = 0;
+    let mut n: t27 = 0;
+    while n < 40 {
+        offer(&mut top, n, i);
+        n += 1;
+        i += 1;
+    }
+    if top.len() != TOP { trap(); }
+    if top[0].count != 39 { trap(); }
+    if top[9].count != 30 { trap(); }
+}

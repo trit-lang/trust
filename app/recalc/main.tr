@@ -1,0 +1,170 @@
+// recalc — a calculator, line by line, on the stream.
+//
+//     printf '1+2\nx = 4\nx*x/2\n' | trust run app/recalc/main.tr
+//
+// Each line is one of three things: an expression to print the value of, a
+// `name = expression` to remember, or nothing (which is skipped). Variables
+// live in a `HashMap<String, t27>` for the whole session. Everything is
+// fixed-point at scale 3^11 (fixed.tr), so `1/2` is `0.5000` and arithmetic
+// needs no rounding apology past the fourth decimal place.
+//
+// A bad line is one line of text, not a halted machine: every error calc.tr
+// can name prints as `error: …` and the next line is read like nothing
+// happened. That is the whole reason calc.tr's failures are values.
+//
+// The prompt "> " is on the stream even when the stream is not a person,
+// which is what makes a session readable in both directions. EOF closes the
+// session mid-line if it must — text already read is still a line.
+
+mod fixed;
+mod calc;
+
+fn getchar() -> t9;             // declared here, defined in runtime.t27
+
+fn main() -> t27 {
+    let mut vars: HashMap<Vec<char>, t27> = HashMap::new();
+    let mut running = true;
+    while running {
+        print("> ");
+        match read_line() {
+            Option::Some(line) => {
+                if !blank(&line) {
+                    run_line(&line, &mut vars);
+                }
+            },
+            Option::None => { running = false; },
+        }
+    }
+    0
+}
+
+// One line of input, or `None` when the port said *closed* before anything
+// arrived (ISA §2.2: −2 is *will never*, −1 is *not yet — keep turning*).
+fn read_line() -> Option<Vec<char>> {
+    let mut line: Vec<char> = Vec::new();
+    let mut saw_any = false;
+    loop {
+        let c = getchar() as t27;
+        if c == 0 - 2 {
+            if saw_any { return Option::Some(line); }
+            return Option::None;
+        }
+        if c >= 0 {
+            if c == 10 { return Option::Some(line); }
+            saw_any = true;
+            line.push(char::try_from(c).unwrap());
+        }
+    }
+}
+
+fn run_line(line: &Vec<char>, vars: &mut HashMap<Vec<char>, t27>) {
+    match find_eq(line) {
+        Option::Some(k) => {
+            let name = slice(line, 0, k);
+            let name = trim(&name);
+            if !calc::valid_name(&name) {
+                report(calc::CalcErr::BadSyntax);
+                return;
+            }
+            let rhs = slice(line, k + 1, line.len());
+            match calc::eval(&rhs, vars) {
+                Result::Ok(v) => {
+                    vars.insert(name, v);
+                    fixed::print_fixed(v);
+                    putchar(10);
+                },
+                Result::Err(e) => report(e),
+            }
+        },
+        Option::None => {
+            match calc::eval(line, vars) {
+                Result::Ok(v) => {
+                    fixed::print_fixed(v);
+                    putchar(10);
+                },
+                Result::Err(e) => report(e),
+            }
+        },
+    }
+}
+
+fn report(e: calc::CalcErr) {
+    calc::report(e);
+}
+
+fn blank(s: &Vec<char>) -> bool {
+    let mut i: taddr = 0;
+    while i < s.len() {
+        if s[i] != ' ' { return false; }
+        i += 1;
+    }
+    true
+}
+
+// The first `=` decides the line's shape. A second one lands in what eval
+// sees, which refuses it as `bad syntax` — so `==` needs no special case.
+fn find_eq(s: &Vec<char>) -> Option<taddr> {
+    let mut i: taddr = 0;
+    while i < s.len() {
+        if s[i] == '=' { return Option::Some(i); }
+        i += 1;
+    }
+    Option::None
+}
+
+// A line is two characters wide or it is a `Vec<char>` copy — slices are for
+// reading and these three places want a small owned string.
+fn slice(s: &Vec<char>, from: taddr, to: taddr) -> Vec<char> {
+    let mut out: Vec<char> = Vec::new();
+    let mut i = from;
+    while i < to {
+        out.push(s[i]);
+        i += 1;
+    }
+    out
+}
+
+fn trim(s: &Vec<char>) -> Vec<char> {
+    let mut lo: taddr = 0;
+    while lo < s.len() {
+        if s[lo] != ' ' { break; }
+        lo += 1;
+    }
+    let mut hi: taddr = s.len();
+    while hi > lo {
+        if s[hi - 1] != ' ' { break; }
+        hi -= 1;
+    }
+    slice(s, lo, hi)
+}
+
+#[test]
+fn a_line_of_spaces_is_a_line_of_nothing() {
+    let spaces = "   ".to_string();
+    if !blank(&spaces) { trap(); }
+    let word = " x ".to_string();
+    if blank(&word) { trap(); }
+    let empty = "".to_string();
+    if !blank(&empty) { trap(); }
+}
+
+#[test]
+fn trim_takes_off_only_the_blank_ends() {
+    let padded = "  x + 1  ".to_string();
+    let t = trim(&padded);
+    if !t.same("x + 1") { trap(); }
+    let bare = "no-blanks".to_string();
+    let u = trim(&bare);
+    if !u.same("no-blanks") { trap(); }
+}
+
+#[test]
+fn the_first_equals_sign_is_the_one_that_counts() {
+    let key = "a = 1 = 2".to_string();
+    match find_eq(&key) {
+        Option::Some(i) => { if i != 2 { trap(); } },
+        Option::None => { trap(); },
+    }
+    let none = "1+1".to_string();
+    if find_eq(&none).is_some() { trap(); }
+}

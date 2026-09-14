@@ -1,0 +1,468 @@
+// calc.tr — a line of arithmetic, read in one pass into a value, or into an
+// error that can be named.
+//
+// The grammar is the small one every calculator starts with:
+//
+//     expr    := primary (op primary)*        op := + - * / %
+//     primary := number | name | '(' expr ')' | '-' primary
+//
+// and `expr` parses it Pratt-style: each binary operator has a binding
+// power, and a right-hand side is read at one power higher, which is what
+// left-associativity costs. Unary minus binds tightest of all, so `-2*3`
+// is `(-2)*3` and writing `-(2*3)` costs a pair of parentheses, like it
+// should. The evaluation is folded into the same pass — nothing builds a
+// tree, and nothing ever walks one twice.
+//
+// Numbers are fixed-point at fixed.tr's scale. `%` needs no rescaling:
+// (A·ONE) % (B·ONE) is (A % B)·ONE exactly, because scaling both operands
+// scales the remainder and nothing else.
+//
+// What fails is *named*, because a REPL keeps going: each `CalcErr` becomes
+// one line of text in main.tr, and nothing below this file ever traps.
+
+pub enum CalcErr {
+    BadSyntax,
+    UnknownName,
+    DivByZero,
+    Overflow,
+    Trailing,
+}
+
+// The one line a failure becomes. It prints rather than returning the string
+// because a returned `&str` has no parameter to root in, which Ch. 3 §4.1
+// refuses — and the arm strings are only borrowed *down* into the `println`,
+// which is the direction that is fine.
+pub fn report(e: CalcErr) {
+    print("error: ");
+    match e {
+        CalcErr::BadSyntax => println("bad syntax"),
+        CalcErr::UnknownName => println("unknown name"),
+        CalcErr::DivByZero => println("division by zero"),
+        CalcErr::Overflow => println("overflow"),
+        CalcErr::Trailing => println("trailing characters"),
+    }
+}
+
+// The whole cursor: the text and where we are in it. `s` borrows the line
+// the way the prelude's `Chars` borrows its string.
+struct Parser {
+    s: &str,
+    at: taddr,
+}
+
+impl Parser {
+    fn peek(&self) -> Option<char> {
+        if self.at < self.s.len() {
+            Option::Some(self.s[self.at])
+        } else {
+            Option::None
+        }
+    }
+
+    fn bump(&mut self) {
+        self.at += 1;
+    }
+
+    fn skip_ws(&mut self) {
+        loop {
+            match self.peek() {
+                Option::Some(c) => {
+                    if c == ' ' { self.bump(); } else { break; }
+                },
+                Option::None => { break; },
+            }
+        }
+    }
+}
+
+pub fn eval(s: &str, vars: &HashMap<String, t27>) -> Result<t27, CalcErr> {
+    let mut p = Parser { s: s, at: 0 };
+    let v = expr(&mut p, 0, vars)?;
+    p.skip_ws();
+    if p.peek().is_some() {
+        // An answer that did not consume the line is not an answer for the
+        // line: `1 2` has a value and means nothing.
+        return Result::Err(CalcErr::Trailing);
+    }
+    Result::Ok(v)
+}
+
+// A name on the left of `=`: at least one character, the first of which
+// starts a name and the rest of which continue one.
+pub fn valid_name(s: &Vec<char>) -> bool {
+    if s.len() == 0 { return false; }
+    if !is_name_start(s[0]) { return false; }
+    let mut i: taddr = 1;
+    while i < s.len() {
+        if !is_name_char(s[i]) { return false; }
+        i += 1;
+    }
+    true
+}
+
+fn expr(p: &mut Parser, min_bp: t27, vars: &HashMap<String, t27>) -> Result<t27, CalcErr> {
+    let mut lhs = primary(p, vars)?;
+    loop {
+        p.skip_ws();
+        let c = match p.peek() {
+            Option::Some(c) => c,
+            Option::None => { break; },
+        };
+        let bp = binding_power(c);
+        // 0 is "not an operator at all": `)` ends a group and anything else
+        // ends the expression, both of which are the caller's business.
+        if bp == 0 || bp < min_bp { break; }
+        p.bump();
+        let rhs = expr(p, bp + 1, vars)?;
+        lhs = apply(c, lhs, rhs)?;
+    }
+    Result::Ok(lhs)
+}
+
+fn primary(p: &mut Parser, vars: &HashMap<String, t27>) -> Result<t27, CalcErr> {
+    p.skip_ws();
+    match p.peek() {
+        Option::Some(c) => {
+            if c == '(' {
+                p.bump();
+                let v = expr(p, 0, vars)?;
+                p.skip_ws();
+                match p.peek() {
+                    Option::Some(c2) => {
+                        if c2 == ')' {
+                            p.bump();
+                            Result::Ok(v)
+                        } else {
+                            Result::Err(CalcErr::BadSyntax)
+                        }
+                    },
+                    Option::None => Result::Err(CalcErr::BadSyntax),
+                }
+            } else {
+                if c == '-' {
+                    // Unary minus binds tightest: `-a * b` is `(-a) * b`,
+                    // and a second `-` simply lands here again.
+                    p.bump();
+                    let v = primary(p, vars)?;
+                    Result::Ok(-v)
+                } else {
+                    if c.to_digit(10).is_some() {
+                        number(p)
+                    } else {
+                        if is_name_start(c) {
+                            let name = parse_name(p);
+                            match vars.get(&name) {
+                                Option::Some(r) => Result::Ok(*r),
+                                Option::None => Result::Err(CalcErr::UnknownName),
+                            }
+                        } else {
+                            Result::Err(CalcErr::BadSyntax)
+                        }
+                    }
+                }
+            }
+        },
+        Option::None => Result::Err(CalcErr::BadSyntax),
+    }
+}
+
+fn binding_power(c: char) -> t27 {
+    if c == '+' || c == '-' {
+        1
+    } else {
+        if c == '*' || c == '/' || c == '%' { 2 } else { 0 }
+    }
+}
+
+fn apply(op: char, a: t27, b: t27) -> Result<t27, CalcErr> {
+    if op == '+' {
+        match a.checked_add(b) {
+            Option::Some(v) => Result::Ok(v),
+            Option::None => Result::Err(CalcErr::Overflow),
+        }
+    } else {
+        if op == '-' {
+            match a.checked_sub(b) {
+                Option::Some(v) => Result::Ok(v),
+                Option::None => Result::Err(CalcErr::Overflow),
+            }
+        } else {
+            if op == '*' {
+                match fixed::fmul(a, b) {
+                    Option::Some(v) => Result::Ok(v),
+                    Option::None => Result::Err(CalcErr::Overflow),
+                }
+            } else {
+                if op == '/' {
+                    if b == 0 { return Result::Err(CalcErr::DivByZero); }
+                    match fixed::fdiv(a, b) {
+                        Option::Some(v) => Result::Ok(v),
+                        Option::None => Result::Err(CalcErr::Overflow),
+                    }
+                } else {
+                    // '%': no rescale, and b == 0 is still a division.
+                    if b == 0 { return Result::Err(CalcErr::DivByZero); }
+                    Result::Ok(a % b)
+                }
+            }
+        }
+    }
+}
+
+// A literal: digits, with an optional fraction after one dot. The integer
+// part caps at 10^7 so the scale-up cannot overflow; the fraction caps at
+// six digits, which is already past what scale 3^11 can see — a seventh
+// would be a lie, so it is an error rather than silently dropped.
+fn number(p: &mut Parser) -> Result<t27, CalcErr> {
+    let mut int: t27 = 0;
+    let mut seen = false;
+    loop {
+        match p.peek() {
+            Option::Some(c) => {
+                match c.to_digit(10) {
+                    Option::Some(d) => {
+                        int = int * 10 + d;
+                        if int > 10000000 { return Result::Err(CalcErr::Overflow); }
+                        p.bump();
+                        seen = true;
+                    },
+                    Option::None => { break; },
+                }
+            },
+            Option::None => { break; },
+        }
+    }
+    let mut scaled = int * fixed::ONE;
+    match p.peek() {
+        Option::Some(c) => {
+            if c == '.' {
+                p.bump();
+                let mut num: t27 = 0;
+                let mut den: t27 = 1;
+                let mut ndigits: t27 = 0;
+                loop {
+                    match p.peek() {
+                        Option::Some(c2) => {
+                            match c2.to_digit(10) {
+                                Option::Some(d) => {
+                                    if ndigits >= 6 {
+                                        return Result::Err(CalcErr::BadSyntax);
+                                    }
+                                    num = num * 10 + d;
+                                    den = den * 10;
+                                    ndigits += 1;
+                                    p.bump();
+                                    seen = true;
+                                },
+                                Option::None => { break; },
+                            }
+                        },
+                        Option::None => { break; },
+                    }
+                }
+                if ndigits > 0 {
+                    // Round-to-nearest is the right rounding for making a
+                    // fraction, the way floor division is the wrong one.
+                    scaled += (num * fixed::ONE) / den;
+                }
+            }
+        },
+        Option::None => {},
+    }
+    if seen {
+        Result::Ok(scaled)
+    } else {
+        Result::Err(CalcErr::BadSyntax)
+    }
+}
+
+// The one conversion of a character the parser cares about that the prelude
+// does not already have: is this byte a name's first letter.
+fn is_name_start(c: char) -> bool {
+    let v = c as t27;
+    (v >= 65 && v <= 90) || (v >= 97 && v <= 122) || v == 95
+}
+
+fn is_name_char(c: char) -> bool {
+    is_name_start(c) || c.to_digit(10).is_some()
+}
+
+fn parse_name(p: &mut Parser) -> Vec<char> {
+    let mut out: Vec<char> = Vec::new();
+    loop {
+        match p.peek() {
+            Option::Some(c) => {
+                if is_name_char(c) {
+                    out.push(c);
+                    p.bump();
+                } else {
+                    break;
+                }
+            },
+            Option::None => { break; },
+        }
+    }
+    out
+}
+
+#[test]
+fn multiplication_happens_before_addition() {
+    let vars: HashMap<String, t27> = HashMap::new();
+    let seven = match fixed::from_int(7) {
+        Option::Some(v) => v,
+        Option::None => { trap(); },
+    };
+    match eval("1+2*3", &vars) {
+        Result::Ok(v) => { if v != seven { trap(); } },
+        Result::Err(e) => { trap(); },
+    }
+}
+
+#[test]
+fn parentheses_happen_before_everything_else() {
+    let vars: HashMap<String, t27> = HashMap::new();
+    let nine = match fixed::from_int(9) {
+        Option::Some(v) => v,
+        Option::None => { trap(); },
+    };
+    match eval("(1+2)*3", &vars) {
+        Result::Ok(v) => { if v != nine { trap(); } },
+        Result::Err(e) => { trap(); },
+    }
+}
+
+#[test]
+fn unary_minus_binds_tighter_than_multiplication() {
+    let vars: HashMap<String, t27> = HashMap::new();
+    // -2*3 is (-2)*3, not -(2*3); at this scale both answers are -6 and
+    // indistinguishable, so use addition where the two readings diverge.
+    let one = match fixed::from_int(1) {
+        Option::Some(v) => v,
+        Option::None => { trap(); },
+    };
+    match eval("-2+3", &vars) {
+        Result::Ok(v) => { if v != one { trap(); } },
+        Result::Err(e) => { trap(); },
+    }
+}
+
+#[test]
+fn the_remainder_scales_with_its_operands() {
+    let vars: HashMap<String, t27> = HashMap::new();
+    let one = match fixed::from_int(1) {
+        Option::Some(v) => v,
+        Option::None => { trap(); },
+    };
+    match eval("10%3", &vars) {
+        Result::Ok(v) => { if v != one { trap(); } },
+        Result::Err(e) => { trap(); },
+    }
+}
+
+#[test]
+fn a_fraction_round_trips_through_printing_scale() {
+    let vars: HashMap<String, t27> = HashMap::new();
+    let ten = match fixed::from_int(10) {
+        Option::Some(v) => v,
+        Option::None => { trap(); },
+    };
+    // 2.5 is not representable at scale 3^11 (it is 442867.5), so it parses
+    // one ulp high and 2.5*4 lands within a few ulp of ten — which is the
+    // honest tolerance of one representation rounding plus one arithmetic
+    // rounding. ("2.5" *prints* as 2.5000 and "2.5*4" as 10.0000, which is
+    // what the eye actually checks.)
+    match eval("2.5*4", &vars) {
+        Result::Ok(v) => {
+            let d = v - ten;
+            if d > 4 { trap(); }
+            if d < 0 - 4 { trap(); }
+        },
+        Result::Err(e) => { trap(); },
+    }
+}
+
+#[test]
+fn each_failure_names_itself() {
+    let mut vars: HashMap<String, t27> = HashMap::new();
+    match eval("1/", &vars) {
+        Result::Ok(v) => { trap(); },
+        Result::Err(e) => {
+            match e {
+                CalcErr::BadSyntax => {},
+                CalcErr::UnknownName => { trap(); },
+                CalcErr::DivByZero => { trap(); },
+                CalcErr::Overflow => { trap(); },
+                CalcErr::Trailing => { trap(); },
+            }
+        },
+    }
+    match eval("missing+1", &vars) {
+        Result::Ok(v) => { trap(); },
+        Result::Err(e) => {
+            match e {
+                CalcErr::BadSyntax => { trap(); },
+                CalcErr::UnknownName => {},
+                CalcErr::DivByZero => { trap(); },
+                CalcErr::Overflow => { trap(); },
+                CalcErr::Trailing => { trap(); },
+            }
+        },
+    }
+    match eval("5/0", &vars) {
+        Result::Ok(v) => { trap(); },
+        Result::Err(e) => {
+            match e {
+                CalcErr::BadSyntax => { trap(); },
+                CalcErr::UnknownName => { trap(); },
+                CalcErr::DivByZero => {},
+                CalcErr::Overflow => { trap(); },
+                CalcErr::Trailing => { trap(); },
+            }
+        },
+    }
+    match eval("1 2", &vars) {
+        Result::Ok(v) => { trap(); },
+        Result::Err(e) => {
+            match e {
+                CalcErr::BadSyntax => { trap(); },
+                CalcErr::UnknownName => { trap(); },
+                CalcErr::DivByZero => { trap(); },
+                CalcErr::Overflow => { trap(); },
+                CalcErr::Trailing => {},
+            }
+        },
+    }
+}
+
+#[test]
+fn a_variable_reads_back_what_assignment_wrote() {
+    let mut vars: HashMap<String, t27> = HashMap::new();
+    let five = match fixed::from_int(5) {
+        Option::Some(v) => v,
+        Option::None => { trap(); },
+    };
+    vars.insert("x".to_string(), five);
+    match eval("x*2", &vars) {
+        Result::Ok(v) => {
+            match fixed::from_int(10) {
+                Option::Some(ten) => { if v != ten { trap(); } },
+                Option::None => { trap(); },
+            }
+        },
+        Result::Err(e) => { trap(); },
+    }
+}
+
+#[test]
+fn a_name_is_checked_one_character_class_at_a_time() {
+    let one = "x".to_string();
+    if !valid_name(&one) { trap(); }
+    let two = "alpha_2".to_string();
+    if !valid_name(&two) { trap(); }
+    let empty = "".to_string();
+    if valid_name(&empty) { trap(); }
+    let digit_first = "2x".to_string();
+    if valid_name(&digit_first) { trap(); }
+    let spaced = "has space".to_string();
+    if valid_name(&spaced) { trap(); }
+}

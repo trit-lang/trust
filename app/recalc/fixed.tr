@@ -1,0 +1,169 @@
+// fixed.tr — fixed-point numbers at scale 3^11, their arithmetic, and how
+// one prints.
+//
+// The scale is HPL's, and the reason it is not higher is HPL's reason:
+// `fdiv` shifts by 3^11 somewhere and the shifted value must fit a word
+// (examples/trust/HPL.tr says the same thing in its own header). What this
+// module adds over HPL's is a REPL's rule: **nothing here may trap**. Every
+// arithmetic entry point returns `Option`, and `None` up here becomes a
+// named error down in calc.tr, later a line of text in main.tr. A calculator
+// that halts the machine on a bad keystroke is not one.
+
+pub const ONE: t27 = 177147;        // 3^11, the fixed-point unit
+const HI: t27 = 43046721;           // 3^(27−11), for recombining a wide product
+
+// The guard on `fmul`: the result is `mulh·3^16 + (low >> 11)`, so it is
+// certain to fit when |mulh| is small — 80000·3^16 + 3^16/2 < 3^26+3^26,
+// well inside the word — and it is refused otherwise. The exact boundary is
+// nearer 88480; the margin is deliberate and cheap.
+const MUL_GUARD: t27 = 80000;
+
+// The guard on `fdiv`: whatever gets `<< 11` has |x| ≤ SHIFT_MAX, and
+// 21500000·3^11 < 3.81·10^12, so the shift fits a word. |a| beyond it is an
+// overflow answer: the quotient of two numbers this small cannot honestly
+// need it.
+const SHIFT_MAX: t27 = 21500000;
+
+fn abs(x: t27) -> t27 {
+    if x < 0 { -x } else { x }
+}
+
+// The exact product, rescaled — `mulh` is the high 27 trits of the 54-trit
+// product and `wrapping_mul` the low 27 (TIR §3.2), so this is P >> 11 with
+// one rounding, not two, exactly as HPL's `fmul`. `None` when the answer
+// would not fit a word.
+pub fn fmul(a: t27, b: t27) -> Option<t27> {
+    let h = a.mulh(b);
+    if h > MUL_GUARD || h < 0 - MUL_GUARD { return Option::None; }
+    Option::Some(h * HI + (a.wrapping_mul(b) >> 11))
+}
+
+// A quotient at the fixed scale: a/b·ONE, one rounding.
+//
+// There is no widening divide, so `<< 11` must fit — and it always fits
+// here, because of the two paths:
+//
+// - |b| ≤ SHIFT_MAX: take q0 = ⌊a/b⌋ and r = a − q0·b, so |r| < |b| and the
+//   shifted *remainder* is what divides. `q0` is floored, not rounded —
+//   round-to-nearest could pull the remainder the wrong side of ±|b|/2 and
+//   double the final rounding (1/2 would land one ulp low).
+// - |b| > SHIFT_MAX: the true quotient is under ½ of the unit, so shifting
+//   the numerator is safe — |a| ≤ SHIFT_MAX was checked at the door.
+//
+// `None` is b == 0 or a word the answer cannot fit. The caller checks
+// b == 0 first, because it can name that error and this signature cannot.
+pub fn fdiv(a: t27, b: t27) -> Option<t27> {
+    if b == 0 { return Option::None; }
+    if abs(a) > SHIFT_MAX { return Option::None; }
+    if abs(b) > SHIFT_MAX {
+        return Option::Some((a << 11) / b);
+    }
+    let q0 = floor_div(a, b);
+    let r = a - q0 * b;
+    let hi = match q0.checked_mul(ONE) {
+        Option::Some(v) => v,
+        Option::None => return Option::None,
+    };
+    let lo = (r << 11) / b;
+    hi.checked_add(lo)
+}
+
+// A whole number at the fixed scale, or `None` when it would not fit.
+pub fn from_int(n: t27) -> Option<t27> {
+    n.checked_mul(ONE)
+}
+
+// ---------------------------------------------------------------- printing
+//
+// Four decimal places, rounded once. `%` round-to-nearest is the wrong knife
+// for slicing a value into fields (the prelude's `print_int` says why), so
+// the slicing is `floor_div`/`floor_mod` and the one rounding is `/` on the
+// fraction as a whole.
+
+fn digit(d: t27) {
+    putchar((d as t9) + 48);        // d is 0..=9 here, by construction
+}
+
+pub fn print_fixed(v: t27) {
+    let mut n = v;
+    if n < 0 {
+        print_char('-');
+        n = -n;
+    }
+    let mut int_part = floor_div(n, ONE);
+    let frac = n - int_part * ONE;          // 0 ≤ frac < ONE
+
+    // f4 is the fraction in 10^4ths, rounded nearest. 10000 is reachable in
+    // principle (frac within half a unit of ONE) and must carry like any
+    // other digit overflow.
+    let mut f4 = (frac * 10000) / ONE;
+    if f4 == 10000 {
+        int_part += 1;
+        f4 = 0;
+    }
+    print_int(int_part);
+    print_char('.');
+    digit(floor_mod(floor_div(f4, 1000), 10));
+    digit(floor_mod(floor_div(f4, 100), 10));
+    digit(floor_mod(floor_div(f4, 10), 10));
+    digit(floor_mod(f4, 10));
+}
+
+#[test]
+fn a_half_lands_on_the_near_side_of_the_scale() {
+    let two = match from_int(2) {
+        Option::Some(v) => v,
+        Option::None => { trap(); },
+    };
+    let half = match fdiv(ONE, two) {
+        Option::Some(v) => v,
+        Option::None => { trap(); },
+    };
+    if half != 88574 { trap(); }            // ONE/2 = 88573.5, ties away
+}
+
+#[test]
+fn an_exact_product_rescales_exactly() {
+    let three = match from_int(3) {
+        Option::Some(v) => v,
+        Option::None => { trap(); },
+    };
+    let nine = match from_int(9) {
+        Option::Some(v) => v,
+        Option::None => { trap(); },
+    };
+    match fmul(three, three) {
+        Option::Some(v) => { if v != nine { trap(); } },
+        Option::None => { trap(); },
+    }
+}
+
+#[test]
+fn what_cannot_fit_says_so_instead_of_trapping() {
+    // 10^6 squared is 10^12 at the scale — three orders past what a word
+    // holds — so the mulh guard must refuse it.
+    let big = match from_int(1000000) {
+        Option::Some(v) => v,
+        Option::None => { trap(); },
+    };
+    if fmul(big, big).is_some() { trap(); }
+    // 22000000·3^11 > 3.81·10^12 is past the word; 21500000 (SHIFT_MAX)
+    // just fits, which is why this test number is 22 and not 21.5.
+    if from_int(22000000).is_some() { trap(); }
+    if fdiv(ONE, 0).is_some() { trap(); }
+}
+
+#[test]
+fn a_huge_denominator_is_not_an_overflow() {
+    // |b| past SHIFT_MAX takes the shift-the-numerator path: 1 / 10^7 at
+    // this scale is under half a scaled unit, and it is an answer, not an
+    // error. (10^7 at the scale is 1.77·10^12, which a word still holds.)
+    let big = match from_int(10000000) {
+        Option::Some(v) => v,
+        Option::None => { trap(); },
+    };
+    match fdiv(ONE, big) {
+        Option::Some(v) => { if v != 0 { trap(); } },
+        Option::None => { trap(); },
+    }
+}

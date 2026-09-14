@@ -263,6 +263,9 @@ bootstrap/   the compiler, in Trust — it reads its own source, and is the
              `sA` of Diverse Double-Compiling (docs/ddc.md)
 targets/     target descriptions (TIR §7)
 examples/    TIR modules and Trust programs that run
+app/         Trust programs written to be *used*, each in its own directory:
+             wordfreq — counts and ranks the stream; recalc — a line-at-a-time
+             fixed-point calculator
 docs/        notes about the spec, including every derived decision
 ```
 
