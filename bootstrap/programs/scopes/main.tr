@@ -231,6 +231,20 @@ fn field_of_owning(n: taddr) -> taddr {
     a.room() + owes.b.room()
 }
 
+// A `for` ends the name it iterates: `into_iter(self)` is a receiver taken
+// by value, which is a move again and not a copy — what the scope owns after
+// the loop is the iterator, not the collection (Ch. 3 §1.2). The flag's
+// `store t1 0` is the only drop the collection ever owed (Ch. 3 §1.4).
+fn for_ends(n: taddr) -> taddr {
+    let mut items: Vec<Raw<t27>> = Vec::new();
+    items.push(Raw::alloc(n));
+    let mut seen: taddr = 0;
+    for r in items {
+        seen += r.room();
+    }
+    seen
+}
+
 enum Turn { Left, Right }
 
 // An arm that leaves is never asked what it answers with (G9.159), and a
@@ -252,5 +266,6 @@ fn main() -> t27 {
         + p.a + p.b + picked(Pick::One, 1) + nested(1) + holds(1)
         + hands_over(1) + given_away(1) + maybe_gone(1) + maybe_valued(1)
         + maybe_picked(Pick::Two, 1) + both_ways(1)
-        + gone(1) + turning(Turn::Left) + field_two(1) + field_of_owning(1)) as t27
+        + gone(1) + turning(Turn::Left) + field_two(1) + field_of_owning(1)
+        + for_ends(1)) as t27
 }

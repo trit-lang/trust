@@ -2735,6 +2735,38 @@ for every family-instance (`Map.Range.t27.main.closure1` for `Map<I,F>`
 by projection — `*map` is exactly as `I` — `into_iter` on it bakes the
 whole).
 
+**G9.196 — a method that answers an aggregate on a receiver that is not a
+place: the receiver takes the storage, the method takes a temporary, and the
+destination copied out of the temporary.** `"fn".to_string()` as the answer
+of `fn kind() -> String` has no slot to borrow: the literal is evaluated
+where it would have been anyway, the call answers into one `%tmp.slot` of
+its own, and the caller's destination gets the copy (`copy_between`, the
+same words every other destination takes). Storage is storage for one
+thing: a method that answers through another aggregate, or an answer that
+does not fit the destination's type, is refused by both counts — a
+receiver being un-placeable is not one of them.
+
+**G9.195 — an arm that left carries no ownership into the join.** A
+`return`-arm that moves a local, sitting beside arms that fall through,
+does not poison the fall-through state: the join's set is the join of the
+arms that *arrive*, which is what a branch's ownership answer has always
+meant (Ch. 3 §1.2, the read Ch. 3 §1.3's refusals then settle per-path).
+Both sides kept a `trap`/no-join for all-left already; what changed is only
+whose moves a landed arm is still given (d33c998's br3-unconditional flow
+and 527b4d5's tested-variant flow, one rule twice). The flag is still
+written 0 in the leaving arm because the value really is gone on that path.
+
+**G9.194 — the iteration a `for` starts is the moment the name ends.** A
+`for` desugars to `let it.N = e.into_iter()` and `fn into_iter(self)` is a
+receiver taken **by value** (Ch. 4 §5.7); whether the ledger moves the
+receiver at that call or at the iterator's own drop is nothing the spec
+ever gets asked, because Ch. 3 §1.2's whole-name move already applies and
+there is exactly one invented binding to move it into. The implementation
+records the move where the call is: the `store t1 0` that reads `items`'s
+flag sits before the `call @Vec.into_iter`, and the scope's later drop is
+the iterator's, not the collection's — `programs/scopes::for_ends` holds
+it against the counter.
+
 **G9.193 — the glue was already there; only the key that asked for it
 was late.** An instantiation is asked for where a call reads its whole
 key off, and `v.push(Option::Some(Vec::new()))` reads it off the
