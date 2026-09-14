@@ -774,6 +774,40 @@ pub fn param_name(t: &ast::Ty) -> String {
         out.push_str(&text);
         return out;
     }
+    // And a family applied is the instance it makes, under the name every
+    // instantiation already has (Ch. 4 §2.5): an argument of
+    // `Vec::new()` against `Vec<T>` as it is written asks for `Vec` at
+    // the `T` the name says — its size is known either way, but which
+    // one is being constructed is only knowable here.
+    match t {
+        ast::Ty::App(segments, args) => {
+            let mut key: Vec<String> = Vec::new();
+            let mut i: taddr = 0;
+            while i < args.len() {
+                let each = param_name(&args[i]);
+                if each.len() == 0 {
+                    return "".to_string();
+                }
+                key.push(each);
+                i += 1;
+            }
+            let head = joined(segments);
+            return mangled(&head, &key);
+        }
+        // A name the program wrote is the name — a `Vec<ast::Item>` as
+        // it is written says `ast.Item` for its element, the way it does
+        // for its own size (Ch. 4 §2.5). scalar_named can say it when it
+        // is a scalar; if it cannot, the name says it.
+        ast::Ty::Name(segments) => {
+            let n = joined(segments);
+            let at_ty = scalar_named(&n);
+            if at_ty.same("?") {
+                return n;
+            }
+            return at_ty;
+        }
+        _ => {}
+    }
     tir_ty(t)
 }
 
@@ -8134,6 +8168,51 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                     let mut given: Vec<String> = Vec::new();
                     if held >= 0 {
                         given = ast::copy_names(&e.instances[held].key);
+                    } else {
+                        // And where the parameter's written type is the
+                        // family's own name read at one of its members —
+                        // `call(&mut x, name, Vec::new())`, which says
+                        // `Vec<ast.Expr>` in `call`'s own signature — the
+                        // key is in the name, even when the element's name
+                        // itself carries its module dots: `Vec<ast.Item>`
+                        // reads its whole tail for the one question the
+                        // family asks (Ch. 4 §2.3, Ch. 4 §2.5).
+                        if e.families[fam].tyvars.len() == 1 {
+                            let mut i3: taddr = 0;
+                            let mut stop = false;
+                            let mut head: String = Vec::new();
+                            let mut tail: String = Vec::new();
+                            while i3 < want.len() {
+                                let c = want[i3];
+                                if stop {
+                                    tail.push(c);
+                                } else if c == '.' {
+                                    stop = true;
+                                } else {
+                                    head.push(c);
+                                }
+                                i3 += 1;
+                            }
+                            let mut under: String = Vec::new();
+                            let mut n2: taddr = 0;
+                            while n2 < e.families[fam].name.len() {
+                                let c2 = e.families[fam].name[n2];
+                                if c2 == '.' {
+                                    n2 = e.families[fam].name.len();
+                                } else {
+                                    under.push(c2);
+                                    n2 += 1;
+                                }
+                            }
+                            if head.same(&under) && tail.len() > 0 {
+                                let mut key: Vec<String> = Vec::new();
+                                key.push(tail.to_string());
+                                let made3 = instantiate(e, &under, &key);
+                                if made3.len() > 0 {
+                                    given = key;
+                                }
+                            }
+                        }
                     }
                     return generic_call(e, fam, &full, "", &given, &args, "");
                 }
