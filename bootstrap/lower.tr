@@ -834,15 +834,33 @@ pub fn field_tir(t: &ast::Ty) -> String {
                 tir_ty(t)
             }
         }
+        // And its mangled form, which is what a family's instantiation owns
+        // of `Box` once the key has moved in — `Option.box.ast.Expr`'s
+        // payload says `box.ast.Expr`, and `box.` means `ptr` wherever the
+        // name arrives (G9.190's answer, read again here).
+        ast::Ty::Name(segments) => {
+            let n = joined(segments);
+            if is_boxed(&n) {
+                "ptr".to_string()
+            } else {
+                tir_ty(t)
+            }
+        }
         _ => tir_ty(t),
     }
 }
 
-/// Whether a written type is a `Box<T>`.
+/// Whether a written type is a `Box<T>`, whether `Box` was spelled or the
+/// name it was *made* into — a `Box<T>` field instantiated as `box.<T>`,
+/// which is the same ownership question under another face (G9.190's).
 pub fn written_box(t: &ast::Ty) -> bool {
     match t {
         ast::Ty::App(segments, args) => {
             joined(segments).same("Box") && args.len() == 1
+        }
+        ast::Ty::Name(segments) => {
+            let n = joined(segments);
+            is_boxed(&n)
         }
         _ => false,
     }
@@ -6161,7 +6179,23 @@ fn drop_one(e: &mut Emit, slot: &str, owner: &str) {
 /// — and then the room goes. There is no null test: a `Box` always points
 /// at one, which is the whole of what it is.
 fn drop_box(e: &mut Emit, slot: &str, owner: &str) {
-    let elem = raw_element(e, owner);
+    let mut elem = raw_element(e, owner);
+    if elem.len() == 0 {
+        // Where the name itself is the whole of what a `Box` is
+        // remembered by — an element only ever *inside* an
+        // instantiation, so `box.ast.Ty` it is, and its tail then being
+        // `ast.Ty` itself, which is the one it wraps (Ch. 5 §2.3 —
+        // G9.190's one-word answer, G9.192's spelling).
+        if is_boxed(owner) {
+            let mut made: String = Vec::new();
+            let mut t: taddr = 4;
+            while t < owner.len() {
+                made.push(owner[t]);
+                t += 1;
+            }
+            elem = made;
+        }
+    }
     if elem.len() == 0 {
         e.stuck = true;
         return;
