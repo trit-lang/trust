@@ -182,6 +182,9 @@ pub struct Cx {
     pub params: Vec<Sig>,
     pub defs: Vec<layout::Def>,
     pub drops: Vec<String>,
+    /// The scalars the file's `const`s fold to — a name read past them is
+    /// an instruction nobody asked for (Ch. 4 §2.4).
+    pub consts: Vec<ConstCell>,
     pub families: Vec<Family>,
     pub tyfams: Vec<TyFamily>,
     pub rets: Vec<RetTy>,
@@ -296,6 +299,30 @@ pub struct Chunk {
 /// the order they run in: a `while`'s body is lowered before its head, so
 /// the body is printed first and jumped over. Both implementations have to
 /// agree about that order, since equality is on the text.
+/// A `const`'s binding in a way that lowers — its name, and the scalar
+/// it is for, and the number it is. A value that is not a single literal
+/// is not here, because it is not a fold of a name (Ch. 4 §2.4).
+pub struct ConstCell {
+    pub name: String,
+    pub ty: String,
+    pub value: t27,
+}
+
+/// A list of them, handed on to another emitter.
+fn copy_consts(from: &Vec<ConstCell>) -> Vec<ConstCell> {
+    let mut out: Vec<ConstCell> = Vec::new();
+    let mut i: taddr = 0;
+    while i < from.len() {
+        out.push(ConstCell {
+            name: from[i].name.to_string(),
+            ty: from[i].ty.to_string(),
+            value: from[i].value,
+        });
+        i += 1;
+    }
+    out
+}
+
 pub struct Emit {
     pub slots: Vec<String>,
     pub insts: Vec<String>,
@@ -322,6 +349,10 @@ pub struct Emit {
     pub defs: Vec<layout::Def>,
     /// Which types have a destructor, by name (Ch. 3 §1.4).
     pub drops: Vec<String>,
+    /// What each `const` in the file is folded to where it is read —
+    /// gathered at `context` with the rest, since the fold is file-local
+    /// until a name is said (Ch. 4 §2.4).
+    pub consts: Vec<ConstCell>,
     /// The locals this scope is responsible for dropping, innermost last.
     pub owned: Vec<Owned>,
     /// The loops being emitted, innermost last, so that a `break` and a
@@ -784,7 +815,20 @@ pub fn param_name(t: &ast::Ty) -> String {
             let mut key: Vec<String> = Vec::new();
             let mut i: taddr = 0;
             while i < args.len() {
-                let each = param_name(&args[i]);
+                // A name the program wrote is the name the key reads out
+                // of it — `Vec<ast.Item>` as it is written says
+                // `ast.Item` for its element, whether or not the scalar
+                // form of it could say (Ch. 4 §2.5).
+                let mut each = param_name(&args[i]);
+                if each.same("?") {
+                    match &args[i] {
+                        ast::Ty::Name(segs) => {
+                            let joined2 = joined(segs);
+                            each = joined2;
+                        }
+                        _ => {}
+                    }
+                }
                 if each.len() == 0 {
                     return "".to_string();
                 }
@@ -793,18 +837,6 @@ pub fn param_name(t: &ast::Ty) -> String {
             }
             let head = joined(segments);
             return mangled(&head, &key);
-        }
-        // A name the program wrote is the name — a `Vec<ast::Item>` as
-        // it is written says `ast.Item` for its element, the way it does
-        // for its own size (Ch. 4 §2.5). scalar_named can say it when it
-        // is a scalar; if it cannot, the name says it.
-        ast::Ty::Name(segments) => {
-            let n = joined(segments);
-            let at_ty = scalar_named(&n);
-            if at_ty.same("?") {
-                return n;
-            }
-            return at_ty;
         }
         _ => {}
     }
@@ -1185,6 +1217,7 @@ pub fn function(
         blocks: Vec::new(),
         defs: cx.defs,
         drops: cx.drops,
+        consts: copy_consts(&cx.consts),
         owned: Vec::new(),
         loops: Vec::new(),
         aliases: cx.aliases,
@@ -6894,6 +6927,7 @@ pub fn destructor(
         blocks: Vec::new(),
         defs: cx.defs,
         drops: cx.drops,
+        consts: copy_consts(&cx.consts),
         owned: Vec::new(),
         loops: Vec::new(),
         aliases: cx.aliases,
@@ -7683,6 +7717,23 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
         ast::Expr::Name(n) => {
             let at = local_at(e, n);
             if at < 0 {
+                // A `const` says it from here: a name nobody made a local
+                // out of is a reading of the value the binding always was,
+                // which is the one instruction we are owed (Ch. 4 §2.4) —
+                // `MANY as t27` is `ret const t27 <n>` and nothing else.
+                let mut c: taddr = 0;
+                while c < e.consts.len() {
+                    if e.consts[c].name.same(n) {
+                        let shown = tir_of(&e.consts[c].ty);
+                        let mut out: String = Vec::new();
+                        out.push_str("const ");
+                        out.push_str(&shown);
+                        out.push_str(" ");
+                        push_int(&mut out, e.consts[c].value);
+                        return Value { text: out, ty: e.consts[c].ty.to_string() };
+                    }
+                    c += 1;
+                }
                 e.stuck = true;
                 return unknown_value();
             }
@@ -11815,12 +11866,48 @@ pub fn context(items: &Vec<ast::Item>) -> Cx {
         params: parameters(items),
         defs: definitions(items),
         drops: destructors(items),
+        consts: scalar_consts(items),
         families: families(items),
         tyfams: type_families(items),
         rets: returns(items),
         aliases: aliases(items),
         assoc: assoc_choices(items),
     }
+}
+
+/// Every `const` that folds, folded (Ch. 4 §2.4): a single literal it must
+/// be, since anything bigger is work the compiler should not do on a name's
+/// behalf — and anything bigger is refused where it is read, rather than
+/// half-said.
+fn scalar_consts(items: &Vec<ast::Item>) -> Vec<ConstCell> {
+    let al = aliases(items);
+    let mut out: Vec<ConstCell> = Vec::new();
+    let mut i: taddr = 0;
+    while i < items.len() {
+        match &items[i].what {
+            ast::What::Const(name, ty, value) => {
+                let mine = settled_ty(&al, ty);
+                let head = name_head(&mine);
+                let t = scalar_named(&head);
+                if !t.same("?") {
+                    match value {
+                        ast::Expr::Int(v) => {
+                            let cell = ConstCell {
+                                name: name.to_string(),
+                                ty: t.to_string(),
+                                value: v,
+                            };
+                            out.push(cell);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
 }
 
 /// The generic functions of the file (Ch. 4 §2.5).
@@ -13985,6 +14072,7 @@ fn drop_glue(
         blocks: Vec::new(),
         defs: cx.defs,
         drops: cx.drops,
+        consts: copy_consts(&cx.consts),
         owned: Vec::new(),
         loops: Vec::new(),
         aliases: cx.aliases,
