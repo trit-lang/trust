@@ -1,0 +1,118 @@
+// pack.tr — nine trits in a tryte, and the one way to get them out.
+//
+// A tryte holds 3^9 = 19683 patterns, so nine balanced trits fit in one
+// exactly: the packed value of trits t_0..t_8 is Σ t_j·3^j, which lands in
+// ±(3^9−1)/2 = ±9841. That Σ is also *a library decision, not a language
+// rule* — AM §2.3's words, and the reason the dot-product device of
+// plan/vdot-device.md can say "a [t9] slice *is* the packed layout".
+//
+// In this program a "tryte" is a t27 holding a tryte value, because Trust
+// arithmetic lives in words. The layout the function sees is the layout
+// device memory will see: one element, one tryte.
+//
+// Extraction is the language's whole thesis in two lines. Round-to-nearest
+// division leaves `%` symmetric, so the low trit of v is `v % 3` with no
+// fixup — the exact thing demo.tr's print_ternary demonstrates and
+// print_decimal cannot do. Getting trit i is getting trit 0 of `v / 3^i`,
+// and that division is exact in the only sense that matters: the trits
+// below i sum to at most (3^i−1)/2, strictly inside the rounding window, so
+// `v / 3^i` is floor-exact and the answer below needs no apology.
+
+// The trit at position i of a packed tryte — −1, 0 or +1.
+pub fn trit_at(packed: t27, i: taddr) -> t27 {
+    let mut p: t27 = 1;
+    let mut j: taddr = 0;
+    while j < i {
+        p *= 3;
+        j += 1;
+    }
+    (packed / p) % 3
+}
+
+// Nine trits into one tryte, read off the front of `t` — which holds values
+// in {−1, 0, +1} and at least nine of them (`&t` on an array is already a
+// slice, and there is no unsize back the other way, so the contract is
+// stated here and the bounds check enforces it).
+pub fn pack9(t: &[t27]) -> t27 {
+    let mut v: t27 = 0;
+    let mut p: t27 = 1;
+    let mut j: taddr = 0;
+    while j < 9 {
+        v += t[j] * p;
+        p *= 3;
+        j += 1;
+    }
+    v
+}
+
+// A vector of trits into trytes, nine to a customer. This program's
+// dimensions are all multiples of nine, so the partial-tryte question (pad
+// the tail with zeros, which the device's i mod 9 walk would then read as
+// +0·anything = nothing) never has to be answered here.
+pub fn pack_trits(w: &Vec<t27>) -> Vec<t27> {
+    let mut out: Vec<t27> = Vec::new();
+    let mut cell: t27 = 0;
+    let mut p: t27 = 1;
+    let mut i: taddr = 0;
+    while i < w.len() {
+        cell += w[i] * p;
+        p *= 3;
+        if p == 19683 {
+            out.push(cell);
+            cell = 0;
+            p = 1;
+        }
+        i += 1;
+    }
+    if p != 1 {
+        out.push(cell);
+    }
+    out
+}
+
+#[test]
+fn the_low_trit_is_the_remainder_with_no_correction() {
+    // 1·1 + 0·3 + (−1)·9 = −8, and −8 % 3 = −2·3 − 2... no: round-to-nearest
+    // gives −8 = (−3)·3 + 1, so −8 % 3 = 1 and −8 / 3 = −3. Check the
+    // claims rather than the arithmetic.
+    let v = 1 + 0 * 3 + (0 - 1) * 9;
+    if v != 0 - 8 { trap(); }
+    if trit_at(v, 0) != 1 { trap(); }
+    if trit_at(v, 1) != 0 { trap(); }
+    if trit_at(v, 2) != 0 - 1 { trap(); }
+}
+
+#[test]
+fn every_tryte_pattern_round_trips() {
+    // All 19683 of them, packed and unpacked: the map from tryte value to
+    // nine trits and back is the identity on the whole domain, which is the
+    // only packing claim a device test will ever need.
+    let mut v: t27 = 0 - 9841;
+    while v <= 9841 {
+        let mut cell: t27 = 0;
+        let mut p: t27 = 1;
+        let mut i: taddr = 0;
+        while i < 9 {
+            cell += trit_at(v, i) * p;
+            p *= 3;
+            i += 1;
+        }
+        if cell != v { trap(); }
+        v += 1;
+    }
+}
+
+#[test]
+fn pack9_and_pack_trits_agree_on_one_cell() {
+    let t: [t27; 9] = [1, 0 - 1, 0, 1, 1, 0 - 1, 0, 0, 1];
+    let v = pack9(&t);
+    let mut w: Vec<t27> = Vec::new();
+    let mut i: taddr = 0;
+    while i < 9 {
+        w.push(t[i]);
+        i += 1;
+    }
+    let packed = pack_trits(&w);
+    if packed.len() != 1 { trap(); }
+    if packed[0] != v { trap(); }
+}

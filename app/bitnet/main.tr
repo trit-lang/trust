@@ -1,0 +1,153 @@
+// bitnet — a ternary MLP forward pass, scalar, measured.
+//
+//     trust run app/bitnet/main.tr
+//
+// The workload is the one plan/vdot-device.md calls the argument: a
+// BitNet-class layer is a matmul whose weights are {−1, 0, +1} and whose
+// activations are integers, which on this machine is add/subtract/skip and
+// no multiplier. This program is the scalar reference of that claim — the
+// same data layout the device will read (weights packed nine trits to a
+// tryte, activations one tryte each, an exact sum wrapped once), run
+// through the honest scalar loop the device exists to replace. When it
+// lands, `dot::matvec`'s inner loop is the only thing that changes, and the
+// numbers below are the before/after the plan's P6 bench wants.
+//
+// The network: 729 inputs → 729 hidden (quantize to tryte) → 27 outputs,
+// 551 124 lanes in all. Every weight and every input comes from one seeded
+// generator, so the whole run — including `z` — is a function of this
+// source, and the printed vector is pinned as a test below.
+//
+// Measurement is instructions retired (`elapsed`, ISA §2.3), printed next
+// to the lane count, which is the unit V_LANES will speak in. A ratio of
+// the two is the scalar cost of a lane, and the honest statement to make
+// about it is here and not in prose: it is *instructions per lane*, not
+// time — TRISC-27 has no clock rate.
+
+mod pack;
+mod dot;
+mod net;
+
+fn elapsed() -> t27;            // declared here, defined in runtime.t27
+
+const IN: taddr = 729;          // 3^6 — every size is a power of three,
+const HID: taddr = 729;         // so every row is a whole number of trytes
+const OUT: taddr = 27;
+const SEED: t27 = 1;
+
+// The pass, factored out so main can print around it and the test can hold
+// it to its record. The calls inside are the whole semantics; main adds
+// only the stopwatch.
+fn forward(seed: t27) -> Vec<t27> {
+    let mut rng = net::Rng::seed(seed);
+    let w1 = net::packed_ternary(&mut rng, HID * IN);
+    let w2 = net::packed_ternary(&mut rng, OUT * HID);
+    let x0 = net::tryte_input(&mut rng, IN);
+    let h1 = dot::matvec(&w1, &x0, HID, IN);
+    let x1 = net::quantize(&h1);
+    dot::matvec(&w2, &x1, OUT, HID)
+}
+
+fn print_lanes(what: &str, lanes: t27, instructions: t27) {
+    print(what);
+    print(": ");
+    print_int(lanes);
+    print(" lanes, ");
+    print_int(instructions);
+    print(" instructions (");
+    print_int(lanes * 1000 / instructions);
+    println(" lanes per 1000)");
+}
+
+fn main() -> t27 {
+    print("bitnet-scalar — ternary MLP ");
+    print_int(IN as t27);
+    print(" -> ");
+    print_int(HID as t27);
+    print(" -> ");
+    print_int(OUT as t27);
+    println("");
+
+    let mut rng = net::Rng::seed(SEED);
+
+    // Packing is reported on its own line, because it is the one cost that
+    // does not exist in the device story: the plan's weights pack at rest,
+    // host-side, and the image is born packed.
+    let t0 = elapsed();
+    let w1 = net::packed_ternary(&mut rng, HID * IN);
+    let w2 = net::packed_ternary(&mut rng, OUT * HID);
+    let t1 = elapsed();
+    print("pack (one-time): ");
+    print_int(t1 - t0);
+    println(" instructions");
+    let x0 = net::tryte_input(&mut rng, IN);
+
+    let t2 = elapsed();
+    let h1 = dot::matvec(&w1, &x0, HID, IN);
+    let t3 = elapsed();
+    print_lanes("layer 1", (HID * IN) as t27, t3 - t2);
+
+    let x1 = net::quantize(&h1);
+    let t4 = elapsed();
+    print("quantize: ");
+    print_int(t4 - t3);
+    println(" instructions");
+
+    let z = dot::matvec(&w2, &x1, OUT, HID);
+    let t5 = elapsed();
+    print_lanes("layer 2", (OUT * HID) as t27, t5 - t4);
+
+    print("total: ");
+    print_int((HID * IN + OUT * HID) as t27);
+    print(" lanes, ");
+    print_int(t5 - t2);
+    println(" instructions of forward");
+
+    println("z:");
+    let mut i: taddr = 0;
+    while i < z.len() {
+        println_int(z[i]);
+        i += 1;
+    }
+    0
+}
+
+#[test]
+fn the_forward_pass_stays_inside_its_own_bounds() {
+    // |z_i| ≤ K·9841 with K = 729: a lane is at most one tryte, exact
+    // arithmetic does not leak, and this bound holds no matter what the
+    // generator produces. The exact record is the test below; this one is
+    // the part that would still be true if the seed changed.
+    let z = forward(SEED);
+    if z.len() != OUT { trap(); }
+    let limit = (HID * 9841) as t27;
+    let mut i: taddr = 0;
+    while i < z.len() {
+        if z[i] > limit { trap(); }
+        if z[i] < 0 - limit { trap(); }
+        i += 1;
+    }
+}
+
+#[test]
+fn the_forward_pass_reproduces_its_record() {
+    // Recorded, not derived: z is a pure function of the seed, the network
+    // and every pass between here and the machine, so equality with the
+    // recorded vector holds all of them to account at once. The numbers
+    // below are what `trust run app/bitnet/main.tr` prints, pasted in; if
+    // anything in the lowering or the kernel changes the pass, this is the
+    // test that says so.
+    let z = forward(SEED);
+    let record: [t27; 27] = [
+        0 - 26697, 0 - 33219, 73995, 70874, 0 - 26394,
+        0 - 59369, 542, 59986, 0 - 3377, 20283,
+        36365, 68937, 0 - 52741, 19664, 0 - 40402,
+        11153, 19557, 43186, 151752, 113300,
+        134055, 52287, 69292, 4396, 0 - 47307,
+        26584, 0 - 39809,
+    ];
+    let mut i: taddr = 0;
+    while i < 27 {
+        if z[i] != record[i] { trap(); }
+        i += 1;
+    }
+}

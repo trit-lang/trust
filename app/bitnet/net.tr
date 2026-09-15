@@ -1,0 +1,145 @@
+// net.tr — the pieces of a ternary MLP that are not the kernel.
+//
+// Everything here is deterministic by construction: the network's weights
+// and its input both come from one linear congruential generator with a
+// seed that is part of the program, so the whole forward pass — and every
+// number it prints — is a pure function of this source. That is what lets
+// the recorded output be a test, and it is the property a device
+// differential test wants from its scalar oracle too.
+//
+// The generator is HPL's own, copied with its comment's argument intact
+// (examples/trust/HPL.tr lives over the same machine and had this fight
+// first).
+
+pub struct Rng { s: t27 }
+
+impl Rng {
+    // Associated functions and methods of an impl are named without `pub`:
+    // an impl body holds `fn`, `type` or `const` (Ch. 4 §1.7), and the
+    // struct itself is the item that carries visibility.
+    fn seed(s: t27) -> Rng {
+        Rng { s: s }
+    }
+
+    // A linear congruential generator over the whole word — wrapping_mul is
+    // the release-profile flavor of `*`, asked for by name (Ch. 1 §4) —
+    // reduced into ±3^11 by a balanced remainder, whose range |r| ≤ |b|/2
+    // is then exact. No fold and no bias correction.
+    fn next_unit(&mut self) -> t27 {
+        self.s = self.s.wrapping_mul(1103515).wrapping_add(12345);
+        self.s % 354295                 // 2·3^11 + 1, so |r| ≤ 3^11
+    }
+
+    // One ternary weight: {−1, 0, +1} by the same balanced remainder.
+    fn next_trit(&mut self) -> t27 {
+        self.next_unit() % 3
+    }
+
+    // One activation: |r| ≤ 9842/2 = 4921, comfortably inside a tryte, which
+    // is where the device's activation operand lives (±9841).
+    fn next_tryte(&mut self) -> t27 {
+        self.next_unit() % 9842
+    }
+}
+
+// n ternary weights, packed nine to a tryte and row-major — the layout the
+// device's VW_PTR points at.
+pub fn packed_ternary(rng: &mut Rng, n: taddr) -> Vec<t27> {
+    let mut w: Vec<t27> = Vec::new();
+    w.reserve(n);
+    let mut i: taddr = 0;
+    while i < n {
+        w.push(rng.next_trit());
+        i += 1;
+    }
+    pack::pack_trits(&w)
+}
+
+// n tryte-range activations, one to an element — the layout VA_PTR points
+// at.
+pub fn tryte_input(rng: &mut Rng, n: taddr) -> Vec<t27> {
+    let mut a: Vec<t27> = Vec::new();
+    a.reserve(n);
+    let mut i: taddr = 0;
+    while i < n {
+        a.push(rng.next_tryte());
+        i += 1;
+    }
+    a
+}
+
+// Absmax quantization back to the tryte range, the BitNet activation step
+// between layers: q_i = round(h_i · 9841 / max|h|). The wide part,
+// |h|·9841 ≤ (K·9841)·9841, is 7.2·10^10 at this program's K = 729 — nowhere
+// near a word, which is a property of the *size*, restated in the test
+// rather than of luck. A zero vector stays a zero vector rather than
+// dividing by itself.
+pub fn quantize(h: &Vec<t27>) -> Vec<t27> {
+    let mut m: t27 = 0;
+    let mut i: taddr = 0;
+    while i < h.len() {
+        let v = h[i];
+        let a = if v < 0 { 0 - v } else { v };
+        if a > m { m = a; }
+        i += 1;
+    }
+    let mut out: Vec<t27> = Vec::new();
+    out.reserve(h.len());
+    if m == 0 {
+        let mut j: taddr = 0;
+        while j < h.len() {
+            out.push(0);
+            j += 1;
+        }
+        return out;
+    }
+    let mut k: taddr = 0;
+    while k < h.len() {
+        out.push((h[k] * 9841) / m);
+        k += 1;
+    }
+    out
+}
+
+#[test]
+fn the_generator_is_deterministic_and_in_range() {
+    // Two generators off the same seed, walked in lockstep — comparing one
+    // against the *continued* walk of the other would be a test of the test.
+    let mut r1 = Rng::seed(1);
+    let mut r2 = Rng::seed(1);
+    let mut i: taddr = 0;
+    while i < 1000 {
+        let t1 = r1.next_trit();
+        let t2 = r2.next_trit();
+        if t1 != t2 { trap(); }
+        if t1 < 0 - 1 || t1 > 1 { trap(); }
+        let a1 = r1.next_tryte();
+        let a2 = r2.next_tryte();
+        if a1 != a2 { trap(); }
+        if a1 < 0 - 9841 || a1 > 9841 { trap(); }
+        i += 1;
+    }
+}
+
+#[test]
+fn quantization_sends_the_max_to_the_rail_and_balances() {
+    let mut h: Vec<t27> = Vec::new();
+    h.push(3);
+    h.push(0 - 6);
+    let q = quantize(&h);
+    // 3·9841/6 = 4920.5 → 4921 (round-to-nearest, ties away), and the max
+    // lands on the rail exactly.
+    if q[0] != 4921 { trap(); }
+    if q[1] != 0 - 9841 { trap(); }
+}
+
+#[test]
+fn a_zero_layer_quantizes_to_zeros() {
+    let mut h: Vec<t27> = Vec::new();
+    h.push(0);
+    h.push(0);
+    let q = quantize(&h);
+    if q.len() != 2 { trap(); }
+    if q[0] != 0 { trap(); }
+    if q[1] != 0 { trap(); }
+}

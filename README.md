@@ -265,7 +265,8 @@ targets/     target descriptions (TIR §7)
 examples/    TIR modules and Trust programs that run
 app/         Trust programs written to be *used*, each in its own directory:
              wordfreq — counts and ranks the stream; recalc — a line-at-a-time
-             fixed-point calculator
+             fixed-point calculator; bitnet — a scalar ternary-MLP forward
+             pass, the reference plan/vdot-device.md's device will be held to
 docs/        notes about the spec, including every derived decision
 ```
 
