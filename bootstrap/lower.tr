@@ -926,6 +926,21 @@ pub fn scalar_named(n: &str) -> String {
     }
 }
 
+/// The TIR spelling of a `wrapping_*` scalar method, or nothing where the
+/// name is not one the language owns (Ch. 1 §5 — the overflow flavour is
+/// part of the instruction, not of the table).
+pub fn wrapping_op(name: &str) -> String {
+    if name.same("wrapping_add") {
+        "add.wrap".to_string()
+    } else if name.same("wrapping_sub") {
+        "sub.wrap".to_string()
+    } else if name.same("wrapping_mul") {
+        "mul.wrap".to_string()
+    } else {
+        "".to_string()
+    }
+}
+
 /// What a signature says a function answers with.
 ///
 /// TIR's name for it, or `()` where it answers with **nothing** — which TIR
@@ -4999,6 +5014,32 @@ fn fill(
         // reference to something unsized is two words and not one, and
         // `store ?` is not TIR (TIR §1).
         if ty.same("?") {
+            match &e.defs[which].fields[index] {
+                // Ch. 2 §4's two words, stored as the pair they are — the
+                // address first and how many it is of after it, the same
+                // two words a `Vec<char>`'s head holds (`as_text` has been
+                // making them all along in the other direction).
+                ast::Ty::Ref(inner, m) => {
+                    if !unsized_ref(&*inner) {
+                        e.stuck = true;
+                        return;
+                    }
+                    let v = value(e, &fields[i].value, "");
+                    if e.stuck {
+                        return;
+                    }
+                    let at = offset_of(e, dest, l.offsets[index]);
+                    let p = loaded(e, "ptr", &v.text);
+                    store_into(e, "ptr", &p, &at);
+                    let s_at = offset_of(e, &v.text, 3);
+                    let d_at = offset_of(e, &at, 3);
+                    let n = loaded(e, "t27", &s_at);
+                    store_into(e, "t27", &n, &d_at);
+                    i += 1;
+                    continue;
+                }
+                _ => {}
+            }
             e.stuck = true;
             return;
         }
@@ -7920,7 +7961,14 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             // A field that is itself an aggregate has no value to load: it
             // **is** the storage at that offset (TIR §3).
             let written = ast::copy_ty(&e.defs[which].fields[index]);
-            let inner = nominal(e, &written);
+            let mut inner = nominal(e, &written);
+            if inner.len() == 0 {
+                // Ch. 2 §4's two words are a value only as a place: the
+                // field whose two are read is spelled `fat.str` here, the
+                // way every other storage of text is (Ch. 3 §3.3's copies
+                // read it back the same way).
+                inner = fat_name(&written);
+            }
             if def_at(&e.defs, &inner) >= 0 {
                 return Value { text: src, ty: inner };
             }
@@ -8028,7 +8076,23 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             if e.stuck {
                 return unknown_value();
             }
-            let inner = referent_name(&held.ty);
+            let mut inner = referent_name(&held.ty);
+            if inner.len() == 0 {
+                // Except `*self`, whose receiver-slot is written down as
+                // `ptr` alone and whose meaning is the impl it sits in:
+                // `*self as taddr` inside `impl Key for t27` reads a t27
+                // exactly as any `*&t27` would (Ch. 1 §6).
+                let mine = match &*a {
+                    ast::Expr::Name(n) => n.to_string(),
+                    _ => "".to_string(),
+                };
+                if held.ty.same("ptr")
+                    && mine.same("self")
+                    && e.self_ty.len() > 0
+                {
+                    inner = e.self_ty.to_string();
+                }
+            }
             if inner.len() == 0 {
                 e.stuck = true;
                 return unknown_value();
@@ -8937,6 +9001,53 @@ fn method_value(
     full.push_str(&owner);
     full.push_str(".");
     full.push_str(name);
+    // Ch. 1 §4 and §5's scalar methods are the language's own — matched
+    // first, the way the other implementation matches them, so nothing
+    // written on the type shadows them and there is no function to call
+    // for them: `a.wrapping_mul(b)` is `%r = mul.wrap t27 %a, %b`, and
+    // `taddr.wrapping_mul` exists in no table.
+    if owner.same("t9") || owner.same("t27") || owner.same("taddr")
+        || owner.same("trit")
+    {
+        let op = wrapping_op(name);
+        if op.len() > 0 {
+            if refuse_dest(e, dest) {
+                return unknown_value();
+            }
+            if args.len() != 1 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            // A local receiver is loaded; one that is already a value —
+            // `h.wrapping_mul(3).wrapping_add(b)` chains these — already
+            // is the value and needs no instruction.
+            if at >= 0 {
+                slot = receiver_at(e, at, recv, &slot, &owner);
+                if e.stuck {
+                    return unknown_value();
+                }
+            }
+            let v = value(e, &args[0], &owner);
+            if e.stuck {
+                return unknown_value();
+            }
+            let out = fresh(e, "a");
+            let mut line: String = Vec::new();
+            line.push_str("    ");
+            line.push_str(&out);
+            line.push_str(" = ");
+            line.push_str(&op);
+            line.push_str(" ");
+            let shown = tir_of(&owner);
+            line.push_str(&shown);
+            line.push_str(" ");
+            line.push_str(&slot);
+            line.push_str(", ");
+            line.push_str(&v.text);
+            emit(e, line);
+            return Value { text: out, ty: owner.to_string() };
+        }
+    }
     // What the method was written to take. A receiver is `ptr` where it is a
     // reference and the type itself where it is by value, and a scalar taken
     // by value is *loaded* — what is handed over is the value and not where
@@ -9267,7 +9378,14 @@ fn place(e: &mut Emit, x: &ast::Expr) -> Value {
             // written head's, because a field may be written `Raw<T>` and
             // an application is a type once it is instantiated (Ch. 4 §2.5).
             let written = ast::copy_ty(&e.defs[which].fields[index]);
-            let inner = nominal(e, &written);
+            let mut inner = nominal(e, &written);
+            if inner.len() == 0 {
+                // Except Ch. 2 §4's two words, which are a place the same
+                // way — `chars.s[at]` walks into what a `&str` field
+                // holds, and the pair is spelled `fat.str` here, the way
+                // the parameter of the same written type is.
+                inner = fat_name(&written);
+            }
             if def_at(&e.defs, &inner) < 0 {
                 e.stuck = true;
                 return unknown_value();
@@ -10321,7 +10439,15 @@ fn guess_ty(e: &mut Emit, x: &ast::Expr) -> String {
             // .t27` is the Range, which is what the family's substitution
             // was already doing everywhere a *written* name was settled.
             let settled = subst_ty(e, &e.tyvars, &e.key, &written);
-            nominal(e, &settled)
+            let answered = nominal(e, &settled);
+            if answered.len() > 0 {
+                return answered;
+            }
+            // Ch. 2 §4's two words are the one more thing it can be: a
+            // field that is `&str` answers `fat.str` here, the way the
+            // parameter of the same type does — what `self.s[at]` and
+            // `self.s.len()` are asked of is written down there.
+            fat_name(&settled)
         }
         ast::Expr::Cast(a, t) => tir_ty_at(&e.tyvars, &e.key, t),
         // Arithmetic answers with what it was given and a comparison with a
@@ -14528,6 +14654,17 @@ fn owns_drop(
         // it is the one `ptr` a type holding it is not free of.
         if written_box(&defs[at].fields[i]) {
             return true;
+        }
+        // And a reference no kind of it at all — Ch. 3 §2.1 is the whole
+        // point of one: the thin kind is one borrowed word and the wide
+        // kind is two, like `Chars { s: &str, at }`, which is not a
+        // droppable struct on `s`'s account.
+        match &defs[at].fields[i] {
+            ast::Ty::Ref(inner, m) => {
+                i += 1;
+                continue;
+            }
+            _ => {}
         }
         let held = field_tir(&defs[at].fields[i]);
         if !held.same("ptr") {
