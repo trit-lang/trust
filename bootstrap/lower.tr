@@ -11186,6 +11186,10 @@ fn nominal(e: &mut Emit, t: &ast::Ty) -> String {
         // instantiation that is the instantiation (Ch. 4 §1.2) — which is
         // what a `fn unwrap_or(self, …)` is given.
         ast::Ty::SelfTy => e.self_ty.to_string(),
+        // `()`'s one name among type arguments: a key is a name every
+        // context already says it by, and this is what `param_name` says
+        // too — a key-slot may hold the word only (Ch. 2 §1).
+        ast::Ty::Unit => "t27".to_string(),
         ast::Ty::App(segments, args) => {
             let head = joined(segments);
             // `Raw<T>` is the compiler's, so there is no family to look up
