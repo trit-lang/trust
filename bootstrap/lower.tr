@@ -1153,14 +1153,25 @@ fn fresh(e: &mut Emit, prefix: &str) -> String {
 /// not a local: its family is `%tmp.slot.*`, and a binding named `tmp` is
 /// somebody's name, which a temporary that shared the family shadowed
 /// (G9.174).
+/// Whether a slot is of a *definition*, first, and of TIR only where no
+/// definition said it — the width is asked exactly once, whatever the
+/// family's name was (G9.191's niche says the same layout must be read
+/// again here, and a `Result.__.Error` was a definition all along).
+fn slot_size(e: &Emit, ty: &str) -> t27 {
+    if def_at(&e.defs, ty) >= 0 {
+        return sized(e, ty);
+    }
+    let wide = tir_of(ty);
+    sized(e, &wide)
+}
+
 fn temporary_slot(e: &mut Emit, ty: &str) -> String {
     let slot = fresh(e, "tmp.slot");
     let mut line: String = Vec::new();
     line.push_str("    ");
     line.push_str(&slot);
     line.push_str(" = slot tryte[");
-    let wide = tir_of(ty);
-    let size = sized(e, &wide);
+    let size = slot_size(e, ty);
     push_int(&mut line, size);
     line.push_str("]");
     e.slots.push(line);
@@ -1187,8 +1198,7 @@ fn slot_for(e: &mut Emit, name: &str, ty: &str) -> String {
     line.push_str("    ");
     line.push_str(&slot);
     line.push_str(" = slot tryte[");
-    let wide = tir_of(ty);
-    let size = sized(e, &wide);
+    let size = slot_size(e, ty);
     push_int(&mut line, size);
     line.push_str("]");
     e.slots.push(line);
