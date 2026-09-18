@@ -8663,6 +8663,64 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 }
                 _ => {}
             }
+            match target {
+                // `*p = v` and `*p += 2`: the address *read once*, then
+                // the word at it — which is the same walk a field's place
+                // once was and the one thing a reference is *for* (Ch. 3
+                // §2.2 and §5.5's one read of the place).
+                ast::Expr::Deref(a) => {
+                    let held = value(e, &*a, "");
+                    if e.stuck {
+                        return unknown_value();
+                    }
+                    let points = referent_name(&held.ty);
+                    if points.len() == 0 {
+                        e.stuck = true;
+                        return unknown_value();
+                    }
+                    let ty = points.to_string();
+                    let val = if op.same("=") {
+                        let got = value(e, v, &ty);
+                        got.text
+                    } else {
+                        let base_op = compound(op);
+                        if base_op.len() == 0 {
+                            e.stuck = true;
+                            return unknown_value();
+                        }
+                        let was = loaded(e, &ty, &held.text);
+                        let got = value(e, v, &ty);
+                        if e.stuck {
+                            return unknown_value();
+                        }
+                        let addr = fresh(e, "a");
+                        let mut line: String = Vec::new();
+                        line.push_str("    ");
+                        line.push_str(&addr);
+                        line.push_str(" = ");
+                        let how = arith(&base_op);
+                        line.push_str(&how);
+                        line.push_str(" ");
+                        let shown = tir_of(&ty);
+                        line.push_str(&shown);
+                        line.push_str(" ");
+                        line.push_str(&was);
+                        line.push_str(", ");
+                        line.push_str(&got.text);
+                        emit(e, line);
+                        addr
+                    };
+                    if e.stuck {
+                        return unknown_value();
+                    }
+                    store_into(e, &ty, &val, &held.text);
+                    return Value {
+                        text: "".to_string(),
+                        ty: "".to_string(),
+                    };
+                }
+                _ => {}
+            }
             let name = match target {
                 ast::Expr::Name(n) => n.to_string(),
                 _ => {
