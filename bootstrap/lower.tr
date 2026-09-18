@@ -850,6 +850,12 @@ pub fn param_name(t: &ast::Ty) -> String {
 /// TIR has no name for, so a field of that kind is refused (Ch. 2 §4).
 pub fn field_tir(t: &ast::Ty) -> String {
     match t {
+        // And its one-word namesake: a `()` written into a payload slot
+        // stores the word, which is what Ch. 2 §1's width is for — zero,
+        // but the store's own spelling is this one where a spelling is
+        // owed, exactly the way the other implementation writes it
+        // (G9.192's convention for the names in text).
+        ast::Ty::Unit => "t27".to_string(),
         ast::Ty::Ref(held, m) => {
             if unsized_ref(&*held) {
                 "?".to_string()
@@ -939,6 +945,45 @@ pub fn wrapping_op(name: &str) -> String {
     } else {
         "".to_string()
     }
+}
+
+/// Whether `want` starts with `head` and then `sep`, in one walk: a key
+/// is split where the first `.` is read, which is what makes it
+/// `Result.t27.Error`'s own key and not a name in the result (Ch. 4
+/// §2.5's convention print, G9.192's).
+pub fn starts_with(want: &str, head: &str, sep: &str) -> bool {
+    if want.len() < head.len() + sep.len() {
+        return false;
+    }
+    let mut i: taddr = 0;
+    while i < head.len() {
+        if want[i] != head[i] {
+            return false;
+        }
+        i += 1;
+    }
+    let mut j: taddr = 0;
+    while j < sep.len() {
+        if want[i + j] != sep[j] {
+            j += 1;
+            return false;
+        }
+        j += 1;
+    }
+    true
+}
+
+/// Where a first `.` is, or `-1` the way `find_colon` says it: the first
+/// `,` or `.` splits parts off a key, each part being an unbroken span.
+pub fn first_dot(s: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < s.len() {
+        if s[i] == '.' {
+            return i as taddr;
+        }
+        i += 1;
+    }
+    0 - 1
 }
 
 /// What a signature says a function answers with.
@@ -5192,6 +5237,11 @@ fn store_tag(e: &mut Emit, dest: &str, which: taddr, index: taddr) {
             push_int(&mut held, l.discriminants[index]);
             store_into(e, "t1", &held, dest);
         }
+        // And where there is one variant or none, nothing is stored and
+        // nothing is asked: the layout carries no tag, and the store's
+        // own arm is not one more (§5's `None` — the whole of what the
+        // enum is said by is in it)
+        layout::Tag::None => {}
         _ => {
             e.stuck = true;
         }
@@ -5617,8 +5667,18 @@ fn bind_payload(
     }
     let mut i: taddr = 0;
     while i < fields.len() {
+        // What a `_` says about the payload: nothing is bound, though the
+        // address it would have been read at is still asked for — the
+        // answer is the two claims where one of them is where the
+        // scrutinee's *kind* is read from, and nothing says the other
+        // (Ch. 0 §4's wild card gets exactly this much).
+        let is_wild = match &fields[i].pat {
+            ast::Pattern::Wild => true,
+            _ => false,
+        };
         let name = match &fields[i].pat {
             ast::Pattern::Bind(n) => n.to_string(),
+            ast::Pattern::Wild => "(wild)".to_string(),
             _ => {
                 e.stuck = true;
                 return;
@@ -5646,6 +5706,15 @@ fn bind_payload(
         }
         let at = l.variant_offsets[index][i];
         let src = offset_of(e, base, at);
+        // A wild card still stands where its address had to go: the
+        // offset is where the scrutinee's own question was answered, the
+        // same piece of text a binding decides by, and nothing is moved
+        // where nothing is bound (Ch. 0 §4's `_`, which says the *shape*
+        // of the whole but not the piece).
+        if is_wild {
+            i += 1;
+            continue;
+        }
         // A binding read out of **borrowed** storage never owns: the
         // referent still does, and two owners of one value is the bug this
         // whole chapter exists to make impossible (Ch. 3 §1.2). What it
@@ -8132,6 +8201,12 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             emit(e, load);
             Value { text: v, ty: inner }
         }
+        // `()` is a word that is zero: `Result::Ok(())` stores nothing
+        // where the slot's width says nothing can be written, which is
+        // what it is for (Ch. 2 §1's two faces meeting here).
+        ast::Expr::Unit => {
+            Value { text: "const t27 0".to_string(), ty: "t27".to_string() }
+        }
         // An aggregate with nowhere to go is built in a temporary, which a
         // `let` then *renames* rather than copying out of — which is what
         // makes `let p = P { … }` cost nothing (Ch. 3 §1.1).
@@ -10197,6 +10272,58 @@ fn aggregate_type(
     if told >= 0 && e.instances[told].base.same(&head) {
         return want.to_string();
     }
+    // A variant that hides some of the family's argument from its
+    // fields — `Result::Ok` never carries `E` — reads the key the way
+    // the type was already said: `let a: Result<(), Error>` names it
+    // `Result.t27.Error`, and its tail is the whole answer the match's
+    // inference would otherwise search a field for (Ch. 4 §2.3).
+    let at = tyfamily_at(e, &head);
+    if at >= 0 {
+        let ask = e.tyfams[at].tyvars.len();
+        let dot = ".".to_string();
+        if want.len() > head.len() + 1 && starts_with(want, &head, &dot) {
+            let mut rest: String = Vec::new();
+            let mut t: taddr = head.len() + 1;
+            while t < want.len() {
+                rest.push(want[t]);
+                t += 1;
+            }
+            let mut key: Vec<String> = Vec::new();
+            let mut split_at: taddr = 0;
+            let mut ok = true;
+            while split_at + 1 < ask {
+                let d = first_dot(&rest);
+                if d < 0 {
+                    ok = false;
+                    break;
+                }
+                let mut part: String = Vec::new();
+                let mut u: taddr = 0;
+                while u < d as taddr {
+                    part.push(rest[u]);
+                    u += 1;
+                }
+                key.push(part);
+                let mut left: String = Vec::new();
+                let mut v: taddr = (d as taddr) + 1;
+                while v < rest.len() {
+                    left.push(rest[v]);
+                    v += 1;
+                }
+                rest = left;
+                split_at += 1;
+            }
+            if ok && rest.len() > 0 {
+                key.push(rest);
+            }
+            if ok && key.len() == ask {
+                let made = instantiate(e, &head, &key);
+                if made.len() > 0 {
+                    return made;
+                }
+            }
+        }
+    }
     let at = tyfamily_at(e, &head);
     if at < 0 {
         return "".to_string();
@@ -10376,6 +10503,11 @@ fn variant_start(d: &layout::Def, index: taddr) -> taddr {
 fn guess_ty(e: &mut Emit, x: &ast::Expr) -> String {
     match x {
         ast::Expr::Int(v) => "t27".to_string(),
+        // `()` is a word the moment anything has to say its type, and
+        // the word is the type's own one: `Result::Ok(())` is read
+        // from the payload the way `Result<-, Error>`'s key already
+        // says it — `__` (Ch. 2 §1 and the flattening of it).
+        ast::Expr::Unit => "__".to_string(),
         ast::Expr::Bool(b) => "bool".to_string(),
         ast::Expr::Trit(v) => "trit".to_string(),
         ast::Expr::Char(v) => "char".to_string(),
@@ -11187,9 +11319,11 @@ fn nominal(e: &mut Emit, t: &ast::Ty) -> String {
         // what a `fn unwrap_or(self, …)` is given.
         ast::Ty::SelfTy => e.self_ty.to_string(),
         // `()`'s one name among type arguments: a key is a name every
-        // context already says it by, and this is what `param_name` says
-        // too — a key-slot may hold the word only (Ch. 2 §1).
-        ast::Ty::Unit => "t27".to_string(),
+        // context already says it by — `()`'s own punctuation, relaxed,
+        // the way `types.tr`'s flattening writes (writes) it: `__`.
+        // `Result<(), Error>` is `Result.__.Error` everywhere it is
+        // remembered, and nowhere written down.
+        ast::Ty::Unit => "__".to_string(),
         ast::Ty::App(segments, args) => {
             let head = joined(segments);
             // `Raw<T>` is the compiler's, so there is no family to look up
@@ -11546,6 +11680,13 @@ fn subst_ty(
             // A type parameter first — `T` is not an alias and an alias is
             // not a parameter — and then what an alias names (Ch. 0 §3.6).
             let n = subst(tyvars, key, &written);
+            // Except the one name nothing writes: what a key means where
+            // it says `__`, it means the unit the `Result<(), E>` of it
+            // is made from, and the field's own `()` is what the layout
+            // has to see (Ch. 2 §1's name, flattened).
+            if n.same("__") {
+                return ast::Ty::Unit;
+            }
             let at = alias_at(&e.aliases, &n);
             if at >= 0 {
                 let held = ast::copy_ty(&e.aliases[at].ty);
@@ -14665,6 +14806,13 @@ fn owns_drop(
         // droppable struct on `s`'s account.
         match &defs[at].fields[i] {
             ast::Ty::Ref(inner, m) => {
+                i += 1;
+                continue;
+            }
+            // And `()`, which is zero words where all the others are one
+            // or two: a `Result<(), Error>` owns no drop from its `Ok` —
+            // and `drop.__` is a name nobody may make (Ch. 2 §1).
+            ast::Ty::Unit => {
                 i += 1;
                 continue;
             }
