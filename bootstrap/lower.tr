@@ -1189,6 +1189,30 @@ fn base_name(x: &ast::Expr) -> String {
     }
 }
 
+/// The same, but the width named directly: `()` is a word where a storing
+/// of it needs one, and it owes a tryte where a slot is owed — the same
+/// home Ch. 2 §1's `()` answers with (storage is never nothing), and the
+/// one that arm reads a binding's own out of.
+fn slot_for_wide(e: &mut Emit, name: &str, ty: &str, wide: t27) -> String {
+    let mut prefix: String = Vec::new();
+    prefix.push_str(name);
+    prefix.push_str(".slot");
+    let slot = fresh(e, &prefix);
+    let mut line: String = Vec::new();
+    line.push_str("    ");
+    line.push_str(&slot);
+    line.push_str(" = slot tryte[");
+    push_int(&mut line, wide);
+    line.push_str("]");
+    e.slots.push(line);
+    e.locals.push(Slot {
+        name: name.to_string(),
+        slot: slot.to_string(),
+        ty: ty.to_string(),
+    });
+    slot
+}
+
 fn slot_for(e: &mut Emit, name: &str, ty: &str) -> String {
     let mut prefix: String = Vec::new();
     prefix.push_str(name);
@@ -5852,7 +5876,14 @@ fn bind_payload(
         load.push_str(" ");
         load.push_str(&src);
         emit(e, load);
-        let slot = slot_for(e, &name, &ty);
+        // `()` owes a tryte where a slot is owed (Ch. 2 §1's, again —
+        // the same one it takes *textually* where a word is stored
+        // somewhere — `Result::Ok(())` reads its payload exactly here,
+        // which is why nothing may be narrower than its own home).
+        let slot = match &e.defs[which].fields[first + i] {
+            ast::Ty::Unit => slot_for_wide(e, &name, &ty, 1),
+            _ => slot_for(e, &name, &ty),
+        };
         store_into(e, &ty, &got, &slot);
         i += 1;
     }
@@ -8474,13 +8505,20 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             // Storage for a value with nowhere else to be. Named as a
             // temporary and not as an aggregate, because a `let` renames it
             // to the binding's and everything else leaves it as it is —
-            // which is where the name shows.
+            // which is where the name shows. **Storage is never nothing**
+            // even where the layout says it is (Ch. 2 §1), which `copy_in`
+            // has been answering the same way all along.
             let held = fresh(e, "tmp.slot");
             let mut line: String = Vec::new();
             line.push_str("    ");
             line.push_str(&held);
             line.push_str(" = slot tryte[");
-            push_int(&mut line, l.size as t27);
+            let wide = if l.size < 1 {
+                1
+            } else {
+                l.size as t27
+            };
+            push_int(&mut line, wide);
             line.push_str("]");
             e.slots.push(line);
             fill(e, &held, path, &variant, fields);
