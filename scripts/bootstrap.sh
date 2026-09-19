@@ -25,9 +25,14 @@
 set -eu
 
 cd "$(dirname "$0")/.."
-cargo build --quiet --release -p trust -p trustc
 trust=target/release/trust
 trustc=target/release/trustc
+if command -v cargo >/dev/null 2>&1; then
+    cargo build --quiet --release -p trust -p trustc
+elif [ ! -x "$trust" ] || [ ! -x "$trustc" ]; then
+    echo "bootstrap: no cargo and no pre-built binaries to fall back on"
+    exit 1
+fi
 
 # Some loops here run one comparison per file and their iterations do not
 # depend on one another; the machine's cores stayed idle for most of the
