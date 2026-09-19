@@ -2735,6 +2735,21 @@ for every family-instance (`Map.Range.t27.main.closure1` for `Map<I,F>`
 by projection — `*map` is exactly as `I` — `into_iter` on it bakes the
 whole).
 
+**G9.197 — the lane is finished in full, and three small questions
+remain open for it.** The suite (`scripts/bootstrap.sh`) and every
+corpus the double compile (`scripts/ddc.sh`) reaches is byte-identical
+today; what is open now is three small mirrors of the comparison's own
+text and no more: (a)*arm-body* of a `?` written as a statement reads its
+answer into the match's join slot, whose name is written onto the text in
+a place the other implementation does not make, though the semantics are
+identical where it is read; (b) a `match` over a `struct` destructuring
+arm is still refused at the machinery the enum's only makes — the
+discriminant is something a struct never has to test, and the only arm a
+destructuring arm takes has no use of it yet; and (c) the glue of a tiny
+trait implementation is queue-printed with its instantiation before the
+call may ask of it, while the other implementation only queues it when
+the call asks.
+
 **G9.196 — a method that answers an aggregate on a receiver that is not a
 place: the receiver takes the storage, the method takes a temporary, and the
 destination copied out of the temporary.** `"fn".to_string()` as the answer
