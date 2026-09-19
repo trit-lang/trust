@@ -4299,12 +4299,7 @@ fn scalar_arm_body(
         // like every other instruction after one (G9.166). Nor has an
         // arm that **answers nothing**: `()` is a type and an empty
         // string is not (G9.155).
-        // Where the whole match answers nothing, a statement's own does
-        // too: no slot for the answer to take, the way `?`'s Ok arm's
-        // `#q` is bound and that is all (§5.1 says the same thing about
-        // statements as here).
-        let answered_needed = dest.len() > 0 || !want.same("()");
-        if answered_needed && v.ty.len() > 0 && !answers_nothing(&v.ty) {
+        if v.ty.len() > 0 && !answers_nothing(&v.ty) {
             if held.len() == 0 {
                 *ty = v.ty.to_string();
                 let made = ty.to_string();
@@ -4540,20 +4535,9 @@ fn match_place(
                 if dest.len() > 0 {
                     aggregate_tail(e, &arms[a].body, dest, answer);
                 } else {
-                    // Where the whole match answers nothing, an arm that
-                    // answers with no more than a name is already said —
-                    // `?`'s `#q` is used nowhere, and a name says the same
-                    // thing either way (§5.1's answerlessness, again).
-                    let bedding = match &arms[a].body {
-                        ast::Expr::Name(n) => want.same("()"),
-                        _ => false,
-                    };
-                    let mut v = unknown_value();
-                    if !bedding {
-                        v = value(e, &arms[a].body, want);
-                        if e.stuck {
-                            return unknown_value();
-                        }
+                    let v = value(e, &arms[a].body, want);
+                    if e.stuck {
+                        return unknown_value();
                     }
                     // An arm that has already left has nothing to store and
                     // nowhere to store it: `trap()` is the arm `unwrap`
@@ -4569,15 +4553,7 @@ fn match_place(
                     // left has its storage made all the same: its name is
                     // text, and the store sinks like every other instruction
                     // after one — G9.166.)
-                    //
-                    // And where the whole match answers nothing, a
-                    // statement's own does too: the slot would take a
-                    // name nobody reads — `?`'s `#q` needs none (§5.1's
-                    // one answerlessness, read same here).
-                    if (dest.len() > 0 || !want.same("()"))
-                        && v.ty.len() > 0
-                        && !answers_nothing(&v.ty)
-                    {
+                    if v.ty.len() > 0 && !answers_nothing(&v.ty) {
                         if held.len() == 0 {
                             ty = v.ty.to_string();
                             held = temporary_slot(e, &ty);
@@ -7750,21 +7726,8 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                     }
                 }
                 _ => {
-                    // A `?` at a statement's own end answers where nobody
-                    // may read it — the Ok arm's binding is the whole of
-                    // what happens, and the Err arm retires the way
-                    // `return` does (Ch. 5 §4.1 against a statement,
-                    // which §5.1 says has none).
-                    match x {
-                        ast::Expr::Try(inner) => {
-                            let no_dest: String = Vec::new();
-                            let _ = try_expr(e, inner, "()", &no_dest, "");
-                        }
-                        _ => {
-                            let v = value(e, x, "");
-                            let _ = v;
-                        }
-                    }
+                    let v = value(e, x, "");
+                    let _ = v;
                 }
             }
         }
