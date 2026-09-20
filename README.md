@@ -249,6 +249,41 @@ three niche guarantees §6 "elevates from implementation detail to spec":
 - nesting within that budget is free, so `Option<Option<trit>>` is still one
   tryte.
 
+## Diverse Double-Compiling
+
+[`bootstrap/`](bootstrap/) is this compiler a second time, written in the
+language it compiles, so that two implementations of one specification can be
+asked the same questions and held to the same answers — `scripts/bootstrap.sh`
+does that pass by pass, character for character, on a corpus chosen for the
+places two implementations stop agreeing and on whole programs up to the
+compiler's own source.
+
+That is the differential invariant, and it is not Wheeler's question. Whether
+the *image* is what its *source* says is answered by a fixpoint: compile the
+Trust compiler with the Rust one, run the machine image it made on the same
+source, and demand the same module back, byte for byte. `scripts/ddc.sh` runs
+it and prints both hashes whether or not they match:
+
+```
+stage1.tir = trust tir bootstrap/program.tr            # cP(sA), as TIR
+stage2.tir = tritium run stage1.timg < sA.bundle       # stage1(sA), as TIR
+```
+
+The machine has no filesystem, so the source stage2 compiles is handed over
+explicitly, as a length-prefixed bundle with the prelude inside; the equality
+is on TIR's text because the text is the canonical form (TIR §8): two images
+could differ and mean the same thing, two texts cannot.
+
+What it proves, stated the way `docs/ddc.md` §3.4 insists: **the Trust
+compiler's image is what its Trust source says, given `trustc`** — diverse in
+language, and honestly not in origin, since both implementations were written
+here from `spec/`. A corroboration presented as a proof would be worse than
+none. The premise underneath — same source twice, same bytes — is guarded by
+`scripts/reproducible.sh`; the root of trust beneath the parent is `rustc`'s
+(§3.5); and the thing that would let a stranger write the truly diverse
+parent one day is `spec/` being complete enough to implement from, with
+`docs/spec-gaps.md` as the list of where they would have to guess.
+
 ## Repository layout
 
 ```

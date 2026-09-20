@@ -138,46 +138,43 @@ that followed only calls would prune away what the table points at. A
 supertrait, a method that is not object-safe, and a type whose destructor
 this cannot answer for are refused rather than guessed (G9.90).
 
-What is left is Ch. 5's `Vec` and `String` — and those two are a different
-kind of thing.
+What was left is done: **`Vec` and `String` are the library's now.** The
+reason it mattered, restated because it is the whole of why any of this was
+done: their methods were intrinsics — `trustc` expanded `push` into
+hand-written TIR, and no chapter said what that TIR was. A second
+implementation could not derive it, only copy it, which is exactly §3.4's
+warning (G9.73). The move had two prerequisites and each is a named entry:
+how a pointer is written is `Raw<T>` (Ch. 5 §2.7, G9.75), the smallest
+thing that makes the rest ordinary, and a generic type has its destructor
+(G9.82) — a family's `Drop` is one per instantiation, which is the only
+way there is for a `Vec<T>` to drop its elements. What the prelude holds
+is every decision §2.6 makes, written in Trust on `Raw<T>` and nothing
+else the compiler provides, with `String` as `Vec<char>`'s one named
+instantiation. `Box` stays the compiler's, as Ch. 3 §6's reservation of
+raw pointers says it should.
 
-**`Vec` is being moved into the library**, and the road is now paved end to
-end: `Raw<T>` exists (Ch. 5 §2.7), `v[i]` resolves to a method (Ch. 2 §3.1),
-and a growable array with §2.6's growth policy, its shift directions and its
-bounds rule is written in Trust and tested. One prerequisite is left — a
-generic type cannot have a destructor (G9.82) — and then the switch is one
-edit and a long afternoon of deleting.
+What a program may use of the library is what the Trust side lowers, and
+what it may not is refused rather than lowered wrongly — which is the same
+rule the rest of this file is about.
 
-The reason it matters, restated because it is the whole of why any of this
-was done: Its methods are
-intrinsics: `trustc` expands `push` into hand-written TIR, and no chapter
-says what that TIR is. A second implementation cannot derive it, only copy
-it, which is exactly §3.4's warning. The decision is to **move them into the
-library** — Trust source in the prelude, with `alloc` and `free` left as the
-compiler's, because those are the target's and not the language's
-(Ch. 5 §2.1). The prerequisite is a language one: Trust cannot name a raw
-pointer, which is why `Box` is the compiler's today. So the order is decide
-how a pointer is written, then move the library, then this comparison can
-reach the whole of it (G9.73).
-
-Until then, what a program may use of the library is what the Trust side
-lowers, and what it may not is refused rather than lowered wrongly — which
-is the same rule the rest of this file is about.
-
-### 3.3 The comparison has something to compare — **not started**
+### 3.3 The comparison has something to compare — **started**
 
 `stage2` and `cA` must be *the same kind of thing*. The natural artifact here
 is the **TIR module**, which has a canonical textual form (`trustc fmt`) and
 is the compiler's real output; the assembly and the image are downstream of
-it and are compared by the pipeline tests already. So the DDC comparison is:
+it and are compared by the pipeline tests already. sA is the front end
+whole — `bootstrap/program.tr` and the modules it reaches — because only a
+compiler can compile itself (the entry once written here, `main.tr`, is the
+lexer the front end grew past). So the DDC comparison is:
 
 ```
-stage1.tir = trustc tir bootstrap/main.tr          # cP(sA)
-stage2.tir = stage1 build bootstrap/main.tr        # stage1(sA)
+stage1.tir = trust tir bootstrap/program.tr          # cP(sA)
+stage2.tir = tritium run stage1.timg < sA.bundle     # stage1(sA)
 ```
 
 and `stage2.tir` must equal `stage1.tir` byte for byte. That equality is the
 **fixpoint**: a self-hosting compiler compiled by itself reproduces itself.
+`scripts/ddc.sh` runs it and prints both hashes either way.
 
 ### 3.4 The parent must be diverse — **partly, and honestly not**
 
