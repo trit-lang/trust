@@ -157,7 +157,8 @@ What a program may use of the library is what the Trust side lowers, and
 what it may not is refused rather than lowered wrongly — which is the same
 rule the rest of this file is about.
 
-### 3.3 The comparison has something to compare — **started**
+### 3.3 The comparison has something to compare — **all roads green, one
+open at the end**
 
 `stage2` and `cA` must be *the same kind of thing*. The natural artifact here
 is the **TIR module**, which has a canonical textual form (`trustc fmt`) and
@@ -175,6 +176,31 @@ stage2.tir = tritium run stage1.timg < sA.bundle     # stage1(sA)
 and `stage2.tir` must equal `stage1.tir` byte for byte. That equality is the
 **fixpoint**: a self-hosting compiler compiled by itself reproduces itself.
 `scripts/ddc.sh` runs it and prints both hashes either way.
+
+**Where it stands.** Every artifact short of the fixpoint itself is green and
+has been for many rounds: the bootstrap suite (`scripts/bootstrap.sh`) ends
+with its full agreement line — 289 names defined, 18 names resolved, 315
+items rewritten, 58 types laid out, 188 bindings typed, 178 functions
+checked, 4367 lines of TIR, 21045 of whole programs, 28616 of assembly —
+and the layout corpus matches word for word. A 71-case rehearsal battery of
+everything the lane threw up — aggregation moves through `*b` and `let
+inner = *b`, `match f()? { … }` scrutinees, `?` carried through `let`
+written-reference types, owned-enum payload moves, generic impl-method
+answers on `-> T` (`Option.unwrap.char` semantics), if-join wants, direct-tag
+niche non-propagation (layout) — is byte-identical to trustc's own text on
+every case.
+
+The fixpoint itself runs to completion of all 554 functions and the full
+drain (1,479 made/drop-entries, destroy-productive through every recorded
+job) before the VM faults at the final `keep` loop copying
+`out[1228].text` for `drop.Vec.layout.Def` — a word-alignment fault whose
+address shifts with each run's textual content, pointing at no emitted
+instruction and no static type fact. It is reproduced only at the scale of
+the front end whole; every intermediate chunk completes. The suspicion zone
+is narrowed to materialization/copy machinery at high string volume (see
+spec-gaps G9.207 for the full trail), not the lowering itself: the
+byte-comparisons for every separable case agree, and the lane stands open
+*here*, not in the semantics that were raised against it.
 
 ### 3.4 The parent must be diverse — **partly, and honestly not**
 

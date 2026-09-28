@@ -3221,11 +3221,17 @@ fn aggregate_body(e: &mut Emit, b: &ast::Block, owner: &str) {
     if e.stuck {
         return;
     }
-    if e.stuck {
-        return;
-    }
     // A body that already left does not leave twice.
     if e.done {
+        return;
+    }
+    // The block's own mark is above the *parameters*, so its close could
+    // never reach them — and nothing else drops what a function's
+    // aggregate answer's parameters still own at the end of the body's
+    // scope. It is the same thing a scalar body's `drop_all` is for (Ch. 3
+    // §1.4), after the answer is written where it is going.
+    drop_all(e);
+    if e.stuck {
         return;
     }
     emit(e, "    ret".to_string());
@@ -3426,6 +3432,20 @@ fn match_expr(
             if !named {
                 held = place(e, &*inner);
             }
+            direct = false;
+        }
+        // `match f()? { … }` — the `?`'s join is the scrutinee: it is
+        // storage made by the inner match for exactly this, and what the
+        // arms read from someplace with no second reading. What it unwraps
+        // is the carrier's key, the only typing of the join there is
+        // (Ch. 5 §4.1, §5.4).
+        ast::Expr::Try(inner) => {
+            let carried = guess_try_carried(e, &*inner);
+            if carried.len() == 0 {
+                e.stuck = true;
+                return unknown_value();
+            }
+            held = try_expr(e, &*inner, &carried, "", answer);
             direct = false;
         }
         _ => {}
@@ -4694,6 +4714,26 @@ fn guess_in_block(e: &mut Emit, b: &ast::Block, x: &ast::Expr) -> String {
     }
 }
 
+/// What a `?` expression unwraps to, by the *name* of the carrier's
+/// instantiation: `Result.<A>.<E>` and `Option.<A>` keep the carried type
+/// first, and a name nobody made an instance of stays unread — mangled
+/// names are remembered, not parsed (Ch. 5 §4.1, G9.59).
+fn guess_try_carried(e: &mut Emit, inner: &ast::Expr) -> String {
+    let held = guess_agg_ty(e, inner);
+    let at = inst_at(e, &held);
+    if at < 0 {
+        return "".to_string();
+    }
+    let base = e.instances[at].base.to_string();
+    if !base.same("Result") && !base.same("Option") {
+        return "".to_string();
+    }
+    if e.instances[at].key.len() == 0 {
+        return "".to_string();
+    }
+    e.instances[at].key[0].to_string()
+}
+
 fn guess_agg_ty(e: &mut Emit, x: &ast::Expr) -> String {
     match x {
         ast::Expr::Group(inner) => guess_agg_ty(e, &*inner),
@@ -4774,6 +4814,109 @@ fn guess_agg_ty(e: &mut Emit, x: &ast::Expr) -> String {
                 Option::None => "".to_string(),
             }
         }
+        // `e?` answers with what its carrier unwraps, which the instantiation
+        // already names: `Result.<A>.<E>` and `Option.<A>` keep that argument
+        // first, and a name nobody made an instance of stays unread —
+        // mangled names are remembered, not parsed (Ch. 5 §4.1, G9.59).
+        ast::Expr::Try(inner) => {
+            let held = guess_agg_ty(e, inner);
+            let at = inst_at(e, &held);
+            if at < 0 {
+                return "".to_string();
+            }
+            let base = e.instances[at].base.to_string();
+            if !base.same("Result") && !base.same("Option") {
+                return "".to_string();
+            }
+            if e.instances[at].key.len() == 0 {
+                return "".to_string();
+            }
+            e.instances[at].key[0].to_string()
+        }
+        // An element and a field, the way `guess_ty` already works them out:
+        // `e.ty.to_string()` is a method on a field, and its answer is read
+        // off the definition without emitting anything (Ch. 2 §3.1).
+        ast::Expr::Index(base, at) => {
+            let owner = guess_receiver(e, base);
+            let text = str_name();
+            if owner.same(&text) {
+                return "char".to_string();
+            }
+            if !is_array(&owner) {
+                return index_answer(e, &owner);
+            }
+            let which = def_at(&e.defs, &owner);
+            if which < 0 {
+                return "".to_string();
+            }
+            name_head(&e.defs[which].fields[0])
+        }
+        ast::Expr::Field(base, field) => {
+            let owner = guess_receiver(e, base);
+            let which = def_at(&e.defs, &owner);
+            if which < 0 {
+                return "".to_string();
+            }
+            let index = field_at(e, which, field);
+            if index < 0 {
+                return "".to_string();
+            }
+            let named = ref_name(&e.defs[which].fields[index]);
+            if named.len() > 0 {
+                return named;
+            }
+            let written = ast::copy_ty(&e.defs[which].fields[index]);
+            let settled = subst_ty(e, &e.tyvars, &e.key, &written);
+            let answered = nominal(e, &settled);
+            if answered.len() > 0 {
+                return answered;
+            }
+            fat_name(&settled)
+        }
+        _ => "".to_string(),
+    }
+}
+
+/// What type an element's or a field's *receiver* answers with, before
+/// anything is lowered: the aggregate the guess walked to, or a plain
+/// reference's pointee, which is how `e.ty.m()` is read at all (TIR §3).
+fn guess_receiver(e: &mut Emit, base: &ast::Expr) -> String {
+    let held = guess_agg_ty(e, base);
+    if held.len() > 0 {
+        return pointee(e, &held);
+    }
+    match base {
+        ast::Expr::Name(n) => {
+            let at = local_at(e, n);
+            if at < 0 {
+                "".to_string()
+            } else {
+                let ty = e.locals[at].ty.to_string();
+                pointee(e, &ty)
+            }
+        }
+        ast::Expr::Field(a, f) => {
+            let owner = guess_receiver(e, a);
+            let which = def_at(&e.defs, &owner);
+            if which < 0 {
+                return "".to_string();
+            }
+            let index = field_at(e, which, f);
+            if index < 0 {
+                return "".to_string();
+            }
+            let named = ref_name(&e.defs[which].fields[index]);
+            if named.len() > 0 {
+                return named;
+            }
+            let written = ast::copy_ty(&e.defs[which].fields[index]);
+            let settled = subst_ty(e, &e.tyvars, &e.key, &written);
+            let answered = nominal(e, &settled);
+            if answered.len() > 0 {
+                return answered;
+            }
+            fat_name(&settled)
+        }
         _ => "".to_string(),
     }
 }
@@ -4849,7 +4992,38 @@ fn if_expr(
             // §1.2, G9.175). The type is decided by what the then-arm
             // answers with: joining needs it said before either arm is
             // lowered.
-            let guessed = guess_if_aggregate_ty(e, t);
+            let mut guessed = guess_if_aggregate_ty(e, t);
+            if guessed.len() == 0 && want.len() > 0 {
+                // Neither arm has to say at all when where the value is
+                // *going* says it: `let written: Option<ast::Ty>` is the
+                // same inference direction Ch. 4 §2.3 gives any other
+                // binding, and the instance it names is a definition all
+                // along.
+                if def_at(&e.defs, want) >= 0 {
+                    guessed = want.to_string();
+                } else {
+                    // The instance has to *exist* to be found, and a written
+                    // type is what names one before anything is lowered —
+                    // the same asking a receiver's otherwise-unlowered type
+                    // gets (Ch. 4 §2.3).
+                    let made_now = read_instance(e, want);
+                    let _ = made_now;
+                    if def_at(&e.defs, want) >= 0 {
+                        guessed = want.to_string();
+                    }
+                }
+            }
+            if guessed.len() == 0 {
+                // The then-arm did not say: its tail is a `?`, which is the
+                // one shape its answer cannot be read off before it is
+                // lowered. The **else**-arm is the one other place the
+                // answer is written down — an `if` is a type both arms
+                // answer, so either may be the one that says (§5.3).
+                match o {
+                    Option::Some(x) => guessed = guess_agg_ty(e, x),
+                    Option::None => {}
+                }
+            }
             if guessed.len() > 0 && def_at(&e.defs, &guessed) >= 0 {
                 start(e, &then_at);
                 let a2 = branch_block(e, t, want);
@@ -4945,7 +5119,34 @@ fn aggregate_block(e: &mut Emit, b: &ast::Block, dest: &str, owner: &str) {
         i += 1;
     }
     match &b.tail {
-        Option::Some(x) => aggregate_tail(e, x, dest, owner),
+        Option::Some(x) => {
+            match x {
+                ast::Expr::Aggregate(path, fields) => aggregate_tail(e, x, dest, owner),
+                ast::Expr::Nested(held) => aggregate_tail(e, x, dest, owner),
+                ast::Expr::If(c, t, o) => aggregate_tail(e, x, dest, owner),
+                ast::Expr::Match(s, arms) => aggregate_tail(e, x, dest, owner),
+                ast::Expr::Try(inner) => aggregate_tail(e, x, dest, owner),
+                ast::Expr::Call(name, args) => aggregate_tail(e, x, dest, owner),
+                ast::Expr::Method(recv, name, dest2) => aggregate_tail(e, x, dest, owner),
+                // A *value* tail — a name, a place, or something computed:
+                // the scope's drops go before the answer is copied out,
+                // which is the order a scalar body's `drop_all` writes too
+                // (Ch. 3 §1.4): `v` is computed, the drops follow, and what
+                // is answered with is read only after that.
+                _ => {
+                    let v = value(e, x, owner);
+                    if e.stuck {
+                        return;
+                    }
+                    if e.done {
+                        return;
+                    }
+                    close_scope(e, mark, &was);
+                    copy_between(e, &v.text, dest, owner);
+                    return;
+                }
+            }
+        }
         // A block with no tail has nothing to answer with — unless it
         // already **left**, in which case the `return` in it wrote the
         // answer where the answer goes and there is nothing after it
@@ -5000,6 +5201,15 @@ fn aggregate_tail(e: &mut Emit, x: &ast::Expr, dest: &str, owner: &str) {
         // wrote is already where this function's answer goes, so there is
         // nothing to copy.
         ast::Expr::Call(callee, args) => {
+            // `trap()` — a deliberate fault, and the one call that does not
+            // come back (Ch. 5 §4). An arm that ends in it never reaches the
+            // join, which is what `e.done` says: the same read of the same
+            // fact the scalar answer already makes.
+            if callee.same("trap") && args.len() == 0 {
+                emit(e, "    trap F_TRAP".to_string());
+                e.done = true;
+                return;
+            }
             let held = local_at(e, callee);
             let fam = family_at(e, callee);
             let big = returned_aggregate(e, callee);
@@ -7305,7 +7515,12 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                         named
                     } else {
                         let mine = settled_ty(&e.aliases, t);
-                        tir_ty_at(&e.tyvars, &e.key, &mine)
+                        let by_ref = ref_name(&mine);
+                        if by_ref.len() > 0 {
+                            by_ref
+                        } else {
+                            tir_ty_at(&e.tyvars, &e.key, &mine)
+                        }
                     }
                 }
                 Option::None => "".to_string(),
@@ -7319,7 +7534,16 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
             let ty = match written {
                 Option::Some(t) => {
                     let mine = settled_ty(&e.aliases, t);
-                    tir_ty_at(&e.tyvars, &e.key, &mine)
+                    // A written *reference* is an address, the way the
+                    // parameter of one is: `let mut opened: &ast::Expr`
+                    // binds a word, and the name keeps the referent for
+                    // whoever reads through it (Ch. 3 §2.1).
+                    let by_ref = ref_name(&mine);
+                    if by_ref.len() > 0 {
+                        by_ref
+                    } else {
+                        tir_ty_at(&e.tyvars, &e.key, &mine)
+                    }
                 }
                 Option::None => val.ty.to_string(),
             };
@@ -7365,6 +7589,11 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                     // named here (Ch. 3 §1.3).
                     let whole = match v {
                         ast::Expr::Name(n) => true,
+                        // `let inner = *b` is the same move where the name
+                        // was a `Box`: dereferencing it reads the whole of
+                        // what it owned, and reading the box already
+                        // recorded the move (Ch. 5 §2.3).
+                        ast::Expr::Deref(a) => names_a_box(e, &*a),
                         _ => false,
                     };
                     if owns && !whole {
@@ -8713,6 +8942,27 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                     if e.stuck {
                         return unknown_value();
                     }
+                    // What is at the other end of the reference is an
+                    // aggregate, and the rule is the field's rule again
+                    // (Ch. 3 §1.1): what is being written over goes away
+                    // first, then the value is copied in — an aggregate is
+                    // never *stored* (TIR §3).
+                    if def_at(&e.defs, &ty) >= 0 {
+                        let owns = is_raw(&ty)
+                            || holds_name(&e.drops, &ty)
+                            || owns_drop(&e.defs, &e.drops, &ty, 0);
+                        if owns {
+                            drop_one(e, &held.text, &ty);
+                            if e.stuck {
+                                return unknown_value();
+                            }
+                        }
+                        copy_between(e, &val, &held.text, &ty);
+                        return Value {
+                            text: "".to_string(),
+                            ty: "".to_string(),
+                        };
+                    }
                     store_into(e, &ty, &val, &held.text);
                     return Value {
                         text: "".to_string(),
@@ -9173,9 +9423,9 @@ fn method_value(
     // Under a name `Vec<char>` does not have, which is why `same` is not
     // called `eq`: an `eq` here would be hidden by the one `Eq for Vec<char>`
     // writes, and text could not be compared with a literal at all.
-    let mut from_text: String = Vec::new();
+    let mut from_text = false;
     if is_string(e, &owner) && !has_method(e, &owner, name) {
-        from_text = slot.to_string();
+        from_text = true;
         owner = "str".to_string();
     }
     let mut full: String = Vec::new();
@@ -9291,10 +9541,15 @@ fn method_value(
         // goes where this function's answer goes: what a lowering owes
         // `%sret` is exactly what the call owes — no one writes the
         // temporary (TIR §3).
+        // An answer that is *the receiver's own key* — `-> T` — is known
+        // before the call reads it: the whole family is decided, so what a
+        // destined value the call answers can be written where it was
+        // already going, the way every named answer in this path is
+        // (TIR §3).
         if dest.len() > 0 {
             let full_key = receiver_decided_key(e, fam, &given);
-            let answering = instantiate_answer(e, fam, &full_key, &owner);
-            if answering.len() > 0 && answering.same(into_ty) {
+            let modified = modify_term_answer(e, fam, &full_key, &owner);
+            if modified.len() > 0 && modified.same(into_ty) {
                 e.family_into_hints.push(dest.to_string());
                 slot = receiver_at(e, at, recv, &slot, &by_value);
                 if e.stuck {
@@ -9416,10 +9671,17 @@ fn method_value(
             temporary_slot(e, &big)
         };
     }
-    if from_text.len() > 0 {
+    if from_text {
         // The pair is built where the receiver would have been evaluated,
-        // out of storage the `Vec` already holds.
-        slot = as_text(e, &from_text);
+        // out of storage the `Vec` already holds. A receiver that is not a
+        // name has not been *evaluated* yet — it is lowered here, at the
+        // point the pair is built, which is the order the other
+        // implementation writes too.
+        slot = receiver_at(e, at, recv, &slot, &by_value);
+        if e.stuck {
+            return unknown_value();
+        }
+        slot = as_text(e, &slot);
     } else {
         slot = receiver_at(e, at, recv, &slot, &by_value);
     }
@@ -13450,6 +13712,20 @@ fn instantiate_answer(e: &mut Emit, fam: taddr, key: &Vec<String>, self_name: &s
         return full_ty;
     }
     instantiate(e, &head, &parts)
+}
+
+/// The same question, answered for the one answer a family can have that is
+/// not an application: `-> T` is the receiver's own key by substitution
+/// (Ch. 4 §2.5), and every other shape is the application's answer
+/// already. `unwrap(self) -> T` at `T = Vec<char>` is `Vec.char` — nothing
+/// to instantiate, and not refused.
+fn modify_term_answer(e: &mut Emit, fam: taddr, key: &Vec<String>, self_name: &str) -> String {
+    let terms = e.families[fam].ret_term.to_string();
+    if terms.len() == 0 {
+        let made = e.families[fam].ret.to_string();
+        return subst(&e.families[fam].tyvars, key, &made);
+    }
+    instantiate_answer(e, fam, key, self_name)
 }
 
 fn generic_call(

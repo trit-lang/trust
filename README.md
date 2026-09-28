@@ -274,6 +274,13 @@ explicitly, as a length-prefixed bundle with the prelude inside; the equality
 is on TIR's text because the text is the canonical form (TIR §8): two images
 could differ and mean the same thing, two texts cannot.
 
+As of today the road is green end to end except the last segment: all 554
+functions lower and the entire drain (1,479 glue/job entries) completes, and
+the suite's agreement line runs through every artifact before the kept-loop —
+which the VM faults on for reasons narrowed to copy mechanics at high string
+volume, not to lowering semantics (docs/ddc.md §3.3, docs/spec-gaps.md
+G9.207).
+
 What it proves, stated the way `docs/ddc.md` §3.4 insists: **the Trust
 compiler's image is what its Trust source says, given `trustc`** — diverse in
 language, and honestly not in origin, since both implementations were written

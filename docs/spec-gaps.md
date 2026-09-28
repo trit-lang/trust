@@ -2735,6 +2735,100 @@ for every family-instance (`Map.Range.t27.main.closure1` for `Map<I,F>`
 by projection — `*map` is exactly as `I` — `into_iter` on it bakes the
 whole).
 
+**G9.207 — OPEN: the DDC fixpoint faults inside `lower::module`'s kept
+loop, and only at full front-end scale.** The trail in question (class of
+bridges nowhere near semantics): all 554 items lower clean, the drain
+processes 1,479 `Made`/`drop.*`/`glue` entries to completion
+(`g=-1,at=-1`), `tables`/`strings`/`declarations`/`reachable` all answer,
+and the kept loop crashes at `out[1228] = drop.Vec.layout.Def` during
+`out[n].text.to_string()` — word-alignment faults (`F_ALIGN`) whose address
+changes with the textual content (13/35/64/97/101/104/118/119/362447189)
+or device-negative reads (`-3582/-9243`) on runs whose prints differ only in
+volume. Facts established against easier theories:
+
+* `Option.unwrap.char` (the drain turn immediately before) produces text
+  **byte-identical** to the same instantiation alone — it is not the site;
+* instance-key audit reports no tyvar-shaped keys in any instantiated
+  family — it is not a wrong-intent cram;
+* chunk bundles (parse/resolve/macros/lower in modules-declared roots,
+  hundreds of Made) complete identical chunk-level drains and kept-loops;
+* a stress program's 40+ instantiations completes;
+* the `drop.Vec.ast.Ty`/`drop.Vec.layout.Def` **text-ish** strings already
+  printed read fine (their content is well-formed TIR);
+* lengths are sane at the copying point (`textlen=3034` on the last read).
+
+So the fault lives in materialization/copy mechanics the VM only exercises
+at the resulting string volumes (reachable()'s names-live vector or the
+kept-loop's name/text copies), not in lowering semantics — for which the
+book of byte-identical agreements (bootstrap suite, layouts corpus, and a
+71-case rehearsal battery including every gate shape this lane grew) stands
+as the full text.
+
+**G9.198 — `-> T` under a key is the key's own argument.** For a family
+method whose answer is literally a type parameter — `fn unwrap(self) ->
+T` on `impl<T> Option<T>` — the answer at a whole-receiver key is the
+argument by substitution, and is not refused as unreadable and not
+instantiated as a family. The dest-hint machinery of a tail whose answer
+*is* what is being asked reuses the same name read the family
+applications already took; only the *head* is what differs, so the dest
+is written there (`compiler/src/lang/lower.rs` `modify_term_answer`,
+mirrored in `bootstrap/lower.tr`).
+
+**G9.199 — a direct-tag variant never offers a niche spot upward.** A
+`Ty::App` to an enum that is itself direct-tag (`Option<Ty>`) is a
+direct-tag enum too: it would borrow a tag trit from the *inner* type as
+its own spot, which the other implementation refuses because the inner
+discriminants are no guarantee of being consecutive (`layout.rs:824`).
+`layout.tr`'s direct-tag fallback now offers **no spot** — the inner
+type's niche cannot propagate to its containers.
+
+**G9.200 — an `*p` that is assigned an aggregate: the old is dropped in
+place, the value copied over it.** The Assign path treated
+`Deref`-through-a-reference as scalar always; an aggregate arriving there
+(e.g. `*ty = method_returning_ast_ty()`) now goes through the same two
+words a field assignment takes (drop the old, then `copy_between`), so
+the borrow-write is not refused and not overwritten placeless.
+
+**G9.201 — a written reference type in a `let` is a place, not a value.**
+`let mut e: &ast::Expr` — the typebinding that `let`'s written hint takes
+answers as a **borrow of a place**, which `ty` machinery's `ref_name`
+already reads for parameters (`&mut Parser` vs `Parser`); the `let`-tf
+route now gives it the same read, so the later match does not go looking
+for a move mechanism a borrow has no idea yet of.
+
+**G9.202 — `let x = *b;` is the box's whole-name move reading.** A let
+bound to a `*b` deref reads Ch. 5 §2.3's whole-name move — the box is
+read to nothing, and the binding receives its contents. The whole-match
+`stmt` arm treats exactly that `Deref`-of-Box-of-known as the move, the
+same place the params machinery takes one.
+
+**G9.203 — `match f()? { ... }` unwraps before it matches.** A `?` as the
+scrutinee of a `match` computes the carried value into the **join** the
+`?`'s own `Ok`/`Err` arm made, and that slot is the match's scrutinee
+(TIR shows it: `%tmp.slot` written in `^arm.6` is matched at
+`^match.join.5`). The typing of that join is the carrier's key(the
+`Response`), not an invention the caller wrote; both the refusals and the
+uses follow the `try-carried` computation of the receiver.
+
+**G9.204 — an aggregate parameter's own answer is kept until the end.**
+What an aggregate parameter *is* helds its own ownership flag through
+its scope, and a callee-body aggregate_answer's `drop_all(e)` before
+the `ret` accounts for them — not in the frame slot move-out, because a
+parameter's nobody told it anything happened.
+
+**G9.205 — an `if` whose arms both answer what the context expects can be
+typed by the expected type alone.** `<expr-want> = if c { f()? } else {
+literal }` with no hint from the arms: neither arm decides before the
+caller tells it, and the join reads the caller's `read_instance` of the
+want (Ch. 4 §2.3's instantiation-on-ask), matching the guarantee of the
+families' answer-any-way mechanism.
+
+**G9.206 — a `trap()` typed-nothing in an aggregate answer reaches
+whatever expected nothing on the other side.** The `aggregate_tail` arm
+for it emits the trap, marks the arm's own done, and there are no
+answers it carries into a join the other side could wait for — the
+scalar answer's `e.done` rule over the same fact (Ch. 5 §4).
+
 **G9.197 — the lane is finished in full, and three small questions
 remain open for it.** The suite (`scripts/bootstrap.sh`) and every
 corpus the double compile (`scripts/ddc.sh`) reaches is byte-identical

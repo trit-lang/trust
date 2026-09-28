@@ -771,16 +771,17 @@ fn of_enum(defs: &Vec<Def>, at: taddr, depth: taddr) -> Result<Layout, String> {
     }
     size = align_to(size, align);
     // The tag's unused values are niches of their own: a one-tryte tag with
-    // three variants leaves 19 680 patterns invalid.
+    // three variants leaves 19 680 patterns invalid. They are left *here* —
+    // an enclosing enum is offered none of them, because they are contiguous
+    // only when the discriminants are, and nothing here may assume they are
+    // (the other implementation's direct-tag fallback makes the same call).
     let spare = capacity(width * TRITS) - (variants as taddr);
-    let lo: t27 = 0;
-    let hi = (variants - 1) as t27;
     Result::Ok(Layout {
         size: size,
         align: align,
         offsets: Vec::new(),
         niches: spare,
-        spot: Option::Some(Spot { offset: 0, trits: width * TRITS, lo: lo, hi: hi }),
+        spot: Option::None,
         tag: Tag::Direct(width, 0),
         discriminants: discs,
         variant_offsets: offs,
