@@ -106,6 +106,24 @@ impl Memory {
             self.set_tryte(i as i128, t as i128);
         }
     }
+
+    /// Every allocated page, as (start address, contents) pairs. For
+    /// diagnostics: snapshots and core dumps (DDC tooling, `crate::vm::diag`).
+    pub fn pages(&self) -> impl Iterator<Item = (i128, &[i16])> {
+        self.pages
+            .iter()
+            .map(|(start, contents)| (*start, &contents[..]))
+    }
+
+    /// Drop every page and install the given ones — the reverse of `pages`.
+    pub fn restore_pages(&mut self, pages: Vec<(i128, Box<[i16]>)>) {
+        self.pages = pages.into_iter().collect();
+    }
+
+    /// Trytes per page, exposed for snapshot tooling.
+    pub fn page_len() -> usize {
+        PAGE as usize
+    }
 }
 
 fn split(addr: i128) -> (i128, usize) {

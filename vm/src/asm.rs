@@ -406,12 +406,30 @@ enum InstForm {
 /// Assemble a source file into an image.
 pub fn assemble(src: &str) -> Result<Vec<i16>, Vec<AsmError>> {
     match assemble_inner(src) {
-        Ok(image) => Ok(image),
+        Ok((image, _)) => Ok(image),
         Err(e) => Err(vec![e]),
     }
 }
 
-fn assemble_inner(src: &str) -> R<Vec<i16>> {
+/// Assemble, and also yield every label and equate with its address: the
+/// symbol table, by name. Diagnostic tooling (`tritium asm -s`) prints this
+/// so that a PC can be mapped back to the function it lies in.
+pub fn assemble_with_symbols(src: &str) -> Result<(Vec<i16>, Vec<(String, i128)>), Vec<AsmError>> {
+    match assemble_inner(src) {
+        Ok((image, syms)) => {
+            let mut table: Vec<(String, i128)> = syms
+                .values
+                .into_iter()
+                .map(|(name, v)| (name, v.to_i128().unwrap_or(0)))
+                .collect();
+            table.sort_by_key(|(_, addr)| *addr);
+            Ok((image, table))
+        }
+        Err(e) => Err(vec![e]),
+    }
+}
+
+fn assemble_inner(src: &str) -> R<(Vec<i16>, Symbols)> {
     let mut syms = Symbols {
         values: BTreeMap::new(),
     };
@@ -481,7 +499,7 @@ fn assemble_inner(src: &str) -> R<Vec<i16>> {
         }
         emit(stmt, &syms, &mut image)?;
     }
-    Ok(image)
+    Ok((image, syms))
 }
 
 fn size_of(kind: &Kind) -> i128 {

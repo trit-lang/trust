@@ -575,7 +575,11 @@ fn product(parts: &Vec<Layout>, linear: bool) -> Layout {
         match &parts[f].spot {
             Option::Some(s) => {
                 let here = spot_count(&s);
-                if here > best {
+                // A tie goes to the *later* field's spot, because that is
+                // what the other implementation's scan keeps (G9.208): two
+                // adjacent `bool` fields offer the same niche, and `Option`'s
+                // tag lands 1 tryte apart on the two readings of which wins.
+                if here >= best {
                     best = here;
                     spot = Option::Some(Spot {
                         offset: offsets[f] + s.offset,

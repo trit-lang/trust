@@ -674,22 +674,22 @@ fn replace_children(s: &mut Sub, e: ast::Expr, arg: &ast::Expr) -> ast::Expr {
         }
         ast::Expr::Group(inner) => ast::Expr::Group(Box::new(replace_param(s, *inner, arg))),
         ast::Expr::Nested(b) => {
-            let mut inner = *b;
-            inner.stmts = replace_stmts(s, inner.stmts, arg);
-            inner.tail = replace_tail(s, inner.tail, arg);
-            ast::Expr::Nested(Box::new(inner))
+            let inner = *b;
+            let stmts = replace_stmts(s, inner.stmts, arg);
+            let tail = replace_tail(s, inner.tail, arg);
+            ast::Expr::Nested(Box::new(ast::Block { stmts: stmts, tail: tail }))
         }
         ast::Expr::If(c, t, o) => {
             let cond = Box::new(replace_param(s, *c, arg));
-            let mut then = *t;
-            then.stmts = replace_stmts(s, then.stmts, arg);
-            then.tail = replace_tail(s, then.tail, arg);
+            let inner = *t;
+            let stmts = replace_stmts(s, inner.stmts, arg);
+            let tail = replace_tail(s, inner.tail, arg);
             let mut other: Option<Box<ast::Expr>> = Option::None;
             match o {
                 Option::Some(e2) => other = Option::Some(Box::new(replace_param(s, *e2, arg))),
                 Option::None => {}
             }
-            ast::Expr::If(cond, Box::new(then), other)
+            ast::Expr::If(cond, Box::new(ast::Block { stmts: stmts, tail: tail }), other)
         }
         ast::Expr::Match(v, arms) => {
             let scrutinee = Box::new(replace_param(s, *v, arg));
@@ -707,23 +707,23 @@ fn replace_children(s: &mut Sub, e: ast::Expr, arg: &ast::Expr) -> ast::Expr {
         }
         ast::Expr::While(c, b) => {
             let cond = Box::new(replace_param(s, *c, arg));
-            let mut body = *b;
-            body.stmts = replace_stmts(s, body.stmts, arg);
-            body.tail = replace_tail(s, body.tail, arg);
-            ast::Expr::While(cond, Box::new(body))
+            let inner = *b;
+            let stmts = replace_stmts(s, inner.stmts, arg);
+            let tail = replace_tail(s, inner.tail, arg);
+            ast::Expr::While(cond, Box::new(ast::Block { stmts: stmts, tail: tail }))
         }
         ast::Expr::Loop(b) => {
-            let mut body = *b;
-            body.stmts = replace_stmts(s, body.stmts, arg);
-            body.tail = replace_tail(s, body.tail, arg);
-            ast::Expr::Loop(Box::new(body))
+            let inner = *b;
+            let stmts = replace_stmts(s, inner.stmts, arg);
+            let tail = replace_tail(s, inner.tail, arg);
+            ast::Expr::Loop(Box::new(ast::Block { stmts: stmts, tail: tail }))
         }
         ast::Expr::For(name, it, b) => {
             let over = Box::new(replace_param(s, *it, arg));
-            let mut body = *b;
-            body.stmts = replace_stmts(s, body.stmts, arg);
-            body.tail = replace_tail(s, body.tail, arg);
-            ast::Expr::For(name, over, Box::new(body))
+            let inner = *b;
+            let stmts = replace_stmts(s, inner.stmts, arg);
+            let tail = replace_tail(s, inner.tail, arg);
+            ast::Expr::For(name, over, Box::new(ast::Block { stmts: stmts, tail: tail }))
         }
         ast::Expr::Break(v) => ast::Expr::Break(replace_tail(s, v, arg)),
         ast::Expr::Return(v) => ast::Expr::Return(replace_tail(s, v, arg)),
@@ -841,10 +841,10 @@ fn sub_children(s: &mut Sub, e: ast::Expr) -> ast::Expr {
         }
         ast::Expr::For(name, it, b) => {
             let over = Box::new(sub_expr(s, *it));
-            let mut body = *b;
-            body.stmts = sub_stmts(s, body.stmts);
-            body.tail = sub_tail(s, body.tail);
-            ast::Expr::For(name, over, Box::new(body))
+            let inner = *b;
+            let stmts = sub_stmts(s, inner.stmts);
+            let tail = sub_tail(s, inner.tail);
+            ast::Expr::For(name, over, Box::new(ast::Block { stmts: stmts, tail: tail }))
         }
         ast::Expr::Break(v) => ast::Expr::Break(sub_tail(s, v)),
         ast::Expr::Return(v) => ast::Expr::Return(sub_tail(s, v)),
@@ -1126,10 +1126,10 @@ fn rename_children(e: ast::Expr, tag: taddr, renames: &mut Renames) -> ast::Expr
         ast::Expr::MacroRepeat(stmts) => ast::Expr::MacroRepeat(rename_stmts(stmts, tag, renames)),
         ast::Expr::For(name, it, b) => {
             let over = Box::new(rename_expr(*it, tag, renames));
-            let mut body = *b;
-            body.stmts = rename_stmts(body.stmts, tag, renames);
-            body.tail = rename_tail(body.tail, tag, renames);
-            ast::Expr::For(name, over, Box::new(body))
+            let inner = *b;
+            let stmts = rename_stmts(inner.stmts, tag, renames);
+            let tail = rename_tail(inner.tail, tag, renames);
+            ast::Expr::For(name, over, Box::new(ast::Block { stmts: stmts, tail: tail }))
         }
         ast::Expr::Break(v) => ast::Expr::Break(rename_tail(v, tag, renames)),
         ast::Expr::Return(v) => ast::Expr::Return(rename_tail(v, tag, renames)),
@@ -1232,22 +1232,22 @@ fn rename_uses_children(e: ast::Expr, renames: &Renames) -> ast::Expr {
         }
         ast::Expr::Group(inner) => ast::Expr::Group(Box::new(rename_uses(*inner, renames))),
         ast::Expr::Nested(b) => {
-            let mut inner = *b;
-            inner.stmts = uses_stmts(inner.stmts, renames);
-            inner.tail = uses_tail(inner.tail, renames);
-            ast::Expr::Nested(Box::new(inner))
+            let inner = *b;
+            let stmts = uses_stmts(inner.stmts, renames);
+            let tail = uses_tail(inner.tail, renames);
+            ast::Expr::Nested(Box::new(ast::Block { stmts: stmts, tail: tail }))
         }
         ast::Expr::If(c, t, o) => {
             let cond = Box::new(rename_uses(*c, renames));
-            let mut then = *t;
-            then.stmts = uses_stmts(then.stmts, renames);
-            then.tail = uses_tail(then.tail, renames);
+            let inner = *t;
+            let stmts = uses_stmts(inner.stmts, renames);
+            let tail = uses_tail(inner.tail, renames);
             let mut other: Option<Box<ast::Expr>> = Option::None;
             match o {
                 Option::Some(e2) => other = Option::Some(Box::new(rename_uses(*e2, renames))),
                 Option::None => {}
             }
-            ast::Expr::If(cond, Box::new(then), other)
+            ast::Expr::If(cond, Box::new(ast::Block { stmts: stmts, tail: tail }), other)
         }
         ast::Expr::Match(v, arms) => {
             let scrutinee = Box::new(rename_uses(*v, renames));
@@ -1265,23 +1265,23 @@ fn rename_uses_children(e: ast::Expr, renames: &Renames) -> ast::Expr {
         }
         ast::Expr::While(c, b) => {
             let cond = Box::new(rename_uses(*c, renames));
-            let mut body = *b;
-            body.stmts = uses_stmts(body.stmts, renames);
-            body.tail = uses_tail(body.tail, renames);
-            ast::Expr::While(cond, Box::new(body))
+            let inner = *b;
+            let stmts = uses_stmts(inner.stmts, renames);
+            let tail = uses_tail(inner.tail, renames);
+            ast::Expr::While(cond, Box::new(ast::Block { stmts: stmts, tail: tail }))
         }
         ast::Expr::Loop(b) => {
-            let mut body = *b;
-            body.stmts = uses_stmts(body.stmts, renames);
-            body.tail = uses_tail(body.tail, renames);
-            ast::Expr::Loop(Box::new(body))
+            let inner = *b;
+            let stmts = uses_stmts(inner.stmts, renames);
+            let tail = uses_tail(inner.tail, renames);
+            ast::Expr::Loop(Box::new(ast::Block { stmts: stmts, tail: tail }))
         }
         ast::Expr::For(name, it, b) => {
             let over = Box::new(rename_uses(*it, renames));
-            let mut body = *b;
-            body.stmts = uses_stmts(body.stmts, renames);
-            body.tail = uses_tail(body.tail, renames);
-            ast::Expr::For(name, over, Box::new(body))
+            let inner = *b;
+            let stmts = uses_stmts(inner.stmts, renames);
+            let tail = uses_tail(inner.tail, renames);
+            ast::Expr::For(name, over, Box::new(ast::Block { stmts: stmts, tail: tail }))
         }
         ast::Expr::Break(v) => ast::Expr::Break(uses_tail(v, renames)),
         ast::Expr::Return(v) => ast::Expr::Return(uses_tail(v, renames)),

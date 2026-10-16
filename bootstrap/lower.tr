@@ -2006,13 +2006,13 @@ fn raw_method(
     }
     // Both arguments before the room is read: what a call is given is
     // evaluated where it is written, and the checking comes after (§5.5).
-    let i = value(e, &args[0], "taddr");
+    let i = arg_value(e, &args[0], "taddr");
     if e.stuck {
         return unknown_value();
     }
     let mut written: String = Vec::new();
     if name.same("write") {
-        let v = value(e, &args[1], &elem);
+        let v = arg_value(e, &args[1], &elem);
         if e.stuck {
             return unknown_value();
         }
@@ -2581,6 +2581,47 @@ fn indexed_by_method(e: &mut Emit, held: &Value, at: &ast::Expr) -> Value {
         return unknown_value();
     }
     Value { text: got.text, ty: points_at }
+}
+
+/// Before a write *through* a field or a dereference of an element —
+/// `v[i].f = x` — `index`'s answer is asked for as a *type*, and that asks
+/// for the definition's place in the text ahead of the exclusive walk's
+/// `index_mut`: written->shared, exactly as the type the read was about says
+/// (G9.219). Only a name-based receiver is asked: how far the walk may go
+/// before a vector is visible is written where the elements are named.
+fn probe_nested_index_writes(e: &mut Emit, x: &ast::Expr) {
+    let mut cur: &ast::Expr = x;
+    loop {
+        match cur {
+            ast::Expr::Index(base, at) => {
+                match &*base {
+                    ast::Expr::Name(n) => {
+                        let lt = local_at(e, n);
+                        if lt >= 0 {
+                            let named = e.locals[lt].ty.to_string();
+                            let owned = referent_name(&named);
+                            let owner = if owned.len() > 0 { owned } else { named };
+                            let inst = inst_at(e, &owner);
+                            if inst >= 0 {
+                                let base_n = e.instances[inst].base.to_string();
+                                let probe = index_named(&base_n, false);
+                                let primary = index_named(&base_n, true);
+                                if family_at(e, &probe) >= 0 && family_at(e, &primary) >= 0 {
+                                    let key = ast::copy_names(&e.instances[inst].key);
+                                    queue(e, &probe, &key);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            ast::Expr::Field(b, name) => cur = &*b,
+            ast::Expr::Deref(inner) => cur = &*inner,
+            _ => return,
+        }
+    }
 }
 
 /// `s[i]` where `s` is text: the first thing this language lowers that can
@@ -4102,6 +4143,7 @@ fn match_scalar(
             emit(e, line);
 
             let was = owns_now(e);
+            let moved_was = moved_now(e);
             let mut agreed: Vec<Owns> = Vec::new();
             let mut reaches = false;
             let mut held_a: String = Vec::new();
@@ -4109,6 +4151,7 @@ fn match_scalar(
             let mut n: taddr = 0;
             while n < arms.len() {
                 owns_back(e, &was);
+            moved_back(e, &moved_was);
                 let here = ats[n].to_string();
                 start(e, &here);
                 let reached = scalar_arm_body(e, &arms[n], want, dest, answer,
@@ -4145,6 +4188,7 @@ fn match_scalar(
 
     // Otherwise each arm is a test, and the tests are the arms in order.
     let was = owns_now(e);
+            let moved_was = moved_now(e);
     let mut agreed: Vec<Owns> = Vec::new();
     let mut n: taddr = 0;
     let mut fell_through = true;
@@ -4155,6 +4199,7 @@ fn match_scalar(
         let next_at = label(e, "arm.next");
         let arm_at = label(e, "arm");
         owns_back(e, &was);
+            moved_back(e, &moved_was);
         let arm = &arms[n];
         match &arm.guard {
             Option::Some(g) => {
@@ -4491,6 +4536,7 @@ fn match_place(
             // before any of them, and what comes after the join is what all
             // of them agreed about (Ch. 3 §1.2).
             let was = owns_now(e);
+            let moved_was = moved_now(e);
             let mut agreed: Vec<Owns> = Vec::new();
             // Whether any arm arrives for the join: one whose body left
             // (`return`, `break`, `trap()`) has nothing to store and
@@ -4501,6 +4547,7 @@ fn match_place(
             while n < order.len() {
                 let a = order[n];
                 owns_back(e, &was);
+            moved_back(e, &moved_was);
                 let catch = catches_all(&arms[a]);
                 let none: taddr = 0 - 1;
                 let index = if catch {
@@ -4551,6 +4598,34 @@ fn match_place(
                 bind_payload(e, which, index, &base, &l, &arms[a], borrowed);
                 if e.stuck {
                     return unknown_value();
+                }
+                // An arm's guard is evaluated where the pattern's bindings
+                // are already made, and a `false` hands the value to the
+                // next arm — `Method(recv, name, args) if !is_place_expr(recv)`
+                // had nobody asking for it until the aggregate_ tail-routing
+                // arms made one (G9.217, Ch. 2 §5.4).
+                match &arms[a].guard {
+                    Option::Some(g) => {
+                        if next_at.len() == 0 {
+                            e.stuck = true;
+                            return unknown_value();
+                        }
+                        let ok_at = label(e, "guard.ok");
+                        let gv = value(e, g, "t1");
+                        if e.stuck {
+                            return unknown_value();
+                        }
+                        let mut br: String = Vec::new();
+                        br.push_str("    br2 ");
+                        br.push_str(&gv.text);
+                        br.push_str(", ");
+                        br.push_str(&ok_at);
+                        br.push_str(", ");
+                        br.push_str(&next_at);
+                        emit(e, br);
+                        start(e, &ok_at);
+                    }
+                    Option::None => {}
                 }
                 if dest.len() > 0 {
                     aggregate_tail(e, &arms[a].body, dest, answer);
@@ -4954,6 +5029,7 @@ fn if_expr(
             // what was known *before* the first: two arms are alternatives
             // and not a sequence (Ch. 3 §1.2).
             let was = owns_now(e);
+            let moved_was = moved_now(e);
             start(e, &then_at);
             if dest.len() > 0 {
                 aggregate_block(e, t, dest, owner);
@@ -4963,6 +5039,7 @@ fn if_expr(
                 jump(e, &join_at);
                 let after_then = owns_now(e);
                 owns_back(e, &was);
+            moved_back(e, &moved_was);
                 start(e, &else_at);
                 match o {
                     Option::Some(x) => {
@@ -5041,6 +5118,7 @@ fn if_expr(
                 jump(e, &join_at);
                 let after_then = owns_now(e);
                 owns_back(e, &was);
+            moved_back(e, &moved_was);
                 start(e, &else_at);
                 match o {
                     Option::Some(x) => {
@@ -5068,6 +5146,33 @@ fn if_expr(
                 return unknown_value();
             }
             let ty = a.ty.to_string();
+            if ty.len() == 0 {
+                // The arms answered with nothing, the way a statement's
+                // `if` does: control flow is the whole of what is emitted,
+                // and nothing is stored — `while c { if c { … } }` ends its
+                // loop body *this* way, which is why it was always deferred
+                // (G9.216).
+                jump(e, &join_at);
+                let after_then = owns_now(e);
+                owns_back(e, &was);
+            moved_back(e, &moved_was);
+                start(e, &else_at);
+                match o {
+                    Option::Some(x) => {
+                        let b = value(e, x, want);
+                        if e.stuck {
+                            return unknown_value();
+                        }
+                        let _ = b;
+                    }
+                    Option::None => {}
+                }
+                jump(e, &join_at);
+                let after_else = owns_now(e);
+                owns_agree(e, &after_then, &after_else);
+                start(e, &join_at);
+                return Value { text: "".to_string(), ty: "".to_string() };
+            }
             // The slot is made where the first arm has its answer ready,
             // which is what decides the number it gets.
             let held = temporary_slot(e, &ty);
@@ -5075,6 +5180,7 @@ fn if_expr(
             jump(e, &join_at);
             let after_then = owns_now(e);
             owns_back(e, &was);
+            moved_back(e, &moved_was);
 
         start(e, &else_at);
         match o {
@@ -5110,6 +5216,7 @@ fn if_expr(
 fn aggregate_block(e: &mut Emit, b: &ast::Block, dest: &str, owner: &str) {
     let mark = e.owned.len();
     let was = owns_now(e);
+            let moved_was = moved_now(e);
     let mut i: taddr = 0;
     while i < b.stmts.len() {
         stmt(e, &b.stmts[i], "");
@@ -5127,6 +5234,24 @@ fn aggregate_block(e: &mut Emit, b: &ast::Block, dest: &str, owner: &str) {
                 ast::Expr::Match(s, arms) => aggregate_tail(e, x, dest, owner),
                 ast::Expr::Try(inner) => aggregate_tail(e, x, dest, owner),
                 ast::Expr::Call(name, args) => aggregate_tail(e, x, dest, owner),
+                // A *method* whose receiver is not a place is a **value** tail
+                // as far as the answer's order goes: the receiver takes its
+                // own temporary first, so the callee's answer lands in one
+                // too, and the scope's drops go before that temporary is
+                // copied out — `"".to_string()` at the end of `carrier` is
+                // the lane's case (G9.213).
+                ast::Expr::Method(recv, name, dest2) if !is_place_expr(recv) => {
+                    let v = value(e, x, owner);
+                    if e.stuck {
+                        return;
+                    }
+                    if e.done {
+                        return;
+                    }
+                    close_scope(e, mark, &was);
+                    copy_between(e, &v.text, dest, owner);
+                    return;
+                }
                 ast::Expr::Method(recv, name, dest2) => aggregate_tail(e, x, dest, owner),
                 // A *value* tail — a name, a place, or something computed:
                 // the scope's drops go before the answer is copied out,
@@ -5224,11 +5349,6 @@ fn aggregate_tail(e: &mut Emit, x: &ast::Expr, dest: &str, owner: &str) {
             let v = aggregate_call(e, callee, &big, dest, "", args);
             let _ = v;
         }
-        // A *method* in tail position is the same fact: what the callee
-        // wrote into `%sret` is already this function's answer. It was
-        // refused until `method_value` existed to be told a destination,
-        // because the alternative was a copy through a temporary that the
-        // other implementation does not write.
         ast::Expr::Method(recv, name, args) => {
             let v = method_value(e, &*recv, name, args, dest, owner);
             let _ = v;
@@ -5596,6 +5716,7 @@ fn copy_fields(e: &mut Emit, from: &str, to: &str, owner: &str) -> bool {
 fn branch_block(e: &mut Emit, b: &ast::Block, want: &str) -> Value {
     let mark = e.owned.len();
     let was = owns_now(e);
+            let moved_was = moved_now(e);
     let mut i: taddr = 0;
     while i < b.stmts.len() {
         stmt(e, &b.stmts[i], want);
@@ -5618,12 +5739,17 @@ fn branch_block(e: &mut Emit, b: &ast::Block, want: &str) -> Value {
             // and its ending is a statement under either (G9.155).
             // Where something *was* wanted none of them can answer it, and
             // the refusal `value` gives is the right one.
+            // A trailing `while` or `loop` is deferred the way it always
+            // was, but not an `if` or a `match`: either of those may answer
+            // with a value the block then has — `let tag = match …` whose
+            // arm ends in an `if` is the lane's case, and `value` reads the
+            // arms' answers itself (G9.216). What answers with nothing falls
+            // out of the same reading: `if_expr` below sees arms that
+            // answered with nothing and emits control flow and no storage.
             let mut deferred = false;
             if want.len() == 0 || answers_nothing(want) {
                 match x {
                     ast::Expr::While(c, wb) => deferred = true,
-                    ast::Expr::If(c, wb, ob) => deferred = true,
-                    ast::Expr::Match(s, arms) => deferred = true,
                     ast::Expr::Loop(wb) => deferred = true,
                     _ => {}
                 }
@@ -5696,6 +5822,7 @@ fn if_statement(
     // is lowered from what was known *before* the first, not from what the
     // first left behind — the two are alternatives and not a sequence.
     let was = owns_now(e);
+            let moved_was = moved_now(e);
     start(e, &then_at);
     statements(e, t, ret);
     if e.stuck {
@@ -5706,6 +5833,7 @@ fn if_statement(
     }
     let after_then = owns_now(e);
     owns_back(e, &was);
+            moved_back(e, &moved_was);
 
     start(e, &else_at);
     match o {
@@ -5741,6 +5869,7 @@ fn if_statement(
 fn statements(e: &mut Emit, b: &ast::Block, ret: &str) {
     let mark = e.owned.len();
     let was = owns_now(e);
+            let moved_was = moved_now(e);
     let mut i: taddr = 0;
     while i < b.stmts.len() {
         stmt(e, &b.stmts[i], ret);
@@ -6170,6 +6299,7 @@ fn loop_expr(e: &mut Emit, b: &ast::Block, want: &str, ret: &str) -> Value {
     start(e, &head);
     let mark = e.owned.len();
     let was = owns_now(e);
+            let moved_was = moved_now(e);
     e.loops.push(LoopCtx {
         head: head.to_string(),
         exit: exit.to_string(),
@@ -6370,6 +6500,7 @@ fn joined_owns(a: &Owns, b: &Owns) -> Owns {
     Owns::Maybe
 }
 
+
 /// Everything this function still owns, for a path that leaves it.
 ///
 /// Nothing is retired: a `return` leaves along **one** path while the
@@ -6413,6 +6544,7 @@ fn close_scope(e: &mut Emit, mark: taddr, was: &Vec<Owns>) {
     }
 }
 
+
 /// What is known about every local's ownership, saved across a branch.
 fn owns_now(e: &Emit) -> Vec<Owns> {
     let mut out: Vec<Owns> = Vec::new();
@@ -6422,6 +6554,28 @@ fn owns_now(e: &Emit) -> Vec<Owns> {
         i += 1;
     }
     out
+}
+
+/// Which of each local's fields went somewhere else, saved the same way —
+/// **separately**, since the two lists are handed around by different arms.
+/// A branch that left is put back the same way both are (G9.221).
+fn moved_now(e: &Emit) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = Vec::new();
+    let mut i: taddr = 0;
+    while i < e.owned.len() {
+        out.push(ast::copy_names(&e.owned[i].moved));
+        i += 1;
+    }
+    out
+}
+
+/// Put back what a branch that left said about single-field moves.
+fn moved_back(e: &mut Emit, was: &Vec<Vec<String>>) {
+    let mut i: taddr = 0;
+    while i < was.len() && i < e.owned.len() {
+        e.owned[i].moved = ast::copy_names(&was[i]);
+        i += 1;
+    }
 }
 
 /// Put back what a branch that **left** said about ownership.
@@ -6492,11 +6646,48 @@ fn mark_owning_again(e: &mut Emit, name: &str) {
 /// dropped when the scope ends is the fields not named here. Matching over
 /// `t.tok` carries that field into the arms' bindings and leaves `t.at`
 /// where it was.
+///
+/// A field nothing inside needs dropping is **copied** by the read, not
+/// moved: `match p.spot` where `spot: Option<Spot>` holds only scalars
+/// leaves `p` whole at the join, and the scope's last drop is the type's
+/// own glue call and not the fields one at a time (G9.210).
+fn field_is_copyable(e: &Emit, name: &str, field: &str) -> bool {
+    let at = local_at(e, name);
+    if at < 0 {
+        return false;
+    }
+    let dt = def_at(&e.defs, &e.locals[at].ty);
+    if dt < 0 {
+        return false;
+    }
+    let mut i: taddr = 0;
+    while i < e.defs[dt].field_names.len() {
+        if e.defs[dt].field_names[i].same(field) {
+            match &e.defs[dt].fields[i] {
+                ast::Ty::Ref(inner, m) => return true,
+                ast::Ty::Unit => return true,
+                _ => {
+                    let inner = name_head(&e.defs[dt].fields[i]);
+                    if inner.len() == 0 {
+                        return false;
+                    }
+                    return !owns_drop(&e.defs, &e.drops, &inner, 0);
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 fn move_field(e: &mut Emit, name: &str, field: &str) {
     let mut i = e.owned.len();
     while i > 0 {
         i -= 1;
         if e.owned[i].name.same(name) {
+            if field_is_copyable(e, name, field) {
+                return;
+            }
             let mut k: taddr = 0;
             while k < e.owned[i].moved.len() {
                 if e.owned[i].moved[k].same(field) {
@@ -6509,6 +6700,13 @@ fn move_field(e: &mut Emit, name: &str, field: &str) {
         }
     }
 }
+
+/// Whether the latest scope entry for `name` already says `field` went
+/// somewhere else — the question a write-over asks (G9.227) is inlined where
+/// it is asked; a helper here would take a payload of one arm's destructuring
+/// (an `&str` bound by `bind_payload`) and hand it on, which is a shape laid
+/// down differently — keep the ask and the answer in the same frame.
+
 
 /// Record that a local was moved out of (Ch. 3 §1.2).
 ///
@@ -7794,6 +7992,7 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
                     start(e, &body);
                     let mark = e.owned.len();
                     let was = owns_now(e);
+            let moved_was = moved_now(e);
                     // A `while` is a loop, so `break` and `continue` mean
                     // it too: its head is what one goes back to and its end
                     // is what the other goes to. It answers with nothing,
@@ -7967,6 +8166,34 @@ fn stmt(e: &mut Emit, s: &ast::Stmt, ret: &str) {
 }
 
 /// What an expression is, as a TIR value.
+/// One argument's value, with the one implicit conversion a call site has
+/// and no `&` written to show: `&Vec<char>` where a `&str` is wanted is the
+/// same two words `borrowed_place` builds for `&x` (Ch. 2 §4), and an
+/// argument that is *already a reference* — `written_length(len)` where
+/// `len: &String` — never passes through that place and needs it here
+/// (G9.211).
+fn arg_value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
+    let v = value(e, x, want);
+    if e.stuck {
+        return v;
+    }
+    let text = str_name();
+    let object = referent_name(want);
+    let inner = referent_name(&v.ty);
+    if object.same(&text) && is_string(e, &inner) {
+        let from = v.text.to_string();
+        let made = as_text(e, &from);
+        if e.stuck {
+            return unknown_value();
+        }
+        let mut kind: String = Vec::new();
+        kind.push('&');
+        kind.push_str(&text);
+        return Value { text: made, ty: kind };
+    }
+    v
+}
+
 fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
     match x {
         // A literal takes its width from what is around it (Ch. 0 §5.2),
@@ -8309,6 +8536,15 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 inner = fat_name(&written);
             }
             if def_at(&e.defs, &inner) >= 0 {
+                // Reading one aggregate field of a *named* place in value
+                // position moves exactly that field out of it (Ch. 3 §1.2) —
+                // `Emit { sigs: cx.sigs, … }` is the lane's case: after it,
+                // the only field `cx` still owns is `consts`, and an early
+                // return's drop names it and not the whole (G9.212).
+                let root = base_name(base);
+                if root.len() > 0 && !through_reference(e, &*base) {
+                    move_field(e, &root, field);
+                }
                 return Value { text: src, ty: inner };
             }
             let v = fresh(e, "v");
@@ -8813,6 +9049,19 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                         return unknown_value();
                     }
                     if def_at(&e.defs, &held.ty) >= 0 {
+                        // What is written over goes away first, exactly as
+                        // the field's arm says it (Ch. 3 §1.1, G9.220):
+                        // `e.locals[i] = renamed` drops the old name's
+                        // characters before the new ones arrive.
+                        let owns = is_raw(&held.ty)
+                            || holds_name(&e.drops, &held.ty)
+                            || owns_drop(&e.defs, &e.drops, &held.ty, 0);
+                        if owns {
+                            drop_one(e, &held.text, &held.ty);
+                            if e.stuck {
+                                return unknown_value();
+                            }
+                        }
                         copy_between(e, &val.text, &held.text, &held.ty);
                     } else {
                         store_into(e, &held.ty, &val.text, &held.text);
@@ -8826,7 +9075,18 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 // the value into it. Walking to a field is instructions, so
                 // a compound assignment may not walk there twice (§5.5).
                 ast::Expr::Field(base, held) => {
+                    // Which side of the `=` the field is on is a fact about
+                    // the walk *to* it as much as the store after it:
+                    // `e.loops[at].broke = true` reaches the element through
+                    // `index_mut`, exactly as the element-assignment arm says
+                    // above (G9.218). And the shared *type* is asked for
+                    // first, which is what ordering the two definitions has
+                    // (G9.219).
+                    probe_nested_index_writes(e, base);
+                    let before = e.writing;
+                    e.writing = true;
                     let at = field_place(e, base, held);
+                    e.writing = before;
                     if e.stuck {
                         return unknown_value();
                     }
@@ -8898,7 +9158,15 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
                 // once was and the one thing a reference is *for* (Ch. 3
                 // §2.2 and §5.5's one read of the place).
                 ast::Expr::Deref(a) => {
+                    // `*v[i] = x` is the same exclusive walk the other arms
+                    // say it is (G9.218) — only the flag says so, and the
+                    // shared *type* of it is asked first, as the field's
+                    // arm does (G9.219).
+                    probe_nested_index_writes(e, &*a);
+                    let before = e.writing;
+                    e.writing = true;
                     let held = value(e, &*a, "");
+                    e.writing = before;
                     if e.stuck {
                         return unknown_value();
                     }
@@ -9012,11 +9280,24 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             // is going away, so Ch. 3 §1.1 gives it one drop and it is
             // written **before** the copy — the same rule as `p.a = x`
             // above, asked of a whole local rather than a field of one.
+            // Unless it has already gone: `out.push(cur)` took `cur` by
+            // value somewhere up this same block, and then there is nothing
+            // left written over (`cur = Vec::new()` owns again *after*, per
+            // `mark_owning_again`.
             if def_at(&e.defs, &ty) >= 0 {
                 let owns = is_raw(&ty)
                     || holds_name(&e.drops, &ty)
                     || owns_drop(&e.defs, &e.drops, &ty, 0);
-                if owns {
+                let mut moved = false;
+                let mut s = e.owned.len();
+                while s > 0 {
+                    s -= 1;
+                    if e.owned[s].name.same(&name) {
+                        moved = owns_no(&e.owned[s].owns);
+                        break;
+                    }
+                }
+                if owns && !moved {
                     drop_one(e, &slot, &ty);
                     if e.stuck {
                         return unknown_value();
@@ -9122,7 +9403,7 @@ fn value(e: &mut Emit, x: &ast::Expr, want: &str) -> Value {
             let mut i: taddr = 0;
             while i < args.len() {
                 let each = param_type(e, callee, i);
-                let v = value(e, &args[i], &each);
+                let v = arg_value(e, &args[i], &each);
                 if e.stuck {
                     return unknown_value();
                 }
@@ -9339,20 +9620,57 @@ fn method_value(
     // slot: `self.area()` inside a `&self` method reads through `self`
     // exactly as `self.field` does (Ch. 3 §2.2).
     let points_at = referent_name(&owner);
-    if at >= 0 && (owner.same("ptr") || points_at.len() > 0) {
-        owner = if points_at.len() > 0 {
-            points_at
+    // On the *str* fallback the read-through waits until the pair is built:
+    // the answer's storage comes first of the receiver's own words (TIR §3),
+    // which is the order the other implementation numbers them (G9.209) —
+    // `name.to_string()` with `name: &String` is `%tmp` answer, `%v` the
+    // read-through, `%tmp` the pair, not `%v` first.
+    let resolved = if at >= 0 && (owner.same("ptr") || points_at.len() > 0) {
+        if points_at.len() > 0 {
+            points_at.to_string()
         } else {
             e.self_ty.to_string()
-        };
-        let held = fresh(e, "v");
-        let mut line: String = Vec::new();
-        line.push_str("    ");
-        line.push_str(&held);
-        line.push_str(" = load ptr ");
-        line.push_str(&slot);
-        emit(e, line);
-        slot = held;
+        }
+    } else {
+        "".to_string()
+    };
+    // The family the method belongs to is asked of the settled name before
+    // the read-through, so the reference's load knows whether a slot of the
+    // answer is numbered first of it — the str fallback has always had its
+    // own (G9.209), and a family answer has the same storage-first rule
+    // (G9.223, `bound.pop()` is `%tmp` answer, `%v` load, never `%v` first).
+    let owner_inst = if resolved.len() > 0 { resolved.to_string() } else { owner.to_string() };
+    if inst_at(e, &owner_inst) < 0 {
+        let made_now = read_instance(e, &owner_inst);
+        let _ = made_now;
+    }
+    let inst2 = inst_at(e, &owner_inst);
+    let base2 = if inst2 < 0 {
+        owner_inst.to_string()
+    } else {
+        e.instances[inst2].base.to_string()
+    };
+    let mut under2: String = Vec::new();
+    under2.push_str(&base2);
+    under2.push_str(".");
+    under2.push_str(name);
+    let delay_fam = resolved.len() > 0 && family_at(e, &under2) >= 0;
+    let delay_through = resolved.len() > 0
+        && is_string(e, &resolved)
+        && !has_method(e, &resolved, name)
+        || delay_fam;
+    if resolved.len() > 0 {
+        owner = resolved.to_string();
+        if !delay_through {
+            let held = fresh(e, "v");
+            let mut line: String = Vec::new();
+            line.push_str("    ");
+            line.push_str(&held);
+            line.push_str(" = load ptr ");
+            line.push_str(&slot);
+            emit(e, line);
+            slot = held;
+        }
     }
     // A method through a trait object is the one call in this language that
     // is not to a name: the receiver's two words say where the object is and
@@ -9458,7 +9776,7 @@ fn method_value(
                     return unknown_value();
                 }
             }
-            let v = value(e, &args[0], &owner);
+            let v = arg_value(e, &args[0], &owner);
             if e.stuck {
                 return unknown_value();
             }
@@ -9526,12 +9844,22 @@ fn method_value(
         // one argument of the call is lowered (Ch. 3 §1.2). A `for`'s
         // `into_iter` consumes exactly this way — its `self` is the family
         // type whole, not a reference to it.
-        if at >= 0 && e.families[fam].by_self {
+        if e.families[fam].by_self {
             match recv {
                 ast::Expr::Name(n) => {
                     move_out(e, n);
                     if e.stuck {
                         return unknown_value();
+                    }
+                }
+                // `for r in p.requires` — a *field* is consumed by value the
+                // same way a whole name is, and `move_field` is what records
+                // that the `requires` of `p` is not there after its
+                // `into_iter` took it (G9.225).
+                ast::Expr::Field(base, field) => {
+                    let root = base_name(base);
+                    if root.len() > 0 && !through_reference(e, &*base) {
+                        move_field(e, &root, field);
                     }
                 }
                 _ => {}
@@ -9576,6 +9904,12 @@ fn method_value(
         } else {
             "".to_string()
         };
+        if whole && answering.len() == 0 {
+        }
+        if whole && answering.len() > 0 {
+        }
+        if !whole {
+        }
         let sited = is_place_expr(recv);
         if answering.len() > 0 && sited {
             let hinted = temporary_slot(e, &answering);
@@ -9584,6 +9918,21 @@ fn method_value(
         slot = receiver_at(e, at, recv, &slot, &by_value);
         if e.stuck {
             return unknown_value();
+        }
+        // A reference receiver is read through **now**: the answer's storage
+        // has already spent whatever slot-numbers it takes, so the load sits
+        // beside it — the same order the str fallback's read-through gets
+        // (G9.209). Two implementations agree because they agree which side
+        // of the load the storage lands on (G9.223).
+        if delay_fam {
+            let held = fresh(e, "v");
+            let mut line: String = Vec::new();
+            line.push_str("    ");
+            line.push_str(&held);
+            line.push_str(" = load ptr ");
+            line.push_str(&slot);
+            emit(e, line);
+            slot = held;
         }
         if answering.len() > 0 && !sited {
             let hinted = temporary_slot(e, &answering);
@@ -9681,6 +10030,19 @@ fn method_value(
         if e.stuck {
             return unknown_value();
         }
+        // The read-through the top of this call deferred (G9.209): emitted
+        // here it numbers after the answer's storage and beside the pair,
+        // which is where the other implementation puts it.
+        if delay_through {
+            let held = fresh(e, "v");
+            let mut line: String = Vec::new();
+            line.push_str("    ");
+            line.push_str(&held);
+            line.push_str(" = load ptr ");
+            line.push_str(&slot);
+            emit(e, line);
+            slot = held;
+        }
         slot = as_text(e, &slot);
     } else {
         slot = receiver_at(e, at, recv, &slot, &by_value);
@@ -9707,7 +10069,7 @@ fn method_value(
     let mut i: taddr = 0;
     while i < args.len() {
         let each = param_type(e, &full, i + 1);
-        let v = value(e, &args[i], &each);
+        let v = arg_value(e, &args[i], &each);
         if e.stuck {
             return unknown_value();
         }
@@ -10048,7 +10410,7 @@ fn dyn_call(
     let mut i: taddr = 0;
     while i < args.len() {
         let each = param_type(e, &full, i + 1);
-        let v = value(e, &args[i], &each);
+        let v = arg_value(e, &args[i], &each);
         if e.stuck {
             return unknown_value();
         }
@@ -13766,6 +14128,81 @@ fn generic_call(
     // answer cannot be sized until they are lowered, and that is refused.
     let mut into: String = Vec::new();
     let mut answer: String = Vec::new();
+    // `vec_of_one(ast::Pattern::Aggregate(…))` — an argument written as an
+    // aggregate already says the instance it is, so a key nothing else says
+    // is readable before the first argument is lowered, and the answer's
+    // storage still comes first (G9.222).
+    if given.len() < front.len() {
+        let mut stat: Vec<String> = Vec::new();
+        let mut fine = true;
+        let mut i: taddr = 0;
+        while i < args.len() {
+            match &args[i] {
+                ast::Expr::Aggregate(path, fields) => {
+                    let called = type_path(path);
+                    if def_at(&e.defs, &called) < 0 {
+                        fine = false;
+                    }
+                    stat.push(called);
+                }
+                _ => {
+                    fine = false;
+                }
+            }
+            i += 1;
+        }
+        if fine {
+            let mut key2: Vec<String> = ast::copy_names(given);
+            let mut t: taddr = key2.len();
+            let mut complete = true;
+            while t < e.families[fam].tyvars.len() {
+                let each = e.families[fam].tyvars[t].to_string();
+                let mut found: String = Vec::new();
+                let mut k: taddr = 0;
+                while k < declared.len() {
+                    if declared[k].same(&each) && found.len() == 0 {
+                        found = stat[k].to_string();
+                    }
+                    k += 1;
+                }
+                if found.len() == 0 {
+                    complete = false;
+                    break;
+                }
+                key2.push(found);
+                t += 1;
+            }
+            if complete {
+                let head = subst_through(&e.families[fam].tyvars, &key2, &e.families[fam].ret);
+                let addressed = referent_name(&head).len() > 0;
+                if scalar_named(&head).same("?") && !answers_nothing(&head) && !addressed {
+                    let substituted = !head.same(&e.families[fam].ret);
+                    let via_terms = instantiate_answer(e, fam, &key2, self_name);
+                    if via_terms.len() > 0 {
+                        answer = via_terms;
+                    } else if substituted && given.len() == front.len() {
+                        answer = read_instance(e, &head);
+                    } else if def_at(&e.defs, &head) >= 0 {
+                        answer = head.to_string();
+                    } else {
+                        answer = instantiate(e, &head, &key2);
+                    };
+                    if answer.len() == 0 {
+                        e.stuck = true;
+                        return unknown_value();
+                    }
+                    into = if e.family_into_hints.len() > 0 {
+                        let h = e.family_into_hints[0].to_string();
+                        e.family_into_hints = Vec::new();
+                        h
+                    } else {
+                        temporary_slot(e, &answer)
+                    };
+                    queue(e, callee, &key2);
+                }
+            }
+        }
+    }
     if given.len() == front.len() {
         let head = subst_through(&front, given, &e.families[fam].ret);
         // A reference is an address and an address is a value, so nothing is
@@ -13851,7 +14288,7 @@ fn generic_call(
                     }
                 }
                 e.fn_want = hint;
-                let v = value(e, &args[i], &each);
+                let v = arg_value(e, &args[i], &each);
                 e.fn_want = Vec::new();
                 if e.stuck {
                         return unknown_value();
@@ -14178,7 +14615,7 @@ fn closure_call_at(e: &mut Emit, slot: &str, owner: &str, args: &Vec<ast::Expr>)
     let mut i: taddr = 0;
     while i < args.len() {
         let each = param_type(e, &full, i + 1);
-        let v = value(e, &args[i], &each);
+        let v = arg_value(e, &args[i], &each);
         if e.stuck {
             return unknown_value();
         }
@@ -14226,7 +14663,7 @@ fn aggregate_call(
     let mut i: taddr = 0;
     while i < args.len() {
         let each = param_type(e, callee, i + skip);
-        let v = value(e, &args[i], &each);
+        let v = arg_value(e, &args[i], &each);
         if e.stuck {
             return unknown_value();
         }

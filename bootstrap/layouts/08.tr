@@ -1,0 +1,7 @@
+// A niche tie: two fields offer the same spot and only one of them may
+// carry an enclosing enum's tag. The later field wins (G9.208).
+struct Two { a: bool, b: bool }
+struct Shapes { a: bool, b: bool, c: bool }
+enum Held2 { Nothing, Some2(Two) }
+enum Held3 { Nothing, Some3(Shapes) }
+fn main() -> t27 { 0 }

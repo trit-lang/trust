@@ -62,6 +62,44 @@ pub struct Io {
     sink: Option<Box<dyn std::io::Write>>,
 }
 
+impl Clone for Io {
+    /// Snapshots need the machine's exact io state; the stream ends do not
+    /// clone, and do not need to: a snapshot is taken with the input held in
+    /// `pending` and is restored with no sink.
+    fn clone(&self) -> Io {
+        Io {
+            pending: self.pending.clone(),
+            closed: self.closed,
+            source: None,
+            output: self.output.clone(),
+            sink: None,
+        }
+    }
+}
+
+impl Io {
+    /// Input not yet consumed, as one slice — for snapshots.
+    pub fn pending_bytes(&self) -> Vec<u8> {
+        self.pending.iter().copied().collect()
+    }
+
+    /// True once the program has been told there is no more input.
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    /// Rebuild an io state from snapshot parts: the input that was left and
+    /// whether the stream had closed. Output starts empty — it is not part
+    /// of anything the machine can observe.
+    pub fn from_pending(pending: Vec<u8>, closed: bool) -> Io {
+        Io {
+            pending: pending.into(),
+            closed,
+            ..Io::default()
+        }
+    }
+}
+
 impl Io {
     /// Supply input and close the stream — the whole program's input at once.
     pub fn with_input(bytes: &[u8]) -> Io {
@@ -122,11 +160,45 @@ pub struct Vm {
     steps: u64,
     /// Decoded instructions, by address — see `decode_at`.
     icache: Vec<Option<(i128, Inst)>>,
+    /// Opt-in diagnostics: everything here is off with zero fields set, and
+    /// costs one branch per step while off. See `Diag`.
+    diag: Diag,
 }
 
 /// Entries in the decode cache. Direct-mapped, so a lookup is one index and
 /// one comparison; 2^16 covers any image this machine runs.
 const ICACHE: usize = 1 << 16;
+
+/// The diagnostic gear a long run (read: DDC) carries. All opt-in:
+///
+/// - `ring` — the last N PCs, one store per retired instruction. On a fault
+///   the tail of the ring is the recent control flow, and with an assembly
+///   listing that is the functions the fault sits in.
+/// - `watch` — tryte ranges a store is reported on hitting. The word a heap
+///   bug poisons is found once in a core dump; watching it then names the
+///   instruction that did the poisoning — determinism makes the poisoned
+///   address stable across runs of an unchanged image.
+/// - `snap_every`/`snap`/`snap_path` — a full machine state saved every N
+///   instructions. Execution is deterministic given the image and input, so
+///   replaying the last snapshot with a watch armed catches in seconds what
+///   a from-scratch rerun catches in hours.
+#[derive(Default)]
+struct Diag {
+    /// Power-of-two ring of PCs; empty means off.
+    ring: Vec<i128>,
+    /// Next slot in `ring` to write.
+    at: usize,
+    /// The address of the instruction currently executing.
+    cur_pc: i128,
+    /// Inclusive tryte ranges to report stores into.
+    watch: Vec<(i128, i128)>,
+    /// Snapshot cadence, in retired instructions.
+    snap_every: Option<u64>,
+    /// The most recent snapshot.
+    snap: Option<Box<crate::snap::Snap>>,
+    /// Where every snapshot is also written as it is taken.
+    snap_path: Option<String>,
+}
 
 impl Vm {
     /// A machine with the given address-space size, at reset (§1.3).
@@ -138,6 +210,7 @@ impl Vm {
             io: Io::default(),
             steps: 0,
             icache: vec![None; ICACHE],
+            diag: Diag::default(),
         }
     }
 
@@ -201,6 +274,7 @@ impl Vm {
     pub fn step(&mut self) -> Result<(), Stop> {
         let pc = self.pc;
         if !self.mem.contains(pc) || !self.mem.contains(pc + 2) {
+            self.diag.cur_pc = pc;
             return Err(fault(
                 FaultCode::Trap,
                 format!("instruction fetch at {pc} is outside memory"),
@@ -211,11 +285,22 @@ impl Vm {
         // The default is to fall through to the next word; control transfers
         // overwrite this.
         self.pc = pc + WORD_TRYTES;
+        self.diag.cur_pc = pc;
+        if !self.diag.ring.is_empty() {
+            let at = self.diag.at & (self.diag.ring.len() - 1);
+            self.diag.ring[at] = pc;
+            self.diag.at = at + 1;
+        }
         let outcome = self.exec(inst, pc);
         // Retired, not merely started: an instruction that faults did not
         // complete and is not counted (ISA §2.3).
         if outcome.is_ok() {
             self.steps = self.steps.wrapping_add(1);
+            if let Some(n) = self.diag.snap_every {
+                if self.steps % n == 0 {
+                    self.take_snap();
+                }
+            }
         }
         outcome
     }
@@ -450,6 +535,28 @@ impl Vm {
             return self.device_store(addr, width, v);
         }
         self.check_access(addr, width)?;
+        if !self.diag.watch.is_empty()
+            && self
+                .diag
+                .watch
+                .iter()
+                .any(|&(lo, hi)| addr <= hi && lo < addr + width.trytes())
+        {
+            eprintln!(
+                "[watch] steps={} pc={} store {} tryte(s) at {} value {}",
+                self.steps,
+                self.diag.cur_pc,
+                width.trytes(),
+                addr,
+                v
+            );
+            if std::env::var_os("TRITIUM_WATCH_REGS").is_some() {
+                for r in -13..=13i8 {
+                    let reg = Reg(r);
+                    eprintln!("  {}({}) = {}", reg.name(), reg.abi_name(), self.reg(reg));
+                }
+            }
+        }
         match width {
             Width::Word => self.mem.set_word(addr, v),
             Width::Tryte => self.mem.set_tryte(addr, word::wrap_to(v, 9)),
@@ -532,3 +639,137 @@ fn fault(code: FaultCode, why: impl Into<String>) -> Stop {
 pub fn is_word(v: i128) -> bool {
     (-MAX_WORD..=MAX_WORD).contains(&v)
 }
+
+// ---------------------------------------------------------- diagnostics
+//
+// Everything here exists for one hunt: a heap corruption that only shows
+// hours into a DDC run (target/HANDOFF.md). Off means off — no field is
+// touched on the hot path unless the matching enable call was made.
+
+/// How many ring entries a report prints, newest last.
+const REPORT_RING: usize = 512;
+
+impl Vm {
+    /// Record the last `cap` PCs. `cap` must be a power of two.
+    pub fn enable_ring(&mut self, cap: usize) {
+        assert!(cap.is_power_of_two(), "ring capacity must be a power of two");
+        self.diag.ring = vec![0; cap];
+        self.diag.at = 0;
+    }
+
+    /// Report every store that touches one of these inclusive tryte ranges.
+    pub fn set_watch(&mut self, ranges: Vec<(i128, i128)>) {
+        self.diag.watch = ranges;
+    }
+
+    /// Save a snapshot every `every` retired instructions — kept in memory,
+    /// and also written to `path` when given, replacing the previous one.
+    pub fn enable_snapshots(&mut self, every: u64, path: Option<String>) {
+        self.diag.snap_every = Some(every);
+        self.diag.snap_path = path;
+    }
+
+    /// The most recent periodic snapshot.
+    pub fn last_snap(&self) -> Option<&crate::snap::Snap> {
+        self.diag.snap.as_deref()
+    }
+
+    /// The whole machine, as a snapshot.
+    pub fn capture_snap(&self) -> crate::snap::Snap {
+        crate::snap::Snap {
+            mem_size: self.mem.size(),
+            pc: self.pc,
+            steps: self.steps,
+            regs: self.regs,
+            io: self.io.clone(),
+            pages: self
+                .mem
+                .pages()
+                .map(|(start, contents)| (start, contents.into()))
+                .collect(),
+        }
+    }
+
+    /// A machine standing exactly where the snapshot was taken. Execution
+    /// from here is identical to the run the snapshot came from.
+    pub fn from_snap(snap: &crate::snap::Snap) -> Vm {
+        let mut vm = Vm::new(snap.mem_size);
+        vm.regs = snap.regs;
+        vm.pc = snap.pc;
+        vm.steps = snap.steps;
+        vm.io = snap.io.clone();
+        vm.mem.restore_pages(
+            snap.pages
+                .iter()
+                .map(|(start, contents)| (*start, contents.clone()))
+                .collect(),
+        );
+        vm
+    }
+
+    /// Take the periodic snapshot: keep the newest, write it through.
+    fn take_snap(&mut self) {
+        let snap = Box::new(self.capture_snap());
+        if let Some(path) = &self.diag.snap_path {
+            let _ = snap.write_file(path);
+        }
+        eprintln!(
+            "[snap] steps={} pages={}",
+            self.steps,
+            snap.pages.len()
+        );
+        self.diag.snap = Some(snap);
+    }
+
+    /// The instruction at `cur_pc`, for the report — tolerant of the same
+    /// faults the machine reports on (an unaligned or outside address).
+    fn cur_inst(&self) -> String {
+        let pc = self.diag.cur_pc;
+        if pc % WORD_TRYTES != 0 || !self.mem.contains(pc) {
+            return format!("<not an aligned instruction address: {pc}>");
+        }
+        match Inst::decode(self.mem.word(pc)) {
+            Ok(inst) => format!("{inst}"),
+            Err(e) => format!("<does not decode: {e}>"),
+        }
+    }
+
+    /// Everything there is to say when a run stops on a fault: the stop
+    /// itself, how far in it happened, the faulting instruction, every
+    /// register, and the recent control flow. Two runs of an unchanged
+    /// image are bit-identical, so every number here reproduces.
+    pub fn report(&self, stop: &Stop) -> String {
+        let mut out = format!("tritium: {stop}\n");
+        out.push_str(&format!("steps: {}\n", self.steps));
+        out.push_str(&format!("at {}: {}\n", self.diag.cur_pc, self.cur_inst()));
+        out.push_str("registers:\n");
+        for v in -13..=13i8 {
+            let r = Reg(v);
+            out.push_str(&format!(
+                "  {:<4} {:<4} {}\n",
+                r.name(),
+                r.abi_name(),
+                self.regs[r.index()]
+            ));
+        }
+        if self.diag.ring.is_empty() {
+            return out;
+        }
+        out.push_str("recent pcs, oldest first:\n");
+        let cap = self.diag.ring.len();
+        let kept = self.diag.at.min(cap);
+        let show = kept.min(REPORT_RING);
+        let first = self.diag.at - show;
+        for i in 0..show {
+            if i % 8 == 0 {
+                out.push_str("  ");
+            }
+            out.push_str(&format!("{} ", self.diag.ring[(first + i) & (cap - 1)]));
+            if i % 8 == 7 || i + 1 == show {
+                out.push('\n');
+            }
+        }
+        out
+    }
+}
+
