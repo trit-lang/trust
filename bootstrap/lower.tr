@@ -4543,6 +4543,24 @@ fn match_place(
             // nowhere to store it (G9.155), and a join nobody reaches is
             // not started (G9.166).
             let mut reaches = false;
+            // Whether the answer is a *private* one: every other arm leaves
+            // the match (`return`, `break`, `continue`), so the answering
+            // arm's own slot can stand as the join's slot — where every arm
+            // could answer, the join names its own (G9.230).
+            let mut answering: taddr = 0;
+            let mut n0: taddr = 0;
+            while n0 < order.len() {
+                // (one arm each: or-patterns are not lowered here)
+                match &arms[order[n0]].body {
+                    ast::Expr::Return(_) => {}
+                    ast::Expr::Break(_) => {}
+                    ast::Expr::Continue => {}
+                    _ => {
+                        answering += 1;
+                    }
+                }
+                n0 += 1;
+            }
             let mut n: taddr = 0;
             while n < order.len() {
                 let a = order[n];
@@ -4630,10 +4648,50 @@ fn match_place(
                 if dest.len() > 0 {
                     aggregate_tail(e, &arms[a].body, dest, answer);
                 } else {
-                    let v = value(e, &arms[a].body, want);
-                    if e.stuck {
-                        return unknown_value();
+                    // An arm that answers with the very scalar it just bound
+                    // leaves the answer where the binding left it: the arm's
+                    // own slot **is** the answering slot and nothing is copied
+                    // — `Ok(q) => q` owes no instruction at all (G9.230),
+                    // where anything else lowers and stores. Only a scalar
+                    // qualifies, and only one this arm bound: an aggregate is
+                    // this arm's to drop at `leave`, and a name it did not
+                    // bind may be written over by another arm's answer.
+                    let mut from_local: String = Vec::new();
+                    let mut local_ty: String = Vec::new();
+                    if held.len() == 0 && answering == 1 {
+                        match &arms[a].body {
+                            ast::Expr::Name(n2) => {
+                                let at2 = local_at(e, n2);
+                                if at2 >= mark {
+                                    let arm_ty = e.locals[at2].ty.to_string();
+                                    if def_at(&e.defs, &arm_ty) < 0
+                                        && !is_boxed(&arm_ty)
+                                        && !is_raw(&arm_ty)
+                                    {
+                                        from_local = e.locals[at2].slot.to_string();
+                                        local_ty = arm_ty;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
                     }
+                    if from_local.len() > 0 && held.len() == 0 {
+                        held = from_local;
+                        ty = local_ty;
+                    }
+                    let v = if from_local.len() > 0 {
+                        Value {
+                            text: from_local.to_string(),
+                            ty: "".to_string(),
+                        }
+                    } else {
+                        let v = value(e, &arms[a].body, want);
+                        if e.stuck {
+                            return unknown_value();
+                        }
+                        v
+                    };
                     // An arm that has already left has nothing to store and
                     // nowhere to store it: `trap()` is the arm `unwrap`
                     // writes for `None` (Ch. 5 §4).
