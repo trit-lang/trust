@@ -5101,7 +5101,14 @@ fn if_expr(
                 if e.stuck {
                     return unknown_value();
                 }
-                jump(e, &join_at);
+                // What an arm that *left* said about the locals is nobody's
+                // to tell: one that returns says nothing of the other's
+                // paths, so the join's story is the *other* arm's alone.
+                // (Ch. 3 §1.2's question, asked at every if-join — G9.233.)
+                let then_left = e.done;
+                if !then_left {
+                    jump(e, &join_at);
+                }
                 let after_then = owns_now(e);
                 owns_back(e, &was);
             moved_back(e, &moved_was);
@@ -5120,20 +5127,21 @@ fn if_expr(
                         return unknown_value();
                     }
                 }
-                jump(e, &join_at);
+                let else_left = e.done;
+                if !else_left {
+                    jump(e, &join_at);
+                }
                 let after_else = owns_now(e);
-                owns_agree(e, &after_then, &after_else);
+                if then_left && !else_left {
+                    owns_back(e, &after_else);
+                } else if !then_left && else_left {
+                    owns_back(e, &after_then);
+                } else {
+                    owns_agree(e, &after_then, &after_else);
+                }
                 start(e, &join_at);
                 return Value { text: dest.to_string(), ty: owner.to_string() };
             }
-            // An `if` whose arms answer an **aggregate** is read
-            // destination-first, because a join is just a place: the join's
-            // storage is made where the branch is, and each arm writes into
-            // it directly — the question the join had to answer, who owns
-            // what at its end, is then the one the arms already ask (Ch. 3
-            // §1.2, G9.175). The type is decided by what the then-arm
-            // answers with: joining needs it said before either arm is
-            // lowered.
             let mut guessed = guess_if_aggregate_ty(e, t);
             if guessed.len() == 0 && want.len() > 0 {
                 // Neither arm has to say at all when where the value is
@@ -5180,7 +5188,10 @@ fn if_expr(
                 // (TIR §3).
                 let held = temporary_slot(e, &guessed);
                 copy_between(e, &a2.text, &held, &guessed);
-                jump(e, &join_at);
+                let then_left = e.done;
+                if !then_left {
+                    jump(e, &join_at);
+                }
                 let after_then = owns_now(e);
                 owns_back(e, &was);
             moved_back(e, &moved_was);
@@ -5200,9 +5211,18 @@ fn if_expr(
                         return unknown_value();
                     }
                 }
-                jump(e, &join_at);
+                let else_left = e.done;
+                if !else_left {
+                    jump(e, &join_at);
+                }
                 let after_else = owns_now(e);
-                owns_agree(e, &after_then, &after_else);
+                if then_left && !else_left {
+                    owns_back(e, &after_else);
+                } else if !then_left && else_left {
+                    owns_back(e, &after_then);
+                } else {
+                    owns_agree(e, &after_then, &after_else);
+                }
                 start(e, &join_at);
                 return Value { text: held, ty: guessed };
             }
@@ -5217,7 +5237,10 @@ fn if_expr(
                 // and nothing is stored — `while c { if c { … } }` ends its
                 // loop body *this* way, which is why it was always deferred
                 // (G9.216).
-                jump(e, &join_at);
+                let then_left = e.done;
+                if !then_left {
+                    jump(e, &join_at);
+                }
                 let after_then = owns_now(e);
                 owns_back(e, &was);
             moved_back(e, &moved_was);
@@ -5232,9 +5255,18 @@ fn if_expr(
                     }
                     Option::None => {}
                 }
-                jump(e, &join_at);
+                let else_left = e.done;
+                if !else_left {
+                    jump(e, &join_at);
+                }
                 let after_else = owns_now(e);
-                owns_agree(e, &after_then, &after_else);
+                if then_left && !else_left {
+                    owns_back(e, &after_else);
+                } else if !then_left && else_left {
+                    owns_back(e, &after_then);
+                } else {
+                    owns_agree(e, &after_then, &after_else);
+                }
                 start(e, &join_at);
                 return Value { text: "".to_string(), ty: "".to_string() };
             }
@@ -5242,7 +5274,10 @@ fn if_expr(
             // which is what decides the number it gets.
             let held = temporary_slot(e, &ty);
             store_into(e, &ty, &a.text, &held);
-            jump(e, &join_at);
+            let then_left = e.done;
+            if !then_left {
+                jump(e, &join_at);
+            }
             let after_then = owns_now(e);
             owns_back(e, &was);
             moved_back(e, &moved_was);
@@ -5258,9 +5293,18 @@ fn if_expr(
                 }
                 Option::None => {}
             }
-            jump(e, &join_at);
+            let else_left = e.done;
+            if !else_left {
+                jump(e, &join_at);
+            }
             let after_else = owns_now(e);
-            owns_agree(e, &after_then, &after_else);
+            if then_left && !else_left {
+                owns_back(e, &after_else);
+            } else if !then_left && else_left {
+                owns_back(e, &after_then);
+            } else {
+                owns_agree(e, &after_then, &after_else);
+            }
 
             start(e, &join_at);
             let name = fresh(e, "v");
@@ -5893,7 +5937,8 @@ fn if_statement(
     if e.stuck {
         return;
     }
-    if !e.done {
+    let then_left = e.done;
+    if !then_left {
         jump(e, &join_at);
     }
     let after_then = owns_now(e);
@@ -5917,11 +5962,18 @@ fn if_statement(
         }
         Option::None => {}
     }
-    if !e.done {
+    let else_left = e.done;
+    if !else_left {
         jump(e, &join_at);
     }
     let after_else = owns_now(e);
-    owns_agree(e, &after_then, &after_else);
+    if then_left && !else_left {
+        owns_back(e, &after_else);
+    } else if !then_left && else_left {
+        owns_back(e, &after_then);
+    } else {
+        owns_agree(e, &after_then, &after_else);
+    }
 
     start(e, &join_at);
 }
