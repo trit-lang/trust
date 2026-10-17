@@ -4630,10 +4630,58 @@ fn match_place(
                 if dest.len() > 0 {
                     aggregate_tail(e, &arms[a].body, dest, answer);
                 } else {
-                    let v = value(e, &arms[a].body, want);
-                    if e.stuck {
-                        return unknown_value();
+                    // `Ok(q) => q` where q's payload is a **unit field**
+                    // — `expect_op(p, "]")?`'s Ok arm. The unit never carries
+                    // a word (G9.192's `t27` spelling is the slot's, not a
+                    // load's), so the arm answers nothing and lowers nothing
+                    // — no load of what is not there, and no store of what
+                    // nobody reads (G9.231).
+                    let mut from_unit = false;
+                    if index != none {
+                        match &arms[a].body {
+                            ast::Expr::Name(n2) => {
+                                match &arms[a].patterns[0] {
+                                    ast::Pattern::Aggregate(path2, fields2) => {
+                                        if fields2.len() == 1 {
+                                            match &fields2[0].pat {
+                                                ast::Pattern::Bind(n3) => {
+                                                    if n3.same(n2) {
+                                                        let mut first2: taddr = 0;
+                                                        let mut v2: taddr = 0;
+                                                        while v2 < index {
+                                                            first2 = first2 + e.defs[which].counts[v2];
+                                                            v2 += 1;
+                                                        }
+                                                        match &e.defs[which].fields[first2] {
+                                                            ast::Ty::Unit => {
+                                                                from_unit = true;
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            _ => {}
+                        }
                     }
+                    let v = if from_unit {
+                        Value {
+                            text: "".to_string(),
+                            ty: "".to_string(),
+                        }
+                    } else {
+                        let v = value(e, &arms[a].body, want);
+                        if e.stuck {
+                            return unknown_value();
+                        }
+                        v
+                    };
                     // An arm that has already left has nothing to store and
                     // nowhere to store it: `trap()` is the arm `unwrap`
                     // writes for `None` (Ch. 5 §4).
