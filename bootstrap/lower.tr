@@ -3526,6 +3526,23 @@ fn try_expr(
     dest: &str,
     answer: &str,
 ) -> Value {
+    // `e?` of a name moves the name: the scrutinee the try matches on is
+    // exactly that name, which the other arm's `return Err(…)` already is
+    // made of and the answering one reads out of — as far as any later
+    // statement in this function is concerned it is no longer there
+    // (G9.232, flowing the same way `let q = p` says it).
+    match inner {
+        ast::Expr::Name(n) => {
+            let at = local_at(e, n);
+            if at >= 0 {
+                let local_ty = e.locals[at].ty.to_string();
+                if def_at(&e.defs, &local_ty) >= 0 {
+                    move_out(e, n);
+                }
+            }
+        }
+        _ => {}
+    }
     let held = place(e, inner);
     if e.stuck {
         return unknown_value();
