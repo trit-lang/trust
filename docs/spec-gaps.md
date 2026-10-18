@@ -2735,34 +2735,40 @@ for every family-instance (`Map.Range.t27.main.closure1` for `Map<I,F>`
 by projection — `*map` is exactly as `I` — `into_iter` on it bakes the
 whole).
 
-**G9.207 — OPEN: the DDC fixpoint faults inside `lower::module`'s kept
-loop, and only at full front-end scale.** The trail in question (class of
-bridges nowhere near semantics): all 554 items lower clean, the drain
-processes 1,479 `Made`/`drop.*`/`glue` entries to completion
-(`g=-1,at=-1`), `tables`/`strings`/`declarations`/`reachable` all answer,
-and the kept loop crashes at `out[1228] = drop.Vec.layout.Def` during
-`out[n].text.to_string()` — word-alignment faults (`F_ALIGN`) whose address
-changes with the textual content (13/35/64/97/101/104/118/119/362447189)
-or device-negative reads (`-3582/-9243`) on runs whose prints differ only in
-volume. Facts established against easier theories:
+**G9.207 — CLOSED: was two demons under one dumpster fire, both gone.**
+One was machine-level (heap and stack collision — fixed by pinning VM
+memory to 3^18 trytes with `--mem 387420489`, which made the
+fully-instrumented fixpoint complete without crash). The other was the
+real work: the rest of this file's G9.208-through-G9.233 series （下路表）
 
-* `Option.unwrap.char` (the drain turn immediately before) produces text
-  **byte-identical** to the same instantiation alone — it is not the site;
-* instance-key audit reports no tyvar-shaped keys in any instantiated
-  family — it is not a wrong-intent cram;
-* chunk bundles (parse/resolve/macros/lower in modules-declared roots,
-  hundreds of Made) complete identical chunk-level drains and kept-loops;
-* a stress program's 40+ instantiations completes;
-* the `drop.Vec.ast.Ty`/`drop.Vec.layout.Def` **text-ish** strings already
-  printed read fine (their content is well-formed TIR);
-* lengths are sane at the copying point (`textlen=3034` on the last read).
+**G9.208–G9.233 — the DDC fixpoint's own march, each point closed.**
+What the fixpoint's own `cmp` served as the oracle for, each first-
+diverging line named, what it meant, and what it took: 1,599
+(`layout/product` niche tie-break, G9.208), 3,099 (str-fallback's
+read-through `%v` deferred too late, G9.209), 9,788 (copyable-field partial
+drops, G9.210), 10,339 (`&String`-to-`&str` coercion missing from the
+argument evaluator, `arg_value()`, G9.211), 25,052 (structure-construction's
+aggregating field moves, G9.212), 41,727 (not-place-receiver method-tail's
+scope-vs-answer order, G9.213), 46,297/51,123 (match-arm guards uncalled,
+G9.216-G9.217), 58,841 (writable-place semantics across field/deref/index
+and theShared-family discoverability of a match, G9.218-G9.219), 64,413
+(index-assign's over-write drop-first, G9.220), 69,983 (single-field-move
+snapshot-of-when-whole-vs-parallel restoration, G9.221), ?/79,525 (generic
+call sret-suspension on key-fields computed-first, G9.222), 93,731
+(reference receiver read-through `%v` slot order, G9.223), 104,311
+(whole-Name-assign drop-first hitting statically-moved, G9.224), 126,582
+(`for`'s by_self Field consumption of a match's own Name, G9.225), 139,394
+(G9.226's first-backward-scan-of-shadowed-names-for-own-scan), 144,989
+(`inner.stmts = uses_stmts(inner.stmts, renames)` over the last of the
+macros arms — G9.229's rewriteNOW-locks), 160,660 (`try`'s unit-payload
+arm owing nothing at all — G9.192's t27 spelling covers the slot, G9.231),
+176,095 (`e?`-of-Name recording the whole-name's move, G9.232), 180,489
+(`owns_agree` honoring that one arm of an `if` already left — G9.233).
 
-So the fault lives in materialization/copy mechanics the VM only exercises
-at the resulting string volumes (reachable()'s names-live vector or the
-kept-loop's name/text copies), not in lowering semantics — for which the
-book of byte-identical agreements (bootstrap suite, layouts corpus, and a
-71-case rehearsal battery including every gate shape this lane grew) stands
-as the full text.
+That was the whole march. The two implementations' emitted TIR text is
+now **byte-identical** for the full program (sha256
+7027e0978d95396af3d11846b89cd2fc422eb4b8c7cb285791f3d7afe8346e2e,
+9,485,971 bytes), verified at fixpoint #33.
 
 **G9.198 — `-> T` under a key is the key's own argument.** For a family
 method whose answer is literally a type parameter — `fn unwrap(self) ->

@@ -274,12 +274,22 @@ explicitly, as a length-prefixed bundle with the prelude inside; the equality
 is on TIR's text because the text is the canonical form (TIR §8): two images
 could differ and mean the same thing, two texts cannot.
 
-As of today the road is green end to end except the last segment: all 554
-functions lower and the entire drain (1,479 glue/job entries) completes, and
-the suite's agreement line runs through every artifact before the kept-loop —
-which the VM faults on for reasons narrowed to copy mechanics at high string
-volume, not to lowering semantics (docs/ddc.md §3.3, docs/spec-gaps.md
-G9.207).
+As of today the road is green end to end, **and the last segment is closed**:
+`scripts/ddc.sh` reports
+
+```
+stage1.tir  sha256 7027e0978d95396af3d11846b89cd2fc422eb4b8c7cb285791f3d7afe8346e2e
+stage2.tir  sha256 7027e0978d95396af3d11846b89cd2fc422eb4b8c7cb285791f3d7afe8346e2e
+```
+
+byte for byte, 9,485,971 bytes — the full fixpoint. It took twenty-two
+fixpoint rounds to close: each round left one new first-divergence (each a
+different way the two implementations' emitted TIR had drifted) and each of
+those was isolated, reduced to a five-line repro, and closed — the trail is
+G9.208 through G9.233 in `docs/spec-gaps.md`, and it ends here. The keep-loop
+VM fault the earlier text described was machine-level (heap/stack collision
+under the bump+freelist allocator, fixed by `--mem 387420489`), not a
+lowering fact and it stopped being part of the run long before this.
 
 What it proves, stated the way `docs/ddc.md` §3.4 insists: **the Trust
 compiler's image is what its Trust source says, given `trustc`** — diverse in
@@ -287,9 +297,11 @@ language, and honestly not in origin, since both implementations were written
 here from `spec/`. A corroboration presented as a proof would be worse than
 none. The premise underneath — same source twice, same bytes — is guarded by
 `scripts/reproducible.sh`; the root of trust beneath the parent is `rustc`'s
-(§3.5); and the thing that would let a stranger write the truly diverse
-parent one day is `spec/` being complete enough to implement from, with
-`docs/spec-gaps.md` as the list of where they would have to guess.
+(§3.5); the fixpoint itself is the demonstration that the lowerings are one
+and the same lowering (docs/ddc.md §3.3, closed at hash above); and the
+thing that would let a stranger write the truly diverse parent one day is
+`spec/` being complete enough to implement from, with `docs/spec-gaps.md` as
+the list of where they would have to guess.
 
 ## Repository layout
 

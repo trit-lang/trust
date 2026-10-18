@@ -157,8 +157,7 @@ What a program may use of the library is what the Trust side lowers, and
 what it may not is refused rather than lowered wrongly — which is the same
 rule the rest of this file is about.
 
-### 3.3 The comparison has something to compare — **all roads green, one
-open at the end**
+### 3.3 The comparison has something to compare — **closed, byte for byte**
 
 `stage2` and `cA` must be *the same kind of thing*. The natural artifact here
 is the **TIR module**, which has a canonical textual form (`trustc fmt`) and
@@ -177,30 +176,42 @@ and `stage2.tir` must equal `stage1.tir` byte for byte. That equality is the
 **fixpoint**: a self-hosting compiler compiled by itself reproduces itself.
 `scripts/ddc.sh` runs it and prints both hashes either way.
 
-**Where it stands.** Every artifact short of the fixpoint itself is green and
-has been for many rounds: the bootstrap suite (`scripts/bootstrap.sh`) ends
-with its full agreement line — 289 names defined, 18 names resolved, 315
-items rewritten, 58 types laid out, 188 bindings typed, 178 functions
-checked, 4367 lines of TIR, 21045 of whole programs, 28616 of assembly —
-and the layout corpus matches word for word. A 71-case rehearsal battery of
-everything the lane threw up — aggregation moves through `*b` and `let
-inner = *b`, `match f()? { … }` scrutinees, `?` carried through `let`
-written-reference types, owned-enum payload moves, generic impl-method
-answers on `-> T` (`Option.unwrap.char` semantics), if-join wants, direct-tag
-niche non-propagation (layout) — is byte-identical to trustc's own text on
-every case.
+**The answer.** Both sides are `7027e0978d95396af3d11846b89cd2fc422eb4b8c7cb285791f3d7afe8346e2e`,
+9,485,971 bytes each — the fixpoint holds, with the whole front end as the
+evidence.
 
-The fixpoint itself runs to completion of all 554 functions and the full
-drain (1,479 made/drop-entries, destroy-productive through every recorded
-job) before the VM faults at the final `keep` loop copying
-`out[1228].text` for `drop.Vec.layout.Def` — a word-alignment fault whose
-address shifts with each run's textual content, pointing at no emitted
-instruction and no static type fact. It is reproduced only at the scale of
-the front end whole; every intermediate chunk completes. The suspicion zone
-is narrowed to materialization/copy machinery at high string volume (see
-spec-gaps G9.207 for the full trail), not the lowering itself: the
-byte-comparisons for every separable case agree, and the lane stands open
-*here*, not in the semantics that were raised against it.
+**How it got here.** The comparison did not land on `stage1.tir ==
+stage2.tir` at the first calibrée — the two lowerings are built far enough
+apart (one in Rust, one in Trust) that agreement is earned fn by fn. The
+fixpoint's march began with a one-max niche tie-break in `layout/product`
+(G9.208), and every subsequent round found one distinct way the two
+implementations would not agree on the same program — which is exactly
+what the comparison is for. The trail it walked includes: a str-fallback
+read-through `%v` (G9.209), copyable-field partial drops (G9.210), `&String`
+arguments never coerced to `&str` and the new `arg_value()` (G9.211),
+struct-construction's aggregating field moves (G9.212), a method-tail
+not-place-receiver's scope ordering (G9.213), match-arm guard lowering
+(G9.217), `e.writing`'s probe across field/deref-through-index and the
+shared family definition of it (G9.218–G9.219), index-assign drop-order
+(G9.220), snapshot-parallel tracking of single-field moves for the
+G9.221-era-scope-end merges, static-key queue-instance order for generic
+calls (G9.222), a reference-receiver's read-through slot ordering (G9.223),
+drop_first when whole-Name-assign meets a statically-moved local (G9.224),
+`for` over a field as the same `into_iter` consume rule (G9.225),
+by_self-method Field consumption of a Name (G9.226), dropping-as-arg's own
+field-assign rule for the whole five-arm macros family — rewritten at the
+site where the lowering was ambiguous on its own (G9.229), unit-payload
+`try-arms` owing nothing (G9.231), `e?`-of-Name recording the whole-name
+move (G9.232), and `owns_agree` honoring what one arm of an `if` was
+willing to leave unquiet (G9.233).
+
+Verifications beside the verdict: a 71-case (now 101 + 9 quarantined)
+battery of minimal reproducers is byte-identical to trustc's own text on
+every case, and `scripts/bootstrap.sh` ends with its full agreement line —
+289 names defined, 18 names resolved, 315 items rewritten, 58 types laid
+out, 188 bindings typed, 178 functions checked, 4367 lines of TIR, 21045 of
+whole programs, 28616 of assembly — for the same compilation the fixpoint
+compares.
 
 ### 3.4 The parent must be diverse — **partly, and honestly not**
 
