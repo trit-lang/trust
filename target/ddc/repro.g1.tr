@@ -1,0 +1,18 @@
+pub struct Block {
+    pub stmts: Vec<String>,
+    pub tail: taddr,
+}
+
+fn remake(b: Box<Block>, n: taddr) -> Block {
+    let mut inner = *b;
+    inner.tail = inner.tail + n;
+    inner
+}
+
+fn main() -> t27 {
+    let mut stmts: Vec<String> = Vec::new();
+    stmts.push("a".to_string());
+    let blk = Block { stmts: stmts, tail: 1 };
+    let out = remake(Box::new(blk), 2);
+    out.tail as t27
+}

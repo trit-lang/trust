@@ -1,0 +1,15 @@
+// Element assignment drops what was there first (G9.220): `v[i] = s` is the
+// same drop-then-copy the field's arm says.
+fn replace(v: &mut Vec<String>, i: taddr) -> bool {
+    let s = "new".to_string();
+    v[i] = s;
+    true
+}
+fn main() -> t27 {
+    let mut xs: Vec<String> = Vec::new();
+    xs.push("old".to_string());
+    let d = replace(&mut xs, 0);
+    let n = xs[0].len();
+    println_int(n as t27);
+    0
+}

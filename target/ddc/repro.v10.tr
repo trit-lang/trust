@@ -1,0 +1,36 @@
+pub struct Taken {
+    pub tok: t27,
+    pub at: taddr,
+}
+
+pub struct Error {
+    pub at: taddr,
+}
+
+pub struct Pair {
+    pub x: t27,
+    pub y: t27,
+}
+
+pub enum Choice {
+    A(Pair),
+    B,
+}
+
+pub enum Narrow {
+    C(t27),
+    D,
+}
+
+
+pub fn give() -> Result<Taken, Error> {
+    let t = Taken { tok: 1, at: 2 };
+    Result::Ok(t)
+}
+
+fn main() -> t27 {
+    match give() {
+        Result::Ok(t) => t.tok,
+        Result::Err(e) => 0,
+    }
+}

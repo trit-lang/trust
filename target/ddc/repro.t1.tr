@@ -1,0 +1,29 @@
+pub enum Expr {
+    Atom(t27),
+    Nested(Box<Expr>),
+}
+
+pub struct Err {
+    pub at: taddr,
+}
+
+fn inner(p: &mut taddr) -> Result<Expr, Err> {
+    Result::Ok(Expr::Atom(*p as t27))
+}
+
+fn f(p: &mut taddr, chained: bool) -> Result<Expr, Err> {
+    let other = if chained {
+        inner(p)?
+    } else {
+        Expr::Nested(Box::new(Expr::Atom(0)))
+    };
+    Result::Ok(other)
+}
+
+fn main() -> t27 {
+    let mut n: taddr = 7;
+    match f(&mut n, true) {
+        Result::Ok(e) => 1,
+        Result::Err(x) => 0,
+    }
+}

@@ -1,0 +1,20 @@
+// Tail protocol for a method whose receiver is not a place (G9.213): the
+// answer lands in a temporary, the scope's drops run, and only then is the
+// answer copied out — `carrier`'s `"".to_string()` tail is this shape.
+fn carrier_like(ok: bool) -> String {
+    let at = if ok { 1 } else { 0 - 1 };
+    if at < 0 {
+        return "neg".to_string();
+    }
+    let base = "base".to_string();
+    if base.same("Result") {
+        return base;
+    }
+    "".to_string()
+}
+
+fn main() -> t27 {
+    let s = carrier_like(true);
+    println(&s);
+    0
+}

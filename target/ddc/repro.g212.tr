@@ -1,0 +1,19 @@
+// Aggregate field moves in value position (G9.212): building a struct out of
+// another's fields takes each aggregate field with it, and the owner's
+// remaining drop at an early return names only what is left.
+struct Pack { sigs: Vec<taddr>, consts: Vec<t27> }
+struct Other { sigs: Vec<taddr>, consts: Vec<t27> }
+
+fn rewrap(p: Pack) -> bool {
+    let q = Other { sigs: p.sigs, consts: p.consts };
+    if q.consts.len() == 0 {
+        return false;
+    }
+    true
+}
+
+fn main() -> t27 {
+    let mut p = Pack { sigs: Vec::new(), consts: Vec::new() };
+    p.consts.push(1);
+    if rewrap(p) { 0 } else { 1 }
+}

@@ -1,0 +1,23 @@
+fn parse_a() -> Result<String, bool> { Result::Ok("a".to_string()) }
+fn parse_b() -> Result<String, bool> { Result::Ok("b".to_string()) }
+fn peek(e: &String) -> bool { e.len() > 0 }
+fn consume(s: String) {}
+fn tail_moves(s: String) {}
+fn probe(x: bool, y: bool) -> Result<(), bool> {
+    let e = if x { parse_a()? } else { parse_b()? };
+    if x {
+        consume(e);
+    } else if peek(&e) {
+        if y {
+            tail_moves(e);
+        } else {
+            consume(e);
+        }
+    } else {
+        return Result::Err(true);
+    }
+    Result::Ok(())
+}
+fn main() -> t27 {
+    match probe(false, false) { Result::Ok(_) => 0, Result::Err(_) => 1 }
+}

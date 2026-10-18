@@ -1,0 +1,14 @@
+// Field-through-index assignment resolves `index_mut` (G9.218): the writing
+// side reaches its field's place through an exclusive index.
+struct Pair { broke: bool, at: t27 }
+fn flip(v: &mut Vec<Pair>, i: taddr) -> bool {
+    v[i].broke = true;
+    v[i].at += 1;
+    v[i].at > 0
+}
+fn main() -> t27 {
+    let mut xs: Vec<Pair> = Vec::new();
+    xs.push(Pair { broke: false, at: 0 });
+    flip(&mut xs, 0);
+    if xs[0].broke { 0 } else { 1 }
+}

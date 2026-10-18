@@ -1,0 +1,22 @@
+pub enum E {
+    A(Vec<String>),
+    B,
+}
+
+pub struct Wrap {
+    tok: E,
+    at: taddr,
+}
+
+fn f(t: Wrap) -> t27 {
+    match t.tok {
+        E::A(v) => v.len() as t27,
+        E::B => 0,
+    }
+}
+
+fn main() -> t27 {
+    let mut v: Vec<String> = Vec::new();
+    v.push("x".to_string());
+    f(Wrap { tok: E::A(v), at: 0 })
+}

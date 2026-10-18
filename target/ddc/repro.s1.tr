@@ -1,0 +1,67 @@
+pub enum Ty {
+    Name(t27),
+    Unit,
+    Ref(Box<Ty>),
+}
+
+pub struct S2 {
+    pub name: String,
+    pub at: taddr,
+}
+
+fn unwrap_ty(v: Option<Ty>) -> Ty {
+    v.unwrap()
+}
+
+fn unwrap_s(v: Option<S2>) -> S2 {
+    v.unwrap()
+}
+
+fn unwrap_str(v: Option<String>) -> String {
+    v.unwrap()
+}
+
+fn unwrap_opt(v: Option<Option<Ty>>) -> Option<Ty> {
+    v.unwrap()
+}
+
+fn match_owned(e: Ty) -> taddr {
+    match e {
+        Ty::Name(v) => v,
+        Ty::Unit => 0,
+        Ty::Ref(inner) => match_owned(*inner),
+    }
+}
+
+fn move_match(v: Option<Ty>) -> taddr {
+    match v {
+        Option::Some(t) => match_owned(t),
+        Option::None => 0,
+    }
+}
+
+fn via_try(p: &mut taddr) -> Result<Option<t27>, Err2> {
+    Result::Ok(Option::Some(3))
+}
+
+pub struct Err2 {
+    pub at: taddr,
+}
+
+fn f(p: &mut taddr) -> taddr {
+    let a = unwrap_str(Option::Some("a".to_string()));
+    let b = unwrap_ty(Option::Some(Ty::Unit));
+    let c = move_match(Option::Some(Ty::Name(5)));
+    let d = unwrap_opt(Option::Some(Option::Some(Ty::Unit)));
+    let e = via_try(p);
+    let s = unwrap_s(Option::Some(S2 { name: "n".to_string(), at: 1 }));
+    match d {
+        Option::Some(t) => c + a.len() as taddr + s.at as taddr,
+        Option::None => b as taddr,
+    }
+}
+
+fn main() -> t27 {
+    let mut n: taddr = 0;
+    f(&mut n) as t27
+}

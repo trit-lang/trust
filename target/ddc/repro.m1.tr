@@ -1,0 +1,17 @@
+pub enum E {
+    A(Vec<String>),
+    B,
+}
+
+fn f(e: E) -> t27 {
+    match e {
+        E::A(v) => v.len() as t27,
+        E::B => 0,
+    }
+}
+
+fn main() -> t27 {
+    let mut v: Vec<String> = Vec::new();
+    v.push("x".to_string());
+    f(E::A(v))
+}

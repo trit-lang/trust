@@ -1,0 +1,33 @@
+pub struct Inst2 {
+    pub full: String,
+    pub base: String,
+    pub key: Vec<String>,
+}
+
+pub struct Em2 {
+    pub instances: Vec<Inst2>,
+    pub ty: String,
+}
+
+fn copy_names(from: &Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut i: taddr = 0;
+    while i < from.len() {
+        out.push(from[i].to_string());
+        i += 1;
+    }
+    out
+}
+
+
+fn f(e: &Em2, inst: taddr) -> String {
+    let base = e.instances[inst as taddr].base.to_string();
+    base
+}
+
+fn main() -> t27 {
+    let mut instances: Vec<Inst2> = Vec::new();
+    instances.push(Inst2 { full: "a".to_string(), base: "b".to_string(), key: Vec::new() });
+    let e = Em2 { instances: instances, ty: "t".to_string() };
+    f(&e, 0).len() as t27
+}

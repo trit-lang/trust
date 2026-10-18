@@ -1,0 +1,11 @@
+fn forget(v: &mut Vec<String>, mark: taddr) {
+    while v.len() > mark {
+        v.pop();
+    }
+}
+fn main() -> t27 {
+    let mut xs: Vec<String> = Vec::new();
+    xs.push("old".to_string());
+    forget(&mut xs, 0);
+    0
+}

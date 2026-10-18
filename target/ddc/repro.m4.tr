@@ -1,0 +1,16 @@
+pub enum Ty {
+    Name(Vec<String>),
+    Ref(Box<Ty>, bool),
+}
+
+fn size(t: Ty) -> taddr {
+    match t {
+        Ty::Name(segments) => segments.len(),
+        Ty::Ref(inner, mutable) => 1 + size(*inner),
+    }
+}
+
+fn main() -> t27 {
+    let v: Vec<String> = Vec::new();
+    size(Ty::Name(v)) as t27
+}

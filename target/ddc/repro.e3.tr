@@ -1,0 +1,13 @@
+
+fn last_same(v: &Vec<String>, w: &str) -> bool {
+    v[v.len() - 1].same(w)
+}
+
+fn main() -> t27 {
+    let mut v: Vec<String> = Vec::new();
+    v.push("a".to_string());
+    if last_same(&v, "a") {
+        return 1;
+    }
+    0
+}

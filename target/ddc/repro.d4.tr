@@ -1,0 +1,13 @@
+
+fn last_is_str(segments: &Vec<String>) -> bool {
+    segments[segments.len() - 1].same("str")
+}
+
+fn main() -> t27 {
+    let mut v: Vec<String> = Vec::new();
+    v.push("str".to_string());
+    if last_is_str(&v) {
+        return 1;
+    }
+    0
+}

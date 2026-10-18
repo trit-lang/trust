@@ -1,0 +1,16 @@
+struct Ctx { n: t27 }
+fn replace_stmts(s: Vec<String>) -> Vec<String> { s }
+fn probe(f: Ctx) -> Vec<String> {
+    let b = f.n;
+    if b == 0 {
+        let empty: Vec<String> = Vec::new();
+        return empty;
+    }
+    let inner: Vec<String> = Vec::new();
+    let next = replace_stmts(inner);
+    next
+}
+fn main() -> t27 {
+    let ok = probe(Ctx { n: 3 }).len() > 0;
+    0
+}

@@ -1,0 +1,29 @@
+pub struct Err {
+    pub at: taddr,
+}
+
+fn name_of(p: &mut taddr) -> Result<String, Err> {
+    Result::Ok("n".to_string())
+}
+
+fn recv(p: &mut taddr) -> Result<Option<t27>, Err> {
+    Result::Ok(Option::None)
+}
+
+fn f(p: &mut taddr) -> Result<String, Err> {
+    match recv(p)? {
+        Option::Some(x) => Result::Ok("y".to_string()),
+        Option::None => {
+            let pname = name_of(p)?;
+            Result::Ok(pname)
+        }
+    }
+}
+
+fn main() -> t27 {
+    let mut n: taddr = 0;
+    match f(&mut n) {
+        Result::Ok(s) => s.len() as t27,
+        Result::Err(e) => 0,
+    }
+}

@@ -1,0 +1,29 @@
+pub enum Ty {
+    Name(t27),
+    Unit,
+}
+
+pub struct Err {
+    pub at: taddr,
+}
+
+fn type_name(p: &mut taddr) -> Result<Ty, Err> {
+    Result::Ok(Ty::Unit)
+}
+
+fn f(p: &mut taddr, has_ty: bool) -> Result<Ty, Err> {
+    let written: Option<Ty> = if has_ty {
+        Option::Some(type_name(p)?)
+    } else {
+        Option::None
+    };
+    Result::Ok(Ty::Unit)
+}
+
+fn main() -> t27 {
+    let mut n: taddr = 0;
+    match f(&mut n, true) {
+        Result::Ok(t) => 1,
+        Result::Err(e) => 0,
+    }
+}

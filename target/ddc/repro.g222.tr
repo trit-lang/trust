@@ -1,0 +1,20 @@
+// An aggregate literal inside a generic call settles its key before the args
+// are lowered, and the answer's slot comes first (G9.222).
+fn vec_of_one<T>(x: T) -> Vec<T> {
+    let mut out: Vec<T> = Vec::new();
+    out.push(x);
+    out
+}
+enum Pattern { Aggregate(String, Vec<t27>), Bind(String) }
+fn probe() -> t27 {
+    let mut arms: Vec<Pattern> = Vec::new();
+    let mut fields: Vec<t27> = Vec::new();
+    fields.push(1);
+    arms.push(Pattern::Aggregate("opt".to_string(), fields));
+    let got = vec_of_one(Pattern::Aggregate("some".to_string(), vec_of_one(0)));
+    (arms.len() + got.len()) as t27
+}
+fn main() -> t27 {
+    println_int(probe());
+    0
+}

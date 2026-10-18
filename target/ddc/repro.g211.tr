@@ -1,0 +1,21 @@
+// Argument-position Vec -> &str coercion for a *reference value* (G9.211):
+// no `&` is written, so borrowed_place never sees it — the call's own
+// argument path converts `&String` to the two words `&str` is.
+fn count_it(text: &str) -> taddr {
+    text.len()
+}
+
+enum E { A(String), B }
+
+fn probe(e: &E) -> taddr {
+    match e {
+        E::A(s) => count_it(s),
+        E::B => 0,
+    }
+}
+
+fn main() -> t27 {
+    let e = E::A("hello".to_string());
+    println_int(probe(&e) as t27);
+    0
+}

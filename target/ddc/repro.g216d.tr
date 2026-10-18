@@ -1,0 +1,37 @@
+// Through-reference enum match with outer mutations inside arms, nested
+// aggregate-if in the Direct arm, and stuff-after in the join path.
+enum TagKind { Direct(taddr, taddr), Niche(taddr, taddr) }
+
+fn niche_tir() -> String {
+    "niche".to_string()
+}
+
+fn tag_text(k: &TagKind) -> String {
+    let mut carrier: taddr = 0 - 1;
+    let mut from = "none".to_string();
+    let tag = match k {
+        TagKind::Direct(width, at) => {
+            if width == 1 {
+                "t9".to_string()
+            } else {
+                "t27".to_string()
+            }
+        }
+        TagKind::Niche(held, at) => {
+            niche_tir()
+        }
+    };
+    if tag.same("?") {
+        return "bad".to_string();
+    }
+    let mut out = tag.to_string();
+    out.push_str(&from);
+    out
+}
+
+fn main() -> t27 {
+    let k = TagKind::Direct(1, 0);
+    let s = tag_text(&k);
+    println(&s);
+    0
+}

@@ -1,0 +1,17 @@
+fn probe(s: bool, s2: Vec<String>) -> Vec<String> {
+    let mut inner: Vec<String> = Vec::new();
+    if s {
+        println_int(inner.len() as t27);
+    }
+    let mut inner: Vec<String> = if s { s2 } else { Vec::new() };
+    let mut other: Vec<String> = Vec::new();
+    let arg = "a".to_string();
+    inner = probe_tail(inner, &arg);
+    inner
+}
+fn probe_tail(s: Vec<String>, arg: &String) -> Vec<String> { s }
+fn main() -> t27 {
+    let v: Vec<String> = Vec::new();
+    println_int(probe(true, v).len() as t27);
+    0
+}

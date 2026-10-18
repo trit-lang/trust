@@ -1,0 +1,35 @@
+pub struct Taken {
+    pub tok: t27,
+    pub at: taddr,
+}
+
+pub struct Error {
+    pub at: taddr,
+}
+
+pub struct Pair {
+    pub x: t27,
+    pub y: t27,
+}
+
+pub enum Choice {
+    A(Pair),
+    B,
+}
+
+pub enum Narrow {
+    C(t27),
+    D,
+}
+
+
+pub fn pick() -> Choice {
+    Choice::A(Pair { x: 1, y: 2 })
+}
+
+fn main() -> t27 {
+    match pick() {
+        Choice::A(p) => p.x,
+        Choice::B => 0,
+    }
+}

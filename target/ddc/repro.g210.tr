@@ -1,0 +1,31 @@
+// Copyable field read on a match scrutinee (G9.210): `match h.spot` with an
+// all-scalar payload leaves `h` whole — the owner drops by its own glue, and
+// no field is recorded as moved.
+struct Spot { offset: taddr, trits: taddr, lo: t27, hi: t27 }
+struct Holder { xs: Vec<taddr>, spot: Option<Spot>, ys: Vec<t27> }
+
+fn look(h: Holder) -> t27 {
+    match h.spot {
+        Option::Some(x) => x.offset as t27,
+        Option::None => 0 - 1 as t27,
+    }
+}
+
+fn probe(h: &Holder) -> taddr {
+    match h.spot {
+        Option::Some(x) => x.trits,
+        Option::None => 0,
+    }
+}
+
+fn main() -> t27 {
+    let h = Holder {
+        xs: Vec::new(),
+        spot: Option::Some(Spot { offset: 3, trits: 9, lo: 0, hi: 1 }),
+        ys: Vec::new(),
+    };
+    let a = look(h);
+    let b = probe(&h);
+    println_int(a + b as t27);
+    0
+}

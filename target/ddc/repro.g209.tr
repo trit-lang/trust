@@ -1,0 +1,23 @@
+// The str-fallback read-through ordering case (G9.209): a match arm binds
+// `name: &String` out of one variant among siblings and calls
+// `name.to_string()` — `%tmp` answer, `%v` read-through, `%tmp` pair.
+enum What { Function(String), Struct(String, Vec<taddr>, Vec<taddr>), Use(Vec<String>) }
+
+fn defines(w: &What) -> Option<String> {
+    match w {
+        What::Function(f) => Option::Some(f.to_string()),
+        What::Struct(name, gs, fields) => Option::Some(name.to_string()),
+        What::Use(segments) => Option::None,
+    }
+}
+
+fn main() -> t27 {
+    let w = What::Struct("abc".to_string(), Vec::new(), Vec::new());
+    match defines(&w) {
+        Option::Some(s) => {
+            println(&s);
+            0
+        }
+        Option::None => 1,
+    }
+}

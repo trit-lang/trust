@@ -1,0 +1,9 @@
+fn expect() -> Result<(), t27> { Result::Ok(()) }
+fn probe() -> Result<(), t27> {
+    expect()?;
+    Result::Ok(())
+}
+fn main() -> t27 {
+    probe();
+    0
+}

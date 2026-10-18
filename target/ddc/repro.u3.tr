@@ -1,0 +1,7 @@
+fn take(v: Option<t27>) -> t27 {
+    v.unwrap()
+}
+
+fn main() -> t27 {
+    take(Option::Some(5)) + 1
+}

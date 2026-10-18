@@ -1,0 +1,9 @@
+fn assign(p: &mut String) {
+    *p = "b".to_string();
+}
+
+fn main() -> t27 {
+    let mut s = "a".to_string();
+    assign(&mut s);
+    s.len() as t27
+}

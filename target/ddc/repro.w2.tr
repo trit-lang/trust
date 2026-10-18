@@ -1,0 +1,13 @@
+pub struct Point {
+    pub x: t27,
+    pub y: t27,
+}
+
+fn first(b: Box<Point>) -> t27 {
+    let mut opened: &Point = &*b;
+    opened.x
+}
+
+fn main() -> t27 {
+    first(Box::new(Point { x: 3, y: 4 }))
+}

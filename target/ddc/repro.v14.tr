@@ -1,0 +1,25 @@
+pub struct Taken {
+    pub tok: t27,
+    pub at: taddr,
+}
+
+pub struct Error {
+    pub at: taddr,
+}
+
+pub enum G<A> {
+    Gx(A),
+    Gy,
+}
+
+
+pub fn give() -> Result<t27, Error> {
+    Result::Ok(3)
+}
+
+fn main() -> t27 {
+    match give() {
+        Result::Ok(n) => n,
+        Result::Err(e) => 0,
+    }
+}

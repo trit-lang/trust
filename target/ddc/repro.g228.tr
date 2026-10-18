@@ -1,0 +1,14 @@
+struct P { name: String }
+fn probe(p: &P, held: &str, e: &mut t27) -> bool {
+    let root = p.name.to_string();
+    let moved = root.len() > 0 && had_field(e, &root, held);
+    owns(e) && !moved
+}
+fn owns(e: &mut t27) -> bool { clone_e(e) > 0 }
+fn clone_e(e: &mut t27) -> t27 { *e }
+fn had_field(e: &mut t27, name: &str, field: &str) -> bool { *e == 7 }
+fn main() -> t27 {
+    let mut e: t27 = 3;
+    let p = P { name: "xy".to_string() };
+    if probe(&p, "f", &mut e) { 1 } else { 0 }
+}

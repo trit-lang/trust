@@ -1,0 +1,12 @@
+fn sampled() -> Result<String, bool> { Result::Ok("x".to_string()) }
+fn probe() -> Result<String, bool> {
+    let e = sampled();
+    let value = e?;
+    Result::Ok(value.to_string())
+}
+fn main() -> t27 {
+    match probe() {
+        Result::Ok(s) => { 0 }
+        Result::Err(_) => { 1 }
+    }
+}

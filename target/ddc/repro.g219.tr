@@ -1,0 +1,13 @@
+fn pick(width: taddr) -> String {
+    let tag = if width == 1 {
+        "t9".to_string()
+    } else {
+        "t27".to_string()
+    };
+    tag
+}
+fn main() -> t27 {
+    let s = pick(1);
+    println(&s);
+    0
+}

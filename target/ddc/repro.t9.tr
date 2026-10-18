@@ -1,0 +1,23 @@
+pub struct Err {
+    pub at: taddr,
+}
+
+fn recv(p: &mut taddr) -> Result<Option<t27>, Err> {
+    Result::Ok(Option::Some(3))
+}
+
+fn f(p: &mut taddr) -> Result<t27, Err> {
+    let o = recv(p)?;
+    match o {
+        Option::Some(x) => Result::Ok(x),
+        Option::None => Result::Ok(0),
+    }
+}
+
+fn main() -> t27 {
+    let mut n: taddr = 0;
+    match f(&mut n) {
+        Result::Ok(v) => v,
+        Result::Err(e) => 0,
+    }
+}

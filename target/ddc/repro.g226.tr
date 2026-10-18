@@ -1,0 +1,11 @@
+fn take(v: Vec<String>) -> bool { v.len() > 0 }
+fn probe(x: bool) -> Vec<String> {
+    let mut b: Vec<String> = Vec::new();
+    b.push("first".to_string());
+    take(b);
+    let new: Vec<String> = Vec::new();
+    new
+}
+fn main() -> t27 {
+    if probe(true).len() > 0 { 0 } else { 1 }
+}

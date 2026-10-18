@@ -1,0 +1,14 @@
+struct P { name: String, requires: Vec<String> }
+fn probe(p: P) -> P {
+    for r in p.requires {
+        println(&r);
+    }
+    p.name.to_string();
+    P { name: "q".to_string(), requires: Vec::new() }
+}
+fn main() -> t27 {
+    let p = P { name: "x".to_string(), requires: Vec::new() };
+    let q = probe(p);
+    println_int(q.name.len() as t27);
+    0
+}

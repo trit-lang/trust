@@ -1,0 +1,8 @@
+fn at(v: t27) -> char {
+    let c: Option<char> = if v == 5 { Option::Some('a') } else { Option::None };
+    c.unwrap()
+}
+
+fn main() -> t27 {
+    at(5) as t27
+}

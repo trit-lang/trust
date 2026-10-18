@@ -1,0 +1,16 @@
+pub struct Def {
+    pub name: String,
+    pub field_names: Vec<String>,
+}
+
+
+fn take(defs: Vec<Def>) -> String {
+    let n = &defs[0].name;
+    "b".to_string()
+}
+
+fn main() -> t27 {
+    let mut defs: Vec<Def> = Vec::new();
+    defs.push(Def { name: "a".to_string(), field_names: Vec::new() });
+    take(defs).len() as t27
+}

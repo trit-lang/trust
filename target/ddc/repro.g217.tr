@@ -1,0 +1,16 @@
+// A place-match whose arm carries a guard (G9.217): after the pattern's
+// bindings, the guard is evaluated, and a `false` hands on to the next arm.
+enum E { M(t27, t27), N(t27) }
+fn probe(x: &E, ok: bool) -> t27 {
+    match x {
+        E::M(a, b) if ok => a,
+        E::M(a, b) => b,
+        E::N(n) => n,
+    }
+}
+fn main() -> t27 {
+    let a = E::M(7, 9);
+    println_int(probe(&a, true));
+    println_int(probe(&a, false));
+    0
+}

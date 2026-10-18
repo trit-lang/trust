@@ -1,0 +1,20 @@
+// A field moved out of a named aggregate on one if-arm, whole on the other:
+// the join drops only what is owned where control actually arrives (G9.221).
+struct V { text: String, ty: String }
+fn probe(x: bool) -> bool {
+    let from = V { text: "a".to_string(), ty: "t27".to_string() };
+    let to_wide = "t27".to_string();
+    let from_wide = "t9".to_string();
+    if to_wide.same(&from_wide) {
+        let made = V { text: from.text, ty: to_wide };
+        return made.text.same("a");
+    }
+    from.text.same("a")
+}
+fn main() -> t27 {
+    if probe(true) {
+        0
+    } else {
+        1
+    }
+}

@@ -1,0 +1,7 @@
+fn take(v: Option<String>) -> String {
+    v.unwrap()
+}
+
+fn main() -> t27 {
+    take(Option::Some("a".to_string())).len() as t27
+}

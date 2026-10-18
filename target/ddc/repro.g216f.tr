@@ -1,0 +1,21 @@
+enum TagKind { Direct(taddr, taddr), Niche(taddr, taddr) }
+
+fn tag_text(k: &TagKind) -> String {
+    match k {
+        TagKind::Direct(width, at) => {
+            if width == 1 {
+                "t9".to_string()
+            } else {
+                "t27".to_string()
+            }
+        }
+        TagKind::Niche(held, at) => "n".to_string(),
+    }
+}
+
+fn main() -> t27 {
+    let k = TagKind::Direct(1, 0);
+    let s = tag_text(&k);
+    println(&s);
+    0
+}

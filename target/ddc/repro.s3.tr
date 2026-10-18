@@ -1,0 +1,305 @@
+pub enum Ty0 { A(t27), B(Vec<String>), C(String) }
+pub enum E0 { A(t27), B(String), C(Vec<Ty0>) }
+pub enum Ty1 { A(t27), B(Vec<E0>), C(String) }
+pub enum E1 { A(t27), B(String), C(Vec<Ty1>) }
+pub enum Ty2 { A(t27), B(Vec<E1>), C(String) }
+pub enum E2 { A(t27), B(String), C(Vec<Ty2>) }
+pub enum Ty3 { A(t27), B(Vec<E2>), C(String) }
+pub enum E3 { A(t27), B(String), C(Vec<Ty3>) }
+pub enum Ty4 { A(t27), B(Vec<E3>), C(String) }
+pub enum E4 { A(t27), B(String), C(Vec<Ty4>) }
+pub enum Ty5 { A(t27), B(Vec<E4>), C(String) }
+pub enum E5 { A(t27), B(String), C(Vec<Ty5>) }
+pub enum Ty6 { A(t27), B(Vec<E5>), C(String) }
+pub enum E6 { A(t27), B(String), C(Vec<Ty6>) }
+pub enum Ty7 { A(t27), B(Vec<E6>), C(String) }
+pub enum E7 { A(t27), B(String), C(Vec<Ty7>) }
+pub enum Ty8 { A(t27), B(Vec<E7>), C(String) }
+pub enum E8 { A(t27), B(String), C(Vec<Ty8>) }
+pub enum Ty9 { A(t27), B(Vec<E8>), C(String) }
+pub enum E9 { A(t27), B(String), C(Vec<Ty9>) }
+pub enum Ty10 { A(t27), B(Vec<E9>), C(String) }
+pub enum E10 { A(t27), B(String), C(Vec<Ty10>) }
+pub enum Ty11 { A(t27), B(Vec<E10>), C(String) }
+pub enum E11 { A(t27), B(String), C(Vec<Ty11>) }
+pub enum Ty12 { A(t27), B(Vec<E11>), C(String) }
+pub enum E12 { A(t27), B(String), C(Vec<Ty12>) }
+pub enum Ty13 { A(t27), B(Vec<E12>), C(String) }
+pub enum E13 { A(t27), B(String), C(Vec<Ty13>) }
+pub enum Ty14 { A(t27), B(Vec<E13>), C(String) }
+pub enum E14 { A(t27), B(String), C(Vec<Ty14>) }
+pub enum Ty15 { A(t27), B(Vec<E14>), C(String) }
+pub enum E15 { A(t27), B(String), C(Vec<Ty15>) }
+pub enum Ty16 { A(t27), B(Vec<E15>), C(String) }
+pub enum E16 { A(t27), B(String), C(Vec<Ty16>) }
+pub enum Ty17 { A(t27), B(Vec<E16>), C(String) }
+pub enum E17 { A(t27), B(String), C(Vec<Ty17>) }
+pub enum Ty18 { A(t27), B(Vec<E17>), C(String) }
+pub enum E18 { A(t27), B(String), C(Vec<Ty18>) }
+pub enum Ty19 { A(t27), B(Vec<E18>), C(String) }
+pub enum E19 { A(t27), B(String), C(Vec<Ty19>) }
+fn pump0(v: Option<E0>) -> t27 {
+    let o: Option<Option<E0>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E0::A(n) => n,
+            E0::B(s) => s.len() as t27,
+            E0::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn pump1(v: Option<E1>) -> t27 {
+    let o: Option<Option<E1>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E1::A(n) => n,
+            E1::B(s) => s.len() as t27,
+            E1::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn pump2(v: Option<E2>) -> t27 {
+    let o: Option<Option<E2>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E2::A(n) => n,
+            E2::B(s) => s.len() as t27,
+            E2::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn pump3(v: Option<E3>) -> t27 {
+    let o: Option<Option<E3>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E3::A(n) => n,
+            E3::B(s) => s.len() as t27,
+            E3::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn pump4(v: Option<E4>) -> t27 {
+    let o: Option<Option<E4>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E4::A(n) => n,
+            E4::B(s) => s.len() as t27,
+            E4::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn pump5(v: Option<E5>) -> t27 {
+    let o: Option<Option<E5>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E5::A(n) => n,
+            E5::B(s) => s.len() as t27,
+            E5::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn pump6(v: Option<E6>) -> t27 {
+    let o: Option<Option<E6>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E6::A(n) => n,
+            E6::B(s) => s.len() as t27,
+            E6::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn pump7(v: Option<E7>) -> t27 {
+    let o: Option<Option<E7>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E7::A(n) => n,
+            E7::B(s) => s.len() as t27,
+            E7::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn pump8(v: Option<E8>) -> t27 {
+    let o: Option<Option<E8>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E8::A(n) => n,
+            E8::B(s) => s.len() as t27,
+            E8::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn pump9(v: Option<E9>) -> t27 {
+    let o: Option<Option<E9>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E9::A(n) => n,
+            E9::B(s) => s.len() as t27,
+            E9::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn pump10(v: Option<E10>) -> t27 {
+    let o: Option<Option<E10>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E10::A(n) => n,
+            E10::B(s) => s.len() as t27,
+            E10::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn pump11(v: Option<E11>) -> t27 {
+    let o: Option<Option<E11>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E11::A(n) => n,
+            E11::B(s) => s.len() as t27,
+            E11::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn pump12(v: Option<E12>) -> t27 {
+    let o: Option<Option<E12>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E12::A(n) => n,
+            E12::B(s) => s.len() as t27,
+            E12::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn pump13(v: Option<E13>) -> t27 {
+    let o: Option<Option<E13>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E13::A(n) => n,
+            E13::B(s) => s.len() as t27,
+            E13::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn pump14(v: Option<E14>) -> t27 {
+    let o: Option<Option<E14>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E14::A(n) => n,
+            E14::B(s) => s.len() as t27,
+            E14::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn pump15(v: Option<E15>) -> t27 {
+    let o: Option<Option<E15>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E15::A(n) => n,
+            E15::B(s) => s.len() as t27,
+            E15::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn pump16(v: Option<E16>) -> t27 {
+    let o: Option<Option<E16>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E16::A(n) => n,
+            E16::B(s) => s.len() as t27,
+            E16::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn pump17(v: Option<E17>) -> t27 {
+    let o: Option<Option<E17>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E17::A(n) => n,
+            E17::B(s) => s.len() as t27,
+            E17::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn pump18(v: Option<E18>) -> t27 {
+    let o: Option<Option<E18>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E18::A(n) => n,
+            E18::B(s) => s.len() as t27,
+            E18::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn pump19(v: Option<E19>) -> t27 {
+    let o: Option<Option<E19>> = Option::Some(v);
+    let q = o.unwrap();
+    match q {
+        Option::Some(e) => match e {
+            E19::A(n) => n,
+            E19::B(s) => s.len() as t27,
+            E19::C(xs) => xs.len() as t27,
+        },
+        Option::None => 0,
+    }
+}
+fn main() -> t27 {
+    let mut acc: t27 = 0;
+    acc = acc + pump0(Option::Some(E0::A(1)));
+    acc = acc + pump1(Option::Some(E1::A(2)));
+    acc = acc + pump2(Option::Some(E2::A(3)));
+    acc = acc + pump3(Option::Some(E3::A(4)));
+    acc = acc + pump4(Option::Some(E4::A(5)));
+    acc = acc + pump5(Option::Some(E5::A(6)));
+    acc = acc + pump6(Option::Some(E6::A(7)));
+    acc = acc + pump7(Option::Some(E7::A(8)));
+    acc = acc + pump8(Option::Some(E8::A(9)));
+    acc = acc + pump9(Option::Some(E9::A(10)));
+    acc = acc + pump10(Option::Some(E10::A(11)));
+    acc = acc + pump11(Option::Some(E11::A(12)));
+    acc = acc + pump12(Option::Some(E12::A(13)));
+    acc = acc + pump13(Option::Some(E13::A(14)));
+    acc = acc + pump14(Option::Some(E14::A(15)));
+    acc = acc + pump15(Option::Some(E15::A(16)));
+    acc = acc + pump16(Option::Some(E16::A(17)));
+    acc = acc + pump17(Option::Some(E17::A(18)));
+    acc = acc + pump18(Option::Some(E18::A(19)));
+    acc = acc + pump19(Option::Some(E19::A(20)));
+    acc
+
+}

@@ -1,0 +1,16 @@
+fn replace_stmts(s: Vec<String>, arg: &String) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for i in s { out.push(i); }
+    out
+}
+fn probe() -> Vec<String> {
+    let mut inner: Vec<String> = Vec::new();
+    inner.push("x".to_string());
+    let arg = "a".to_string();
+    inner = replace_stmts(inner, &arg);
+    inner
+}
+fn main() -> t27 {
+    println_int(probe().len() as t27);
+    0
+}

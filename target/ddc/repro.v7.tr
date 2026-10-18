@@ -1,0 +1,33 @@
+// Repro candidate: peek — tail call answering an aggregate from another
+// function's aggregate answer, with a &field-read argument.
+pub struct Taken {
+    pub tok: t27,
+    pub at: taddr,
+}
+
+pub struct Error {
+    pub at: taddr,
+}
+
+pub struct Parser {
+    pub src: String,
+    pub at: taddr,
+}
+
+pub fn one(s: &String, at: taddr) -> Result<Taken, Error> {
+    Result::Ok(Taken { tok: 1, at: at })
+}
+
+
+pub fn plain(s: &String, at: taddr) -> Taken {
+    Taken { tok: 1, at: at }
+}
+
+pub fn peek2(p: &Parser) -> Taken {
+    plain(&p.src, p.at)
+}
+
+fn main() -> t27 {
+    let p = Parser { src: "x".to_string(), at: 0 };
+    peek2(&p).at as t27
+}

@@ -1,0 +1,32 @@
+pub struct Expr {
+    pub at: taddr,
+}
+
+pub struct Err {
+    pub at: taddr,
+}
+
+fn primary(p: &mut taddr) -> Result<Expr, Err> {
+    Result::Ok(Expr { at: 1 })
+}
+
+fn expr(p: &mut taddr) -> Result<Expr, Err> {
+    Result::Ok(Expr { at: 2 })
+}
+
+fn f(p: &mut taddr, opens: bool) -> Result<Expr, Err> {
+    let e = if opens {
+        primary(p)?
+    } else {
+        expr(p)?
+    };
+    Result::Ok(e)
+}
+
+fn main() -> t27 {
+    let mut n: taddr = 0;
+    match f(&mut n, true) {
+        Result::Ok(e) => e.at as t27,
+        Result::Err(x) => 0,
+    }
+}

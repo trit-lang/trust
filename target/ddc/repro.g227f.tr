@@ -1,0 +1,9 @@
+struct Blk { stmts: Vec<String>, tail: Vec<String> }
+fn probe(b: Box<Blk>) -> Vec<String> {
+    let inner = *b;
+    inner.stmts
+}
+fn main() -> t27 {
+    let b = Box::new(Blk { stmts: Vec::new(), tail: Vec::new() });
+    if probe(b).len() > 0 { 1 } else { 0 }
+}

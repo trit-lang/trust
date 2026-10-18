@@ -1,0 +1,15 @@
+pub struct Def {
+    pub name: String,
+    pub field_names: Vec<String>,
+}
+
+
+fn first_len(defs: &Vec<Def>) -> taddr {
+    defs[0].name.len()
+}
+
+fn main() -> t27 {
+    let mut defs: Vec<Def> = Vec::new();
+    defs.push(Def { name: "a".to_string(), field_names: Vec::new() });
+    first_len(&defs) as t27
+}

@@ -1,0 +1,22 @@
+pub struct Def {
+    pub name: String,
+    pub field_names: Vec<String>,
+}
+
+
+fn def_at(defs: &Vec<Def>, name: &str) -> taddr {
+    let mut i: taddr = 0;
+    while i < defs.len() {
+        if defs[i].name.same(name) {
+            return i;
+        }
+        i += 1;
+    }
+    0 - 1
+}
+
+fn main() -> t27 {
+    let mut defs: Vec<Def> = Vec::new();
+    defs.push(Def { name: "a".to_string(), field_names: Vec::new() });
+    def_at(&defs, "a")
+}
