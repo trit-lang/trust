@@ -16,7 +16,7 @@ repository = "https://github.com/trit-lang/trust"
 # against the examples in the same commit that changes either.
 [grammars.trust]
 repository = "https://github.com/trit-lang/trust"
-rev = "faa68b34be1ef47c50cbb8c928deece91fa35511"
+rev = "cb5ce778c6d9e980ac4f81c6ec0f57ec444c89de"
 path = "editors/tree-sitter-trust"
 
 [language_servers.trust-lsp]
