@@ -1,0 +1,409 @@
+// t27enc — a byte stream spelled in base 27, the ternary answer to base64.
+//
+//     printf 'encode\nHello, 世界!\n' | trust run app/t27enc/main.tr
+//     printf 'decode\n<symbols>\n'         | trust run app/t27enc/main.tr
+//
+// The first line of the stream is the word `encode` or `decode`; everything
+// after its newline is the data. Encoded output is wrapped at 54 characters
+// (twice the alphabet, one line per 27 bytes), matching the 76-of-64 habit
+// its binary ancestor has.
+//
+// The encoding, and why this one:
+//
+// - **Three bytes become six symbols.** 24 bits fit in 16 trits
+//   (3^16 = 43 046 721 > 2^24), and a base-27 symbol is exactly three
+//   trits, so the block is 6 symbols with two trits to spare — the direct
+//   analog of base64's three-bytes-to-four-chars. The spare trits carry
+//   nothing: a block's value must stay under 2^24, which decode checks, so
+//   every 6-symbol block decodes to exactly 3 bytes.
+// - **A whole block is the bignum.** Each 3-byte group is one number
+//   (b0·256² + b1·256 + b2), converted to base 27 by repeated floor
+//   division — no bit fiddling, and none of `%`'s balanced remainders:
+//   slice with `floor_div`/`floor_mod`, the same rule recalc's printer
+//   follows (docs/status.md §9).
+// - **Packing across byte boundaries was weighed and rejected.** 14 bits
+//   per 9-trit group (7 bytes → 12 symbols, a 14% saving) leaves its short
+//   tails ambiguous: 2 bytes (16 bits) and 3 bytes (24 bits) both occupy
+//   exactly two 14-bit groups, so no padding count can tell them apart.
+//   The ambiguity is structural, not a corner case — so the cleaner 6-of-24
+//   framing above it is.
+// - **The alphabet is `0-9 A-Q`, meaning 0 … 26.** Same letters as the `0h`
+//   literal (Ch. 1 §3.1) but **not** the balanced mapping: an encoding
+//   digit names a quantity (the way base64's do), not a trit pattern. The
+//   contiguous ASCII ranges keep decode to two comparisons.
+// - **Short tails are 2 or 4 symbols, no `=` anywhere.** One byte ≤ 255 ≤
+//   27² and two bytes ≤ 65535 ≤ 27⁴, so a tail is never padded and the
+//   symbol count alone says which it is — total length is always even,
+//   which is the first thing decode checks.
+// - Errors are values again: a stray character, an odd length, or a block
+//   whose value spills its byte budget is a named line with a position,
+//   never a halted machine.
+
+fn getchar() -> t9;             // declared here, defined in runtime.t27
+
+// -------------------------------------------------------------- alphabet ---
+
+// 0 … 26 as the digit's value, or −1 when the character is not in the
+// alphabet at all. Two contiguous ranges, two comparisons (as promised).
+fn symbol_value(c: char) -> t27 {
+    if c >= '0' && c <= '9' { return (c as t27) - 48; }
+    if c >= 'A' && c <= 'Q' { return (c as t27) - 55; }
+    0 - 1
+}
+
+fn symbol_char(v: t27) -> char {
+    if v < 10 { return char::try_from(v + 48).unwrap(); }
+    char::try_from(v + 55).unwrap()
+}
+
+// -------------------------------------------------------------- encode ---
+
+// One number — at most 24 bits — as exactly `n` base-27 symbols, most
+// significant first, into `out`. `n` is 6, 2 or 4 by construction, and the
+// value always fits its symbols (encode checks on the way in, decode never
+// has to guess).
+fn push_base27(out: &mut Vec<char>, value: t27, n: taddr) {
+    let mut digits: Vec<char> = Vec::new();
+    let mut v = value;
+    let mut i: taddr = 0;
+    while i < n {
+        digits.push(symbol_char(floor_mod(v, 27)));
+        v = floor_div(v, 27);
+        i += 1;
+    }
+    let mut k = digits.len();
+    while k > 0 {
+        k -= 1;
+        out.push(digits[k]);
+    }
+}
+
+// The whole stream: full 3-byte blocks, then the short tail if there is
+// one, wrapped at 54 symbols per line.
+const WRAP: taddr = 54;
+
+fn encode(data: &Vec<t27>) -> Vec<char> {
+    let mut out: Vec<char> = Vec::new();
+    let mut col: taddr = 0;
+    let mut i: taddr = 0;
+    while i + 2 < data.len() {
+        let block = data[i] * 65536 + data[i + 1] * 256 + data[i + 2];
+        push_base27(&mut out, block, 6);
+        col += 6;
+        if col == WRAP {
+            out.push('\n');
+            col = 0;
+        }
+        i += 3;
+    }
+    let rest = data.len() - i;
+    if rest == 1 {
+        push_base27(&mut out, data[i], 2);
+        col += 2;
+    }
+    if rest == 2 {
+        push_base27(&mut out, data[i] * 256 + data[i + 1], 4);
+        col += 4;
+    }
+    if col > 0 { out.push('\n'); }      // a stream ends on a whole line
+    out
+}
+
+// -------------------------------------------------------------- decode ---
+
+enum DecErr {
+    BadChar(taddr),
+    OddLength,
+    ValueTooBig(taddr),
+}
+
+fn is_ws(c: char) -> bool {
+    c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// The symbols, whitespace ignored, as values — or the position of the
+// character that broke the rule.
+fn symbol_values(text: &Vec<char>) -> Result<Vec<t27>, DecErr> {
+    let mut vals: Vec<t27> = Vec::new();
+    let mut i: taddr = 0;
+    while i < text.len() {
+        let c = text[i];
+        if !is_ws(c) {
+            let v = symbol_value(c);
+            if v < 0 { return Result::Err(DecErr::BadChar(i)); }
+            vals.push(v);
+        }
+        i += 1;
+    }
+    if floor_mod(vals.len() as t27, 2) == 1 {
+        // Every block is an even number of symbols; an odd one can only
+        // come from losing one on the way in. (`%` would be the wrong
+        // knife here too — its remainder is balanced, `3 % 2` is −1.)
+        return Result::Err(DecErr::OddLength);
+    }
+    Result::Ok(vals)
+}
+
+// `n` symbol values (MSB first) as one number, refused when it does not fit
+// `limit` — 24 bits for a full block, 16 for a 2-byte tail, 8 for one.
+fn take_block(vals: &Vec<t27>, from: taddr, n: taddr, limit: t27) -> Result<t27, DecErr> {
+    let mut v: t27 = 0;
+    let mut i: taddr = 0;
+    while i < n {
+        v = v * 27 + vals[from + i];
+        i += 1;
+    }
+    if v > limit { return Result::Err(DecErr::ValueTooBig(from)); }
+    Result::Ok(v)
+}
+
+fn decode(text: &Vec<char>) -> Result<Vec<t27>, DecErr> {
+    let vals = symbol_values(text)?;
+    let mut out: Vec<t27> = Vec::new();
+    let mut i: taddr = 0;
+    // Full blocks. A tail of the last 2 or 4 symbols is recognized by what
+    // remains, never by content: 2 means one byte, 4 means two.
+    while i + 6 <= vals.len() {
+        let v = take_block(&vals, i, 6, 16777215)?;
+        out.push(floor_div(v, 65536));
+        out.push(floor_mod(floor_div(v, 256), 256));
+        out.push(floor_mod(v, 256));
+        i += 6;
+    }
+    let left = vals.len() - i;
+    if left == 4 {
+        let v = take_block(&vals, i, 4, 65535)?;
+        out.push(floor_div(v, 256));
+        out.push(floor_mod(v, 256));
+    }
+    if left == 2 {
+        let v = take_block(&vals, i, 2, 255)?;
+        out.push(v);
+    }
+    Result::Ok(out)
+}
+
+// ----------------------------------------------------------------- main ---
+
+fn report(e: DecErr) {
+    match e {
+        DecErr::BadChar(at) => {
+            print("error: a character outside 0-9 A-Q at ");
+            println_int(at as t27);
+        },
+        DecErr::OddLength => println("error: an odd number of symbols — a block is broken"),
+        DecErr::ValueTooBig(at) => {
+            print("error: the block at ");
+            print_int(at as t27);
+            println(" names more than its bytes hold");
+        },
+    }
+}
+
+fn put_units(data: &Vec<t27>) {
+    // Units out as they arrived: the port carries UTF-8 code units
+    // (ISA §2.2), and 0 … 255 is its whole alphabet.
+    let mut i: taddr = 0;
+    while i < data.len() {
+        putchar(data[i] as t9);
+        i += 1;
+    }
+}
+
+// The stream, split at its first newline: before is the command word,
+// after is the data (raw units for encode, symbols for decode).
+fn read_stream() -> (Vec<char>, Vec<t27>) {
+    let mut cmd: Vec<char> = Vec::new();
+    let mut data: Vec<t27> = Vec::new();
+    let mut past = false;
+    loop {
+        let c = getchar() as t27;
+        if c < 0 { break; }
+        if c == 10 && !past {
+            past = true;
+        } else {
+            if past {
+                data.push(c);
+            } else {
+                cmd.push(char::try_from(c).unwrap());
+            }
+        }
+    }
+    (cmd, data)
+}
+
+fn main() -> t27 {
+    let (cmd, bytes) = read_stream();
+    if cmd.same("encode") {
+        let out = encode(&bytes);
+        print(&out);
+        return 0;
+    }
+    if cmd.same("decode") {
+        let mut text: Vec<char> = Vec::new();
+        let mut i: taddr = 0;
+        while i < bytes.len() {
+            text.push(char::try_from(bytes[i]).unwrap());
+            i += 1;
+        }
+        match decode(&text) {
+            Result::Ok(data) => {
+                put_units(&data);
+                0
+            },
+            Result::Err(e) => {
+                report(e);
+                1
+            },
+        }
+    } else {
+        println("usage: the first line is encode or decode");
+        1
+    }
+}
+
+// ---------------------------------------------------------------- tests ---
+
+fn fill(v: Vec<t27>, at: taddr, vals: [t27; 14]) -> Vec<t27> {
+    let mut out = v;
+    let mut i: taddr = 0;
+    while i < 14 {
+        out.push(vals[at + i]);
+        i += 1;
+    }
+    out
+}
+
+fn bytes_of(s: &str) -> Vec<t27> {
+    let mut out: Vec<t27> = Vec::new();
+    let mut i: taddr = 0;
+    while i < s.len() {
+        out.push(s[i] as t27);
+        i += 1;
+    }
+    out
+}
+
+fn round_trip(data: &Vec<t27>) -> bool {
+    let enc = encode(data);
+    match decode(&enc) {
+        Result::Ok(back) => {
+            if back.len() != data.len() { return false; }
+            let mut i: taddr = 0;
+            while i < data.len() {
+                if back[i] != data[i] { return false; }
+                i += 1;
+            }
+            true
+        },
+        Result::Err(_) => false,
+    }
+}
+
+#[test]
+fn the_corners_have_exact_spellings() {
+    // A zero byte is two zero digits; 255 is 9·27 + 12 = `9C`; three zero
+    // bytes are six zero digits.
+    let mut one_zero: Vec<t27> = Vec::new();
+    one_zero.push(0);
+    let a = encode(&one_zero);
+    if !a.same("00\n") { trap(); }
+    let mut ff: Vec<t27> = Vec::new();
+    ff.push(255);
+    let b = encode(&ff);
+    if !b.same("9C\n") { trap(); }
+    let mut three: Vec<t27> = Vec::new();
+    three.push(0); three.push(0); three.push(0);
+    let c = encode(&three);
+    if !c.same("000000\n") { trap(); }
+}
+
+#[test]
+fn every_tail_length_round_trips() {
+    let mut data: Vec<t27> = Vec::new();
+    // Lengths 0 … 9 edges every residue of the 3-byte framing, with byte
+    // values picked at both rails and across the middle.
+    let vals: [t27; 9] = [0, 255, 1, 128, 254, 66, 200, 33, 97];
+    if !round_trip(&data) { trap(); }
+    let mut i: taddr = 0;
+    while i < 9 {
+        data.push(vals[i]);
+        if !round_trip(&data) { trap(); }
+        i += 1;
+    }
+}
+
+#[test]
+fn a_record_stream_spells_as_recorded() {
+    // "Hello, 世界!" in its UTF-8 *code units* — what the port actually
+    // carries (ISA §2.2) — encoded and pinned: the same kind of record
+    // bitnet's z-vector is, holding every stage from the stream read to
+    // the alphabet to account at once.
+    let data: Vec<t27> = Vec::new();
+    let data = fill(data, 0, [72, 101, 108, 108, 111, 44, 32, 228, 184, 150, 231, 149, 140, 33]);
+    let enc = encode(&data);
+    if !enc.same("08P1880DA122041E1O0IGC2H1M5H\n") { trap(); }
+    match decode(&enc) {
+        Result::Ok(back) => {
+            if back.len() != data.len() { trap(); }
+            let mut i: taddr = 0;
+            while i < data.len() {
+                if back[i] != data[i] { trap(); }
+                i += 1;
+            }
+        },
+        Result::Err(_) => { trap(); },
+    }
+}
+
+#[test]
+fn decode_ignores_whitespace_and_refuses_the_rest() {
+    let spaced = "00 00\n00\n".to_string();
+    match decode(&spaced) {
+        Result::Ok(v) => {
+            if v.len() != 3 { trap(); }     // three zero bytes
+        },
+        Result::Err(_) => { trap(); },
+    }
+    let odd = "000".to_string();
+    match decode(&odd) {
+        Result::Err(DecErr::OddLength) => {},
+        _ => { trap(); },
+    }
+    let stray = "00R0".to_string();         // R is past Q
+    match decode(&stray) {
+        Result::Err(DecErr::BadChar(at)) => { if at != 2 { trap(); } },
+        _ => { trap(); },
+    }
+    let fat = "QQ\n".to_string();           // 26·27+26 overflows one byte
+    match decode(&fat) {
+        Result::Err(DecErr::ValueTooBig(_)) => {},
+        _ => { trap(); },
+    }
+}
+
+#[test]
+fn wrapping_breaks_lines_at_fifty_four() {
+    // 27 bytes is exactly one line: nine full blocks of six symbols, then
+    // one newline — 55 characters in all.
+    let mut data: Vec<t27> = Vec::new();
+    let mut i: taddr = 0;
+    while i < 27 {
+        data.push(i as t27);
+        i += 1;
+    }
+    let enc = encode(&data);
+    if enc.len() != 55 { trap(); }
+    if enc[WRAP] != '\n' { trap(); }
+    // 36 bytes: the 55 of the full line, then 18 symbols (three blocks)
+    // and the stream-closing newline.
+    let mut more: Vec<t27> = Vec::new();
+    let mut j: taddr = 0;
+    while j < 36 {
+        more.push(j as t27);
+        j += 1;
+    }
+    let enc2 = encode(&more);
+    if enc2.len() != 55 + 18 + 1 { trap(); }
+    if enc2[55 + 18] != '\n' { trap(); }
+}

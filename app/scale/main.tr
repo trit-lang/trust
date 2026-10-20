@@ -1,0 +1,283 @@
+// scale — a two-pan balance and the weights of three.
+//
+//     printf '5\n13\n40\n' | trust run app/scale/main.tr
+//
+// Bachet's weights problem: with one weight of each power of three and the
+// freedom to place a weight on *either* pan, every integer weight up to
+// (3^n − 1)/2 balances exactly. The reason is the radix: the pan assignment
+// of the weights is the balanced-ternary expansion of the load, digit for
+// digit — a `+1` digit at 3^k puts that weight on the pan facing the object,
+// a `−1` digit puts it beside the object.
+//
+// Which is why the conversion below is three lines and has no correction
+// step. `%` on this machine is the *symmetric* remainder (Ch. 1 §4): it
+// rounds to nearest, ties away from zero, so it lands in −1 … 1 every time —
+// and that remainder *is* the balanced digit, the quotient exact. On a binary
+// machine the same program needs a `if rem < 0 { rem += 3 }` fixup; here the
+// arithmetic and the algorithm are the same thing.
+//
+// Decided here, so the output says what it means:
+//
+// - The object sits on the left pan, always. The two lines print as
+//   equations — `left: 5 + 1 + 3` against `right: 9` — so a balance can be
+//   checked by eye rather than by trust.
+// - A negative load is refused, not simulated. Negating the digits would
+//   swap the pans (negation is total here, Ch. 1 §4 — `MIN == −MAX` at every
+//   width, so the digits of −w are exactly the negated digits of w), but a
+//   balloon is not a scale's business.
+// - Input is capped at twelve digits. The word holds 3 762 481 947 031, so
+//   thirteen could overflow mid-parse and this program's errors are values,
+//   not halts (the same rule recalc sets itself). Nine hundred ninety-nine
+//   billion is enough for any scale this app will meet; the cap is one line
+//   if it is not.
+
+fn getchar() -> t9;             // declared here, defined in runtime.t27
+
+enum ScaleErr { NotNumber, TooBig, Negative }
+
+// The balanced-ternary digits of w, least significant first — the loop the
+// header is about. Works for negatives too (`digits_of(0 - 5)` is the
+// negated `digits_of(5)`); main refuses them before asking.
+fn digits_of(w: t27) -> Vec<t27> {
+    let mut ds: Vec<t27> = Vec::new();
+    if w == 0 { ds.push(0); return ds; }
+    let mut n = w;
+    while n != 0 {
+        ds.push(n % 3);         // −1, 0 or 1, by Ch. 1 §4's rounding
+        n = n / 3;              // exact against that remainder
+    }
+    ds
+}
+
+// A trimmed line is a non-negative decimal integer, or a named error.
+fn parse_value(line: &Vec<char>) -> Result<t27, ScaleErr> {
+    if line.len() == 0 { return Result::Err(ScaleErr::NotNumber); }
+    // Before any accumulation: twelve digits always fit a word, thirteen
+    // might not, and the check has to precede the arithmetic it protects.
+    if line.len() > 12 { return Result::Err(ScaleErr::TooBig); }
+    let mut i: taddr = 0;
+    let mut n: t27 = 0;
+    while i < line.len() {
+        let c = line[i];
+        if c == '-' { return Result::Err(ScaleErr::Negative); }
+        if c < '0' || c > '9' { return Result::Err(ScaleErr::NotNumber); }
+        n = n * 10 + (c as t27) - 48;
+        i += 1;
+    }
+    Result::Ok(n)
+}
+
+// The digits, most significant first, as `0t` text. `T` is the −1 digit —
+// the same spelling Ch. 1 §3 gives ternary literals, so what this prints is
+// what the language would parse back.
+fn print_digits(ds: &Vec<t27>) {
+    print("0t");
+    let mut i = ds.len();
+    while i > 0 {
+        i -= 1;
+        let d = ds[i];
+        if d == 1 { print("1"); }
+        if d == 0 { print("0"); }
+        if d == 0 - 1 { print("T"); }
+    }
+    println("");
+}
+
+// One pan's contents, ascending powers, as `3 + 9 + 27` — or `0`, which is
+// what an empty pan weighs. `want` picks which digit this pan answers to:
+// +1 is the pan facing the object, −1 the pan beside it.
+fn print_weights(ds: &Vec<t27>, want: t27) {
+    let mut first = true;
+    let mut pow: t27 = 1;
+    let mut i: taddr = 0;
+    while i < ds.len() {
+        if ds[i] == want {
+            if !first { print(" + "); }
+            print_int(pow);
+            first = false;
+        }
+        pow = pow * 3;
+        i += 1;
+    }
+    if first { print_int(0); }
+}
+
+fn answer(w: t27) {
+    let ds = digits_of(w);
+    print_digits(&ds);
+    print("left: ");
+    print_int(w);                       // the object itself
+    let mut i: taddr = 0;
+    let mut pow: t27 = 1;
+    while i < ds.len() {                // beside it, the −1 weights
+        if ds[i] == 0 - 1 {
+            print(" + ");
+            print_int(pow);
+        }
+        pow = pow * 3;
+        i += 1;
+    }
+    println("");
+    print("right: ");
+    print_weights(&ds, 1);
+    println("");
+}
+
+fn report(e: ScaleErr) {
+    match e {
+        ScaleErr::NotNumber => println("error: not a number"),
+        ScaleErr::TooBig => println("error: too big for this scale (twelve digits)"),
+        ScaleErr::Negative => println("error: a load on a scale is not negative"),
+    }
+}
+
+// One line of input, or `None` when the port said *closed* before anything
+// arrived (ISA §2.2: −2 is *will never*, −1 is *not yet — keep turning*).
+fn read_line() -> Option<Vec<char>> {
+    let mut line: Vec<char> = Vec::new();
+    let mut saw_any = false;
+    loop {
+        let c = getchar() as t27;
+        if c == 0 - 2 {
+            if saw_any { return Option::Some(line); }
+            return Option::None;
+        }
+        if c >= 0 {
+            if c == 10 { return Option::Some(line); }
+            saw_any = true;
+            line.push(char::try_from(c).unwrap());
+        }
+    }
+}
+
+fn trim(s: &Vec<char>) -> Vec<char> {
+    let mut lo: taddr = 0;
+    while lo < s.len() {
+        if s[lo] != ' ' { break; }
+        lo += 1;
+    }
+    let mut hi: taddr = s.len();
+    while hi > lo {
+        if s[hi - 1] != ' ' { break; }
+        hi -= 1;
+    }
+    let mut out: Vec<char> = Vec::new();
+    let mut i = lo;
+    while i < hi {
+        out.push(s[i]);
+        i += 1;
+    }
+    out
+}
+
+fn main() -> t27 {
+    let mut running = true;
+    while running {
+        print("> ");
+        match read_line() {
+            Option::Some(line) => {
+                let t = trim(&line);
+                if t.len() > 0 {
+                    match parse_value(&t) {
+                        Result::Ok(w) => answer(w),
+                        Result::Err(e) => report(e),
+                    }
+                }
+            },
+            Option::None => { running = false; },
+        }
+    }
+    0
+}
+
+#[test]
+fn the_digits_are_the_rounding() {
+    let d0 = digits_of(0);
+    if d0.len() != 1 { trap(); }
+    if d0[0] != 0 { trap(); }
+    let d5 = digits_of(5);              // 5 = 9 − 3 − 1 = 0t1TT
+    if d5.len() != 3 { trap(); }
+    if d5[0] != 0 - 1 { trap(); }
+    if d5[1] != 0 - 1 { trap(); }
+    if d5[2] != 1 { trap(); }
+    let d13 = digits_of(13);            // 13 = 9 + 3 + 1 = 0t111
+    if d13[0] != 1 || d13[1] != 1 || d13[2] != 1 { trap(); }
+    let d2 = digits_of(2);              // 2 = 3 − 1 = 0t1T
+    if d2[0] != 0 - 1 || d2[1] != 1 { trap(); }
+}
+
+#[test]
+fn negating_the_load_negates_the_digits() {
+    let up = digits_of(41);
+    let down = digits_of(0 - 41);
+    if up.len() != down.len() { trap(); }
+    let mut i: taddr = 0;
+    while i < up.len() {
+        if up[i] + down[i] != 0 { trap(); }
+        i += 1;
+    }
+}
+
+#[test]
+fn the_digits_reconstruct_the_load() {
+    // The balance itself: left equals right, for every load in the range.
+    let mut w: t27 = 0;
+    while w < 300 {
+        let ds = digits_of(w);
+        let mut sum: t27 = 0;
+        let mut pow: t27 = 1;
+        let mut i: taddr = 0;
+        while i < ds.len() {
+            sum += ds[i] * pow;
+            pow = pow * 3;
+            i += 1;
+        }
+        if sum != w { trap(); }
+        w += 1;
+    }
+}
+
+#[test]
+fn parsing_names_its_refusals() {
+    let good = "  42  ".to_string();
+    let g = trim(&good);
+    match parse_value(&g) {
+        Result::Ok(w) => { if w != 42 { trap(); } },
+        Result::Err(_) => { trap(); },
+    }
+    let letters = "12a".to_string();
+    match parse_value(&letters) {
+        Result::Ok(_) => { trap(); },
+        Result::Err(e) => {
+            match e {
+                ScaleErr::NotNumber => {},
+                _ => { trap(); },
+            }
+        },
+    }
+    let neg = "-7".to_string();
+    match parse_value(&neg) {
+        Result::Ok(_) => { trap(); },
+        Result::Err(e) => {
+            match e {
+                ScaleErr::Negative => {},
+                _ => { trap(); },
+            }
+        },
+    }
+    let huge = "9999999999999".to_string();     // thirteen digits
+    match parse_value(&huge) {
+        Result::Ok(_) => { trap(); },
+        Result::Err(e) => {
+            match e {
+                ScaleErr::TooBig => {},
+                _ => { trap(); },
+            }
+        },
+    }
+    let cap = "999999999999".to_string();       // twelve is the agreement
+    match parse_value(&cap) {
+        Result::Ok(w) => { if w != 999999999999 { trap(); } },
+        Result::Err(_) => { trap(); },
+    }
+}

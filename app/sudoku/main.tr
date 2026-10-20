@@ -1,0 +1,326 @@
+// sudoku — reads 81 digits off the stream, prints the solved grid.
+//
+//     printf '530070000\n600195000\n098000060\n800060003\n400803001\n700020006\n060000280\n000419005\n000080079\n' | trust run app/sudoku/main.tr
+//
+// Input is digits with whitespace between them — one puzzle in the usual
+// newspaper layout, all nine lines of it. `0` and `.` both name an empty
+// cell. Output is the grid with the box separators drawn in, so what the
+// program asserts can be checked by eye.
+//
+// What is decided here:
+//
+// - **Failure is named before it is searched for.** Three things can be
+//   wrong with a puzzle and each is its own line: the wrong number of
+//   digits, two givens that already contradict (`a repeated given`), and a
+//   puzzle the search exhausts (`no solution`). The machine never halts on
+//   a puzzle — an unsolvable one is an answer, the way recalc's bad lines
+//   are.
+// - **The search is backtracking over the most-constrained cell** (MRV):
+//   scan the empties, take the one with the fewest candidates, try them.
+//   First-empty search solves newspaper puzzles too, eventually; MRV solves
+//   them now, and the candidate scan it needs is the same code the givens
+//   check already uses.
+// - **Legality is one function** (`fits`): a digit fits a cell iff its row,
+//   column and box do not already hold it. The givens check, the candidate
+//   counts and the search all call it, because a rule written three times
+//   disagrees with itself eventually.
+//
+// The solver core (`solve`, `fits`, `pick`) never touches the port, so the
+// tests run whole puzzles end to end.
+
+fn getchar() -> t9;             // declared here, defined in runtime.t27
+
+// Row and column of an index, by subtraction. `/ 9` and `% 9` would be the
+// obvious spelling — and wrong: division here rounds to *nearest* (Ch. 1 §4),
+// so `44 / 9` is 5 and `44 % 9` is −1, balanced and off the grid. Grids want
+// floor division, so this file subtracts.
+fn row_of(at: taddr) -> taddr {
+    let mut r: taddr = 0;
+    let mut rest = at;
+    while rest >= 9 {
+        rest -= 9;
+        r += 1;
+    }
+    r
+}
+
+fn col_of(at: taddr) -> taddr {
+    at - row_of(at) * 9
+}
+
+// The first cell of the band/stack containing `at`: floor to a multiple of
+// three, with `%` avoided for the same reason (`2 / 3` rounds to 1, and the
+// answer wanted is 0).
+fn box_start(x: taddr) -> taddr {
+    let mut s: taddr = 0;
+    let mut rest = x;
+    while rest >= 3 {
+        rest -= 3;
+        s += 3;
+    }
+    s
+}
+
+// Whether placing digit v at index `at` leaves every house of `at`
+// contradiction-free. The standard three houses; a loop each, because the
+// houses share no shape worth abstracting over.
+fn fits(b: &Vec<t27>, at: taddr, v: t27) -> bool {
+    let r = row_of(at);
+    let c = col_of(at);
+    let mut i: taddr = 0;
+    while i < 9 {
+        if i != c && b[r * 9 + i] == v { return false; }
+        if i != r && b[i * 9 + c] == v { return false; }
+        i += 1;
+    }
+    let br = box_start(r);
+    let bc = box_start(c);
+    let mut dr: taddr = 0;
+    while dr < 3 {
+        let mut dc: taddr = 0;
+        while dc < 3 {
+            let idx = (br + dr) * 9 + (bc + dc);
+            if idx != at && b[idx] == v { return false; }
+            dc += 1;
+        }
+        dr += 1;
+    }
+    true
+}
+
+// How many digits fit at `at` — the MRV ordering's whole input.
+fn candidates(b: &Vec<t27>, at: taddr) -> t27 {
+    let mut n: t27 = 0;
+    let mut v: t27 = 1;
+    while v <= 9 {
+        if fits(b, at, v) { n += 1; }
+        v += 1;
+    }
+    n
+}
+
+// The empty cell with the fewest candidates, or `None` on a full board.
+// A cell with zero candidates is picked immediately — it is a dead end,
+// and finding it now is the deepest cut the search has.
+fn pick(b: &Vec<t27>) -> Option<taddr> {
+    let mut best: taddr = 81;
+    let mut best_n: t27 = 10;
+    let mut at: taddr = 0;
+    while at < 81 {
+        if b[at] == 0 {
+            let n = candidates(b, at);
+            if n < best_n {
+                best = at;
+                best_n = n;
+                if n == 0 { return Option::Some(at); }
+            }
+        }
+        at += 1;
+    }
+    if best == 81 { return Option::None; }
+    Option::Some(best)
+}
+
+// Backtracking over the most-constrained cell. `true` leaves the board
+// solved; `false` leaves it exactly as it was found.
+fn solve(b: &mut Vec<t27>) -> bool {
+    match pick(b) {
+        Option::None => true,
+        Option::Some(at) => {
+            let mut v: t27 = 1;
+            while v <= 9 {
+                if fits(b, at, v) {
+                    b[at] = v;
+                    if solve(b) { return true; }
+                    b[at] = 0;
+                }
+                v += 1;
+            }
+            false
+        },
+    }
+}
+
+// The 81 digits, or which of the three named endings applies.
+enum PuzzleErr {
+    WrongCount(t27),
+    NotADigit,
+    RepeatedGiven,
+    NoSolution,
+}
+
+fn read_puzzle() -> Result<Vec<t27>, PuzzleErr> {
+    let mut b: Vec<t27> = Vec::new();
+    loop {
+        let c = getchar() as t27;
+        if c < 0 { break; }             // the port's *closed* (ISA §2.2)
+        if c >= 48 && c <= 57 {         // 0-9
+            b.push(c - 48);
+        } else {
+            if c == 46 {                // '.', the other empty
+                b.push(0);
+            } else {
+                if c != 10 && c != 13 && c != 32 && c != 9 {
+                    return Result::Err(PuzzleErr::NotADigit);
+                }
+            }
+        }
+    }
+    if b.len() != 81 {
+        return Result::Err(PuzzleErr::WrongCount(b.len() as t27));
+    }
+    // Each given checked against the houses it shares, with the cell
+    // counted out — `fits` refuses a cell that merely sees itself.
+    let mut at: taddr = 0;
+    while at < 81 {
+        let v = b[at];
+        if v != 0 {
+            b[at] = 0;
+            if !fits(&b, at, v) {
+                return Result::Err(PuzzleErr::RepeatedGiven);
+            }
+            b[at] = v;
+        }
+        at += 1;
+    }
+    Result::Ok(b)
+}
+
+fn print_grid(b: &Vec<t27>) {
+    let mut r: taddr = 0;
+    while r < 9 {
+        if r == 3 || r == 6 {
+            println("------+-------+------");
+        }
+        let mut line: Vec<char> = Vec::new();
+        let mut c: taddr = 0;
+        while c < 9 {
+            if c == 3 || c == 6 {
+                line.push('|');
+                line.push(' ');
+            }
+            line.push(char::try_from(b[r * 9 + c] + 48).unwrap());
+            line.push(' ');
+            c += 1;
+        }
+        print(&line);
+        println("");
+        r += 1;
+    }
+}
+
+fn report(e: PuzzleErr) {
+    match e {
+        PuzzleErr::WrongCount(n) => {
+            print("error: a puzzle is 81 digits; this one had ");
+            println_int(n);
+        },
+        PuzzleErr::NotADigit => println("error: a character that was not a digit"),
+        PuzzleErr::RepeatedGiven => println("error: two givens already contradict"),
+        PuzzleErr::NoSolution => println("error: no solution"),
+    }
+}
+
+fn main() -> t27 {
+    match read_puzzle() {
+        Result::Err(e) => {
+            report(e);
+            1
+        },
+        Result::Ok(board) => {
+            let mut b = board;
+            if solve(&mut b) {
+                print_grid(&b);
+                0
+            } else {
+                report(PuzzleErr::NoSolution);
+                1
+            }
+        },
+    }
+}
+
+fn board_of(s: &str) -> Vec<t27> {
+    let mut b: Vec<t27> = Vec::new();
+    let mut i: taddr = 0;
+    while i < s.len() {
+        b.push((s[i] as t27) - 48);
+        i += 1;
+    }
+    b
+}
+
+#[test]
+fn fits_sees_all_three_houses() {
+    // The puzzle from the header: cell (0,2) is empty; its row holds 3, its
+    // box holds 9 — both refused, and neither by the other's house. Cell
+    // (4,1) is empty; its column holds 6 while its row and box do not — the
+    // column alone refuses. And a genuinely free digit must not be refused.
+    let b = board_of("530070000600195000098000060800060003400803001700020006060000280000419005000080079");
+    if fits(&b, 2, 3) { trap(); }       // the row's
+    if fits(&b, 2, 9) { trap(); }       // the box's
+    if fits(&b, 37, 6) { trap(); }      // the column's, at (4,1)
+    if !fits(&b, 2, 2) { trap(); }      // nobody's
+}
+
+#[test]
+fn the_classic_puzzle_solves_to_its_record() {
+    let mut b = board_of("530070000600195000098000060800060003400803001700020006060000280000419005000080079");
+    if !solve(&mut b) { trap(); }
+    let want = board_of("534678912672195348198342567859761423426853791713924856961537284287419635345286179");
+    let mut i: taddr = 0;
+    while i < 81 {
+        if b[i] != want[i] { trap(); }
+        i += 1;
+    }
+}
+
+#[test]
+fn an_empty_board_has_a_solution() {
+    let mut b: Vec<t27> = Vec::new();
+    let mut i: taddr = 0;
+    while i < 81 { b.push(0); i += 1; }
+    if !solve(&mut b) { trap(); }
+    // Whatever it found, the givens' absence imposes nothing — but what it
+    // found must still be a real grid: every house, checked.
+    let mut at: taddr = 0;
+    while at < 81 {
+        let v = b[at];
+        b[at] = 0;
+        if !fits(&b, at, v) { trap(); }
+        b[at] = v;
+        at += 1;
+    }
+}
+
+#[test]
+fn a_cell_with_no_candidates_is_a_dead_end_at_once() {
+    // Row 0 holds every digit but 9, so (0,8) needs a 9 — and column 8
+    // already has one at (5,8). No given is repeated anywhere, yet no digit
+    // fits (0,8): the search must find this dead end without wandering the
+    // rest of the space (MRV picks the zero-candidate cell first).
+    let mut b: Vec<t27> = Vec::new();
+    let mut i: taddr = 0;
+    while i < 81 { b.push(0); i += 1; }
+    let mut v: t27 = 1;
+    while v <= 8 {
+        b[(v - 1) as taddr] = v;        // 1 2 3 4 5 6 7 8 0
+        v += 1;
+    }
+    b[5 * 9 + 8] = 9;
+    if solve(&mut b) { trap(); }
+}
+
+#[test]
+fn a_repeated_given_is_caught_before_search() {
+    // The givens check lives behind the port, so re-run its logic here: two
+    // 7s in one row, one of them emptiable. `fits` with the cell emptied
+    // must refuse the second.
+    let mut b: Vec<t27> = Vec::new();
+    let mut i: taddr = 0;
+    while i < 81 { b.push(0); i += 1; }
+    b[0] = 7;
+    b[8] = 7;
+    b[8] = 0;
+    if fits(&b, 8, 7) { trap(); }
+}

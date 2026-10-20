@@ -1,0 +1,151 @@
+// mandel — the Mandelbrot set in fixed point, 81 columns by 27 rows.
+//
+//     trust run app/mandel/main.tr
+//
+// There is no floating point on this machine (AM §7), so the set is computed
+// the way `app/recalc` and `examples/trust/HPL.tr` compute everything
+// non-integral: fixed point at scale 3^11 = 177 147, where a multiply is
+// `mulh` and the low half recombined (the same `fmul` recalc writes —
+// restated here because every app carries the code it needs, and stated
+// again in tests below). Rescaling after a multiply is an exact `>> 11`,
+// because shifting is exact division by a power of three with no tie case
+// (Ch. 1 §4) — there is no rounding fixup anywhere in the arithmetic, and
+// the iteration's exactness rests on that.
+//
+// What is decided here:
+//
+// - The window is [−2.4, 1.0] × [−1.2, 1.2] of the complex plane, rasterized
+//   at 81 × 27. The bounds convert to fixed by rounding once, at the edge —
+//   half a quantum of 3^-11 on a picture meant for a terminal.
+// - The escape test is `x² + y² > 4` in fixed units, exact everywhere the
+//   loop looks. Nothing in the loop can overflow: bounded orbits stay under
+//   4·ONE before the check, and one step past it is still under 3^-11 of a
+//   word.
+// - The iteration cap is 81 and a point that survives it is *in the set as
+//   far as 81 checks can tell*, and printed as a blank. The answer's edge
+//   is where the picture is.
+// - The exact frame is the program's record, held the way bitnet holds its
+//   `z` vector: the test below replays the run and compares a *signature* —
+//   the escape count down the middle column, 27 numbers — so the picture is
+//   reproducible end to end and any drift from here to the machine prints.
+
+fn elapsed() -> t27;            // declared here, defined in runtime.t27
+
+const ONE: t27 = 177147;        // 3^11, the fixed-point unit
+const HI: t27 = 43046721;       // 3^(27−11), for recombining a wide product
+
+const COLS: t27 = 81;
+const ROWS: t27 = 27;
+const MAXIT: t27 = 81;
+
+// The window, converted once. 2.4 · 177 147 = 425 152.8, so the left edge
+// lands a fifth of a quantum past −425 153; the picture does not know.
+const XMIN: t27 = 0 - 425153;
+const XMAX: t27 = 177147;
+const YMIN: t27 = 0 - 212576;
+const YMAX: t27 = 212576;
+const FOUR: t27 = 708588;       // 4 · ONE, the escape bound
+
+// The exact product, rescaled: `mulh` is the high 27 trits of the 54-trit
+// product and `wrapping_mul` the low 27 (TIR §3.2), so this is P >> 11 with
+// one rounding, exactly as the `fmul` of app/recalc/fixed.tr.
+fn fmul(a: t27, b: t27) -> t27 {
+    let h = a.mulh(b);
+    h * HI + (a.wrapping_mul(b) >> 11)
+}
+
+// Escape count of c = (cx, cy): the number of z → z² + c before
+// |z|² > 4, or MAXIT when the orbit stays bounded that long.
+fn iterate(cx: t27, cy: t27) -> t27 {
+    let mut x: t27 = 0;
+    let mut y: t27 = 0;
+    let mut it: t27 = 0;
+    while it < MAXIT {
+        let x2 = fmul(x, x);
+        let y2 = fmul(y, y);
+        if x2 + y2 > FOUR { break; }
+        y = 2 * fmul(x, y) + cy;
+        x = x2 - y2 + cx;
+        it += 1;
+    }
+    it
+}
+
+// The character for an escape count: denser marks for longer orbits, and a
+// blank in the lake — the eye reads the boundary as the dense edge.
+fn shade(it: t27) -> char {
+    if it >= MAXIT { return ' '; }
+    let ramp = ".,:;ox%#@&";        // 10 marks, ordered
+    ramp[(it * 10 / MAXIT) as taddr]
+}
+
+// Pixel centres in fixed units, as one exact division each — the
+// round-to-nearest `/` (Ch. 1 §4) shares the rounding between adjacent
+// pixels instead of accumulating it.
+fn col_x(c: t27) -> t27 {
+    XMIN + c * (XMAX - XMIN) / (COLS - 1)
+}
+
+fn row_y(r: t27) -> t27 {
+    YMIN + r * (YMAX - YMIN) / (ROWS - 1)
+}
+
+fn main() -> t27 {
+    let t0 = elapsed();
+    let mut r: t27 = 0;
+    while r < ROWS {
+        let y = row_y(r);
+        let mut line: Vec<char> = Vec::new();
+        let mut c: t27 = 0;
+        while c < COLS {
+            line.push(shade(iterate(col_x(c), y)));
+            c += 1;
+        }
+        print(&line);
+        println("");
+        r += 1;
+    }
+    let t1 = elapsed();
+    print("done: ");
+    print_int(ROWS * COLS);
+    print(" pixels in ");
+    print_int(t1 - t0);
+    println(" instructions");
+    0
+}
+
+#[test]
+fn the_fixed_multiply_is_exact_where_it_can_be() {
+    if fmul(ONE, ONE) != ONE { trap(); }
+    if fmul(2 * ONE, 3 * ONE) != 6 * ONE { trap(); }
+    if fmul(59049, ONE) != 59049 { trap(); }            // ONE/3 stays
+    if fmul(19683, 19683) != 2187 { trap(); }           // thirds of thirds
+    if fmul(0 - 2 * ONE, ONE) != 0 - 2 * ONE { trap(); }
+}
+
+#[test]
+fn the_known_points_answer_right() {
+    if iterate(0, 0) != MAXIT { trap(); }               // the cardioid's heart
+    if iterate(0 - ONE, 0) != MAXIT { trap(); }         // the centre of the bud
+    if iterate(0 - 2 * ONE, 0) != MAXIT { trap(); }     // the tip, exactly
+    // (1/3, 4/3) in fixed: 59 049 and 236 196 — far outside, out at once.
+    if iterate(59049, 236196) >= 5 { trap(); }
+}
+
+#[test]
+fn the_middle_column_matches_its_record() {
+    // Row by row, the escape count at the picture's middle column (x ≈
+    // −0.58, inside the window where the cardioid and its bulbs all pass).
+    // Pasted from a run of this program; the deal is bitnet's.
+    let c = COLS / 2;
+    let record: [t27; 27] = [
+        3, 3, 4, 4, 4, 5, 7, 8, 30, 26, 81, 81, 81, 81,
+        81, 81, 81, 26, 30, 8, 7, 5, 4, 4, 4, 3, 3,
+    ];
+    let mut r: t27 = 0;
+    while r < ROWS {
+        let got = iterate(col_x(c), row_y(r));
+        if got != record[r as taddr] { trap(); }
+        r += 1;
+    }
+}

@@ -1,0 +1,139 @@
+// grep — the first line is the pattern; the rest of the stream is the text.
+//
+//     printf 'err\nok: started\nerr: disk\nok: done\n' | trust run app/grep/main.tr
+//
+// Prints every line that contains the pattern as a plain substring, in the
+// order they arrive, and nothing else — the contract of the four-letter
+// tool. There are no flags and no pattern language: a stream filter that
+// answers "does this line contain this text" is already useful, and every
+// character of syntax it doesn't have is a character of input it can't
+// misunderstand.
+//
+// What is decided here:
+//
+// - **Matching is character-exact and case-sensitive.** wordfreq folds ASCII
+//   case because words read by a person are the same word; text filtered by
+//   a program is not, and inventing a second folding rule here would be the
+//   same decision written in a worse place. What the pattern says is what
+//   the line must contain.
+// - **An empty pattern matches every line** — the prelude's `contains` says
+//   so (Ch. 5, `str::contains`: a pattern of length 0 fits at position 0),
+//   and that is the right answer: it is `grep ''`, and costs nothing here.
+// - **The filter is a pure function** (`select` below), so the tests run
+//   the whole program minus the port. `main` is only the port and a
+//   prompt-less loop, which is where a stream tool's untestable half should
+//   live: thin and on the edge.
+// - If the stream closes before the pattern arrives there is nothing to do
+//   and no way to complain that isn't the output itself — so the tool says
+//   one line on its one channel and stops: `usage` is the message.
+
+fn getchar() -> t9;             // declared here, defined in runtime.t27
+
+// The lines that contain the pattern, in arrival order. This is the whole
+// tool given a name, so the tests can hold it to cases the port cannot
+// reach deterministically.
+fn select(pattern: &Vec<char>, lines: &Vec<Vec<char>>) -> Vec<Vec<char>> {
+    let mut out: Vec<Vec<char>> = Vec::new();
+    let mut i: taddr = 0;
+    while i < lines.len() {
+        if contains(&lines[i], pattern) {
+            out.push(lines[i].to_string());
+        }
+        i += 1;
+    }
+    out
+}
+
+// A small wrapper for the call the header makes: `contains` on a `Vec<char>`
+// through the slice coercion (Ch. 5 §2.6), which is the conversion the
+// compiler knows rather than one this file could write.
+fn contains(line: &Vec<char>, pattern: &Vec<char>) -> bool {
+    line.contains(pattern)
+}
+
+// One line of input, or `None` when the port said *closed* before anything
+// arrived (ISA §2.2: −2 is *will never*, −1 is *not yet — keep turning*).
+fn read_line() -> Option<Vec<char>> {
+    let mut line: Vec<char> = Vec::new();
+    let mut saw_any = false;
+    loop {
+        let c = getchar() as t27;
+        if c == 0 - 2 {
+            if saw_any { return Option::Some(line); }
+            return Option::None;
+        }
+        if c >= 0 {
+            if c == 10 { return Option::Some(line); }
+            saw_any = true;
+            line.push(char::try_from(c).unwrap());
+        }
+    }
+}
+
+fn main() -> t27 {
+    let pattern = match read_line() {
+        Option::Some(p) => p,
+        Option::None => {
+            println("usage: pattern on the first line, text after it");
+            return 1;
+        },
+    };
+    let mut done = false;
+    while !done {
+        match read_line() {
+            Option::Some(line) => {
+                if contains(&line, &pattern) {
+                    print(&line);
+                    println("");
+                }
+            },
+            Option::None => { done = true; },
+        }
+    }
+    0
+}
+
+#[test]
+fn substrings_match_and_others_do_not() {
+    let pattern = "err".to_string();
+    let mut lines: Vec<Vec<char>> = Vec::new();
+    lines.push("ok: started".to_string());
+    lines.push("err: disk".to_string());
+    lines.push("ok: done".to_string());
+    lines.push("terror at sea".to_string());
+    let out = select(&pattern, &lines);
+    if out.len() != 2 { trap(); }
+    if !out[0].same("err: disk") { trap(); }
+    if !out[1].same("terror at sea") { trap(); }    // a substring, not a word
+}
+
+#[test]
+fn the_empty_pattern_matches_everything() {
+    let pattern = "".to_string();
+    let mut lines: Vec<Vec<char>> = Vec::new();
+    lines.push("a".to_string());
+    lines.push("".to_string());
+    let out = select(&pattern, &lines);
+    if out.len() != 2 { trap(); }
+}
+
+#[test]
+fn a_pattern_too_long_matches_nothing() {
+    let pattern = "longer than any line".to_string();
+    let mut lines: Vec<Vec<char>> = Vec::new();
+    lines.push("short".to_string());
+    lines.push("long".to_string());
+    let out = select(&pattern, &lines);
+    if out.len() != 0 { trap(); }
+}
+
+#[test]
+fn case_is_significant() {
+    let pattern = "Err".to_string();
+    let mut lines: Vec<Vec<char>> = Vec::new();
+    lines.push("err: lowercase".to_string());
+    lines.push("Err: capital".to_string());
+    let out = select(&pattern, &lines);
+    if out.len() != 1 { trap(); }
+    if !out[0].same("Err: capital") { trap(); }
+}

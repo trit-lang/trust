@@ -1,0 +1,427 @@
+// basecvt — the language's three radices, converted between.
+//
+//     printf '42\n0t1TTT0\n0h21\n-7\n' | trust run app/basecvt/main.tr
+//
+// Every line is one integer, written in any of the forms Ch. 1 §3 gives a
+// literal: decimal, balanced ternary (`0t`, digits `1` `0` `T`), or
+// heptavintimal (`0h`, digits `0-9` `A-Q` — a *balanced* group of three
+// trits, so `0` is −13 and zero is `D`, Ch. 1 §3.1). The answer is the value
+// in all three, one per line.
+//
+// What is decided here:
+//
+// - **There is a `print_ternary` after all.** Ch. 5 §1.6 leaves it out of the
+//   library on the grounds that a program can write it in six lines; this
+//   program writes it once, carefully, next to its two siblings. Decimal
+//   extraction needs the correction step (`n % 10` runs −9 … 9 under round-
+//   to-nearest division, so a negative digit borrows from the next place) —
+//   or would, except the library's `print_int` already absorbed it, and
+//   decimal output is delegated to it. The ternary and heptavintimal loops
+//   need no correction: the symmetric remainder lands *inside* the digit
+//   alphabet by construction. That asymmetry is the whole point of the radix,
+//   and it is why decimal is the one radix this file does not print by hand.
+// - **Length caps stand in for overflow checks.** A balanced-ternary string
+//   of 27 digits always fits a word and 28 never do; a heptavintimal string
+//   of 9 digits always fits and 10 never do (counting shows both bounds land
+//   exactly on `(3^27 − 1)/2`). Decimal is 13 digits *sometimes*, so those
+//   get compared against the word's maximum digit by digit — the same
+//   magnitude either side of zero, because the range is symmetric
+//   (Ch. 3 §1's `MIN == −MAX`).
+// - **Underscores are skipped wherever they appear** (Ch. 1 §3 permits them
+//   between digits; a filter is the lenient reading, and a tool is not a
+//   type checker).
+// - A leading `-` means negation on any radix and the answer is negated at
+//   the end — never mid-parse, so there is no most-negative corner to fall
+//   into.
+//
+// Errors are values (the rule recalc sets, which this program shares): a bad
+// line prints `error: …` and the next line is read like nothing happened.
+
+fn getchar() -> t9;             // declared here, defined in runtime.t27
+
+enum ParseErr { Empty, BadDigit, TooBig }
+
+// --- in ---------------------------------------------------------------------
+
+fn parse_number(s: &Vec<char>) -> Result<t27, ParseErr> {
+    if s.len() == 0 { return Result::Err(ParseErr::Empty); }
+
+    let mut from: taddr = 0;
+    let mut neg = false;
+    if s[0] == '-' {
+        neg = true;
+        from = 1;
+    }
+    if from == s.len() { return Result::Err(ParseErr::Empty); }
+
+    if from + 1 < s.len() && s[from] == '0' && s[from + 1] == 't' {
+        parse_digits(s, from + 2, 27, neg, true)
+    } else {
+        if from + 1 < s.len() && s[from] == '0' && s[from + 1] == 'h' {
+            parse_digits(s, from + 2, 9, neg, false)
+        } else {
+            parse_decimal(s, from, neg)
+        }
+    }
+}
+
+// Ternary and heptavintimal share a loop: `cap` digits always fit a word
+// (see the header), each digit is a *balanced* value added to `n * radix`.
+// The two alphabets disagree only on where each character sits.
+fn parse_digits(s: &Vec<char>, from: taddr, cap: taddr, neg: bool, ternary: bool) -> Result<t27, ParseErr> {
+    let mut digits: Vec<t27> = Vec::new();
+    let mut i = from;
+    while i < s.len() {
+        let c = s[i];
+        if c != '_' {
+            let d = digit_value(c, ternary);
+            if d == 99 { return Result::Err(ParseErr::BadDigit); }
+            digits.push(d);
+        }
+        i += 1;
+    }
+    if digits.len() == 0 { return Result::Err(ParseErr::Empty); }
+    if digits.len() > cap { return Result::Err(ParseErr::TooBig); }
+
+    let radix: t27 = if ternary { 3 } else { 27 };
+    let mut n: t27 = 0;
+    let mut k: taddr = 0;
+    while k < digits.len() {
+        n = n * radix + digits[k];
+        k += 1;
+    }
+    if neg { n = -n; }
+    Result::Ok(n)
+}
+
+// `99` is "not a digit of this alphabet" — every digit value here is a
+// balanced one, −13 … 1, so 99 is outside them all.
+fn digit_value(c: char, ternary: bool) -> t27 {
+    if ternary {
+        if c == '1' { return 1; }
+        if c == '0' { return 0; }
+        if c == 'T' { return 0 - 1; }
+        99
+    } else {
+        if c >= '0' && c <= '9' { return (c as t27) - 61; }   // −13 … −4
+        if c >= 'A' && c <= 'Q' { return (c as t27) - 68; }   // −3 … +13
+        99
+    }
+}
+
+// Decimal is the radix whose digits are not balanced, so it is the one that
+// can name a number the word cannot hold: thirteen digits sometimes fit.
+// `MAX` below is the word's whole story, in either direction.
+fn parse_decimal(s: &Vec<char>, from: taddr, neg: bool) -> Result<t27, ParseErr> {
+    let mut digits: Vec<t27> = Vec::new();
+    let mut i = from;
+    while i < s.len() {
+        let c = s[i];
+        if c != '_' {
+            if c < '0' || c > '9' { return Result::Err(ParseErr::BadDigit); }
+            digits.push((c as t27) - 48);
+        }
+        i += 1;
+    }
+    if digits.len() == 0 { return Result::Err(ParseErr::Empty); }
+    if digits.len() > 13 { return Result::Err(ParseErr::TooBig); }
+    if digits.len() == 13 {
+        let max = "3812798742493";       // (3^27 − 1)/2, and −(3^27 − 1)/2
+        let mut k: taddr = 0;
+        while k < 13 {
+            let m = (max[k] as t27) - 48;
+            if digits[k] > m { return Result::Err(ParseErr::TooBig); }
+            if digits[k] < m { break; }
+            k += 1;
+        }
+    }
+    let mut n: t27 = 0;
+    let mut k: taddr = 0;
+    while k < digits.len() {
+        n = n * 10 + digits[k];
+        k += 1;
+    }
+    if neg { n = -n; }
+    Result::Ok(n)
+}
+
+// --- out --------------------------------------------------------------------
+
+// The balanced-ternary spelling, `0t` and MST first, exactly the form the
+// lexer reads back (Ch. 1 §3). Zero is `0t0`; negatives carry no sign —
+// `0tT1` is how this language writes −2.
+fn to_ternary(v: t27) -> Vec<char> {
+    let mut out: Vec<char> = Vec::new();
+    out.push('0');
+    out.push('t');
+    if v == 0 {
+        out.push('0');
+        return out;
+    }
+    let mut rev: Vec<char> = Vec::new();
+    let mut n = v;
+    while n != 0 {
+        let d = n % 3;                  // −1, 0 or 1 — the digit, directly
+        n = n / 3;
+        if d == 1 { rev.push('1'); }
+        if d == 0 { rev.push('0'); }
+        if d == 0 - 1 { rev.push('T'); }
+    }
+    let mut i = rev.len();
+    while i > 0 {
+        i -= 1;
+        out.push(rev[i]);
+    }
+    out
+}
+
+// The heptavintimal spelling, `0h` and MSD first. Same loop, taken 3 trits
+// at a time: `% 27` rounds to nearest and leaves −13 … 13, which *is* the
+// digit value — the alphabet `0-9 A-Q` is exactly that range (Ch. 1 §3.1).
+// Zero is `0hD`, because `D` is the zero digit and `0` is −13; and no
+// leading zero-padding ever, for the reason §3.1 gives in its warning.
+fn to_heptavintimal(v: t27) -> Vec<char> {
+    let mut out: Vec<char> = Vec::new();
+    out.push('0');
+    out.push('h');
+    if v == 0 {
+        out.push('D');
+        return out;
+    }
+    let mut rev: Vec<char> = Vec::new();
+    let mut n = v;
+    while n != 0 {
+        let d = n % 27;                 // −13 … 13 — the digit, directly
+        n = n / 27;
+        if d < 0 - 3 {
+            rev.push(char::try_from(d + 61).unwrap());      // 0-9
+        } else {
+            rev.push(char::try_from(d + 68).unwrap());      // A-Q
+        }
+    }
+    let mut i = rev.len();
+    while i > 0 {
+        i -= 1;
+        out.push(rev[i]);
+    }
+    out
+}
+
+// --- the session ------------------------------------------------------------
+
+fn answer(v: t27) {
+    print("dec ");
+    println_int(v);
+    print("ter ");
+    let t = to_ternary(v);
+    print(&t);
+    println("");
+    print("hep ");
+    let h = to_heptavintimal(v);
+    print(&h);
+    println("");
+}
+
+fn report(e: ParseErr) {
+    match e {
+        ParseErr::Empty => println("error: no digits"),
+        ParseErr::BadDigit => println("error: a digit from outside the alphabet"),
+        ParseErr::TooBig => println("error: does not fit a word"),
+    }
+}
+
+// One line of input, or `None` when the port said *closed* before anything
+// arrived (ISA §2.2: −2 is *will never*, −1 is *not yet — keep turning*).
+fn read_line() -> Option<Vec<char>> {
+    let mut line: Vec<char> = Vec::new();
+    let mut saw_any = false;
+    loop {
+        let c = getchar() as t27;
+        if c == 0 - 2 {
+            if saw_any { return Option::Some(line); }
+            return Option::None;
+        }
+        if c >= 0 {
+            if c == 10 { return Option::Some(line); }
+            saw_any = true;
+            line.push(char::try_from(c).unwrap());
+        }
+    }
+}
+
+fn trim(s: &Vec<char>) -> Vec<char> {
+    let mut lo: taddr = 0;
+    while lo < s.len() {
+        if s[lo] != ' ' { break; }
+        lo += 1;
+    }
+    let mut hi: taddr = s.len();
+    while hi > lo {
+        if s[hi - 1] != ' ' { break; }
+        hi -= 1;
+    }
+    let mut out: Vec<char> = Vec::new();
+    let mut i = lo;
+    while i < hi {
+        out.push(s[i]);
+        i += 1;
+    }
+    out
+}
+
+fn main() -> t27 {
+    let mut running = true;
+    while running {
+        print("> ");
+        match read_line() {
+            Option::Some(line) => {
+                let t = trim(&line);
+                if t.len() > 0 {
+                    match parse_number(&t) {
+                        Result::Ok(v) => answer(v),
+                        Result::Err(e) => report(e),
+                    }
+                }
+            },
+            Option::None => { running = false; },
+        }
+    }
+    0
+}
+
+#[test]
+fn the_specs_own_examples_parse() {
+    // Every row of Ch. 1 §3's table, and §3.1's warning about leading zeros.
+    let cases: [(&str, t27); 9] = [
+        ("6", 6),
+        ("-9841", 0 - 9841),
+        ("0t1T0", 6),
+        ("0tT1", 0 - 2),
+        ("-0t1T", 0 - 2),               // redundant, but permitted
+        ("0hJ", 6),
+        ("0h0J", 0 - 345),              // the warning itself
+        ("0hD", 0),
+        ("0hDDDDDDDDE", 1),             // leading D's are the neutral pad
+    ];
+    let mut i: taddr = 0;
+    while i < 9 {
+        let (text, want) = cases[i];
+        let ts = text.to_string();
+        match parse_number(&ts) {
+            Result::Ok(v) => { if v != want { trap(); } },
+            Result::Err(_) => { trap(); },
+        }
+        i += 1;
+    }
+}
+
+#[test]
+fn underscores_go_unheard() {
+    let a = "1_000_000".to_string();
+    let b = "0t1T0_T01".to_string();
+    match parse_number(&a) {
+        Result::Ok(v) => { if v != 1000000 { trap(); } },
+        Result::Err(_) => { trap(); },
+    }
+    match parse_number(&b) {
+        Result::Ok(v) => { if v != 154 { trap(); } },         // 0t1T0T01
+        Result::Err(_) => { trap(); },
+    }
+}
+
+#[test]
+fn print_and_parse_agree() {
+    // Round-tripping both output forms across sign, zero, and the digit
+    // corners is the strongest check this file admits: the two loops were
+    // written down independently of the parser.
+    let mut v: t27 = 0 - 500;
+    while v <= 500 {
+        let t = to_ternary(v);
+        match parse_number(&t) {
+            Result::Ok(back) => { if back != v { trap(); } },
+            Result::Err(_) => { trap(); },
+        }
+        let h = to_heptavintimal(v);
+        match parse_number(&h) {
+            Result::Ok(back) => { if back != v { trap(); } },
+            Result::Err(_) => { trap(); },
+        }
+        v += 1;
+    }
+}
+
+#[test]
+fn the_corners_spell_themselves_right() {
+    let t0 = to_ternary(0);
+    if !t0.same("0t0") { trap(); }
+    let h0 = to_heptavintimal(0);
+    if !h0.same("0hD") { trap(); }
+    let t2 = to_ternary(0 - 2);
+    if !t2.same("0tT1") { trap(); }     // a negative, with no sign anywhere
+    let h345 = to_heptavintimal(0 - 345);
+    if !h345.same("0h0J") { trap(); }   // −13 · 27 + 6
+    let tmax = to_ternary(3812798742493);
+    if !tmax.same("0t111111111111111111111111111") { trap(); }  // 27 ones
+    let hmax = to_heptavintimal(3812798742493);
+    if !hmax.same("0hQQQQQQQQQ") { trap(); }                    // 9 Qs
+    let tmin = to_ternary(0 - 3812798742493);
+    if !tmin.same("0tTTTTTTTTTTTTTTTTTTTTTTTTTTT") { trap(); }  // 27 Ts
+}
+
+#[test]
+fn too_big_is_named_before_the_arithmetic() {
+    let d = "99999999999999".to_string();
+    let d13 = "9999999999999".to_string();
+    let edge = "3812798742493".to_string();
+    let past = "3812798742494".to_string();
+    match parse_number(&d) {
+        Result::Err(ParseErr::TooBig) => {},
+        _ => { trap(); },
+    }
+    match parse_number(&d13) {
+        Result::Err(ParseErr::TooBig) => {},
+        _ => { trap(); },
+    }
+    match parse_number(&edge) {
+        Result::Ok(v) => { if v != 3812798742493 { trap(); } },
+        Result::Err(_) => { trap(); },
+    }
+    match parse_number(&past) {
+        Result::Err(ParseErr::TooBig) => {},
+        _ => { trap(); },
+    }
+    let nedge = "-3812798742493".to_string();
+    match parse_number(&nedge) {
+        Result::Ok(v) => { if v != 0 - 3812798742493 { trap(); } },
+        Result::Err(_) => { trap(); },
+    }
+    let t28 = "0t1111111111111111111111111111".to_string();   // 28 ones
+    match parse_number(&t28) {
+        Result::Err(ParseErr::TooBig) => {},
+        _ => { trap(); },
+    }
+    let h10 = "0hQQQQQQQQQQ".to_string();                     // 10 Qs
+    match parse_number(&h10) {
+        Result::Err(ParseErr::TooBig) => {},
+        _ => { trap(); },
+    }
+}
+
+#[test]
+fn a_stray_character_is_a_named_error() {
+    let a = "0t12".to_string();          // 2 is not a trit
+    match parse_number(&a) {
+        Result::Err(ParseErr::BadDigit) => {},
+        _ => { trap(); },
+    }
+    let b = "0hR".to_string();           // the alphabet ends at Q
+    match parse_number(&b) {
+        Result::Err(ParseErr::BadDigit) => {},
+        _ => { trap(); },
+    }
+    let c = "0t".to_string();            // a prefix is not a number
+    match parse_number(&c) {
+        Result::Err(ParseErr::Empty) => {},
+        _ => { trap(); },
+    }
+}

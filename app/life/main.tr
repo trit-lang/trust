@@ -1,0 +1,241 @@
+// life — Conway's Game of Life on a 27 × 27 torus, measured.
+//
+//     trust run app/life/main.tr
+//
+// The board is a torus of 729 cells — a power of three, like every size this
+// app chooses — seeded with a glider, a blinker and a block: one pattern
+// that walks, one that breathes, one that does nothing, which between them
+// exercise all four rows of the rule table. Twenty-seven generations are
+// printed, and the run ends with the instruction count the same way
+// `app/bitnet` reports: `elapsed` counts instructions retired
+// (ISA §2.3), and instructions — not seconds — are what a machine with no
+// clock rate can truthfully report.
+//
+// What is decided here:
+//
+// - **Edge wrapping is written out, never `%`.** `%` on this machine rounds
+//   to nearest (Ch. 1 §4), so `26 % 27` is **−1** — the balanced answer,
+//   exactly right for balanced digits and exactly wrong for a grid
+//   coordinate. On a grid the only remainders wanted are `0 … 26`, and two
+//   comparisons produce them with no rounding to argue about. This is the
+//   trap `docs/status.md` §9 lists first; this program steps over it in two
+//   named helpers.
+// - **The seed is fixed and the run is therefore a pure function of this
+//   source.** The exact generations are the tests below — pinned by a
+//   checksum over alive positions the way bitnet pins its `z` vector — so
+//   any change from here to the machine that alters the evolution says so.
+// - Output is one frame per generation, `#` alive and `.` dead, with a
+//   `gen N` header — readable to a person, stable against `diff`.
+
+fn elapsed() -> t27;            // declared here, defined in runtime.t27
+
+const SIDE: taddr = 27;
+const CELLS: taddr = 729;       // 27 × 27 = 3^6
+const GENS: t27 = 27;
+
+// The two wrap helpers the header promises. `%` is left alone entirely.
+fn wrap_up(x: taddr) -> taddr {
+    if x + 1 >= SIDE { x + 1 - SIDE } else { x + 1 }
+}
+
+fn wrap_down(x: taddr) -> taddr {
+    if x == 0 { SIDE - 1 } else { x - 1 }
+}
+
+fn at(g: &[bool], r: taddr, c: taddr) -> bool {
+    g[r * SIDE + c]
+}
+
+// Live neighbours of (r, c), counted on the torus.
+fn neighbours(g: &[bool], r: taddr, c: taddr) -> t27 {
+    let ru = wrap_up(r);
+    let rd = wrap_down(r);
+    let cu = wrap_up(c);
+    let cd = wrap_down(c);
+    let mut n: t27 = 0;
+    if at(g, rd, cd) { n += 1; }
+    if at(g, rd, c) { n += 1; }
+    if at(g, rd, cu) { n += 1; }
+    if at(g, r, cd) { n += 1; }
+    if at(g, r, cu) { n += 1; }
+    if at(g, ru, cd) { n += 1; }
+    if at(g, ru, c) { n += 1; }
+    if at(g, ru, cu) { n += 1; }
+    n
+}
+
+// One generation into `out`: alive on 2 or 3, born on 3, empty else.
+fn step(g: &[bool], out: &mut [bool]) {
+    let mut r: taddr = 0;
+    while r < SIDE {
+        let mut c: taddr = 0;
+        while c < SIDE {
+            let n = neighbours(g, r, c);
+            let alive = at(g, r, c);
+            out[r * SIDE + c] = (alive && (n == 2 || n == 3)) || (!alive && n == 3);
+            c += 1;
+        }
+        r += 1;
+    }
+}
+
+// A whole-generation fingerprint: the sum of i² over alive cells. Cheap
+// enough to live in a test, strong enough that a wrong step somewhere in 27
+// generations cannot plausibly hold it (the maximum is 729² · 729 ≈
+// 3.9 · 10^8, well inside a word, so the sum is exact).
+fn checksum(g: &[bool]) -> t27 {
+    let mut s: t27 = 0;
+    let mut i: taddr = 0;
+    while i < CELLS {
+        if g[i] {
+            let k = (i + 1) as t27;
+            s += k * k;
+        }
+        i += 1;
+    }
+    s
+}
+
+// The opening board: a glider that marches down-right (and eventually wraps
+// the torus), a blinker breathing far from it, and a block doing what a
+// block does.
+fn seed() -> [bool; CELLS] {
+    let mut g: [bool; CELLS] = [false; CELLS];
+    // glider
+    g[1 * SIDE + 2] = true;
+    g[2 * SIDE + 3] = true;
+    g[3 * SIDE + 1] = true;
+    g[3 * SIDE + 2] = true;
+    g[3 * SIDE + 3] = true;
+    // blinker
+    g[10 * SIDE + 12] = true;
+    g[10 * SIDE + 13] = true;
+    g[10 * SIDE + 14] = true;
+    // block
+    g[20 * SIDE + 20] = true;
+    g[20 * SIDE + 21] = true;
+    g[21 * SIDE + 20] = true;
+    g[21 * SIDE + 21] = true;
+    g
+}
+
+fn print_frame(g: &[bool], gen: t27) {
+    print("gen ");
+    println_int(gen);
+    let mut r: taddr = 0;
+    while r < SIDE {
+        let mut line: Vec<char> = Vec::new();
+        let mut c: taddr = 0;
+        while c < SIDE {
+            if at(g, r, c) { line.push('#'); } else { line.push('.'); }
+            c += 1;
+        }
+        print(&line);
+        println("");
+        r += 1;
+    }
+    println("");
+}
+
+fn main() -> t27 {
+    let t0 = elapsed();
+    let mut g = seed();
+    let mut next: [bool; CELLS] = [false; CELLS];
+    let mut gen: t27 = 0;
+    while gen < GENS {
+        print_frame(&g, gen);
+        step(&g, &mut next);
+        let hold = g;
+        g = next;
+        next = hold;
+        gen += 1;
+    }
+    let t1 = elapsed();
+    print("done: ");
+    print_int(GENS);
+    print(" generations of ");
+    print_int(CELLS as t27);
+    print(" cells in ");
+    print_int(t1 - t0);
+    println(" instructions");
+    0
+}
+
+#[test]
+fn wrapping_never_leaves_the_board() {
+    if wrap_up(0) != 1 { trap(); }
+    if wrap_up(SIDE - 1) != 0 { trap(); }
+    if wrap_down(0) != SIDE - 1 { trap(); }
+    if wrap_down(5) != 4 { trap(); }
+}
+
+#[test]
+fn the_block_does_nothing_forever() {
+    let mut g: [bool; CELLS] = [false; CELLS];
+    g[5 * SIDE + 5] = true;
+    g[5 * SIDE + 6] = true;
+    g[6 * SIDE + 5] = true;
+    g[6 * SIDE + 6] = true;
+    let mut out: [bool; CELLS] = [false; CELLS];
+    step(&g, &mut out);
+    if checksum(&g) != checksum(&out) { trap(); }
+    let mut i: taddr = 0;
+    while i < CELLS {
+        if g[i] != out[i] { trap(); }
+        i += 1;
+    }
+}
+
+#[test]
+fn the_blinker_breathes_with_period_two() {
+    let mut g: [bool; CELLS] = [false; CELLS];
+    g[9 * SIDE + 10] = true;
+    g[10 * SIDE + 10] = true;
+    g[11 * SIDE + 10] = true;
+    let mut out: [bool; CELLS] = [false; CELLS];
+    let mut back: [bool; CELLS] = [false; CELLS];
+    step(&g, &mut out);                 // now horizontal
+    if !out[10 * SIDE + 9] { trap(); }
+    if !out[10 * SIDE + 10] { trap(); }
+    if !out[10 * SIDE + 11] { trap(); }
+    step(&out, &mut back);              // and vertical again
+    let mut i: taddr = 0;
+    while i < CELLS {
+        if g[i] != back[i] { trap(); }
+        i += 1;
+    }
+}
+
+#[test]
+fn a_wrapped_glider_keeps_walking() {
+    // Placed against the corner, the glider steps off the top edge and back
+    // on at the bottom: the torus is real, not a boundary that gliders die
+    // against. Two generations move a corner glider's centre of mass.
+    let mut g: [bool; CELLS] = [false; CELLS];
+    g[0] = true;                        // a block crossing the seam
+    g[SIDE - 1] = true;
+    g[(SIDE - 1) * SIDE] = true;
+    g[(SIDE - 1) * SIDE + (SIDE - 1)] = true;
+    if neighbours(&g, 0, 0) != 3 { trap(); }        // all three across seams
+    if neighbours(&g, 13, 13) != 0 { trap(); }
+}
+
+#[test]
+fn the_seeded_run_matches_its_record() {
+    // Computed by running this program, pasted in here: the deal bitnet's
+    // z-record makes — replay the run, and every pass between this source
+    // and the machine is held to the same evolution.
+    let mut g = seed();
+    let mut next: [bool; CELLS] = [false; CELLS];
+    let first = checksum(&g);
+    if first != 1590634 { trap(); }     // the twelve seeded cells
+    let mut gen: t27 = 0;
+    while gen < GENS {
+        step(&g, &mut next);
+        let hold = g;
+        g = next;
+        next = hold;
+        gen += 1;
+    }
+    if checksum(&g) != 1902047 { trap(); }
+}

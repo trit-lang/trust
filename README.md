@@ -320,7 +320,15 @@ examples/    TIR modules and Trust programs that run
 app/         Trust programs written to be *used*, each in its own directory:
              wordfreq — counts and ranks the stream; recalc — a line-at-a-time
              fixed-point calculator; bitnet — a scalar ternary-MLP forward
-             pass, the reference plan/vdot-device.md's device will be held to
+             pass, the reference plan/vdot-device.md's device will be held to;
+             scale — a balance scale: the balanced-ternary expansion is the
+             weights on the two pans; basecvt — decimal / `0t` / `0h`, all
+             ways; life — Game of Life on a 27×27 torus, measured; mandel —
+             the Mandelbrot set in fixed point; grep — the first line is the
+             pattern, the stream after it; bf — a Brainfuck interpreter;
+             sudoku — 81 digits in, the solved grid out; ttt — noughts and
+             crosses, played in trits; json — JSON in, canonical JSON out;
+             t27enc — a byte stream spelled in base 27, the ternary base64
 docs/        notes about the spec, including every derived decision
 ```
 
