@@ -1997,21 +1997,237 @@ fn for_each_child_block(b: &ast::Block, f: &mut impl FnMut(&ast::Expr)) {
     }
 }
 
-/// Rewrite each captured name to a dereference of the capture struct's
-/// field, which is what makes the closure body an ordinary function body.
-fn rewrite_captures(e: &mut ast::Expr, captures: &[String]) {
+/// How strongly a closure takes a captured place — the row of Ch. 4 §4.3's
+/// table it lands on, by §4.4's "weakest form that suffices".
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Capture {
+    /// Only read: by `&`, so the closure is `Fn` too.
+    Read,
+    /// Written: by `&mut`, so the closure is at best `FnMut`.
+    Write,
+    /// Moved out: by value, so the closure is `FnOnce` only.
+    Move,
+}
+
+/// One step of the projection spine a move can travel: `c.f`, `c[i]`, or
+/// `*c` where `c` is a `Box` — the three places the ownership rules already
+/// treat as the same value (Ch. 3 §1.2).
+enum Spine {
+    Field(String),
+    Index,
+    Deref,
+}
+
+/// The spine of an expression that is nothing but projections of `name`:
+/// `c`, `c.f`, `c.f[i]`, `*c`. `&c` is not one — a borrow never moves.
+fn spine_of(e: &ast::Expr, name: &str, out: &mut Vec<Spine>) -> bool {
+    match e {
+        ast::Expr::Path(n, _) if n == name => true,
+        ast::Expr::Field(b, f, _) => {
+            let ok = spine_of(b, name, out);
+            if ok {
+                out.push(Spine::Field(f.clone()));
+            }
+            ok
+        }
+        ast::Expr::Index(b, _, _) => {
+            let ok = spine_of(b, name, out);
+            if ok {
+                out.push(Spine::Index);
+            }
+            ok
+        }
+        ast::Expr::Deref(b, _) => {
+            let ok = spine_of(b, name, out);
+            if ok {
+                out.push(Spine::Deref);
+            }
+            ok
+        }
+        _ => false,
+    }
+}
+
+/// What a spine ends at, where it can be told. A field of a struct or tuple
+/// and an element of an array are knowable here; a field of anything else
+/// (a `Vec` is named but its fields are the language's), an element of a
+/// `Vec`, and what a reference points at are not.
+fn spine_ty(types: &Types, mut ty: Ty, projs: &[Spine]) -> Option<Ty> {
+    for p in projs {
+        // Each step looks through the references the place is written
+        // against (Ch. 3 §2.3): `s[i]` on a `&[T]` is an element of the
+        // slice, `s.f` on a `&S` a field of the struct.
+        while let Ty::Ref(inner, _) = ty {
+            ty = *inner;
+        }
+        ty = match p {
+            Spine::Field(f) => types.fields(&ty).into_iter().find(|(n, _, _)| n == f)?.1,
+            Spine::Index => match ty {
+                Ty::Array(e, _) | Ty::Slice(e) => *e,
+                _ => return None,
+            },
+            Spine::Deref => match ty {
+                Ty::Boxed(t) => *t,
+                _ => return None,
+            },
+        };
+    }
+    Some(ty)
+}
+
+/// Whether a pattern binds anything, which is what decides whether a
+/// `match` scrutinee moves: matching a value moves it only into an arm's
+/// bindings, and `_` and the literals bind nothing.
+fn pattern_binds(p: &ast::Pattern) -> bool {
+    match p {
+        ast::Pattern::Bind(..) => true,
+        ast::Pattern::Aggregate(_, fields, _) => fields.iter().any(|(_, p)| pattern_binds(p)),
+        ast::Pattern::Tuple(ps, _) => ps.iter().any(pattern_binds),
+        _ => false,
+    }
+}
+
+/// Whether a closure body moves this name out, which decides capture by
+/// value and therefore `FnOnce` — the last row of Ch. 4 §4.3's table.
+///
+/// A place rooted at the name moves where a value is taken: an argument, a
+/// `let`'s right side, a struct's field, an element, a scrutinee whose arms
+/// bind, a return, a break's value, or a tail — every tail evaluates its
+/// expression, even one the statement throws the answer of. It does not
+/// move as an assignment's target, behind `&`, in an operator (which only a
+/// copyable reads through anyway), or as a method's receiver. The last is
+/// the analysis's one blind edge and it fails closed: a body that calls a
+/// by-value receiver on a capture — `c.unwrap()`, `for x in c` — is
+/// captured by reference and then refused by the synthesized body's own
+/// move-out-of-a-reference check, and the function spelling
+/// (`Option::unwrap(c)`) is the way to write it.
+///
+/// Only a use whose projected type is not copyable moves at all
+/// (Ch. 3 §1.2): `let y = c.f` with `f: t27` copies. Where a projection's
+/// type cannot be told the use is taken to move, which is the direction
+/// that refuses rather than mis-captures.
+fn moves_name(e: &ast::Expr, name: &str, root: &Ty, types: &Types) -> bool {
+    // The body stands in the synthesized function's tail, so it is read
+    // from, not written to — and a whole-name read moves.
+    moves_at(e, name, root, types, true)
+}
+
+fn moves_at(e: &ast::Expr, name: &str, root: &Ty, types: &Types, by_value: bool) -> bool {
+    use ast::Expr::*;
+    let mut projs = Vec::new();
+    if spine_of(e, name, &mut projs) {
+        if !by_value {
+            return false;
+        }
+        return !matches!(spine_ty(types, root.clone(), &projs), Some(t) if types.is_copyable(&t));
+    }
+    match e {
+        Char(..) | Str(..) | Int(..) | Trit(..) | Bool(..) | Unit(_) | Continue(_) | Path(..)
+        | MacroCall(..) | MacroParam(..) | MacroRepeat(..) => false,
+        Try(a, _) => moves_at(a, name, root, types, true),
+        CallExpr(f, args, _) => {
+            moves_at(f, name, root, types, false)
+                || args.iter().any(|a| moves_at(a, name, root, types, true))
+        }
+        Call(.., args, _) => args.iter().any(|a| moves_at(a, name, root, types, true)),
+        Method(recv, _, _, args, _) => {
+            moves_at(recv, name, root, types, false)
+                || args.iter().any(|a| moves_at(a, name, root, types, true))
+        }
+        Aggregate(_, fields, _) => fields
+            .iter()
+            .any(|(_, v)| moves_at(v, name, root, types, true)),
+        Array(items, _) | Tuple(items, _) => {
+            items.iter().any(|v| moves_at(v, name, root, types, true))
+        }
+        Repeat(v, n, _) => {
+            moves_at(v, name, root, types, true) || moves_at(n, name, root, types, false)
+        }
+        Closure(_, _, body, _) => moves_at(body, name, root, types, true),
+        Cast(a, _, _) | Unary(_, a, _) | Borrow(a, _, _) => {
+            moves_at(a, name, root, types, false)
+        }
+        Deref(a, _) | Field(a, _, _) => moves_at(a, name, root, types, false),
+        Index(a, i, _) => {
+            moves_at(a, name, root, types, false) || moves_at(i, name, root, types, false)
+        }
+        Binary(_, a, b, _) => {
+            moves_at(a, name, root, types, false) || moves_at(b, name, root, types, false)
+        }
+        Assign(_, target, value, _) => {
+            moves_at(target, name, root, types, false)
+                || moves_at(value, name, root, types, true)
+        }
+        Block(b) => moves_block_at(b, name, root, types),
+        Loop(b, _) => moves_block_at(b, name, root, types),
+        If(c, t, e2, _) => {
+            moves_at(c, name, root, types, false)
+                || moves_block_at(t, name, root, types)
+                // An `else` arm's own expression is a tail like the
+                // `then` block's: it evaluates, so a whole name there moves.
+                || e2.as_deref()
+                    .is_some_and(|x| moves_at(x, name, root, types, true))
+        }
+        While(c, b, _) => {
+            moves_at(c, name, root, types, false) || moves_block_at(b, name, root, types)
+        }
+        For(_, _, it, b, _) => {
+            moves_at(it, name, root, types, true) || moves_block_at(b, name, root, types)
+        }
+        Match(sc, arms, _) => {
+            let binds = arms
+                .iter()
+                .any(|a| a.patterns.iter().any(pattern_binds));
+            moves_at(sc, name, root, types, binds)
+                || arms.iter().any(|a| {
+                    a.guard
+                        .as_ref()
+                        .is_some_and(|g| moves_at(g, name, root, types, false))
+                        || moves_at(&a.body, name, root, types, true)
+                })
+        }
+        Break(v, _) | Return(v, _) => v
+            .as_deref()
+            .is_some_and(|x| moves_at(x, name, root, types, true)),
+    }
+}
+
+fn moves_block_at(b: &ast::Block, name: &str, root: &Ty, types: &Types) -> bool {
+    for st in &b.stmts {
+        let hit = match st {
+            ast::Stmt::Let { value, .. } => moves_at(value, name, root, types, true),
+            // A statement's own expression is evaluated whether or not the
+            // answer is looked at, so a whole name there moves.
+            ast::Stmt::Expr(e) => moves_at(e, name, root, types, true),
+        };
+        if hit {
+            return true;
+        }
+    }
+    if let Some(t) = &b.tail {
+        return moves_at(t, name, root, types, true);
+    }
+    false
+}
+
+/// Rewrite each captured name to the capture struct's field, which is what
+/// makes the closure body an ordinary function body. A capture taken by
+/// value is the field plain (`self.k`); one taken by reference is read
+/// through it (`*self.k`).
+fn rewrite_captures(e: &mut ast::Expr, captures: &[(String, Capture)]) {
     use ast::Expr::*;
     if let Path(n, span) = e
-        && captures.contains(n)
+        && let Some((_, how)) = captures.iter().find(|(c, _)| c == n)
     {
-        *e = Deref(
-            Box::new(Field(
-                Box::new(Path("self".to_string(), *span)),
-                n.clone(),
-                *span,
-            )),
+        let field = Field(
+            Box::new(Path("self".to_string(), *span)),
+            n.clone(),
             *span,
         );
+        *e = match how {
+            Capture::Move => field,
+            Capture::Read | Capture::Write => Deref(Box::new(field), *span),
+        };
         return;
     }
     for_each_child_mut(e, &mut |c| rewrite_captures(c, captures));
@@ -5022,17 +5238,22 @@ impl Bounds<'_> {
             );
         };
         // `Fn` ⊂ `FnMut` ⊂ `FnOnce`: a closure that writes a capture cannot
-        // be passed where one that only reads is wanted.
+        // be passed where one that only reads is wanted, and a closure that
+        // moves one out can only be passed where `FnOnce` is (§4.3's table).
         let rank = |k: ast::FnKind| match k {
             ast::FnKind::Fn => 0,
             ast::FnKind::FnMut => 1,
             ast::FnKind::FnOnce => 2,
         };
         if rank(info.kind) > rank(kind) {
+            let because = match info.kind {
+                ast::FnKind::FnOnce => "it moves a capture out",
+                _ => "it writes a capture",
+            };
             return err(
                 span,
                 format!(
-                    "this closure is `{}` because it writes a capture, and `{callee}` \
+                    "this closure is `{}` because {because}, and `{callee}` \
                      wants `{}` for `{param}` (Ch. 4 §4.3)",
                     info.kind.name(),
                     kind.name()
@@ -6730,7 +6951,11 @@ impl Fn<'_> {
                         format!("{ty} is not callable; only a closure is (Ch. 4 §4.3)"),
                     );
                 };
-                let recv = ast::Expr::Borrow(callee.clone(), false, *span);
+                let recv = if info.kind == ast::FnKind::FnOnce {
+                    callee.as_ref().clone()
+                } else {
+                    ast::Expr::Borrow(callee.clone(), false, *span)
+                };
                 let mut full = vec![recv];
                 full.extend(args.iter().cloned());
                 self.call_key(&info.call, Vec::new(), &full, *span)
@@ -7905,16 +8130,22 @@ impl Fn<'_> {
 
         // `f(args)` where `f` is a local holding a closure: the call goes to
         // the function its body became, with the captures as the receiver
-        // (Ch. 4 §4.2).
+        // (Ch. 4 §4.2). An `FnOnce`'s receiver is by value, so the call
+        // moves the closure — the second call is the ordinary "moved out
+        // of" refusal (§4.3).
         if let Some(local) = self.lookup(name)
             && let Some(cname) = nominal_name(&local.ty)
             && let Some(info) = self.types.closures.borrow().get(&cname).cloned()
         {
-            let recv = ast::Expr::Borrow(
-                Box::new(ast::Expr::Path(name.to_string(), span)),
-                false,
-                span,
-            );
+            let recv = if info.kind == ast::FnKind::FnOnce {
+                ast::Expr::Path(name.to_string(), span)
+            } else {
+                ast::Expr::Borrow(
+                    Box::new(ast::Expr::Path(name.to_string(), span)),
+                    false,
+                    span,
+                )
+            };
             let mut full = vec![recv];
             full.extend(args.iter().cloned());
             return self.call_key(&info.call, Vec::new(), &full, span);
@@ -9587,21 +9818,31 @@ impl Fn<'_> {
         let mut free = Vec::new();
         free_names(body, &mut bound, &mut free);
 
-        let mut captures: Vec<(String, Ty, bool)> = Vec::new();
+        let mut captures: Vec<(String, Ty, Capture)> = Vec::new();
         for n in &free {
             let Some(local) = self.lookup(n) else {
                 continue;
             };
-            // By shared reference if it only reads, by exclusive reference if
-            // it writes. Capture by value is §4.3's `FnOnce`, which needs the
-            // move analysis this milestone does not do.
-            let mutable = writes_name(body, n);
-            captures.push((n.clone(), local.ty, mutable));
+            // By shared reference if it only reads, by exclusive reference
+            // if it writes, by value if it moves the capture out — the
+            // weakest form that suffices (§4.4), which is the row of §4.3's
+            // table the closure lands on.
+            let how = if moves_name(body, n, &local.ty, self.types) {
+                Capture::Move
+            } else if writes_name(body, n) {
+                Capture::Write
+            } else {
+                Capture::Read
+            };
+            captures.push((n.clone(), local.ty, how));
         }
 
         let mut kind = ast::FnKind::Fn;
-        if captures.iter().any(|(_, _, m)| *m) {
+        if captures.iter().any(|(_, _, h)| *h == Capture::Write) {
             kind = ast::FnKind::FnMut;
+        }
+        if captures.iter().any(|(_, _, h)| h == &Capture::Move) {
+            kind = ast::FnKind::FnOnce;
         }
 
         // Parameter and result types are written or nothing: inference from
@@ -9684,20 +9925,35 @@ impl Fn<'_> {
         self.closures_made += 1;
         let name = format!("{}.closure{}", self.name, self.closures_made);
 
-        // The capture struct: one reference per capture, in the order found.
+        // The capture struct: one field per capture, in the order found —
+        // a reference for a borrowed one, the value itself for a moved one.
         let fields: Vec<(String, Ty)> = captures
             .iter()
-            .map(|(n, t, m)| (n.clone(), Ty::Ref(Box::new(t.clone()), *m)))
+            .map(|(n, t, h)| match h {
+                Capture::Move => (n.clone(), t.clone()),
+                Capture::Read => (n.clone(), Ty::Ref(Box::new(t.clone()), false)),
+                Capture::Write => (n.clone(), Ty::Ref(Box::new(t.clone()), true)),
+            })
             .collect();
         let ty = self.types.register_struct(&name, fields.clone());
 
-        // The body, as an ordinary function taking the captures by reference.
+        // The body, as an ordinary function taking the captures as its
+        // receiver. A closure that moves one of them owns it, so the only
+        // way to hand the body that ownership is to hand it the closure:
+        // `FnOnce`'s receiver is by value, which is also what makes the
+        // second call a "moved out of" error rather than a rule of its own.
+        let by_value = kind == ast::FnKind::FnOnce;
         let mut body = body.clone();
-        let capture_names: Vec<String> = captures.iter().map(|(n, ..)| n.clone()).collect();
-        rewrite_captures(&mut body, &capture_names);
+        let capture_kinds: Vec<(String, Capture)> =
+            captures.iter().map(|(n, _, h)| (n.clone(), *h)).collect();
+        rewrite_captures(&mut body, &capture_kinds);
         let mut call_params = vec![ast::Named::new(
             "self",
-            ast::Ty::Ref(Box::new(ast::Ty::Name(name.clone(), span)), false, span),
+            if by_value {
+                ast::Ty::Name(name.clone(), span)
+            } else {
+                ast::Ty::Ref(Box::new(ast::Ty::Name(name.clone(), span)), false, span)
+            },
         )];
         call_params.extend(ps.clone());
         let call = format!("{name}.call");
@@ -9718,7 +9974,13 @@ impl Fn<'_> {
             span,
         };
 
-        let mut sig_params = vec![Ty::Ref(Box::new(ty.clone()), false)];
+        let mut sig_params = vec![
+            if by_value {
+                ty.clone()
+            } else {
+                Ty::Ref(Box::new(ty.clone()), false)
+            },
+        ];
         sig_params.extend(param_tys.clone());
         self.sigs
             .borrow_mut()
@@ -9734,18 +9996,27 @@ impl Fn<'_> {
             },
         );
 
-        // The value: a struct of borrows of the captured places.
+        // The value: a struct of its captures. A borrowed one is an address
+        // with a loan beside it; a moved one is the value, which leaves the
+        // place it came from — the same rule as passing it to a function
+        // (Ch. 3 §1.2), so the closure's scope end is now the only drop.
         let slot = self.temp_slot(&ty);
-        for ((n, _, mutable), (_, ft, off)) in captures.iter().zip(self.types.fields(&ty)) {
+        for ((n, _, how), (_, ft, off)) in captures.iter().zip(self.types.fields(&ty)) {
             let place = ast::Expr::Path(n.clone(), span);
+            if how == &Capture::Move {
+                let (v, _) = self.expr(&place, None)?;
+                self.store_at(&slot, off, &ft, v, span)?;
+                continue;
+            }
             if let Some(path) = self.path_of(&place) {
-                self.check_access(&path, Access::Borrow(*mutable), span)?;
+                let mutable = how == &Capture::Write;
+                self.check_access(&path, Access::Borrow(mutable), span)?;
                 // The loan lives as long as the closure does, which for a
                 // closure that cannot escape is the rest of the scope.
                 // The loan lives as long as the closure does. A closure used
                 // as an argument dies with the statement; one bound by `let`
                 // is extended to its last use, below.
-                self.add_loan(path, *mutable, span);
+                self.add_loan(path, mutable, span);
             }
             let (addr, _) = self.place(&place, span)?;
             self.store_at(&slot, off, &ft, addr, span)?;

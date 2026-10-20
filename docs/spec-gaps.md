@@ -337,11 +337,11 @@ where nothing in the context says, the result type is read off the body.
 
 Two limits:
 
-- **`FnOnce` is not implemented.** Every capture is by reference — shared, or
-  exclusive when the body writes it. A closure that moves a capture out is
-  §4.3's `FnOnce`, and needs a move analysis of the closure body this
-  milestone does not do. `Fn` and `FnMut` are checked against each other, so
-  passing an `FnMut` where `Fn` is wanted is rejected with the reason.
+- ~~**`FnOnce` is not implemented.**~~ **Closed (G9.26a).** A closure that
+  moves a capture out takes the capture by value, is `FnOnce` only, and the
+  bound check names the row of §4.3's table a closure lands on: passing an
+  `FnMut` where `Fn` is wanted is rejected with the reason, and so is an
+  `FnOnce`.
 - **Capture is by variable, not by place.** §4.4 says a closure using `p.x`
   borrows `p.x` and leaves `p.y` free; this one borrows `p`. Conservative in
   the right direction, and it costs only programs that use disjoint fields of
@@ -7392,6 +7392,70 @@ time this session those two have caught something written for another reason.
 and `0t` is its literal, but nothing has needed it that a program cannot write
 in six lines, and the digit that has no character — `T` for −1 — is a choice
 §1.6 would have to make.
+
+**G9.26a — `FnOnce` is built: a body that moves a capture out is a closure
+taken by value (Ch. 4 §§4.3–4.4).** The last row of §4.3's table, and the
+close of what G9.27's fix *refused* to keep unsound. The desugaring is §4.2's
+with one more case: a capture the body moves out of is the closure's own
+storage rather than its address, and the synthesized `call` takes its
+receiver by value, which is the whole of the one-shot rule — the second call
+is the borrow checker's ordinary "moved out of" (Ch. 3 §1.2), not a rule of
+its own. §4.4's "weakest form that suffices" is per capture: one binding can
+be the closure's while another stays borrowed. The move analysis that decides
+it reads the places ownership already moves: an argument, a `let`'s right
+side, a struct's field, an element, a scrutinee whose arms bind, a return, a
+`break`'s value, a tail — and not an assignment's target, a borrow, an
+operator, or a method's receiver. Both implementations ask the same
+questions, and `bootstrap/programs/fnonce` is the comparison — five shapes
+(moved into a bound, into a local, one moved and one borrowed, one boxed,
+one never called), plus the drop ledger's three rows for who owns what after.
+
+**The second implementation needed four things found only by asking it.**
+None of them was in the move analysis:
+
+- A closure with a **block body** could not have its result type guessed —
+  `guess_ty` read a bare expression and nothing shaped like `{ … }`, and no
+  corpus program had ever written one. It reads a block's tail and an `if`'s
+  `then` arm's tail now, the same two arms `peek_ty` reads (Ch. 4 §4.1).
+- A `**Box` instance did not survive `remake`** — `instantiate` knows
+  families and a `Box` is no family's, so a `*self.b` in a synthesized body
+  asked what the box was *of* and was told nothing. `remake` replays `Box`
+  and `Raw` by name now, idempotently, the way it replays a key (Ch. 5 §§2.3,
+  2.7).
+- **`*` of a box held in a *field* was not a box.** The gate was a name's:
+  `*b` moved the box and `*self.b` — which is what a moved capture rewrites
+  to (§4.4) — fell through to the reference's path and was refused. The
+  question is the place's *type* now, which is what it is everywhere else,
+  and the move is recorded against the field so the scope's end drops only
+  what stayed (Ch. 3 §1.3).
+- **Glue and closure bodies were two stacks.** A closure that owns a value
+  is the first type whose drop glue is asked for with no declaration behind
+  it, and when one was asked for *between* two closure bodies, the first
+  implementation's one `extra_fns` printed it between them while the second
+  printed it after. `work.found` is the one ledger now — discoveries in the
+  order they are made, drained last-found first, closures and destructors
+  alike — and `instantiations` drains it before each job, the way the queue
+  prefers extras to pending.
+- And the smallest one: a `Box` field copied by value loaded as `%p`, the
+  prefix a *reference*'s load gets; everything else a field can be loads as
+  `%v`. The prefix is text, and the text is what agrees.
+
+Two edges stand, and both are pinned:
+
+- **A move through a method's by-value receiver fails closed.** `c.unwrap()`
+  — the receiver — is not an argument position, so the analysis reads it as
+  a borrow and the synthesized body's own move-out-of-a-reference check —
+  G9.27's — is the refusal. `Option::unwrap(c)` is the way to write it;
+  `moves.rs`'s `a_capture_moved_through_a_method_receiver_is_still_refused`
+  is the pin, in both implementations.
+- **An array or tuple moved out of a capture is refused by the second
+  implementation** (an aggregate shape its capture classifier does not name
+  yet; the first accepts). Nothing in the corpus moves one, so the refusal
+  is the compared answer there — the corpus would have to grow the case
+  before the two could disagree, which is the shape of every entry the
+  comparison cannot ask about yet.
+
+HPL retires **1 985 745** instructions, unchanged.
 
 **G8.17 — the compiler spent 96% of its time verifying, and I guessed twice
 before measuring.** `trust run` made one number visible that three commands

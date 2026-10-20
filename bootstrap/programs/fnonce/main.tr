@@ -1,0 +1,64 @@
+// Ch. 4 §4.3's last row: a body that moves a capture out implements
+// `FnOnce` only, and the capture is the closure's from the moment it is
+// written — moved at construction into the closure's own storage, which is
+// what makes the second call an ordinary "moved out of" rather than a rule
+// of its own.
+//
+// What is compared here is the desugaring, one shape at a time: the
+// closure struct's field is the value rather than its address, the
+// receiver the body takes is by value, and the move out of the binding is
+// the same one an argument makes (Ch. 3 §1.2).
+
+struct Held { n: t27 }
+impl Drop for Held { fn drop(self) {} }
+
+fn take(h: Held) -> t27 { h.n }
+
+fn once(f: impl FnOnce() -> t27) -> t27 {
+    f()
+}
+
+// Handed to a `FnOnce` bound the way the `Fn` ones are handed above it:
+// the bound's signature is what the closure's own types are read off.
+fn moved_once() -> t27 {
+    let h = Held { n: 3 };
+    once(|| take(h))
+}
+
+// Named and called in the next breath, once: the receiver the call takes
+// is by value.
+fn local_once() -> t27 {
+    let h = Held { n: 4 };
+    let f = || take(h);
+    f()
+}
+
+// One capture moved, one only written: §4.4's "weakest form that suffices"
+// is per place, so `h` is the closure's and `n` stays borrowed.
+fn mixed() -> t27 {
+    let h = Held { n: 1 };
+    let mut n: t27 = 0;
+    let f = || { n = n + 1; take(h) };
+    f() + n
+}
+
+// One boxed capture — a `Box` is the one word it points with (Ch. 5 §2.3),
+// and the copy that carries it into the closure is a load and a store.
+fn boxed() -> t27 {
+    let b = Box::new(Held { n: 5 });
+    let f = || take(*b);
+    f()
+}
+
+// And one the program never calls: the closure is the owner from
+// construction, so the moved value is dropped where the closure is — at
+// the end of this scope, through the glue a struct of one gets.
+fn unused() -> t27 {
+    let h = Held { n: 9 };
+    let _f = || take(h);
+    0
+}
+
+fn main() -> t27 {
+    moved_once() + local_once() + mixed() + boxed() + unused()
+}

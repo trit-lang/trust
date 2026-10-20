@@ -32,15 +32,46 @@ fn a_value_behind_a_reference_cannot_be_taken() {
 
 #[test]
 fn a_closure_capture_cannot_be_taken_either() {
-    // A capture is a reference (Ch. 4 §4.2) and is rewritten to `*self.h`,
-    // so this is the same hole wearing a hat. It dropped the value three
-    // times: once per call, and once when the scope ended.
+    // Moving a capture out makes the closure `FnOnce` (Ch. 4 §4.3's table),
+    // so a `Fn` parameter refuses it — with the reason named rather than
+    // the double drop G9.27 this program used to reach: one per call, and a
+    // third when the scope ended.
     let why = refusal(&format!(
         "{OWNED}fn twice(f: impl Fn() -> t27) -> t27 {{ f() + f() }}\n\
          fn main() -> t27 {{ let h = Held {{ n: 7 }}; twice(|| take(h)) }}\n"
     ))
     .expect("refused");
+    assert!(why.contains("`FnOnce`"), "{why}");
+}
+
+#[test]
+fn a_capture_moved_through_a_method_receiver_is_still_refused() {
+    // The move analysis reads argument positions, not receiver forms: a
+    // by-value `self` method called on a capture stays a borrow, and the
+    // synthesized body's own move-out-of-a-reference check is the refusal —
+    // the edge G9.27's fix is for, deliberately left failing closed. The
+    // function spelling of the same call is the way to write it.
+    let why = refusal(
+        "struct Held { n: t27 }\n\
+         fn drop(self: Held) { print_int(self.n); }\n\
+         impl Held { fn into(self) -> t27 { self.n } }\n\
+         fn main() -> t27 { let h = Held { n: 7 }; let f = || h.into(); f() }\n",
+    )
+    .expect("refused");
     assert!(why.contains("cannot move out of a reference"), "{why}");
+    // `Option::unwrap(h)` rather than `h.unwrap()`: an argument is a place a
+    // value can be taken from, so this one captures by value and is fine.
+    assert_eq!(
+        refusal(
+            "fn drop(self: Held) { print_int(self.n); }\n\
+             struct Held { n: t27 }\n\
+             fn take(h: Held) -> t27 { h.n }\n\
+             fn once(f: impl FnOnce() -> t27) -> t27 { f() }\n\
+             fn main() -> t27 { let h = Held { n: 7 }; once(|| take(h)) }\n"
+        ),
+        None,
+        "an argument position moves, and the closure is `FnOnce`"
+    );
 }
 
 #[test]

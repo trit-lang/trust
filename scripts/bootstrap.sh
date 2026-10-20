@@ -686,6 +686,7 @@ for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
             bootstrap/programs/patterns/main.tr \
             bootstrap/programs/macros/main.tr \
             bootstrap/programs/adaptors/main.tr \
+            bootstrap/programs/fnonce/main.tr \
             bootstrap/main.tr; do
     # The one that uses the library is handed the library, which is what
     # `--prelude` is for (Ch. 6 §3.3) — and asking for it where there is
@@ -700,11 +701,11 @@ for root in bootstrap/programs/whole/main.tr bootstrap/programs/deeper/main.tr \
             } > "$tmp/$idx.err"
             exit 1
         fi
-        # And then the whole way, as the modules above go: TRISC-27 assembly,
-        # the whole pipeline piping its own stages under `bootstrap/tirgen.tr`,
-        # held to `trustc compile`. All twenty-two answer now — for a while
-        # four of them could not, refused at the `#` G9.183 named, and the
-        # refusal was the answer compared, as it is for any other.
+    # And then the whole way, as the modules above go: TRISC-27 assembly,
+    # the whole pipeline piping its own stages under `bootstrap/tirgen.tr`,
+    # held to `trustc compile`. All twenty-three answer now — for a while
+    # four of them could not, refused at the `#` G9.183 named, and the
+    # refusal was the answer compared, as it is for any other.
         printf '%s\n' "$rust" > "$tmp/$idx.tir"
         if rasm=$("$trustc" compile "$tmp/$idx.tir" 2>/dev/null); then
             miasm=$(printf '%s\n' "$rust" | "$trust" run bootstrap/tirgen.tr 2>/dev/null)

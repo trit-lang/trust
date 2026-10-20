@@ -177,7 +177,9 @@ Traits with required and provided methods, supertraits, inherent and trait
 impls, the four receivers, associated functions, associated types and
 constants, generic functions/structs/enums/impls with monomorphization and
 bounds, `dyn Trait` with real vtables and object safety, closures with capture
-inference and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
+inference — `Fn`, `FnMut` and `FnOnce`, the last by taking the moved capture
+into the closure's own storage, so calling one twice is the ordinary "moved
+out of" — and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
 `#[derive(Eq, Ord, Clone)]` with the comparison operators wired to them,
 `impl !Copy`, the turbofish, `Option` and `Result`.
 
@@ -189,7 +191,7 @@ inference and `impl Fn(…)` parameters, `for` loops over a user `Iterator`,
 | a type parameterized by a `const` | `const N` works as an array *length* (G8.2); `struct Grid<const N: taddr>` is Ch. 4 §2.4 and unimplemented |
 
 | returning a closure | needs `impl Trait` in return position or `Box<dyn Fn>`; Ch. 4 §4.5 |
-| `FnOnce` that moves a capture | every capture is by reference, and moving out of one is now **refused** rather than silently accepted (G9.27). Allowing it needs a move analysis of the closure body |
+| a moved capture that is an array or tuple | accepted by `trustc` since `FnOnce` was built (G9.26a); the second implementation in `bootstrap/` refuses the shape rather than guess, which is the compared answer while no corpus program grows the case |
 | `IntoIterator`, so `for x in xs` over an array | array iterators are the library's; the blanket impl it needs now works (G0.14b) |
 | separate compilation, a unit larger than a program | Ch. 6 §6; there is no `crate` and no linking of one program to another. Modules, `use` and `pub` are **built** (Ch. 6) |
 | `unsafe`, raw pointers | reserved; `?` is built (G9.8) |

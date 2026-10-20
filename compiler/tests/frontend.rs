@@ -1598,6 +1598,91 @@ fn a_closure_that_writes_a_capture_is_fn_mut() {
 }
 
 #[test]
+fn a_closure_that_moves_a_capture_is_fn_once() {
+    // §4.3's last row: a body that moves a capture out implements `FnOnce`
+    // only, and the capture is taken by value — into the closure's own
+    // storage at construction, so `h` is the closure's from then on.
+    assert_eq!(
+        run("struct Held { n: t27 } impl Drop for Held { fn drop(self) {} }\n\
+             fn take(h: Held) -> t27 { h.n }\n\
+             fn once(f: impl FnOnce() -> t27) -> t27 { f() }\n\
+             fn main() -> t27 { let h = Held { n: 41 }; once(|| take(h)) + 1 }")
+        .0,
+        42
+    );
+    // The move is the ordinary one: `h` is the closure's, and reading it
+    // again is the same refusal as after any move (Ch. 3 §1.2).
+    let e = error(
+        "struct Held { n: t27 } impl Drop for Held { fn drop(self) {} }\n\
+         fn take(h: Held) -> t27 { h.n }\n\
+         fn once(f: impl FnOnce() -> t27) -> t27 { f() }\n\
+         fn main() -> t27 { let h = Held { n: 7 }; let r = once(|| take(h)); h.n + r }",
+    );
+    assert!(e.contains("moved out of"), "{e}");
+}
+
+#[test]
+fn an_fn_once_is_called_once_because_the_call_moves_it() {
+    // There is no separate one-shot rule: the call's receiver is by value,
+    // so the second call is the borrow checker's "moved out of" (Ch. 4 §4.3
+    // by Ch. 3 §1.2).
+    let e = error(
+        "struct Held { n: t27 } impl Drop for Held { fn drop(self) {} }\n\
+         fn take(h: Held) -> t27 { h.n }\n\
+         fn twice(f: impl FnOnce() -> t27) -> t27 { f() + f() }\n\
+         fn main() -> t27 { let h = Held { n: 7 }; twice(|| take(h)) }",
+    );
+    assert!(e.contains("`f` was moved out of"), "{e}");
+    // And it composes: a twice-once is a `FnOnce` taking a `FnOnce` once.
+    assert_eq!(
+        run("struct Held { n: t27 } impl Drop for Held { fn drop(self) {} }\n\
+             fn take(h: Held) -> t27 { h.n }\n\
+             fn twice_once(f: impl FnOnce() -> t27, g: impl FnOnce() -> t27) -> t27 { f() + g() }\n\
+             fn main() -> t27 { \
+                 let a = Held { n: 1 }; let b = Held { n: 2 }; \
+                 twice_once(|| take(a), || take(b)) \
+             }")
+        .0,
+        3
+    );
+}
+
+#[test]
+fn a_closure_can_move_one_capture_and_borrow_another() {
+    // §4.4's "weakest form that suffices" is per capture: the moved one is
+    // taken by value and the read one borrowed, and the receiver is by
+    // value because one of them needed it.
+    assert_eq!(
+        run("struct Held { n: t27 } impl Drop for Held { fn drop(self) {} }\n\
+             fn take(h: Held) -> t27 { h.n }\n\
+             fn once(f: impl FnOnce() -> t27) -> t27 { f() }\n\
+             fn main() -> t27 { \
+                 let h = Held { n: 3 }; let k: t27 = 4; \
+                 once(|| take(h) + k) \
+             }")
+        .0,
+        7
+    );
+    // By value only where the *projected* type does not copy: `h.n` is a
+    // `t27`, so this closure only borrows `h` and is still `Fn`.
+    assert_eq!(
+        run("struct Held { n: t27 } impl Drop for Held { fn drop(self) {} }\n\
+             fn twice(f: impl Fn() -> t27) -> t27 { f() + f() }\n\
+             fn main() -> t27 { let h = Held { n: 7 }; let r = twice(|| h.n); r + h.n }")
+        .0,
+        21
+    );
+    // And through a reference: `s[0]` on a `&str` is a `char`, which copies,
+    // so the same is true there (Ch. 3 §2.3's projections count).
+    assert_eq!(
+        run("fn twice(f: impl Fn() -> t27) -> t27 { f() + f() }\n\
+             fn main() -> t27 { let s = \"ab\"; twice(|| s[0] as t27) + s.len() as t27 }")
+        .0,
+        196
+    );
+}
+
+#[test]
 fn a_captured_place_is_borrowed_for_as_long_as_the_closure_lives() {
     // §4.4's own example: the capture is subject to Ch. 3 §2.2 unchanged.
     let src = "struct P { x: t27, y: t27 } \
@@ -2531,6 +2616,24 @@ fn every_owner_drops_exactly_once() {
         "moved on one branch only",
         "let a = P{id:65}; if 1 > 0 { eat(a); } 0",
         "A",
+    );
+    // Ch. 4 §4.3's last row: a closure that moves a capture out takes it by
+    // value, so the closure is the owner — dropped where it is called, or
+    // where the scope ends when it is not.
+    ledger(
+        "moved into a closure that is called",
+        "let a = P{id:65}; let f = || eat(a); f(); 0",
+        "A",
+    );
+    ledger(
+        "moved into a closure that is not called",
+        "let a = P{id:65}; let _f = || eat(a); 0",
+        "A",
+    );
+    ledger(
+        "one moved, one borrowed, one call",
+        "let a = P{id:65}; let b = P{id:66}; let f = || { eat(a); b.id }; f(); 0",
+        "AB",
     );
 
     // Overwriting: the value being replaced is going away, and it has one
