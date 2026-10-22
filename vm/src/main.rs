@@ -138,7 +138,10 @@ fn cmd_replay(args: &[String]) -> Result<ExitCode, String> {
     }
     match stop {
         Stop::Halted(status) => {
-            eprintln!("replay: halted with status {status} after {} steps", vm.steps());
+            eprintln!(
+                "replay: halted with status {status} after {} steps",
+                vm.steps()
+            );
             Ok(ExitCode::SUCCESS)
         }
         Stop::OutOfSteps => {
@@ -224,8 +227,8 @@ fn arm_diag(vm: &mut Vm) {
             Err(e) => eprintln!("tritium: bad TRITIUM_WATCH: {e}"),
         }
     }
-    if let Some(n) = std::env::var_os("TRITIUM_SNAP_EVERY")
-        .and_then(|v| v.to_string_lossy().parse::<u64>().ok())
+    if let Some(n) =
+        std::env::var_os("TRITIUM_SNAP_EVERY").and_then(|v| v.to_string_lossy().parse::<u64>().ok())
     {
         let path = std::env::var_os("TRITIUM_SNAP_PATH").map(|p| p.to_string_lossy().into_owned());
         vm.enable_snapshots(n, path);
@@ -236,7 +239,10 @@ fn arm_diag(vm: &mut Vm) {
 fn parse_watch(spec: &str) -> Result<Vec<(i128, i128)>, String> {
     let mut out = Vec::new();
     for part in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        let parse = |s: &str| s.parse::<i128>().map_err(|_| format!("`{s}` is not a number"));
+        let parse = |s: &str| {
+            s.parse::<i128>()
+                .map_err(|_| format!("`{s}` is not a number"))
+        };
         let range = match part.split_once('-') {
             Some((a, b)) => (parse(a)?, parse(b)?),
             None => (parse(part)?, parse(part)?),

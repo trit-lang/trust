@@ -4645,7 +4645,7 @@ fn match_place(
                 // are already made, and a `false` hands the value to the
                 // next arm — `Method(recv, name, args) if !is_place_expr(recv)`
                 // had nobody asking for it until the aggregate_ tail-routing
-                // arms made one (G9.217, Ch. 2 §5.4).
+                // arms made one (G9.217, Ch. 0 §5.4).
                 match &arms[a].guard {
                     Option::Some(g) => {
                         if next_at.len() == 0 {

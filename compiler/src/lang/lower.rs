@@ -2144,9 +2144,7 @@ fn moves_at(e: &ast::Expr, name: &str, root: &Ty, types: &Types, by_value: bool)
             moves_at(v, name, root, types, true) || moves_at(n, name, root, types, false)
         }
         Closure(_, _, body, _) => moves_at(body, name, root, types, true),
-        Cast(a, _, _) | Unary(_, a, _) | Borrow(a, _, _) => {
-            moves_at(a, name, root, types, false)
-        }
+        Cast(a, _, _) | Unary(_, a, _) | Borrow(a, _, _) => moves_at(a, name, root, types, false),
         Deref(a, _) | Field(a, _, _) => moves_at(a, name, root, types, false),
         Index(a, i, _) => {
             moves_at(a, name, root, types, false) || moves_at(i, name, root, types, false)
@@ -2155,8 +2153,7 @@ fn moves_at(e: &ast::Expr, name: &str, root: &Ty, types: &Types, by_value: bool)
             moves_at(a, name, root, types, false) || moves_at(b, name, root, types, false)
         }
         Assign(_, target, value, _) => {
-            moves_at(target, name, root, types, false)
-                || moves_at(value, name, root, types, true)
+            moves_at(target, name, root, types, false) || moves_at(value, name, root, types, true)
         }
         Block(b) => moves_block_at(b, name, root, types),
         Loop(b, _) => moves_block_at(b, name, root, types),
@@ -2175,9 +2172,7 @@ fn moves_at(e: &ast::Expr, name: &str, root: &Ty, types: &Types, by_value: bool)
             moves_at(it, name, root, types, true) || moves_block_at(b, name, root, types)
         }
         Match(sc, arms, _) => {
-            let binds = arms
-                .iter()
-                .any(|a| a.patterns.iter().any(pattern_binds));
+            let binds = arms.iter().any(|a| a.patterns.iter().any(pattern_binds));
             moves_at(sc, name, root, types, binds)
                 || arms.iter().any(|a| {
                     a.guard
@@ -2219,11 +2214,7 @@ fn rewrite_captures(e: &mut ast::Expr, captures: &[(String, Capture)]) {
     if let Path(n, span) = e
         && let Some((_, how)) = captures.iter().find(|(c, _)| c == n)
     {
-        let field = Field(
-            Box::new(Path("self".to_string(), *span)),
-            n.clone(),
-            *span,
-        );
+        let field = Field(Box::new(Path("self".to_string(), *span)), n.clone(), *span);
         *e = match how {
             Capture::Move => field,
             Capture::Read | Capture::Write => Deref(Box::new(field), *span),
@@ -9974,13 +9965,11 @@ impl Fn<'_> {
             span,
         };
 
-        let mut sig_params = vec![
-            if by_value {
-                ty.clone()
-            } else {
-                Ty::Ref(Box::new(ty.clone()), false)
-            },
-        ];
+        let mut sig_params = vec![if by_value {
+            ty.clone()
+        } else {
+            Ty::Ref(Box::new(ty.clone()), false)
+        }];
         sig_params.extend(param_tys.clone());
         self.sigs
             .borrow_mut()
@@ -12425,7 +12414,16 @@ impl Fn<'_> {
             for (arm, label) in arms.iter().zip(&labels) {
                 self.owned = before.clone();
                 self.start(label.clone());
-                self.arm_body(arm, expected, &mut answer, &mut result, &join, span, None, &dest)?;
+                self.arm_body(
+                    arm,
+                    expected,
+                    &mut answer,
+                    &mut result,
+                    &join,
+                    span,
+                    None,
+                    &dest,
+                )?;
                 merged = self.join_arm(merged, span)?;
             }
             if let Some(m) = merged {
@@ -12448,7 +12446,16 @@ impl Fn<'_> {
             self.owned = before.clone();
             let unconditional = self.arm_test(arm, &v, &ty, &body, &next, span)?;
             self.start(body);
-            self.arm_body(arm, expected, &mut answer, &mut result, &join, span, None, &dest)?;
+            self.arm_body(
+                arm,
+                expected,
+                &mut answer,
+                &mut result,
+                &join,
+                span,
+                None,
+                &dest,
+            )?;
             merged = self.join_arm(merged, span)?;
             if unconditional {
                 // A wildcard or binding matches everything, so no later arm

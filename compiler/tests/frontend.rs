@@ -1603,10 +1603,12 @@ fn a_closure_that_moves_a_capture_is_fn_once() {
     // only, and the capture is taken by value — into the closure's own
     // storage at construction, so `h` is the closure's from then on.
     assert_eq!(
-        run("struct Held { n: t27 } impl Drop for Held { fn drop(self) {} }\n\
+        run(
+            "struct Held { n: t27 } impl Drop for Held { fn drop(self) {} }\n\
              fn take(h: Held) -> t27 { h.n }\n\
              fn once(f: impl FnOnce() -> t27) -> t27 { f() }\n\
-             fn main() -> t27 { let h = Held { n: 41 }; once(|| take(h)) + 1 }")
+             fn main() -> t27 { let h = Held { n: 41 }; once(|| take(h)) + 1 }"
+        )
         .0,
         42
     );
@@ -1635,13 +1637,15 @@ fn an_fn_once_is_called_once_because_the_call_moves_it() {
     assert!(e.contains("`f` was moved out of"), "{e}");
     // And it composes: a twice-once is a `FnOnce` taking a `FnOnce` once.
     assert_eq!(
-        run("struct Held { n: t27 } impl Drop for Held { fn drop(self) {} }\n\
+        run(
+            "struct Held { n: t27 } impl Drop for Held { fn drop(self) {} }\n\
              fn take(h: Held) -> t27 { h.n }\n\
              fn twice_once(f: impl FnOnce() -> t27, g: impl FnOnce() -> t27) -> t27 { f() + g() }\n\
              fn main() -> t27 { \
                  let a = Held { n: 1 }; let b = Held { n: 2 }; \
                  twice_once(|| take(a), || take(b)) \
-             }")
+             }"
+        )
         .0,
         3
     );
@@ -1653,22 +1657,26 @@ fn a_closure_can_move_one_capture_and_borrow_another() {
     // taken by value and the read one borrowed, and the receiver is by
     // value because one of them needed it.
     assert_eq!(
-        run("struct Held { n: t27 } impl Drop for Held { fn drop(self) {} }\n\
+        run(
+            "struct Held { n: t27 } impl Drop for Held { fn drop(self) {} }\n\
              fn take(h: Held) -> t27 { h.n }\n\
              fn once(f: impl FnOnce() -> t27) -> t27 { f() }\n\
              fn main() -> t27 { \
                  let h = Held { n: 3 }; let k: t27 = 4; \
                  once(|| take(h) + k) \
-             }")
+             }"
+        )
         .0,
         7
     );
     // By value only where the *projected* type does not copy: `h.n` is a
     // `t27`, so this closure only borrows `h` and is still `Fn`.
     assert_eq!(
-        run("struct Held { n: t27 } impl Drop for Held { fn drop(self) {} }\n\
+        run(
+            "struct Held { n: t27 } impl Drop for Held { fn drop(self) {} }\n\
              fn twice(f: impl Fn() -> t27) -> t27 { f() + f() }\n\
-             fn main() -> t27 { let h = Held { n: 7 }; let r = twice(|| h.n); r + h.n }")
+             fn main() -> t27 { let h = Held { n: 7 }; let r = twice(|| h.n); r + h.n }"
+        )
         .0,
         21
     );

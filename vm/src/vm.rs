@@ -296,10 +296,10 @@ impl Vm {
         // complete and is not counted (ISA §2.3).
         if outcome.is_ok() {
             self.steps = self.steps.wrapping_add(1);
-            if let Some(n) = self.diag.snap_every {
-                if self.steps % n == 0 {
-                    self.take_snap();
-                }
+            if let Some(n) = self.diag.snap_every
+                && self.steps.is_multiple_of(n)
+            {
+                self.take_snap();
             }
         }
         outcome
@@ -652,7 +652,10 @@ const REPORT_RING: usize = 512;
 impl Vm {
     /// Record the last `cap` PCs. `cap` must be a power of two.
     pub fn enable_ring(&mut self, cap: usize) {
-        assert!(cap.is_power_of_two(), "ring capacity must be a power of two");
+        assert!(
+            cap.is_power_of_two(),
+            "ring capacity must be a power of two"
+        );
         self.diag.ring = vec![0; cap];
         self.diag.at = 0;
     }
@@ -713,11 +716,7 @@ impl Vm {
         if let Some(path) = &self.diag.snap_path {
             let _ = snap.write_file(path);
         }
-        eprintln!(
-            "[snap] steps={} pages={}",
-            self.steps,
-            snap.pages.len()
-        );
+        eprintln!("[snap] steps={} pages={}", self.steps, snap.pages.len());
         self.diag.snap = Some(snap);
     }
 
@@ -772,4 +771,3 @@ impl Vm {
         out
     }
 }
-

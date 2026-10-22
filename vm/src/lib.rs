@@ -31,7 +31,7 @@ pub mod snap;
 pub mod vm;
 pub mod word;
 
-pub use asm::{AsmError, assemble, assemble_with_symbols};
+pub use asm::{AsmError, SymbolTable, assemble, assemble_with_symbols};
 pub use inst::{AluOp, Inst, Malformed, Reg, Width};
 pub use mem::Memory;
 pub use profile::{Profile, classify, profile};

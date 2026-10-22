@@ -77,12 +77,23 @@ if [ -n "$bad" ]; then
 fi
 
 # And a citation of a gap that does not exist, which is the other way the
-# registry stops being one.
+# registry stops being one. A range entry — `**G9.208–G9.233` — is one entry
+# that names every number between its two ends: twenty-six first divergences
+# of the fixpoint's march close as one line, and a citation of any point of
+# the march resolves to the line the march closed on.
 missing=$(grep -rhoE '\bG[0-9]+\.[0-9]+[a-z]*' \
   core/src compiler/src vm/src lsp/src driver/src spec docs editors README.md 2>/dev/null |
   sort -u |
   while IFS= read -r g; do
-    grep -qE "^\*\*$(echo "$g" | sed 's/\./\\./g')[^0-9]" "$gaps" || echo "$g"
+    grep -qE "^\*\*$(echo "$g" | sed 's/\./\\./g')[^0-9]" "$gaps" && continue
+    x=${g#G}; x=${x%%.*}
+    y=${g#*.}
+    case "$y" in *[a-z]*) echo "$g"; continue ;; esac
+    grep -oE "^\*\*G$x\.[0-9]+–G$x\.[0-9]+" "$gaps" |
+      sed "s/^\*\*G$x\.//; s/–G$x\./ /" |
+      while read -r lo hi; do
+        [ "$y" -ge "$lo" ] && [ "$y" -le "$hi" ] && echo covered
+      done | grep -q covered || echo "$g"
   done)
 if [ -n "$missing" ]; then
   echo "$missing" | sed 's/^/no such gap: /'

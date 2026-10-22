@@ -43,6 +43,11 @@ impl std::error::Error for AsmError {}
 
 type R<T> = Result<T, AsmError>;
 
+/// Every label and equate with the address it names, sorted by address:
+/// what `tritium asm -s` prints so a PC can be mapped back to the function
+/// it lies in.
+pub type SymbolTable = Vec<(String, i128)>;
+
 fn err<T>(line: u32, message: impl Into<String>) -> R<T> {
     Err(AsmError {
         line,
@@ -414,7 +419,7 @@ pub fn assemble(src: &str) -> Result<Vec<i16>, Vec<AsmError>> {
 /// Assemble, and also yield every label and equate with its address: the
 /// symbol table, by name. Diagnostic tooling (`tritium asm -s`) prints this
 /// so that a PC can be mapped back to the function it lies in.
-pub fn assemble_with_symbols(src: &str) -> Result<(Vec<i16>, Vec<(String, i128)>), Vec<AsmError>> {
+pub fn assemble_with_symbols(src: &str) -> Result<(Vec<i16>, SymbolTable), Vec<AsmError>> {
     match assemble_inner(src) {
         Ok((image, syms)) => {
             let mut table: Vec<(String, i128)> = syms
