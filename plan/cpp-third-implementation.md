@@ -254,7 +254,56 @@ Recommended home: a new `spec/determinism-0.1.md`, cited from TIR §8 and from
 ddc.md §3.3. Alternative: fold the name rules into TIR §8 and the emission
 rules into a `docs/` annex. See D4.
 
-### G4 — the sA audit.
+### G4 — the sA audit. — **landed 2026-10-29**
+
+*Outcome, the audit itself, inline as promised.* sA is `bootstrap/program.tr`
+plus the module tree it reaches — 29 `.tr` files, 38 006 lines, over
+`mod` declarations per Ch. 6 §1 — with the prelude handed over beside it
+(ddc.md §4 step 3's `#prelude` mechanism). Verified against the source
+rather than recalled, 2026-10-29.
+
+**Families sA's text uses, each pointed at its normative text:**
+
+| Family (example loci) | Normative text | Status |
+|---|---|---|
+| scalars, arithmetic, all six comparisons, literals in three radices (`parse.tr`, `tir.tr`) | Ch. 1 §§3–5, Ch. 0 §2.8 | covered |
+| `match` in full — literals, trit arms, enum variants with payloads, or-arms, bare names, guards (`parse.tr`, `lower.tr`) | Ch. 0 §§4–5.4, Ch. 2 §5; struct pattern clause added in G2 | covered |
+| generics — fns, methods, types; monomorphization (`lower.tr` 345 comment-sites, `types.tr`) | Ch. 4 §2; determinism §3 for the key order | covered |
+| generic impls incl. associated types resolved at instantiation (`lower.tr`, `ast.tr`'s `Item`-machinery) | Ch. 4 §1.7, §2 | covered |
+| traits with provided bodies, supertrait-static dispatch (`gen.tr`) | Ch. 4 §1.5 | covered |
+| `impl Fn(…)` bounds and closure-hint machinery (`lower.tr`) | Ch. 4 §4.3 | covered (sA implements it; does not itself spell a closure — see the second list) |
+| `for … in …`, ranges `a..b`, iterator adaptors (`layout.tr` 3, `lex.tr` 4 `?`-sites among them) | Ch. 4 §5.7, Ch. 5 §3.4 | covered |
+| `?` — heavy real usage (`parse.tr` 365, `tir.tr` 95) | Ch. 5 §4.1; determinism §1's `q.k` for the text | covered |
+| ownership the Ch. 3 way — moves, field moves, drop flags, destructors incl. `impl Drop` (`lower.tr`'s own `Vec<T>` fields) | Ch. 3 §§1.2–1.4; G9.189's whole-value rule folded in G2 | covered |
+| references `&T`/`&mut T`, slices, the array-to-slice coercion | Ch. 3 §§2, 5 | covered |
+| `Box`, `Raw<T>`, `Vec<T>`, `String` as `Vec<char>` | Ch. 5 §2 — `Box`/language items, §2.7 `Raw`, §2.6 `Vec` | covered |
+| `Option`/`Result` from the prelude, `char` and string literals (`lex.tr`, `layout.tr`) | Ch. 4 §5.8, Ch. 5 §1 | covered |
+| tuples, arrays, const items, `let`-tuple patterns (`parse.tr` 2, `lower.tr` 1) | Ch. 2, Ch. 0 §§3.2, 5.2 | covered |
+| modules — `mod`/`use`, the bundled prelude merge, reachability pruning | Ch. 6 §§1–4; determinism §4's roots note (vtable = use) | covered |
+| TIR text, emitted and re-read (`tir.tr`) | TIR §8 (G0) + `spec/determinism-0.1.md` (G3) | covered in full as of this work |
+
+**Families sA implements but does not itself spell** — a cP3 candidate
+learns them from `spec/`, and they are pinned at the corpus ladder (L1/L2),
+**not** at L4: macro items and `name!(…)` calls (Ch. 7; sA merely parses
+them, `in_macro`; real usage lives in the `macros` corpus lanes),
+closures `|x| …` (zero real occurrences in sA — every `|` in its sources
+is `||`), `dyn Trait` (zero real occurrences — sA implements the vtable
+shape from Ch. 4 §3 without spelling one), turbofish `::<>` (zero real
+occurrences). The audit's practical consequence: **an implementation that
+passes L4 might still be wrong on all four; only L1–L2 catch it.** The
+corpus lanes already hold each.
+
+**Nothing unpointable found.** Every family sA spells now has a normative
+home, six of them written during this program (TIR §8, determinism, the
+G1 folds, Ch. 0 §4's struct-pattern clause, Ch. 3 §1.4's whole-value
+rule, Ch. 2 §6's niche rule). Zero new G1-class gaps opened.
+
+**One carry-over from G2, scheduled here by its own rule:** the bootstrap
+side's answer on `match` over a struct destructuring arm is untested
+(corpus has none). Add one struct-destructure program to
+`bootstrap/programs/` when a toolchain can run the suite, so both
+implementations are held to one answer — P0-adjacent, not P0-blocking,
+since sA spells no such arm either.
 
 Enumerate every construct `bootstrap/program.tr` and the prelude use, and
 point each at a normative line of `spec/`. Whatever the audit cannot point at
@@ -266,6 +315,10 @@ is a checklist appended to this file when P0 opens.
 
 **Gate P0**: program one is done when the stranger test passes on sA — a
 reader of `spec/` alone can, in principle, emit the 9 485 971 bytes.
+**Passed on paper 2026-10-29** (G0–G4 all landed; the four sA-absent
+families are documented as pinned at L1–L2 rather than L4, which is their
+honest status and not a gate failure). The gate's *practical* passage —
+a stranger actually emitting the bytes — is what P1–P3 measure.
 
 ## 5. Program two — build `cP3`
 
