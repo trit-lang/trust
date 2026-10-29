@@ -208,7 +208,24 @@ put them on the agenda with their citations:
 | G9.189 | a field moved out of a value whose type has a destructor: the body never runs, and no chapter says so | Ch. 3 §1.3 and §1.4 read side by side are silent; sA itself does not move through such a type, but the corpus and any future library code does |
 | G9.197 (a)(b)(c) | three small mirrors: a statement-`?`'s join-slot text; `match` over a struct destructuring; trait-glue queue timing | (c) is a determinism rule (G3); (b) is either a spec limit or future work |
 
-### G3 — the determinism appendix.
+### G3 — the determinism appendix. — **landed 2026-10-29**
+
+*Outcome:* `spec/determinism-0.1.md` exists, cited from TIR §8.3 and
+ddc.md §3.3, in six sections: §1 the alphabet and the one shared counter
+(values *and* labels — minted in emission order, re-seeded per
+instantiation); §2 slot hoisting, adoption, and the hole in the numbers;
+§3 instantiation names (written types, path mangling, receiver-first
+keys, closure families) and the stack drain, reverse of ask; §4 glue
+(`@Re.twice` once per implementing type, printed beside the
+instantiations — G9.197(c) resolved at the printed text, internal queue
+timing declared free), closures, and vtables (`@vt.Sq.Area`); §5 backend
+determinism (the pool is an order — G9.187) bound from M2; §6 the
+environment rule restated for C++ (`std::unordered_map` may be
+consulted, never printed). Every rule is evidence-tagged *spec* or
+*corpus*, and the appendix table shows the probes that pin them — every
+one re-run against the binary while writing, not recalled from the log.
+spec-gaps: G9.183, G9.187, G9.192 and G9.197's (a)(c) amended with
+pointers.
 
 The byte-equality contract of §3 runs on rules that today exist only as
 entries in this log and as two agreeing implementations. A stranger needs them

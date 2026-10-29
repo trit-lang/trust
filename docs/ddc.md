@@ -178,7 +178,8 @@ and `stage2.tir` must equal `stage1.tir` byte for byte. That equality is the
 
 **The answer.** Both sides are `7027e0978d95396af3d11846b89cd2fc422eb4b8c7cb285791f3d7afe8346e2e`,
 9,485,971 bytes each — the fixpoint holds, with the whole front end as the
-evidence.
+evidence. The emission rules the equality is defined on — which counter,
+which name, which position — are stated in `spec/determinism-0.1.md`.
 
 **How it got here.** The comparison did not land on `stage1.tir ==
 stage2.tir` at the first calibrée — the two lowerings are built far enough

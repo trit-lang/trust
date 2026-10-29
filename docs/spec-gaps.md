@@ -2883,12 +2883,15 @@ evidence). What §4's grammar lists plainly now means something: Ch. 0 §4
 gains the one clause — a struct pattern matches without a discriminant
 test and binds fields by name. The bootstrap side's own answer was never
 corpus-covered, and holding the two implementations to one belongs to the
-sA audit the third-implementation plan runs next (its G4). (a) and (c)
-stand, both determinism-appendix material (its G3); and (c) as before:
-the glue of a tiny
-trait implementation is queue-printed with its instantiation before the
-call may ask of it, while the other implementation only queues it when
-the call asks.
+sA audit the third-implementation plan runs next (its G4). ~~(a) and (c)
+stand~~ — both now answered where a third implementation reads them, in
+`spec/determinism-0.1.md` (2026-10-29): (a)'s `?`-statement join slot is
+the `q.k` family of §1 with the counter-and-hole rules of §§1–2 — the
+name is minted at the join, as on every match; and (c) resolves at the
+printed text: the glue's **position** is pinned (beside the
+instantiations, after the ordinary functions — spec/determinism-0.1.md
+§4), and whether one compiler queued the glue early and the other at the
+call's ask is internal scheduling, free in both.
 
 **G9.196 — a method that answers an aggregate on a receiver that is not a
 place: the receiver takes the storage, the method takes a temporary, and the
@@ -2950,6 +2953,7 @@ over): the parent now writes `raw.<T>` and `box.<T>` where it wrote
 where the same underscore had been kept as its own tradition (G9.86's
 generation) — writes the dotted form too. The corpus that never once
 instantiated at a wrapper until now reads the same under both.
+*The dotted-wrapper name is now normative:* `spec/determinism-0.1.md` §3.
 
 **G9.191 — an enum's discriminant lives in its payload, and so does
 its drop.** `Option<Box<t27>>` sets its None where only nothing
@@ -3060,7 +3064,9 @@ treated as an order rather than a set the whole lane went quiet:
 and two-pass branch naming, at the end of the pipeline it shares with
 five earlier passes, prints the same TRISC-27 as `trustc compile` on
 every whole module of the corpus — main kept and what it reaches —
-which is the first text either side can ask the machine about.
+which is the first text either side can ask the machine about. *The
+order-is-not-a-set rule is now normative for the backend too:*
+`spec/determinism-0.1.md` §5, bound from the cP3 plan's M2.
 
 **G9.186 — legalization for the reference target is one direction, and
 renormalization is its price.** `tritium`'s legal widths are the word
@@ -3137,6 +3143,9 @@ with no refusal between them, and the four programs the hole had kept
 out of assembly — `chars`, `failing`, `macros`, and `bootstrap/main.tr`
 itself — assemble on both sides, `main.tr`'s gate having stood at line
 221 of the old text, `%#pat2.slot.44`.
+*The alphabet and the counter this entry decided are now normative:*
+`spec/determinism-0.1.md` §1 carries them for the third implementation
+that has to mint the same names.
  And in a *non-chained* receiver the answer is not read
 *first*: `f.inner.next()` in a member's own body answers where the
 receiver's own method answers, `Range.next.t27` with the `option.t27`

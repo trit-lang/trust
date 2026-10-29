@@ -583,7 +583,10 @@ Rules 2, 4, 5 and 6 are why the canonical form exists at all: a name from
 a counter that depends on visit order, a type left to inference, a literal
 in two notations or a branch in two spellings is a difference that means
 nothing and still fails the comparison — exactly what `docs/ddc.md` §5's
-canonical-output warning is about.
+canonical-output warning is about. Which of the many canonical texts one
+compiler emits for one program — which counter, which name, which
+position — is not this document's to say: those rules are
+`spec/determinism-0.1.md`.
 
 ### 8.4 Target-description files
 
