@@ -406,6 +406,25 @@ target is expressible — the SBTCVM Gen 3 lesson, learned before writing
 line one of a backend). Every field is target-supplied data, never an
 assumption baked into a pass.
 
+That last sentence once had one exception, and it was the reason two
+passes could disagree: **natural alignment is target-supplied like
+everything else (G7.6).** AM §2.3's table is stated in trytes — units of
+nine trits — so a target whose `addr_unit` is not nine cannot read it,
+and an earlier draft left such a target to inherit it anyway. A
+description declares its own rule instead:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `align_unit` | `3` when `addr_unit` is 9; **required** otherwise | natural alignment of any access wider than one addressable unit, in addressable units |
+
+A one-unit access aligns to one unit. With `addr_unit` 9 this default
+*is* AM §2.3's table (1 tryte, then 3), so existing descriptions change
+nothing; with any other unit there is no table to fall back to, and the
+target says its own. Legalization strides parts in the target's units
+and a checking implementation checks the same units, which is the one
+reading under which the two never spoke different units on the
+description's behalf.
+
 ---
 
 ## 8. Textual format and versioning
@@ -577,12 +596,14 @@ value       = uint | "[" [ uint { "," uint } ] "]" | string
 ```
 
 The five fields — `addr_unit`, `ptr_width`, `legal`, `word`, `call_conv` —
-are each required and may appear in any order; quoting is as §7's example
-shows (`call_conv` quoted, nothing else); unknown fields are ignored, so a
-description written against a later draft still parses under an earlier
-reader. §7's constraints check the values: `addr_unit` at least 1, `legal`
-non-empty, containing `word` and at least one width ≥ `ptr_width`, and
-naming no width twice.
+are each required and may appear in any order; a sixth — `align_unit` — is
+optional, defaulting to AM §2.3's shape when `addr_unit` is 9 and required
+otherwise (§7, G7.6). Quoting is as §7's example shows (`call_conv`
+quoted, nothing else); unknown fields are ignored, so a description
+written against a later draft still parses under an earlier reader. §7's
+constraints check the values: `addr_unit` at least 1, `legal` non-empty,
+containing `word` and at least one width ≥ `ptr_width`, and naming no
+width twice.
 
 ---
 

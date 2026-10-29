@@ -739,12 +739,13 @@ entry to move with it.
   `sbtcvm` produces stores the interpreter calls misaligned, which is UB by
   §4 item 2. See G7.6.
 
-**G7.6 — alignment is defined in AM trytes, but a target may not have them.**
+**G7.6 — alignment is defined in AM trytes, but a target may not have them.
+— DECIDED (2026-10-29, the first reading).**
 AM §2.3 gives natural alignment as a table in trytes; TIR §3.4 imports it for
 every load and store; TIR §7 lets a target declare `addr_unit` freely, and
 `targets/sbtcvm.target` declares six trits. For that target the two rules
-speak different units, and legalization and the reference interpreter
-disagree about whether an expanded store is aligned.
+spoke different units, and legalization and the reference interpreter
+disagreed about whether an expanded store is aligned.
 
 *Not decided.* Three readings are available: alignment is a target property
 that §7 should let a target state, defaulting to AM §2.3 when `addr_unit` is
@@ -755,6 +756,18 @@ in §7 is target-supplied data rather than an assumption baked into a pass, and
 this is the one place a pass still assumes. It is recorded rather than decided
 because it changes a normative rule in two documents, and because the target
 it currently affects has no code generator.
+
+*Decision:* the first reading, per the G2 agenda of the third-implementation
+plan. TIR §7 now declares `align_unit` — the natural alignment of any access
+wider than one addressable unit, in addressable units — defaulting to 3 when
+`addr_unit` is 9 (which is AM §2.3's table read in trytes) and required when
+it is not, since there is then no tryte table to fall back to. The format
+note in TIR §8.4 carries the sixth field. No code moves: every target in
+tree has `addr_unit` 9, where the default reproduces today's behavior
+exactly, and the target the rule exists for has no code generator —
+`align_unit` parses today as one of the unknown fields §8.4's grammar
+ignores, so a `sbtcvm.target` carrying it reads under the current toolchain
+unchanged.
 
 **G6.12 — the shifts expand, by a constant amount.**
 
