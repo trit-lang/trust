@@ -16,6 +16,7 @@ model it is stated in.
 |---|---|---|
 | [`vdot-device.md`](vdot-device.md) | The accepted design: a dot-product **device** (negative addresses, no new instructions), a bitplane host kernel behind it, and the six-phase implementation plan. | **Accepted direction; not started** |
 | [`alternatives-considered.md`](alternatives-considered.md) | The analysis record: why BitNet on a ternary ISA, what performance numbers can honestly mean without hardware, and the four routes that were rejected (fixed-window instruction, variable-length instruction, int8-kernel offload, VM auto-vectorization). Read this before re-litigating any of them. | Record |
+| [`cpp-third-implementation.md`](cpp-third-implementation.md) | The proposed third implementation `docs/ddc.md` §3.4 asks for — in C++, by someone who has not read the other two — and the prerequisite program that closes `spec/` for a stranger: TIR §8's missing grammar (**G0, landed 2026-10-29**), the recorded decisions folded in (G1), the undecided decided (G2), a determinism appendix (G3), the sA audit (G4). | **Proposal; G0 landed, G1–G4 not started** |
 
 ## The decision in one paragraph
 

@@ -8174,12 +8174,23 @@ note that a `t18` occupies two trytes but still aligns to three, because the
 table is stated per *width*, not per size — keeps alignment a power of three
 (Composites Ch. 2 §1), and extends past the word without a special case.
 
-**G4.2 — Uninitialized global storage.** TIR §4 item 4 makes reading uninitialized
+**G4.2 — Uninitialized global storage — first clause RESOLVED, second clause
+SUPERSEDED (2026-10-29).** TIR §4 item 4 makes reading uninitialized
 `slot` storage yield poison but says nothing about a `global` with no
 initializer.
 
-*Decision:* the same — `= zeroinit` zero-fills, an omitted initializer leaves
-the storage uninitialized and reading it yields poison.
+*Decision:* the same — `= zeroinit` zero-fills, ~~an omitted initializer
+leaves the storage uninitialized and reading it yields poison~~.
+
+*What happened to the second clause.* The parser collapsed the two spellings
+from day one (`= zeroinit` and the bare form both parse to "no item list"),
+and the canonical printer never emits the bare one, so the distinction the
+decision draws never existed in the format. TIR §8 now says the bare form is
+an **alias** of `= zeroinit`, which is the only state a module can be in:
+every global is zero-filled unless an item list says otherwise, matching
+codegen's `.zero` discharge and §1.2's table. The interpreter disagrees — it
+poisons a global with no item list, `zeroinit` spelling included — which is
+a live bug rather than a decision, recorded as G4.5.
 
 **G4.3 — Poison propagation.** TIR §4 item 4 adopts "the standard modern" poison
 model by reference without restating it. Implemented as: poison propagates
@@ -8187,44 +8198,90 @@ through every value-producing instruction; branching on poison is UB; loading
 or storing *through* a poison address is UB; `select3` on a poison selector
 yields poison rather than UB, since it is not a branch.
 
+**G4.5 — the interpreter poisons a zero-filled global. (Found by G0 of the
+third-implementation plan, 2026-10-29.)** Three texts stated the semantics of
+a global with no item list, and the interpreter implemented a fourth:
+
+| | `= zeroinit` / the bare alias |
+|---|---|
+| TIR §1.2's table | all zero |
+| TIR §8 (new) | zero-filled unless an item list says otherwise |
+| codegen → assembler → machine | `.zero n` — zero trytes |
+| `compiler/src/tir/interp.rs` | **poison on read** (N uninitialized trytes) |
+
+The three-way agreement against the interpreter was invisible because the
+frontend has never emitted a bare global — every global in every compiled
+module carries an explicit `[…]` initializer — and because hand-written TIR
+with a `zeroinit` global *read before written* is exactly the program nobody
+had in a differential test. Reading one on the machine yields 0; reading one
+in the interpreter yields poison, and branching on poison is UB — a
+differential failure waiting for its first program.
+
+This was found the way G0 promises such things will be found: by a stranger
+reading the specification to write a grammar. The fix is the interpreter
+zero-filling, and it is deliberately **not** inside the documentation change
+that recorded this: an interpreter-visible behavior moves on its own commit,
+where the differential suite can say which programs notice.
+
 ---
 
 ## 5. TIR syntax
 
-The textual format is "the canonical serialization" (TIR §8) but is only ever
-shown by example. These forms are inventions filling holes in the examples.
+The textual format was "the canonical serialization" (TIR §8) shown only by
+example. These forms were inventions filling holes in the examples. **All six
+are RESOLVED as of 2026-10-29**: TIR §8 now carries the lexis (§8.1), the
+grammar with each decision inline (§8.2), the canonical serialization
+(§8.3) and the target-file format (§8.4). The entries below are the record
+of being first; §8 is the answer.
 
-**G5.1 — Naming a global's address.** TIR §1 defines `global @name : tryte[N]`
-but no instruction or operand form ever mentions a global again, leaving the
-storage unreachable.
+**G5.1 — Naming a global's address — RESOLVED.** TIR §1 defines `global
+@name : tryte[N]` but no instruction or operand form ever mentions a global
+again, leaving the storage unreachable.
 
 *Decision:* `@name` is an operand of type `ptr`, denoting the global's base
 address. This is the minimum addition that makes globals usable, and it needs
 no new instruction.
 
-**G5.2 — Function declarations.** TIR §1 lists "function declarations —
-signature only, body external" without syntax. A trailing `;` is unavailable,
-because `;` starts a comment in every listing in the spec.
+*Resolution:* now stated in TIR §8.2's operand production and the prose
+following it.
+
+**G5.2 — Function declarations — RESOLVED.** TIR §1 lists "function
+declarations — signature only, body external" without syntax. A trailing `;`
+is unavailable, because `;` starts a comment in every listing in the spec.
 
 *Decision:* a signature with no `{ … }` body is a declaration:
 `fn @g(%a: t9) -> t9`.
 
-**G5.3 — Global initializers.** `= <initializer>` is never given a grammar.
+*Resolution:* now stated in TIR §8.2 (`declaration` / `definition`) and the
+prose following it.
+
+**G5.3 — Global initializers — RESOLVED, with one clause superseded.** `=
+<initializer>` is never given a grammar.
 
 *Decision:* `= zeroinit`, or `= [v₀, v₁, …]` with exactly one value per tryte,
 lowest address first (little-trytean, so index 0 is the least significant
-tryte of a multi-tryte scalar). An absent `= …` means uninitialized (G4.2).
+tryte of a multi-tryte scalar). ~~An absent `= …` means uninitialized (G4.2).~~
 
-**G5.4 — `br2` operand order.** TIR §3.6 says the printer displays a `br3`
-with two identical destinations as `br2 %t, ^then, ^else`, without saying
-which arms `then` covers.
+*Resolution:* the grammar is TIR §8.2's, and the canonical form — the printer
+never omits the initializer — is §8.3 rule 6's. The last sentence of the
+decision is superseded: the parser collapsed the two spellings from the
+beginning, so §8.2 rules the bare form an *alias* of `= zeroinit` and there
+is no omitted-initializer state. G4.2's entry records the correction at its
+end, and G4.5 records the interpreter bug the collapse was hiding.
+
+**G5.4 — `br2` operand order — RESOLVED.** TIR §3.6 says the printer
+displays a `br3` with two identical destinations as `br2 %t, ^then, ^else`,
+without saying which arms `then` covers.
 
 *Decision:* `then` is the `+1` arm, `else` is the `−1` *and* `0` arms —
 matching `bool`, whose storage encoding is `false = 0`, `true = 1` (Types
 Ch. 1 §2). Parsing `br2` produces the equivalent `br3`; the two forms are the
 same instruction.
 
-**G5.5 — Omitted operand types.** TIR §1's own example writes
+*Resolution:* now stated in TIR §8.2's terminator production and the prose
+following it.
+
+**G5.5 — Omitted operand types — RESOLVED.** TIR §1's own example writes
 `%s = cmp %x, const t27 0` with no type on the instruction, while the appendix
 writes `cmp t27 %pos, %target` with one.
 
@@ -8233,8 +8290,13 @@ constant operand, which is the only place it can come from without a typing
 pass; if no operand supplies one, the instruction is rejected. The printer
 always emits the explicit form.
 
-**G5.6 — Comment character.** Never stated; `;` is used for comments
-throughout the spec's listings and is implemented as such.
+*Resolution:* now stated in TIR §8.2 — which instructions carry the optional
+type, and which state theirs always — with the emission half as §8.3 rule 4.
+
+**G5.6 — Comment character — RESOLVED.** Never stated; `;` is used for
+comments throughout the spec's listings and is implemented as such.
+
+*Resolution:* now the first rule of TIR §8.1.
 
 ---
 

@@ -345,21 +345,190 @@ target "tritium" {
 }
 ```
 
-Constraints: `legal` must contain `word` and at least one width ≥
-`ptr_width`; `addr_unit` need not be 9 and `word` need **not** be a power
-of three (a 12-trit target is expressible — the SBTCVM Gen 3 lesson,
-learned before writing line one of a backend). Every field is
-target-supplied data, never an assumption baked into a pass.
+Constraints: `addr_unit` is at least 1, and need not be 9; `legal` is
+non-empty, contains `word` and at least one width ≥ `ptr_width`, and
+names no width twice; `word` need **not** be a power of three (a 12-trit
+target is expressible — the SBTCVM Gen 3 lesson, learned before writing
+line one of a backend). Every field is target-supplied data, never an
+assumption baked into a pass.
 
 ---
 
 ## 8. Textual format and versioning
 
-The textual form shown throughout is the canonical serialization; a module
-begins `tir 0.1 target "name"`. There is no binary encoding in draft 0.1
-(premature; the textual form is the test-suite and differential-testing
-medium). The version stamp is a compatibility *check*, not a promise:
-mismatched versions are rejected, full stop, per the stability notice.
+The textual form is the canonical serialization; there is no binary
+encoding in draft 0.1 (premature; the textual form is the test-suite and
+differential-testing medium). The version stamp is a compatibility *check*,
+not a promise: mismatched versions are rejected, full stop, per the
+stability notice.
+
+The format is specified twice, because equality on it is load-bearing — the
+test suite, the differential invariant and the double-compiling comparison
+(`docs/ddc.md`) all reduce to byte equality of this text. §8.1 and §8.2
+give what a reader **accepts**; §8.3 gives what a writer **emits**, which
+is stricter. A §8.4 grammar covers the target-description file of §7,
+which is a second format in the same family.
+
+### 8.1 Lexis
+
+- **Whitespace** (space, tab, carriage return, newline) is insignificant;
+  newlines are counted only for diagnostics.
+- **Comments** begin with `;` and run to end of line. (G5.6)
+- **Names** are `@name` (a module-scope symbol), `%name` (an SSA value)
+  and `^name` (a block label). A name is one or more characters drawn from
+  ASCII letters, digits, `_` and `.`, and nothing else — `#` in particular
+  is not a name character. The alphabet names a smaller set than the
+  source language's identifiers, deliberately: the dot is how a compiler
+  invents names (`%tmp.slot.4`) that no source program can spell, so every
+  name a printer may invent survives a round trip through this grammar.
+  (Why the table is stated at all, and why it grows by the dot and nothing
+  else, is `docs/spec-gaps.md` G9.183.)
+- **Words** begin with a letter or `_` and continue with name characters.
+  They are the keywords of §8.2, the instruction mnemonics — a flavor is
+  part of the mnemonic, so `add.flag` is one word — the types `tN` and
+  `ptr`, and the fault codes.
+- **Numbers** begin with `-` or a digit and continue with name characters;
+  the literal notation is the language's (Ch. 1 §3.1) — decimal and the
+  `0t`/`0h` forms, sign included. A bare `-` is ill-formed.
+- **Strings** are `"…"`, with no escapes and no newline; they appear
+  exactly twice, as the module's target name and as §8.4's `call_conv`.
+- **Punctuation** is `( ) [ ] { } , : =` and the two-character arrow `->`.
+
+### 8.2 Grammar
+
+```
+module       = "tir" version "target" string { item }
+version      = number                        ; draft 0.1 accepts exactly `0.1`
+item         = global | declaration | definition
+
+global       = "global" @name ":" "tryte" "[" uint "]" [ "=" initializer ]
+initializer  = "zeroinit" | "[" [ init-item { "," init-item } ] "]"
+init-item    = literal | "addr" @name
+
+declaration  = signature
+definition   = signature "{" block { block } "}"
+signature    = "fn" @name params [ "->" type ]
+params       = "(" [ %name ":" type { "," %name ":" type } ] ")"
+
+block        = ^name [ params ] ":" { inst } terminator
+inst         = [ results ] operation
+results      = %name { "," %name } "="
+
+operation    = binary | unary | "cmp" [type] operand "," operand
+             | "select3" operand "," [type] operand "," operand "," operand
+             | slot | load | store | offset | convert | call
+binary       = flavored-op [type] operand "," operand
+             | plain-op    [type] operand "," operand
+flavored-op  = ("add" | "sub" | "mul" | "shl") "." ("wrap" | "trap" | "flag")
+plain-op     = "mulh" | "div" | "rem" | "shr" | "tmin" | "tmax" | "tmul"
+unary        = ("neg" | "tneg") [type] operand
+slot         = "slot" "tryte" "[" uint "]"
+load         = "load" type operand
+store        = "store" type operand "," operand
+offset       = "offset" operand "," operand
+convert      = ("widen" | "trunc") type operand "->" type
+call         = "call" (@name | %name) "(" [ operand { "," operand } ] ")"
+               [ "->" type ]
+
+terminator   = "br3" operand "," target "," target "," target   ; arms −1, 0, +1
+             | "br2" operand "," target "," target              ; arm +1, else
+             | "br" target
+             | "ret" [ operand ]
+             | "trap" word
+             | "unreachable"
+target       = ^name [ "(" [ operand { "," operand } ] ")" ]
+
+operand      = %name | @name | "const" type literal
+type         = "t" uint | "ptr"
+uint         = a non-negative decimal integer
+```
+
+What the productions do not say, stated once each:
+
+- **A type may be omitted wherever `[type]` appears** — in the two binary
+  forms, in `unary`, in `cmp` and in `select3`, and nowhere else (`load`,
+  `store` and the conversions always state theirs). The type is then taken
+  from the first *constant* operand; if no constant operand carries one,
+  the instruction is rejected. (G5.5)
+- **`br2` is sugar.** `br2 %t, ^then, ^else` is a `br3` whose −1 and 0
+  arms are `^else` and whose +1 arm is `^then` — the names reflect
+  `bool`'s encoding (false = 0, true = 1). Parsing produces the `br3`;
+  §8.3's printer writes `br2` whenever the −1 and 0 targets coincide.
+  (G5.4, §3.6)
+- **`tneg` is an alias of `neg`** (§3.2); one canonical form survives
+  parsing, and §8.3's printer never writes `tneg`.
+- **An operand of `@name`** denotes the base address of that global as a
+  `ptr` value — G5.1's minimum addition, an operand form rather than an
+  integer↔pointer conversion, which §5 continues not to have.
+- **A signature with no `{ … }` body is a declaration** (§1): signature
+  only, body external. (G5.2)
+- **An omitted initializer reads as `= zeroinit`.** A global is therefore
+  zero-filled unless an item list says otherwise; §1.2's table has each
+  item's fill width (`addr @name` fills one word, a relocation) and the
+  rule that the items' total is exactly the declared `tryte[N]`, filled
+  upward from the global's base address. (G5.3; G4.2's first clause. The
+  alias is why the "omitted" spelling of G4.2's second clause does not
+  exist as a distinct state.)
+- **A `const` of integer type** carries a value that fits the width; one
+  that does not is rejected where the module is read, which is the only
+  error §8.2's grammar checks beyond its own shape.
+- **Result counts are the operation's business** (§3): the arithmetic,
+  comparison, conversion, memory and call forms yield one result, a
+  `.flag` form exactly two, `store` none, the terminators none. What is
+  *well-formed* beyond the grammar — SSA definition and use, dominance,
+  the entry block's ban on incoming branches, operand types and widths —
+  is verified per §1.1 and §3 and is not §8's concern.
+
+### 8.3 The canonical serialization
+
+Two well-formed modules are compared by this text. A printer agrees with
+the reference printer byte for byte exactly when it follows every rule
+below:
+
+1. **Header**: `tir 0.1 target "<name>"` on the first line.
+2. **Item order**: all globals, then all declarations, then all
+   definitions — each group in its input order — with exactly one blank
+   line before every item, the first one included.
+3. **Layout**: an instruction or terminator per line, indented four
+   spaces; a block header at column 0 as `^label:` or
+   `^label(%p: tN, …):`; the signature and `{` on one line; the closing
+   `}` at column 0; the module ends with a newline after the last item.
+4. **Explicit types**: every position the grammar marks optional is
+   printed explicitly — `%r = select3 %t, t27 …` with the type, never
+   without.
+5. **Decimal literals**, always (never `0t` or `0h` spellings of the same
+   value).
+6. **The sugar shows**: a `br3` with coinciding −1 and 0 targets prints
+   as `br2`; `tneg` never appears; a global with no item list prints
+   `global @name : tryte[N] = zeroinit` on one line, initializer
+   included.
+7. **Spacing** exactly as §8.2's productions show: `global @g : tryte[9]`,
+   `fn @f(%a: t27) -> t1`, `call @f(%a) -> t27`, `offset %p, %d` — one
+   space after each comma, none before a parameter list.
+
+Rules 2, 4, 5 and 6 are why the canonical form exists at all: a name from
+a counter that depends on visit order, a type left to inference, a literal
+in two notations or a branch in two spellings is a difference that means
+nothing and still fails the comparison — exactly what `docs/ddc.md` §5's
+canonical-output warning is about.
+
+### 8.4 Target-description files
+
+§7's record has its own small format, line-oriented with `;` comments:
+
+```
+target-file = "target" string "{" { "}" | field }
+field       = word "=" value
+value       = uint | "[" [ uint { "," uint } ] "]" | string
+```
+
+The five fields — `addr_unit`, `ptr_width`, `legal`, `word`, `call_conv` —
+are each required and may appear in any order; quoting is as §7's example
+shows (`call_conv` quoted, nothing else); unknown fields are ignored, so a
+description written against a later draft still parses under an earlier
+reader. §7's constraints check the values: `addr_unit` at least 1, `legal`
+non-empty, containing `word` and at least one width ≥ `ptr_width`, and
+naming no width twice.
 
 ---
 
