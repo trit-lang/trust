@@ -272,6 +272,23 @@ A **fault** is a defined, observable machine halt with a fault code. Draft
 | `F_ALIGN` | misaligned access, on targets that check (§2.3) |
 | `F_TRAP` | explicit trap instruction |
 
+**Reserved (decided, claimed, raised by nothing in draft 0.1):**
+
+| Code | Will cover |
+|---|---|
+| `F_ILLEGAL` | a malformed instruction or reserved encoding, and a reserved I/O access |
+| `F_ADDRESS` | an access outside the address space |
+
+Three machine conditions — ISA §5 names them — share `F_TRAP` today, and
+`F_TRAP`'s own row above is why that cannot stand: as long as it holds, a
+program cannot tell its own `trap` from a jump into garbage. The codes
+above are the AM's answer, recorded as *decided* and deliberately not
+claimed as *raised*: nothing may raise `F_ILLEGAL` or `F_ADDRESS` until
+the revision that implements them, and everything an implementation does
+today stays what it is — `F_TRAP` for all three. When the codes arrive,
+`F_TRAP` narrows to its row, which is why the reservation is a reservation
+rather than a quiet re-meaning. (spec-gaps G0.2a)
+
 Faults are not exceptions; the AM has no unwinding. Whether a language-level
 mechanism maps onto faults is a language-spec concern.
 

@@ -39,15 +39,25 @@ negative-address device region, the register roles of the ABI — was made while
 writing it and wants review before anything depends on it. The TIR interpreter remains
 the executable oracle in the meantime.
 
-**G0.2a — three machine conditions have no fault code.** TRISC-27 §5 records
-the finding: a malformed instruction, an access outside the address space, and
-a reserved I/O access all currently raise `F_TRAP`, whose AM §4 definition is
-"explicit trap instruction". A program therefore cannot distinguish its own
-`trap` from a jump into garbage.
+**G0.2a — three machine conditions have no fault code — DECIDED as a
+reservation (2026-10-29).** TRISC-27 §5 records the finding: a malformed
+instruction, an access outside the address space, and a reserved I/O access
+all currently raise `F_TRAP`, whose AM §4 definition is "explicit trap
+instruction". A program therefore cannot distinguish its own `trap` from a
+jump into garbage.
 
 *Suggested:* AM §4 grows `F_ILLEGAL` (malformed instruction or reserved
 encoding) and `F_ADDRESS` (access outside the address space). Adding fault
 codes is the AM's decision, so the ISA document reports rather than invents.
+
+*Decision:* the suggestion, adopted as a **reservation** rather than a
+behavior — AM §4 now carries the two codes as reserved (decided, claimed,
+raised by nothing), ISA §5's behavior text stays true today, and the codes
+become raisable on the revision that implements them. The decision is
+recorded so the *meanings* cannot be argued again; the raising is recorded
+as not-done so no reader believes the machine got there already. A fault
+the machine does not raise is a fault a program cannot rely on (G8.5), and
+the reservation says exactly that about itself.
 
 **G0.3 — Trust surface syntax — RESOLVED, and implemented.** The frontend in
 `compiler/src/lang/` lexes, parses, type-checks and lowers to TIR, and a

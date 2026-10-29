@@ -536,15 +536,17 @@ outside 0 … 26, `F_ALIGN` from a misaligned word access, and `F_TRAP` from the
 A fault halts the machine and its code is observable to the host (AM §4).
 There is no handler, no vector table and no unwinding.
 
-> **Finding for the AM (informative).** Three machine conditions have no code
-> that fits: a malformed instruction (§3.4), an access outside the address
-> space (§2.1), and a reserved device address (§2.2). All three currently raise
-> `F_TRAP`, which is defined as "explicit trap instruction" and is therefore a
-> poor fit — a program cannot distinguish its own `trap` from a jump into
-> garbage. AM §4 should probably grow `F_ILLEGAL` (malformed instruction or
-> reserved encoding) and `F_ADDRESS` (access outside the address space).
-> Recorded rather than invented: adding fault codes is the AM's decision, and
-> `docs/spec-gaps.md` tracks it.
+> **Finding for the AM — answered as a reservation.** Three machine
+> conditions have no code that fits: a malformed instruction (§3.4), an
+> access outside the address space (§2.1), and a reserved device address
+> (§2.2). All three raise `F_TRAP` today, which is defined as "explicit
+> trap instruction" and is therefore a poor fit — a program cannot
+> distinguish its own `trap` from a jump into garbage. AM §4 now carries
+> `F_ILLEGAL` (malformed instruction or reserved encoding — the first and
+> third of these) and `F_ADDRESS` (an access outside the address space) as
+> **reserved** codes: decided, claimed, and raised by nothing yet, so the
+> behavior described above is unchanged in draft 0.1. spec-gaps G0.2a
+> records the decision and §5's behavior stays true in the meantime.
 
 ---
 
