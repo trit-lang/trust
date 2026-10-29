@@ -75,7 +75,8 @@ element of a place, or the target of a dereference. `p`, `p.x`, `xs[i]` and
 Moving out of a place leaves *that place* uninitialized, not the whole
 variable: after `let a = p.x;` where `p.x` moves, `p.y` remains usable and `p`
 as a whole does not. What is left is dropped at the end of the scope, a field
-at a time; writing to `p.x` puts it back, and `p` is whole again.
+at a time — and if `p`'s type has a destructor, its body does not run on the
+parts (§1.4 item 1); writing to `p.x` puts it back, and `p` is whole again.
 
 Three things are refused, and each is refused rather than approximated:
 
@@ -152,7 +153,15 @@ its type must be a struct or enum declared in the same file.
 
 When a value is dropped:
 
-1. its destructor body runs, if it has one;
+1. its destructor body runs, if it has one — **and if the value is whole**.
+   A value one of whose fields has moved out stops being one (§1.3), and it
+   is dropped *as parts*: the body — a function written against the whole —
+   never runs on a part. Nothing leaks: the moved field is somebody else's
+   to drop, and the rest drops field by field per item 2. But nothing in
+   this rule runs a body's side effect for a partial value either, because
+   a part cannot be the whole the body was written for. (The rule both
+   reference implementations implement; spec-gaps G9.189 records it
+   arriving into text.)
 2. then every field or element it still owns is dropped, in **declaration
    order** for a struct and payload order for an enum variant;
 3. a field the destructor moved out of is not dropped again.

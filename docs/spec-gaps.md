@@ -2940,11 +2940,11 @@ off the end of the table it could search. Now it answers the dotted
 form the `App` form always answered, one word and never null,
 which is the niche `Option<Box<T>>` was for all along.
 
-**G9.189 — recorded, not quite settled: a field may leave a value whose
-type has a destructor, and the glue is the whole's.** Ch. 3 §1.3 lets
-`let a = p.x;` stand — `p.y` remains usable, and what is left is dropped
-a field at a time — and Ch. 3 §1.4's drop order begins with "the
-destructor body runs, if it has one". Read side by side they do not say
+**G9.189 — SETTLED in the specification (2026-10-29): a field may leave a
+value whose type has a destructor, and the glue is the whole's.** Ch. 3 §1.3
+lets `let a = p.x;` stand — `p.y` remains usable, and what is left is
+dropped a field at a time — and Ch. 3 §1.4's drop order begins with "the
+destructor body runs, if it has one". Read side by side they did not say
 what a value owes when one of its fields is gone: the body is a function
 of the whole, and the one parameter it takes is the value that is no
 longer there to pass. Rust's answer is to refuse the field move. The
@@ -2953,10 +2953,11 @@ stops being one: `let x = h.v;` out of an `impl Drop for Held` is `x`
 dropped where its scope ends and then what remains of `h` a field at a
 time, and the body never runs, because a body written against the whole
 does not run on a part. Nothing is leaked — the moved field is somebody
-else's to drop, and the rest drops on its own — but nothing in either
-chapter says so, and a caller who wrote the destructor for its side
-effect has no sentence to point to when it does not run.
-`bootstrap/programs/scopes` now holds both shapes against both
+else's to drop, and the rest drops on its own — **and the rule is now
+written: §1.4 item 1 carries it, with §1.3 pointing at it**, per the G2
+decision of 2026-10-29. Verified against the binary rather than recalled:
+the scopes corpus shape on trustc prints `X` and never `T`.
+`bootstrap/programs/scopes` holds both shapes against both
 implementations — the plain `Two` and the destructor-holding `Owning` —
 and the two agree: the glue's call is written exactly for values whole,
 and for the rest the scope ends the way §1.3's field-at-a-time says.
