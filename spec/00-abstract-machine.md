@@ -108,6 +108,11 @@ any machine as a single register value; it exists as a chain of word-sized
 parts (TIR §6 calls the pass that makes the chain *expansion*), and a chain of
 word-aligned parts is word-aligned. Requiring more would align a `t54` to 9
 trytes and waste a tryte per value for nothing any load or store can use.
+The cap is a statement about this layer: a single access wider than a word
+never reaches a machine. At the IR layer a wider access may exist *before*
+expansion splits it, and natural alignment there is the smallest power of
+three at least the access's size in trytes — stated in TIR §3.4, reproducing
+this table at and below the word. (G4.1)
 
 A load or store of a value at an address that is not a multiple of its natural
 alignment has **undefined behavior** at the AM level. (The language's safe
@@ -150,8 +155,14 @@ operation flavor the higher layer selected:
 - **trapping** — the machine halts with an overflow fault.
 - **checked / saturating** — defined in the language spec as library-level
   compositions of the above plus comparison; the AM provides wrapping and
-  trapping primitives only, plus an overflow-flag-producing form for
-  efficient checked lowering.
+  trapping primitives only, plus an **overflow-flag-producing form** for
+  efficient checked lowering, which yields the wrapped value and the
+  **overflow trit**: the *direction* of the overflow — +1 when the exact
+  result exceeded MAX, −1 when it fell below MIN, 0 when there was none.
+  For `add` and `sub` this is exactly the carry out of the top trit, which
+  is what TIR §6's carry chaining consumes; the definition extends
+  unchanged to `mul` and `shl`, whose exact result can exceed the width by
+  more than one trit. (G2.1)
 
 `neg` and `abs` are **total**: since MIN = −MAX, neither can overflow at any
 width. They have no wrapping/trapping flavors because none are needed.

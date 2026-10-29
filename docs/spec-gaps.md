@@ -8133,19 +8133,22 @@ with the `2t`-is-ill-formed consequence the implementation already enforced.
 
 ## 2. Arithmetic
 
-**G2.1 — The `.flag` overflow trit for `mul` and `shl`.** AM §3.1 establishes
-that the machine provides "an overflow-flag-producing form for efficient
-checked lowering" but does not say what the flag holds; TIR §3 calls it an
-"overflow trit"; TIR §6 says "carry out of a part is the overflow trit of that
-part's `add.flag`", which defines it for `add` (and by symmetry `sub`) but not
-for `mul`/`shl`, whose exact result can exceed the width by more than one
-trit.
+**G2.1 — The `.flag` overflow trit for `mul` and `shl` — RESOLVED.** AM §3.1
+establishes that the machine provides "an overflow-flag-producing form for
+efficient checked lowering" but does not say what the flag holds; TIR §3
+calls it an "overflow trit"; TIR §6 says "carry out of a part is the
+overflow trit of that part's `add.flag`", which defines it for `add` (and
+by symmetry `sub`) but not for `mul`/`shl`, whose exact result can exceed
+the width by more than one trit.
 
 *Decision:* the overflow trit is the **direction** of the overflow: `+1` if
 the exact result exceeded MAX, `−1` if it fell below MIN, `0` otherwise. For
 `add`/`sub` this is exactly the carry out of the top trit, so the §6 carry
 chaining works as written, and the definition extends to every flavored
 operation without a special case.
+
+*Resolution:* now stated in AM §3.1's checked/saturating bullet, where the
+flag-producing form is named.
 
 **G2.2 — Ties in division — RESOLVED.** AM §3.2 fixes round-to-nearest with
 ties away from zero, and justifies the tie-break by the symmetry identities
