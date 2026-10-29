@@ -8084,7 +8084,12 @@ existing two is the author's call, not the implementation's.
 
 ## 1. Numeric notation
 
-**G1.1 — Heptavintimal digit values.** Naming §3 and Types Ch. 1 §3 give the
+**G1.1 — Heptavintimal digit values — RESOLVED.** — and the balanced table
+has since landed: Ch. 1 §3.1 now carries the full digit table **and the
+leading-zero warning the consequence below demanded** (G0.15's review wrote
+it in; the warning blockquote there is the resolution of this entry).
+
+Naming §3 and Types Ch. 1 §3 give the
 alphabet (`0-9`, `A-Q`, 27 characters, "1 digit = 3 trits") and one example
 (`0h2C9`) with no value; the AM does not mention heptavintimal at all. Two
 mappings are possible: each character denotes an *unsigned* 0…26, or each
@@ -8099,16 +8104,22 @@ ternary requires balanced digits. It is also the only reading under which a
 *Consequence, and the reason this needs confirming:* `0hD` is zero and `0h0`
 is −13. Leading `0`s are not neutral in heptavintimal.
 
-**G1.2 — `0t` is ambiguous between two literal forms.** `0t` is both the
-balanced-ternary prefix (`0t1T0`) and the `trit` literal for zero (`-1t`,
-`0t`, `1t` — Types Ch. 1 §2). `0t1` could be either.
+**G1.2 — `0t` is ambiguous between two literal forms — RESOLVED.** `0t` is
+both the balanced-ternary prefix (`0t1T0`) and the `trit` literal for zero
+(`-1t`, `0t`, `1t` — Types Ch. 1 §2). `0t1` could be either.
 
 *Decision:* maximal munch. `0t` followed by one or more of `0 1 T _` is a
 balanced ternary literal; a bare `0t` is the trit zero. So `0t1` is the
 integer 1, and the trit zero must not be followed by trit-string characters.
 
-**G1.3 — Trit-string case.** AM §1.1 fixes `T` for −1. Lowercase `t` is
-accepted on input as a synonym and normalized to `T` on output.
+*Resolution:* now stated in Ch. 1 §3, immediately under the radices table,
+with the `2t`-is-ill-formed consequence the implementation already enforced.
+
+**G1.3 — Trit-string case — RESOLVED.** AM §1.1 fixes `T` for −1. Lowercase
+`t` is accepted on input as a synonym and normalized to `T` on output.
+
+*Resolution:* now stated beside G1.2 in Ch. 1 §3, including the read of
+`0t1t` as `0t1T`.
 
 ---
 

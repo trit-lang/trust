@@ -132,6 +132,21 @@ per digit, so a `t27` value is at most 9 digits), playing the role hex plays
 in the binary world. There is no hexadecimal or octal: both are artifacts of
 the bit.
 
+Two spelling questions the table raises, settled at the lexer:
+
+- **Balanced-ternary digits are `1 0 T`; lowercase `t` is accepted on input
+  as a synonym for `T`** (AM §1.1 fixes the letter) **and normalized to `T`
+  on every output.** `0t1t` reads as `0t1T`, which is 2; canonical forms
+  never carry the lowercase. (G1.3)
+- **`0t` the prefix and `0t` the trit literal collide by construction, and
+  the lexer resolves it by maximal munch.** Immediately followed by a
+  balanced-ternary character (`0`, `1`, `T`/`t`, `_`) `0t` opens a balanced
+  literal; standing alone it is the `trit` zero. So `0t1` is the integer 1
+  while `0t` is the trit 0, and the trit zero may not be written adjacent
+  to trit-string characters. The three `trit` literals of §2 (`-1t`, `0t`,
+  `1t`) are the only decimal magnitudes that may wear the `t` suffix —
+  `2t` is ill-formed. (G1.2)
+
 ### 3.1 The heptavintimal digits
 
 A heptavintimal digit is a **balanced** group of three trits, so it denotes
