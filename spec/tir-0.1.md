@@ -151,6 +151,10 @@ trit) for lowering `checked_*` / `overflowing_*`.
                                 ; k out of 0..N-1 traps F_SHIFT (both shifts)
 ```
 
+The shift amount `%k` is an operand of the **same `tN`** as `%a` (G2.3),
+so the instruction stays uniformly typed; a negative amount is
+representable and faults like any other out-of-range amount.
+
 There is exactly one division. Frontends for languages wanting truncating
 division must synthesize it; Trust does not want it.
 
@@ -210,8 +214,28 @@ size it would otherwise be.
 
 Alignment: `load`/`store` of `tN` require the AM natural alignment of the
 access width (AM §2.3); misalignment is UB at TIR level (frontends emitting
-only language-legal accesses cannot produce it). `offset` performs no
-bounds reasoning; provenance rules are §5.
+only language-legal accesses cannot produce it). For an access wider than
+the word — one legalization (§6) has not yet split — natural alignment is
+the smallest power of three at least the access's size in trytes, which
+reproduces AM §2.3's table at and below the word (the table is stated per
+*width*: a `t18` occupies two trytes and still aligns to three) and extends
+past it without a special case. AM §2.3's cap is the machine-layer
+statement of the same rule. (G4.1) `offset` performs no bounds reasoning;
+provenance rules are §5.
+
+**`load` and `store` also accept `ptr` as the access type** (G6.7). That
+is not the integer↔pointer conversion §5 declines to define: nothing about
+the address becomes observable, and provenance (§5) travels with the
+value. An implementation may keep a stored pointer's provenance beside the
+trytes rather than in them, so that loading it back yields the same
+allocation; writing integers over the storage destroys the pointer. On the
+machine a pointer is a word and moves as one — which hands a frontend one
+consequence worth stating here: an aggregate containing a pointer is
+copied **field by field**, never tryte by tryte, because a tryte copy
+carries no provenance. An enum's payload, whose fields vary by variant,
+is the known limitation: its storage is copied as trytes, so a reference
+inside an enum payload loses *checked* provenance — a limitation of the
+checking, not of the machine.
 
 ### 3.5 Conversion
 
@@ -281,9 +305,12 @@ can enumerate them:
 1. executing `unreachable`;
 2. misaligned `load`/`store` (§3.4);
 3. `load`/`store`/`offset` escaping an allocation's provenance (§5);
-4. reading uninitialized `slot` storage (yields *poison*, and branching on
-   poison is UB — the poison model is the standard modern one, adopted
-   whole rather than re-invented);
+4. reading uninitialized `slot` storage — yields *poison*. Poison
+   propagates through every value-producing instruction; branching on
+   poison is UB; loading or storing *through* a poison address is UB;
+   `select3` on a poison selector yields poison rather than UB, since it
+   is not a branch (the standard modern model, stated once rather than
+   adopted by reference — G4.3);
 5. an indirect call through a pointer that is not the address of a
    function, or through one whose function has a different signature from
    the call site's (§3.7).
@@ -321,6 +348,33 @@ target-independent optimization and instruction selection. Its contract:
   multi-part arithmetic over legal widths with explicit carry chaining
   (the flavor system's `.flag` form exists chiefly for this — carry out of
   a part is the overflow trit of that part's `add.flag`).
+
+Four decisions the contract leaves open, stated once each:
+
+- **`t1` is a condition type, not an arithmetic width** (G6.1). The
+  invariant the output column establishes is that every *arithmetic*
+  operand and result has a width in the legal set, while `t1` survives as
+  a comparison result, a `.flag` overflow trit, or a branch/select
+  selector. Crossing between the two is explicit: `widen` on the way up,
+  `cmp x, 0` on the way down — by *sign*, not by residue, since a `trunc`
+  would be wrong for any value outside −1…1.
+- **Renormalization cannot use `trunc`** (G6.2). After a promoted
+  wrapping operation the result is wrapped into the *narrow* width's
+  range at the legal width, with `tmul` against a mask of *w* ones:
+  `tmul(x, 1) = x` and `tmul(x, 0) = 0`, so the mask keeps the low *w*
+  trits and clears the rest — exactly the symmetric residue mod 3ʷ
+  (AM §3.1), trit-wise, carry-free, expressible without leaving the legal
+  set a `trunc` would reintroduce.
+- **A memory access keeps its own width** (G6.3): `load`/`store` move the
+  trytes they move whether or not the arithmetic unit has that width's
+  adder. Only an access wider than the widest legal width is an error,
+  and that is expansion's case, not promotion's.
+- **Overflow detection has a width requirement** (G6.4): promoting
+  `mul.trap` from *w* to *L* can only detect overflow if the exact
+  product fits — *L* ≥ 2*w*. `.wrap` has no such requirement, because the
+  low *w* trits of the exact product survive any wider wrapping. A case
+  the pass cannot synthesize is reported rather than emitted as an
+  operation that silently fails to trap.
 
 Backends may assume legalized input and are not required to handle any
 other. This is the mechanism that lets one frontend serve a t27 reference

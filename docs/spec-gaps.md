@@ -8155,14 +8155,17 @@ ties away from zero, and justifies the tie-break by the symmetry identities
 `div(−a,b) = div(a,−b) = −div(a,b)` and `rem(−a,b) = −rem(a,b)`. Those
 identities are tested directly (`core/tests/am.rs`).
 
-**G2.3 — Shift amount type.** AM §3.3 settles the *behavior* — "shift amounts
-k are values in 0 … n−1 for an n-trit operand; k outside that range is a
-trapping fault (not masked, not undefined)" — but TIR §3.1 writes
-`shl<fl> tN %a, %k` without giving `%k` a type.
+**G2.3 — Shift amount type — RESOLVED.** AM §3.3 settles the *behavior* —
+"shift amounts k are values in 0 … n−1 for an n-trit operand; k outside
+that range is a trapping fault (not masked, not undefined)" — but TIR §3.1
+writes `shl<fl> tN %a, %k` without giving `%k` a type.
 
 *Decision:* `%k` is an operand of the same `tN` as `%a`, so the instruction
 stays uniformly typed. Negative amounts are representable and fault like any
 other out-of-range amount.
+
+*Resolution:* now stated in TIR §3.1, one sentence directly under the
+shifts.
 
 ---
 
@@ -8186,15 +8189,22 @@ it. Recorded so the choice is not made silently later.
 
 ## 4. Memory and layout
 
-**G4.1 — Alignment beyond the word.** AM §2.3 tabulates natural alignment for
-1…9 trits (1 tryte) and 10…27 trits (3 trytes), and stops there. Legalization
-may introduce widths above 27.
+**G4.1 — Alignment beyond the word — RESOLVED.** AM §2.3 tabulates natural
+alignment for 1…9 trits (1 tryte) and 10…27 trits (3 trytes), and stops
+there. Legalization may introduce widths above 27.
 
 *Decision:* natural alignment is the smallest power of three at least the
 access's size in trytes (`⌈N/9⌉`). This reproduces both AM rows exactly —
 note that a `t18` occupies two trytes but still aligns to three, because the
 table is stated per *width*, not per size — keeps alignment a power of three
 (Composites Ch. 2 §1), and extends past the word without a special case.
+
+*Resolution:* stated in TIR §3.4, with AM §2.3 gaining the layer-clause
+that keeps it honest: the cap is the machine-layer statement of the same
+rule, and a single access wider than a word never reaches a machine. The
+two texts bind disjoint layers and reproduce each other at and below the
+word — the reconciliation the fold owed, since G0.15's cap and this
+decision had been sitting one layer apart, un-reconciled, the whole time.
 
 **G4.2 — Uninitialized global storage — first clause RESOLVED, second clause
 SUPERSEDED (2026-10-29).** TIR §4 item 4 makes reading uninitialized
@@ -8214,11 +8224,14 @@ codegen's `.zero` discharge and §1.2's table. The interpreter disagrees — it
 poisons a global with no item list, `zeroinit` spelling included — which is
 a live bug rather than a decision, recorded as G4.5.
 
-**G4.3 — Poison propagation.** TIR §4 item 4 adopts "the standard modern" poison
-model by reference without restating it. Implemented as: poison propagates
-through every value-producing instruction; branching on poison is UB; loading
-or storing *through* a poison address is UB; `select3` on a poison selector
-yields poison rather than UB, since it is not a branch.
+**G4.3 — Poison propagation — RESOLVED.** TIR §4 item 4 adopts "the standard
+modern" poison model by reference without restating it. Implemented as:
+poison propagates through every value-producing instruction; branching on
+poison is UB; loading or storing *through* a poison address is UB; `select3`
+on a poison selector yields poison rather than UB, since it is not a branch.
+
+*Resolution:* the four clauses are now item 4's own text in TIR §4 — the
+model stated once rather than adopted by reference.
 
 **G4.5 — the interpreter poisons a zero-filled global. (Found by G0 of the
 third-implementation plan, 2026-10-29.)** Three texts stated the semantics of
@@ -8328,10 +8341,10 @@ TIR §6 states legalization's contract — arbitrary `tN` in, legal-set widths
 out — and names the two techniques, but the details below are not written
 down anywhere.
 
-**G6.1 — `t1` is a condition type, not an arithmetic width.** `cmp` yields
-`t1` by definition (TIR §3.3, AM §3.5) and `br3` consumes one, but TIR §7 does
-not require a target's legal set to contain 1 — the reference target lists it,
-a hypothetical one need not.
+**G6.1 — `t1` is a condition type, not an arithmetic width — RESOLVED.**
+`cmp` yields `t1` by definition (TIR §3.3, AM §3.5) and `br3` consumes one,
+but TIR §7 does not require a target's legal set to contain 1 — the
+reference target lists it, a hypothetical one need not.
 
 *Decision:* the invariant legalization establishes is that every *arithmetic*
 operand and result has a width in the legal set, while `t1` survives as a
@@ -8340,10 +8353,12 @@ Crossing between the two is explicit: `widen` on the way up, and `cmp x, 0` on
 the way down — by *sign*, not by residue, since a `trunc` would be wrong for
 any value outside −1…1.
 
-**G6.2 — Renormalization cannot use `trunc`.** After a promoted wrapping
-operation the result must be wrapped into the *narrow* width's range, but
-`trunc tL -> tw` would reintroduce the illegal width the pass exists to
-remove.
+*Resolution:* now the first of the four decision bullets closing TIR §6.
+
+**G6.2 — Renormalization cannot use `trunc` — RESOLVED.** After a promoted
+wrapping operation the result must be wrapped into the *narrow* width's
+range, but `trunc tL -> tw` would reintroduce the illegal width the pass
+exists to remove.
 
 *Decision:* renormalize at the legal width with `tmul` against a mask of `w`
 ones. `tmul(x, 1) = x` and `tmul(x, 0) = 0`, so the mask keeps the low `w`
@@ -8351,22 +8366,29 @@ trits and clears the rest, which is exactly the symmetric residue mod 3^w
 (AM §3.1) — trit-wise, carry-free, and expressible without leaving the legal
 set.
 
-**G6.3 — Memory access widths are not promoted.** A `load t9` moves one
-tryte; whether the arithmetic unit has a 9-trit adder is unrelated. TIR §6
-speaks of "value types and operation widths" without separating the two.
+*Resolution:* the second of the four decision bullets closing TIR §6.
+
+**G6.3 — Memory access widths are not promoted — RESOLVED.** A `load t9`
+moves one tryte; whether the arithmetic unit has a 9-trit adder is
+unrelated. TIR §6 speaks of "value types and operation widths" without
+separating the two.
 
 *Decision:* `load`/`store` keep their access width, and the loaded value is
 converted into the arithmetic width immediately after. Only an access wider
 than the widest legal width is an error, and that needs expansion, not
 promotion.
 
-**G6.4 — Overflow detection has a width requirement.** Promoting `mul.trap`
-from `tw` to `tL` can only detect overflow if the exact product fits, i.e.
-`L ≥ 2w`; `.wrap` has no such requirement, because the low `w` trits of the
-exact product survive any wider wrapping.
+*Resolution:* the third of the four decision bullets closing TIR §6.
+
+**G6.4 — Overflow detection has a width requirement — RESOLVED.** Promoting
+`mul.trap` from `tw` to `tL` can only detect overflow if the exact product
+fits, i.e. `L ≥ 2w`; `.wrap` has no such requirement, because the low `w`
+trits of the exact product survive any wider wrapping.
 
 *Decision:* the pass reports the case it cannot synthesize rather than
 emitting an operation that silently fails to trap.
+
+*Resolution:* the fourth of the four decision bullets closing TIR §6.
 
 **G6.5 — A wide value could not cross a function boundary — RESOLVED.**
 A `t54` parameter on a `t27` target has to arrive in two registers, or through
@@ -8429,10 +8451,11 @@ balanced positional number *is*.
 with the unlegalized module.
 
 
-**G6.7 — TIR could not hold a pointer in memory.** §3.4's `load`/`store` take
-an integer width, and §5 deliberately has no integer↔pointer conversion.
-Between them, draft 0.1 as written cannot spill a reference, put one in a
-struct, or represent a fat pointer — which makes Language Ch. 3 inexpressible.
+**G6.7 — TIR could not hold a pointer in memory — RESOLVED.** §3.4's
+`load`/`store` take an integer width, and §5 deliberately has no
+integer↔pointer conversion. Between them, draft 0.1 as written cannot
+spill a reference, put one in a struct, or represent a fat pointer —
+which makes Language Ch. 3 inexpressible.
 
 *Decision:* `load` and `store` accept `ptr` as an access type. This is **not**
 the conversion §5 declines to define: nothing about an address is exposed, and
@@ -8449,8 +8472,9 @@ copied as trytes — a reference inside an enum payload therefore loses
 provenance in the interpreter, which is a limitation of the checking, not of
 the machine.
 
-*Suggested:* TIR §3.4 gains a sentence permitting `ptr` as an access type, and
-§5 a note distinguishing that from the integer↔pointer casts it declines.
+*Resolution:* the *Suggested* clause is discharged — TIR §3.4 carries the
+whole decision now, including the field-by-field consequence and the
+enum-payload limitation named beside it.
 
 ---
 
