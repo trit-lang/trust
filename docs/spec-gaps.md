@@ -72,7 +72,8 @@ modules and visibility, and `for` loops, which need iteration and therefore
 traits. A `.tr` "hello world" is expressible today only as an array of `t9`
 code units — which is what the chapter's own appendix shows.
 
-**G0.4 — Chapter 3 is written, and two earlier statements want updating.**
+**G0.4 — Chapter 3 is written, and two earlier statements want updating. —
+both now updated (2026-10-29).**
 `spec/language/03-references.md` defines ownership, moves, destructors,
 references, lifetimes, the borrow checker and slices. It is a **design** like
 the ISA and the syntax chapter, and it makes four choices worth review:
@@ -80,6 +81,13 @@ lifetimes follow Rust (they are erased, not instantiated, so nothing about
 them waits on Chapter 4); the borrow checker is non-lexical; destructors are
 `fn drop(self: T)` until `impl` blocks exist; and `Box` is left to the library
 chapter.
+
+*The two updates, discharged:* Ch. 2 §6's niche line now counts every
+non-positive address ((3^27+1)/2 niches) with this entry named beside it,
+and Ch. 2 §3's text no longer offers the fused bounds check, citing this
+entry and G0.15 where it stood. G0.15's reversal had already fixed
+Ch. 3 §5.5; the wrong wording surviving as "informative" in Ch. 2 was
+the gap the sweep missed, found here by the G1 fold.
 
 Two consequences for documents already written:
 
@@ -8453,8 +8461,9 @@ trit-shaped with size 1, and that only holds if `B` is 0 — the positional
 reading would make `B` = 1, colliding with `C` and making the enum ill-formed.
 So an unassigned discriminant is the previous one plus one, as in Rust.
 
-**G7.2 — `repr(lang)` field order.** §1 permits the compiler to "order, pad,
-and pack fields arbitrarily" and §4 notes the obligation is mild.
+**G7.2 — `repr(lang)` field order — RESOLVED.** §1 permits the compiler to
+"order, pad, and pack fields arbitrarily" and §4 notes the obligation is
+mild.
 
 *Decision:* fields are placed most-aligned first (a stable sort by descending
 alignment). With only two scalar alignments this removes every removable
@@ -8462,11 +8471,14 @@ pad, and the appendix's own counter-example — `struct { a: t9, b: t27 }`
 staying at size 6 — still holds, because size must be a multiple of
 alignment.
 
-**G7.3 — Which niche an enum uses, and which values encode it.** §6 guarantees
-the *outcomes* (`Option<&T>` pointer-sized, `Option<bool>`/`Option<trit>` one
-tryte, nesting free) without specifying the rule that produces them — and a
-count of niches is not enough to generate code against, which needs to know
-*which* patterns are invalid.
+*Resolution:* now stated in Ch. 2 §4, pinned for implementers while §1's
+"no program may depend on it" stands beside it untouched.
+
+**G7.3 — Which niche an enum uses, and which values encode it — RESOLVED.**
+§6 guarantees the *outcomes* (`Option<&T>` pointer-sized,
+`Option<bool>`/`Option<trit>` one tryte, nesting free) without specifying
+the rule that produces them — and a count of niches is not enough to
+generate code against, which needs to know *which* patterns are invalid.
 
 *Decision:* an enum is niche-encoded when exactly one variant carries a
 payload, every other variant is fieldless, and the payload has at least as
@@ -8482,18 +8494,31 @@ address first among them, which is the one every `Option<&T>` uses. The
 untagged variant is recognized by elimination rather than by a stored value,
 so its arm is tested last whatever order it was written in.
 
-**G7.4 — Padding contributes no niches.** §1 says padding trytes have
-unspecified contents. Unspecified means every pattern is acceptable, so
+*Resolution:* the whole rule is now stated in Ch. 2 §6, after the guarantees
+it generates, so a reader meets "what" before "how". The reference-range
+under-count is stated against the corrected §6 count — every non-positive
+address, (3^27+1)/2 niches — rather than against the "at least 1" line it
+sat beside for so long (G0.4).
+
+**G7.4 — Padding contributes no niches — RESOLVED.** §1 says padding trytes
+have unspecified contents. Unspecified means every pattern is acceptable, so
 padding cannot be used to hide a discriminant.
 
 *Decision:* implemented that way. A struct's niches are exactly its fields'.
 
-**G7.5 — `repr(lang)` enums that cannot be niche-encoded.** §5.1 specifies the
-tag layout for `repr(linear)` only, and leaves `repr(lang)` unspecified.
+*Resolution:* one clause in Ch. 2 §6, beside the payload question —
+unspecified is not invalid.
+
+**G7.5 — `repr(lang)` enums that cannot be niche-encoded — RESOLVED.**
+§5.1 specifies the tag layout for `repr(linear)` only, and leaves
+`repr(lang)` unspecified.
 
 *Decision:* fall back to the `repr(linear)` shape — leading tag, then the
 payload union at its natural alignment — with the tag narrowed to `t9`
 whenever every discriminant fits.
+
+*Resolution:* now stated in Ch. 2 §5.1, one sentence hanging directly off
+the `repr(linear)` rule it borrows.
 
 ---
 

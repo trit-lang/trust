@@ -78,12 +78,17 @@ on it.
 Indexing takes `taddr`. A bounds check rejects indices outside `0 … N−1`;
 negative indices are simply out of bounds — they are **not** Python-style
 end-relative aliases, and no future revision will make them so (claiming
-this now so no library invents the convention). The bounds check is one
-three-way comparison: `i <=> N` must be `-1t` *and* `sign(i)` must not be
-`-1t`; codegen is encouraged to fuse these, and on targets with `br3` the
-fused check is a single branch on `tmin(sign(i), i <=> N)`... (informative;
-the normative requirement is only that out-of-bounds access faults or
-panics per the safety chapter, never proceeds).
+this now so no library invents the convention). The bounds check is two
+comparisons — `i <=> N` must be `-1t` *and* `sign(i)` must not be `-1t` —
+and two branches, which is what the reference implementation emits. (An
+earlier wording of this section offered a fused
+`tmin(sign(i), i <=> N)` as a single branch; the fuse cannot tell the two
+cases apart, the working fusion costs more than it saves, and one class of
+out-of-range index would surface as `F_OVERFLOW` rather than a bounds
+fault — spec-gaps G0.4 records the finding and G0.15 the reversal. What
+survives is the constant-length fusion, where `len − 1` folds.) The
+normative requirement is only that out-of-bounds access faults or panics
+per the safety chapter, never proceeds.
 
 ### 3.1 `v[i]` on a type the language does not know
 
@@ -134,7 +139,13 @@ defined layout (§1). Field order in `repr(lang)` may be permuted by the
 compiler to minimize padding — with trytes of 9 trits and only two scalar
 alignments (1 and 3), padding arises exactly when a 3-aligned field follows
 a size-not-multiple-of-3 prefix, and the compiler's reordering obligation
-is correspondingly mild.
+is correspondingly mild. For a second implementation reproducing the
+reference compiler's output byte for byte (`docs/ddc.md`) the permutation
+is fixed: **fields are placed most-aligned first** (a stable sort by
+descending alignment), which under the two scalar alignments removes every
+removable pad — the appendix's `struct { a: t9, b: t27 }` stays at size 6
+either way, because size must be a multiple of alignment. No program may
+rely on the order (§1); the pin is for implementers, not programs. (G7.2)
 
 A struct's alignment is the maximum alignment of its fields (minimum 1);
 its size is a multiple of that alignment.
@@ -164,7 +175,10 @@ The discriminant's *storage type* under `repr(lang)` is unspecified (the
 compiler picks the narrowest workable encoding, including niches, §6).
 `repr(linear)` enums store the discriminant as a leading `t9` (or `t27` if
 any explicit discriminant requires it) followed by the payload, union-style,
-at the payload's natural alignment.
+at the payload's natural alignment. An enum §6 cannot niche-encode falls
+back to that same shape under `repr(lang)` — a leading tag, then the
+payload union at its natural alignment — with the tag narrowed to `t9`
+whenever every discriminant fits one. (G7.5)
 
 ### 5.2 Three-variant enums and `br3` (informative)
 
@@ -200,7 +214,9 @@ radix pays layout dividends:
 
 - A `bool` occupies a tryte using 2 of 19 683 patterns → 19 681 niches.
 - A `trit` occupies a tryte using 3 patterns → 19 680 niches.
-- References (Ch. 3) exclude the null address → at least 1 niche.
+- References (Ch. 3) exclude **every non-positive address** (Ch. 3 §2.5)
+  → (3^27+1)/2 niches. (This line once read "at least 1 niche"; spec-gaps
+  G0.4 is the record of the understatement.)
 
 The question asked of a payload is whether **one scalar in it** has enough
 invalid values to tell the variants apart — not whether the payload as a
@@ -208,7 +224,10 @@ whole has that many. The two differ: a twelve-tryte payload has 3^108
 patterns, a number no implementation carries, and asking about the whole
 payload means asking a question whose answer cannot be represented. Asking
 about the scalar keeps the arithmetic small, and the scalar is where the
-discriminant would go in any case.
+discriminant would go in any case. And a payload's niches are its fields'
+and nothing else's: **padding contributes none**, because a padding tryte's
+contents are unspecified (§1) and an unspecified tryte is not an invalid
+one. (G7.4)
 
 Consequences the standard library relies on and user code may rely on
 (these are **guaranteed** for `repr(lang)`, elevating them from
@@ -219,6 +238,22 @@ implementation detail to spec):
    variants wrapped around a `bool`/`trit` payload occupy **one tryte**.
 3. Nesting up to the niche budget adds no size:
    `Option<Option<trit>>` is still one tryte.
+
+The guarantees state outcomes; this is the rule that generates them, owed
+to a second implementation. An enum is niche-encoded when **exactly one
+variant carries a payload, every other variant is fieldless, and the
+payload has at least as many niches as there are fieldless variants**. The
+encoding consumes that many niches; the rest stay available to an enclosing
+type, which is why guarantee 3's nesting falls out rather than being
+special-cased. The niche-bearing scalars have a contiguous valid range, so
+the invalid values are taken from above the valid range first and then from
+below: `Option<trit>`'s `None` is the tryte 2. A reference's valid range is
+treated as 1 … MAX — deliberately an under-count of the Ch. 3 §2.5 promise
+counted above, chosen because it puts the null address first among the
+niches, which is the one every `Option<&T>` spends. A variant with no
+stored discriminant is recognized **by elimination** — every variant with a
+discriminant is tested and does not match — so its arm is tested last,
+whatever order it is written in. (G7.3)
 
 Guarantee 2's practical face: the ubiquitous "value or absent" tri-state
 that binary systems hack as `-1 | 0 | 1` sentinel integers, and the
