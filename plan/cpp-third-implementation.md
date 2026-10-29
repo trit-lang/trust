@@ -139,7 +139,15 @@ identically by both compilers — and none was where a stranger could read
 it. **Equality in this project was defined on a format the specification
 did not define.**
 
-### G1 — fold the recorded decisions into `spec/`.
+### G1 — fold the recorded decisions into `spec/`. — **landed 2026-10-29**
+
+*Outcome:* four commits — Ch. 1 §3 (G1.1–G1.3), Ch. 2 (G7.2–G7.5 plus the
+two G0.4 lines the sweep had left standing: the §6 niche count and §3's
+wrong fused-bounds-check formula, both corrected citing their records),
+AM (G2.1; and §2.3's cap scoped to the machine layer, the reconciliation
+with G4.1 the fold found it owed), TIR (G2.3, G4.1, G4.3, G6.1–G6.4,
+G6.7). G7.4 folded alongside though the list below had omitted it —
+*Decision:* is *Decision:*.
 
 Every topic-organized entry in spec-gaps whose status is *Decision:* and whose
 decision never reached the document it decides about:
@@ -156,14 +164,40 @@ decision never reached the document it decides about:
   type) → TIR §6 and §3.4.
 - spec-gaps §7: G7.2 (`repr(lang)` field order), G7.3 (**which** niches and
   **which** values encode them — the rule that generates what Ch. 2 §6 only
-  promises), G7.5 (`repr(lang)` fallback shape) → Ch. 2.
+  promises), G7.4 (padding contributes no niches), G7.5 (`repr(lang)`
+  fallback shape) → Ch. 2.
 - G0.4's flagged line, still standing today: `spec/02-composites.md` says a
   reference excludes null, "at least 1 niche", where Ch. 3 §2.5 promises every
   non-positive value is invalid. One sentence, corrected at both ends.
 
-### G2 — decide the undecided.
+### G2 — decide the undecided. — **landed 2026-10-29**
 
-Each of these is a user decision, not an editorial one; the plan's job is to
+*Outcome:* all five decided on the record, and two of the five **decided
+against the first recommendation after verification overturned the
+premise** — which is what deciding on evidence is for.
+
+- **G7.6** — first reading: alignment is a target property. TIR §7 declares
+  `align_unit` (default 3 when `addr_unit` is 9 — AM's table read in
+  trytes — required otherwise); §8.4 lists it. No code moves.
+- **G0.2a** — `F_ILLEGAL` and `F_ADDRESS` reserved in AM §4: decided and
+  claimed, raised by nothing in draft 0.1; ISA §5's finding is "answered
+  as a reservation". The raising is implementation work deferred to an
+  environment with a toolchain.
+- **G9.137** — *premise stale.* `@Range.next.taddr` instantiates and
+  type-checks today; "compiles for `t27` and nothing else" is false. The
+  寫死-t27 way out was offered back with the evidence and declined. The
+  honest residue landed instead: Ch. 4 Appendix B's row now says which
+  half is removed and confesses which half survives.
+- **G9.189** — written into Ch. 3: §1.4 item 1 says the destructor body
+  runs only on a whole value, §1.3 points at it. Verified by binary (`X`
+  prints, `T` never does).
+- **G9.197(b)** — *premise stale at the trustc side* (`Point { x, y }`
+  destructures and runs). No draft-0.1 limit; Ch. 0 §4 gains the one
+  clause a struct pattern needs (no discriminant to test, binds fields by
+  name). The bootstrap side's own answer joins G4's audit below. (a) and
+  (c) stand as G3 material.
+
+Each of these was a user decision, not an editorial one; the plan's job was to
 put them on the agenda with their citations:
 
 | Entry | Question | Why `cP3` cannot proceed on a guess |

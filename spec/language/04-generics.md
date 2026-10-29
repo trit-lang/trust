@@ -1151,7 +1151,8 @@ Continuing the scorecard:
 
 | Binary-world bug class | Why it cannot occur here |
 |---|---|
-| a template error reported inside a library's body | bounds are checked at the call site (§2.2) |
+| a template error reaching the user from a library's bounds | bounds are checked at the call site (§2.2) — the call-site half |
+| a template error inside a generic body | **not** removed — a body is checked once per instantiation, not once against its bounds, so the failure mode survives for bodies; the surviving half was found in the prelude's own `Range` and is recorded as spec-gaps G9.137 rather than glossed |
 | two libraries implementing the same trait for the same type | coherence (§1.8) |
 | a `NaN` making `<` and `==` disagree | there is no partial order under `<` (§5.3.2) |
 | an `Ordering` enum allocated, matched, and discarded | the ordering type is `trit` (§5.3.1) |

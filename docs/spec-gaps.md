@@ -2866,17 +2866,26 @@ for it emits the trap, marks the arm's own done, and there are no
 answers it carries into a join the other side could wait for — the
 scalar answer's `e.done` rule over the same fact (Ch. 5 §4).
 
-**G9.197 — the lane is finished in full, and three small questions
-remain open for it.** The suite (`scripts/bootstrap.sh`) and every
+**G9.197 — the lane is finished in full; of the three small questions it
+left, (b) was overtaken by the implementation it described (2026-10-29).**
+The suite (`scripts/bootstrap.sh`) and every
 corpus the double compile (`scripts/ddc.sh`) reaches is byte-identical
 today; what is open now is three small mirrors of the comparison's own
 text and no more: (a)*arm-body* of a `?` written as a statement reads its
 answer into the match's join slot, whose name is written onto the text in
 a place the other implementation does not make, though the semantics are
-identical where it is read; (b) a `match` over a `struct` destructuring
-arm is still refused at the machinery the enum's only makes — the
-discriminant is something a struct never has to test, and the only arm a
-destructuring arm takes has no use of it yet; and (c) the glue of a tiny
+identical where it is read; ~~(b) a `match` over a `struct` destructuring
+arm is still refused at the machinery the enum's only makes~~ — **trustc
+compiles and runs one today** (verified: `Point { x, y }` binds by field
+name and returns their sum; the premise was stale at the trustc side and
+the limit was not written into the spec, per the G2 re-decision on the
+evidence). What §4's grammar lists plainly now means something: Ch. 0 §4
+gains the one clause — a struct pattern matches without a discriminant
+test and binds fields by name. The bootstrap side's own answer was never
+corpus-covered, and holding the two implementations to one belongs to the
+sA audit the third-implementation plan runs next (its G4). (a) and (c)
+stand, both determinism-appendix material (its G3); and (c) as before:
+the glue of a tiny
 trait implementation is queue-printed with its instantiation before the
 call may ask of it, while the other implementation only queues it when
 the call asks.
@@ -4129,6 +4138,21 @@ or a prelude that says `Range<t27>` and gives up the pretence. Appendix B's
 row cannot be re-earned until one of them happens — and the shorter honest
 path is to amend the row, since what is removed is the call-site half and now
 the named-method half, not the failure mode.
+
+*Settled (2026-10-29) — by evidence, differently than either way out.* The
+premise above was stale: instantiation-on-ask and literal inference under
+the instantiated environment later closed the failure this entry records
+locally. Verified against the binary rather than argued: `for i in
+0..v.len()` with `v.len(): taddr` compiles today, and the TIR carries a
+working `@Range.next.taddr` — the generic impl instantiates and type-checks
+at more widths than `t27`, so "a body whose declared generality its own
+code contradicts" no longer describes it. Narrowing the prelude, the
+recorded way out, would have **removed working generality**; it was offered
+back with the evidence and declined. What stands from the entry is the
+honest half: Appendix B's row is amended — the call-site half is what's
+removed, the body-check-at-instantiation half is confessed, and the
+check-once machinery this entry's *read* belonged to remains the open
+limit behind G4.4's fixed note and G0.8's third limit.
 
 **G9.136 — `x = <aggregate>`, and the drop a whole local owes.**
 

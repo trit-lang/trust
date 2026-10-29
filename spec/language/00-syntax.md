@@ -391,6 +391,11 @@ p @ Sign::Neg          // binding the whole while matching
 An or-pattern's alternatives must bind the same names at the same types.
 `|` is available for this because §2.5 declined to spend it on `tmax`.
 
+A struct pattern is written in the same shape as a variant's named-field
+pattern, and it means the analogous thing without a discriminant: a struct
+has no variant to test, so the arm matches without one, and each binding
+takes the field of the name it was written under.
+
 A `match` on a **reference** matches what it points at, and what its
 bindings are follows from what they hold. A scalar is copied — a copy of one
 is the same value. Anything that owns something is bound as the **place**:
