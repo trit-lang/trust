@@ -1,0 +1,66 @@
+// sym.tr — the symbol table.
+//
+// A symbol is an index into `names`, handed out once per distinct spelling
+// and never again: interning is what makes `eq?` one comparison of two
+// numbers. Symbols are permanent — nothing here is collected. A program that
+// interns a fresh spelling at every step grows the table without bound, and
+// that is the standard bargain interning makes (the GC's arena excludes the
+// table for the same reason).
+//
+// The map is the prelude's `HashMap` (64 buckets, exact-fit freelist): a
+// program with many more symbols than buckets degrades toward a linear scan
+// of one bucket, which the table admits in its own comment. Symbol counts in
+// the thousands sit comfortably under it.
+
+pub struct Intern {
+    names: Vec<Vec<char>>,
+    ids: HashMap<Vec<char>, taddr>,
+}
+
+impl Intern {
+    fn new() -> Intern {
+        Intern { names: Vec::new(), ids: HashMap::new() }
+    }
+
+    // The id of `s`, interning it if new.
+    fn intern(&mut self, s: &Vec<char>) -> taddr {
+        match self.ids.get(s) {
+            Option::Some(id) => *id,
+            Option::None => {
+                let name = s.to_string();
+                self.names.push(name);
+                let id = self.names.len() - 1;
+                self.ids.insert(s.to_string(), id);
+                id
+            },
+        }
+    }
+
+    fn intern_str(&mut self, s: &str) -> taddr {
+        let owned = s.to_string();
+        self.intern(&owned)
+    }
+
+    fn name(&self, id: taddr) -> &Vec<char> {
+        &self.names[id]
+    }
+
+    fn count(&self) -> taddr {
+        self.names.len()
+    }
+}
+
+#[test]
+fn interning_is_idempotent_and_distinct() {
+    let mut t = Intern::new();
+    let a = t.intern_str("car");
+    let b = t.intern_str("cdr");
+    let a2 = t.intern_str("car");
+    if a != a2 { trap(); }
+    if a == b { trap(); }
+    if t.count() != 2 { trap(); }
+    let na = t.name(a);
+    let nb = t.name(b);
+    if !na.same("car") { trap(); }
+    if !nb.same("cdr") { trap(); }
+}

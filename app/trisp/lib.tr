@@ -1,0 +1,95 @@
+// lib.tr — the Scheme library, written in Scheme, loaded before the first
+// form of every run.
+//
+// Everything here could have been a native primitive; the point of putting
+// it in Scheme instead is the one every Lisp makes: the language gets
+// better by being the language its own library is written in. `map` is
+// variadic because `apply` and dotted rest-args already exist; merge sort
+// exists because a language without a sort is a calculator; and because
+// every definition here is exercised by the very machine that runs user
+// code, the library doubles as the evaluator's largest always-on test.
+//
+// The source arrives as `push_str` lines, not one string: a Trust string
+// literal cannot span lines (the lexer calls that an unterminated string),
+// so the library is spelled as the lines it is.
+
+use err::SErr;
+use err::err_of;
+use eval::eval_top;
+use machine::Machine;
+use read::Reader;
+use read::read_datum;
+
+// The whole library text, pushed a line at a time.
+pub fn source(out: &mut Vec<char>) {
+    out.push_str(";; trisp library — loaded before the first form.\n");
+    out.push_str("(define (not x) (if x #f #t))\n");
+    out.push_str("(define (boolean=? a b) (if a b (not b)))\n");
+    out.push_str("(define (symbol=? a b) (eq? a b))\n");
+    out.push_str("(define (identity x) x)\n");
+    out.push_str("(define (zero? n) (= n 0))\n");
+    out.push_str("(define (positive? n) (> n 0))\n");
+    out.push_str("(define (negative? n) (< n 0))\n");
+    out.push_str("(define (sgn n) (cond ((> n 0) 1) ((< n 0) -1) (else 0)))\n");
+    out.push_str("(define (abs n) (if (< n 0) (- n) n))\n");
+    out.push_str("(define (even? n) (zero? (modulo n 2)))\n");
+    out.push_str("(define (odd? n) (= 1 (modulo n 2)))\n");
+    out.push_str("(define (square n) (* n n))\n");
+    out.push_str("(define (cube n) (* n n n))\n");
+    out.push_str("(define (gcd a b) (if (= b 0) (abs a) (gcd b (remainder a b))))\n");
+    out.push_str("(define (lcm a b) (let ((g (gcd a b))) (if (= g 0) 0 (quotient (abs (* a b)) g))))\n");
+    out.push_str("(define (expt b e) (cond ((= e 0) 1) ((< e 0) (error \"expt: negative exponent\")) ((even? e) (let ((h (expt b (quotient e 2)))) (* h h))) (else (* b (expt b (- e 1))))))\n");
+    out.push_str("(define (last xs) (if (null? (cdr xs)) (car xs) (last (cdr xs))))\n");
+    out.push_str("(define (list* . xs) (if (null? (cdr xs)) (car xs) (cons (car xs) (apply list* (cdr xs)))))\n");
+    out.push_str("(define (take xs n) (if (or (null? xs) (= n 0)) (quote ()) (cons (car xs) (take (cdr xs) (- n 1)))))\n");
+    out.push_str("(define (drop xs n) (if (or (null? xs) (= n 0)) xs (drop (cdr xs) (- n 1))))\n");
+    out.push_str("(define (list-set! xs n v) (set-car! (list-tail xs n) v))\n");
+    out.push_str("(define (find p xs) (cond ((null? xs) #f) ((p (car xs)) (car xs)) (else (find p (cdr xs)))))\n");
+    out.push_str("(define (list-index p xs) (let walk ((ys xs) (n 0)) (cond ((null? ys) #f) ((p (car ys)) n) (else (walk (cdr ys) (+ n 1))))))\n");
+    out.push_str("(define (any p xs) (cond ((null? xs) #f) ((p (car xs))) (else (any p (cdr xs)))))\n");
+    out.push_str("(define (every p xs) (cond ((null? xs) #t) ((p (car xs)) (every p (cdr xs))) (else #f)))\n");
+    out.push_str("(define (map1 f xs) (if (null? xs) (quote ()) (cons (f (car xs)) (map1 f (cdr xs)))))\n");
+    out.push_str("(define (map f . xss) (if (or (null? xss) (any null? xss)) (quote ()) (cons (apply f (map1 car xss)) (apply map f (map1 cdr xss)))))\n");
+    out.push_str("(define (for-each f . xss) (if (or (null? xss) (any null? xss)) (if #f #f) (begin (apply f (map1 car xss)) (apply for-each f (map1 cdr xss)))))\n");
+    out.push_str("(define (filter p xs) (cond ((null? xs) (quote ())) ((p (car xs)) (cons (car xs) (filter p (cdr xs)))) (else (filter p (cdr xs)))))\n");
+    out.push_str("(define (fold-left f acc xs) (if (null? xs) acc (fold-left f (f acc (car xs)) (cdr xs))))\n");
+    out.push_str("(define (fold-right f acc xs) (if (null? xs) acc (f (car xs) (fold-right f acc (cdr xs)))))\n");
+    out.push_str("(define (concatenate xss) (apply append xss))\n");
+    out.push_str("(define (iota n . start) (let ((s (if (null? start) 0 (car start)))) (let walk ((k 0)) (if (= k n) (quote ()) (cons (+ s k) (walk (+ k 1)))))))\n");
+    out.push_str("(define (merge a b cmp) (cond ((null? a) b) ((null? b) a) ((cmp (car a) (car b)) (cons (car a) (merge (cdr a) b cmp))) (else (cons (car b) (merge a (cdr b) cmp)))))\n");
+    out.push_str("(define (list-sort cmp xs) (let ((n (length xs))) (if (< n 2) xs (let ((h (quotient n 2))) (merge (list-sort cmp (take xs h)) (list-sort cmp (drop xs h)) cmp)))))\n");
+    out.push_str("(define (vector-map f v) (list->vector (map f (vector->list v))))\n");
+    out.push_str("(define (assoc-ref t k) (let ((e (assoc k t))) (if e (cdr e) (error \"assoc-ref: missing key\" k))))\n");
+    out.push_str("(define (number->trits n) (map1 (lambda (c) (cond ((char=? c #\\1) 1) ((char=? c #\\0) 0) (else -1))) (list-tail (string->list (number->string n 3)) 2)))\n");
+}
+
+// Read and evaluate the whole library into the machine.
+pub fn load(m: &mut Machine) -> Result<(), SErr> {
+    let mut src: Vec<char> = Vec::new();
+    source(&mut src);
+    let mut r = Reader::from_str(&src);
+    loop {
+        match read_datum(&mut r, &mut m.heap, &mut m.syms, 0) {
+            Result::Ok(v) => {
+                match v {
+                    Option::Some(form) => {
+                        match eval_top(m, form) {
+                            Result::Ok(_) => {},
+                            Result::Err(e) => {
+                                let mut msg = "during library load: ".to_string();
+                                msg.push_str(&e.msg);
+                                return Result::Err(err_of(msg));
+                            },
+                        }
+                    },
+                    Option::None => { return Result::Ok(()); },
+                }
+            },
+            Result::Err(e) => {
+                let mut msg = "during library load: ".to_string();
+                msg.push_str(&e.msg);
+                return Result::Err(err_of(msg));
+            },
+        }
+    }
+}

@@ -1,0 +1,147 @@
+// machine.tr — the abstract machine: heap + symbol table + eval registers.
+//
+// Trust has no mutable globals, so the whole interpreter state is one
+// struct, threaded by `&mut` through the evaluator — which is also what
+// makes the machine *restartable* inside a test: build one, run a program
+// against it, drop it. Everything about a run lives in here.
+//
+// The registers are the CEK machine's own: `exp` (the expression being
+// evaluated), `env` (its environment), `val` (the last value produced), and
+// `konts` — the continuation stack, an explicit `Vec<Kont>` rather than the
+// machine's call stack, for three reasons that decide the whole design:
+//
+// - **Tail calls cost nothing structurally.** A body's frames replace the
+//   caller's frames as they fire (eval.tr traces this), so `(loop (- n 1))`
+//   at a million iterations is O(1) of this stack.
+// - **`call/cc` is a copy.** A continuation is first-class because the
+//   stack is data: capture clones `konts` into `conts`, resume clones it
+//   back. First-class continuations are usually the hard stretch goal; on
+//   this design they are twenty lines.
+// - **GC roots are enumerable.** genv/exp/env/val/konts/conts plus the
+//   reader's half-read form is the whole root set (gc.tr), and nothing
+//   reachable escapes it.
+//
+// GC is collected only at the boundary of the *outermost* eval loop, where
+// every register is a complete, valid root — quasiquote's nested runs, the
+// reader, and the primitives all allocate without ever collecting mid-step.
+// The trigger and policy live in gc.tr.
+
+use read::Reader;
+use sym::Intern;
+use val::Heap;
+use val::Val;
+
+// A frame of the continuation stack. Every payload is Copy (Val, taddr or
+// bool), so the whole stack is Copy-shaped and snapshots are plain clones.
+
+pub enum Kont {
+    If { conseq: Val, alt: Val, env: Val },
+    Seq { rest: Val, env: Val },                    // forms still to run
+    // define/set! carry their env: evaluating the value expression may
+    // install a callee's environment in m.env, and the definition belongs
+    // where the define FORM ran, not wherever the value happened to live.
+    DefName { sym: taddr, env: Val },
+    SetName { sym: taddr, env: Val },
+    CallOp { args: Val, env: Val },                 // operator being evaluated
+    CallArg { op: Val, rest: Val, acc: Val, env: Val },
+    CondNext { rest: Val, body: Val, env: Val },    // test fired: body | next clause
+    CondRecv { rest: Val, expr: Val, env: Val },    // (test => recipient)
+    AndRest { rest: Val, env: Val },
+    OrRest { rest: Val, env: Val },
+    WhenRest { body: Val, env: Val, sense: bool },
+    LetEval { names: Val, exprs: Val, acc: Val, body: Val, oenv: Val },
+    LetStarBind { name: taddr, names: Val, exprs: Val, body: Val },
+    LetrecBind { bindings: Val, exprs: Val, body: Val, fenv: Val },
+    NamedLetCall { names: Val, exprs: Val, acc: Val,
+                   cell: taddr, body: Val, ienv: Val, fenv: Val },
+}
+
+pub struct ContBox {
+    pub ks: Vec<Kont>,
+    pub mark: bool,
+    pub live: bool,
+}
+
+pub struct Machine {
+    pub heap: Heap,
+    pub syms: Intern,
+    pub rdr: Reader,                  // the one input stream (REPL and `read`)
+    pub genv: Val,                    // the global environment chain
+    pub exp: Val,
+    pub env: Val,
+    pub val: Val,
+    pub konts: Vec<Kont>,
+    pub conts: Vec<ContBox>,
+    pub gc_limit: taddr,              // collect at a boundary past this pace
+    pub gc_since: taddr,              // allocations since the last collection
+    pub halted: bool,                 // `quit`/`exit` asked for the stop
+    pub exit_code: t27,
+    pub capturing: bool,              // display & friends park their bytes in…
+    pub capture: Vec<char>,           // …here instead of the port (tests)
+}
+
+impl Machine {
+    // Over the machine's input port — the REPL's machine.
+    fn port() -> Machine {
+        Machine {
+            heap: Heap::new(),
+            syms: Intern::new(),
+            rdr: Reader::port(),
+            genv: Val::Nil,
+            exp: Val::Nil,
+            env: Val::Nil,
+            val: Val::Unspec,
+            konts: Vec::new(),
+            conts: Vec::new(),
+            gc_limit: 59049,          // 3^10 allocations between collections
+            gc_since: 0,
+            halted: false,
+            exit_code: 0,
+            capturing: false,
+            capture: Vec::new(),
+        }
+    }
+
+    // Over a string — every test's machine.
+    fn from_str(s: &Vec<char>) -> Machine {
+        let mut m = Machine::port();
+        m.rdr = Reader::from_str(s);
+        m
+    }
+
+    // Clone the current stack into the continuation arena; the id a
+    // `Val::Cont` carries.
+    fn capture(&mut self) -> taddr {
+        let mut snap: Vec<Kont> = Vec::with_capacity(self.konts.len());
+        let mut i: taddr = 0;
+        while i < self.konts.len() {
+            snap.push(self.konts[i]);
+            i += 1;
+        }
+        // Reuse a dead slot if one is free.
+        let mut j: taddr = 0;
+        while j < self.conts.len() {
+            if !self.conts[j].live {
+                self.conts[j].ks = snap;
+                self.conts[j].live = true;
+                self.conts[j].mark = false;
+                return j;
+            }
+            j += 1;
+        }
+        self.conts.push(ContBox { ks: snap, mark: false, live: true });
+        self.conts.len() - 1
+    }
+
+    // Resume: the captured stack replaces the current one wholesale — the
+    // abandoned frames simply stop existing, which is what abandoning means.
+    fn install(&mut self, i: taddr) {
+        let mut snap: Vec<Kont> = Vec::with_capacity(self.conts[i].ks.len());
+        let mut j: taddr = 0;
+        while j < self.conts[i].ks.len() {
+            snap.push(self.conts[i].ks[j]);
+            j += 1;
+        }
+        self.konts = snap;
+    }
+}

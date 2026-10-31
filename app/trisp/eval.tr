@@ -1,0 +1,1411 @@
+// eval.tr — the evaluator: a CEK machine with first-class continuations.
+//
+// The shape is the one machine.tr's header argues for: two loops sharing
+// three registers. `step_exp` dispatches on `m.exp` and either produces a
+// value (`false`) or rewrites state for another round (`true`);
+// `step_konts` pops frames until one of them asks for a new expression —
+// Ok(true) — or the stack runs out, which is what "the program has
+// answered" means, with the answer in `m.val`. A frame that consumes
+// `m.val` and produces another value just keeps the loop going: values flow
+// frame to frame without round-tripping the outer driver.
+//
+// Tail position is structural. When an application fires, its own frames
+// (CallOp/CallArg) have already popped themselves, and the callee's body
+// frames push onto whatever the caller left — nothing of the call itself
+// remains on the stack. A recursive call in body-tail therefore replaces
+// its caller's frames wholesale: `(define (loop n) (if (= n 0) 0 (loop (-
+// n 1))))` at a million iterations holds the kont stack to a handful of
+// frames, and main.tr's tests measure that rather than assert it.
+//
+// What is decided here:
+//
+// - **Only `#f` is false.** 0, (), "" are all true (val.tr's `true_of`).
+// - **`define` adds to the first frame of the current environment**, and
+//   redefining a name updates that binding. Internal defines run
+//   sequentially, not simultaneously — a program wanting letrec's knotting
+//   writes `letrec`.
+// - **Three primitives are control operations, not functions**, and live
+//   here rather than in prim.tr: `apply`, `eval`, `call/cc`. Each rewrites
+//   the machine's own registers, which is what a primitive behind a result
+//   value cannot do.
+// - **Quasiquote evaluates unquotes through `eval_value`**, a nested run
+//   marked off by the stack depth it started above. Escaping a nested
+//   evaluation through a captured continuation is the unspecified case the
+//   header of `eval_value` names — it answers an error, not a lie.
+// - **GC never runs mid-step** (gc.tr's boundary rule), so a half-built
+//   quasiquote result in a local is never under the marker.
+
+use err::SErr;
+use err::err;
+use err::err_of;
+use gc::mcons;
+use machine::Kont;
+use machine::Machine;
+use prim::ID_APPLY;
+use prim::ID_CALLCC;
+use prim::ID_EVAL;
+use sym::Intern;
+use val::Heap;
+use val::Val;
+
+// -------------------------------------------------------------- driver ---
+
+// Evaluate one top-level form; the answer is in m.val. The stack is
+// emptied per form: a previous form's frames cannot leak into this one.
+pub fn eval_top(m: &mut Machine, form: Val) -> Result<(), SErr> {
+    m.exp = form;
+    m.env = m.genv;
+    m.val = Val::Unspec;
+    m.konts.clear();
+    run(m)
+}
+
+pub fn run(m: &mut Machine) -> Result<(), SErr> {
+    loop {
+        gc::maybe_collect(m);
+        if !step_exp(m)? {
+            if !step_konts(m)? { return Result::Ok(()); }
+        }
+    }
+}
+
+// Evaluate `form` in `env` to a value, above whatever frames are already on
+// the stack — quasiquote's and `eval`'s way of running a subprogram. The
+// registers are saved and restored; the subprogram's errors propagate.
+pub fn eval_value(m: &mut Machine, form: Val, env: Val) -> Result<Val, SErr> {
+    let saved_exp = m.exp;
+    let saved_env = m.env;
+    let saved_val = m.val;
+    let mark = m.konts.len();
+    m.exp = form;
+    m.env = env;
+    let r = run_above(m, mark);
+    let v = m.val;
+    let crossed = m.konts.len() != mark;
+    m.exp = saved_exp;
+    m.env = saved_env;
+    m.val = saved_val;
+    match r {
+        Result::Err(e) => Result::Err(e),
+        Result::Ok(_) => {
+            if crossed {
+                // The subprogram escaped through a captured continuation
+                // and resumed it into the middle of this run: R5RS leaves
+                // the case unspecified, and this machine answers it
+                // honestly with an error rather than a made-up value.
+                Result::Err(err("continuation escaped a nested evaluation"))
+            } else {
+                Result::Ok(v)
+            }
+        },
+    }
+}
+
+// run, but halting when the frames above `mark` are exhausted.
+fn run_above(m: &mut Machine, mark: taddr) -> Result<(), SErr> {
+    loop {
+        // No gc::maybe_collect here: the nested run's registers are roots,
+        // but its *driver's* locals (a half-built quasiquote) are not, so a
+        // collection here could free a living value. gc.tr holds the rule.
+        if !step_exp(m)? {
+            if m.konts.len() <= mark { return Result::Ok(()); }
+            if !step_konts(m)? { return Result::Ok(()); }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- step ---
+
+// One step of expression evaluation: Ok(true) = m.exp was rewritten, keep
+// stepping; Ok(false) = m.val holds the value, fire the continuation.
+fn step_exp(m: &mut Machine) -> Result<bool, SErr> {
+    let x = m.exp;
+    match x {
+        Val::Num(_) => { m.val = x; Result::Ok(false) },
+        Val::Str(_) => { m.val = x; Result::Ok(false) },
+        Val::Chr(_) => { m.val = x; Result::Ok(false) },
+        Val::Bool(_) => { m.val = x; Result::Ok(false) },
+        Val::Vec(_) => { m.val = x; Result::Ok(false) },
+        Val::Eof => { m.val = x; Result::Ok(false) },
+        Val::Unspec => { m.val = x; Result::Ok(false) },
+        Val::Prim(_) => { m.val = x; Result::Ok(false) },
+        Val::Closure(_) => { m.val = x; Result::Ok(false) },
+        Val::Cont(_) => { m.val = x; Result::Ok(false) },
+        Val::Nil => Result::Err(err("cannot evaluate ()")),
+        Val::Sym(id) => {
+            match env_lookup(m, m.env, id) {
+                Option::Some(v) => { m.val = v; Result::Ok(false) },
+                Option::None => {
+                    let mut msg = "unbound symbol: ".to_string();
+                    msg.push_str(m.syms.name(id));
+                    Result::Err(err_of(msg))
+                },
+            }
+        },
+        Val::Pair(i) => step_combination(m, i),
+    }
+}
+
+pub fn named(s: &Intern, v: Val, want: &str) -> bool {
+    // NB: the compared text is bound to a local before `.same` — calling
+    // `s.name(id).same(...)` in one expression compiles to a comparison
+    // that answers false here (the parameter named `name` and Intern's
+    // `name` method share a resolution namespace, and the chain loses).
+    match v {
+        Val::Sym(id) => {
+            let nm = s.name(id);
+            nm.same(want)
+        },
+        _ => false,
+    }
+}
+
+// car/cdr of a value known to be a pair where the match itself would drown
+// the point in noise; Nil is the don't-care answer for the impossible case.
+fn hcar(h: &Heap, v: Val) -> Val {
+    match v {
+        Val::Pair(i) => h.car(i),
+        _ => Val::Nil,
+    }
+}
+
+fn hcdr(h: &Heap, v: Val) -> Val {
+    match v {
+        Val::Pair(i) => h.cdr(i),
+        _ => Val::Nil,
+    }
+}
+
+// -------------------------------------------------------- arity shapes ---
+
+fn argc_err(whose: &str) -> SErr {
+    let mut msg = whose.to_string();
+    msg.push_str(": wrong number of arguments");
+    err_of(msg)
+}
+
+pub fn form_err(whose: &str, what: &str) -> SErr {
+    let mut msg = whose.to_string();
+    msg.push_str(": ");
+    msg.push_str(what);
+    err_of(msg)
+}
+
+// A form's single argument, or an arity error naming the form.
+pub fn one_arg(h: &Heap, args: Val, whose: &str) -> Result<Val, SErr> {
+    match args {
+        Val::Pair(i) => {
+            match h.cdr(i) {
+                Val::Nil => Result::Ok(h.car(i)),
+                _ => Result::Err(argc_err(whose)),
+            }
+        },
+        _ => Result::Err(argc_err(whose)),
+    }
+}
+
+// ------------------------------------------------------------- bodies ---
+
+// Run a proper list of forms for their last value: the head goes into
+// m.exp, one self-chaining Seq frame covers the rest. `answer` is an empty
+// list's value (begin's contract).
+fn splice(m: &mut Machine, forms: Val, answer: Val) -> Result<bool, SErr> {
+    match forms {
+        Val::Nil => { m.val = answer; Result::Ok(false) },
+        Val::Pair(i) => {
+            let rest = m.heap.cdr(i);
+            match rest {
+                Val::Pair(_) => {
+                    m.konts.push(Kont::Seq { rest: rest, env: m.env });
+                },
+                Val::Nil => {},
+                _ => { return Result::Err(form_err("body", "malformed")); },
+            }
+            m.exp = m.heap.car(i);
+            Result::Ok(true)
+        },
+        _ => Result::Err(form_err("body", "malformed")),
+    }
+}
+
+// ------------------------------------------------------- combinations ---
+
+// A form with a parenthesized head: special form, or application.
+fn step_combination(m: &mut Machine, i: taddr) -> Result<bool, SErr> {
+    let head = m.heap.car(i);
+    let args = m.heap.cdr(i);
+    match head {
+        Val::Sym(_) => {
+            if named(&m.syms, head, "quote") {
+                let v = one_arg(&m.heap, args, "quote")?;
+                m.val = v;
+                return Result::Ok(false);
+            }
+            if named(&m.syms, head, "if") { return do_if(m, args); }
+            if named(&m.syms, head, "define") { return do_define(m, args); }
+            if named(&m.syms, head, "set!") { return do_set(m, args); }
+            if named(&m.syms, head, "lambda") { return do_lambda(m, args); }
+            if named(&m.syms, head, "begin") { return splice(m, args, Val::Unspec); }
+            if named(&m.syms, head, "let") { return do_let(m, args); }
+            if named(&m.syms, head, "let*") { return do_let_star(m, args); }
+            if named(&m.syms, head, "letrec") { return do_letrec(m, args); }
+            if named(&m.syms, head, "cond") { return do_cond(m, args); }
+            if named(&m.syms, head, "and") { return do_and(m, args); }
+            if named(&m.syms, head, "or") { return do_or(m, args); }
+            if named(&m.syms, head, "when") { return do_when(m, args, true); }
+            if named(&m.syms, head, "unless") { return do_when(m, args, false); }
+            if named(&m.syms, head, "quasiquote") {
+                let t = one_arg(&m.heap, args, "quasiquote")?;
+                let v = quasi(m, t, m.env, 1)?;
+                m.val = v;
+                return Result::Ok(false);
+            }
+            if named(&m.syms, head, "unquote") || named(&m.syms, head, "unquote-splicing") {
+                return Result::Err(err("unquote: outside quasiquote"));
+            }
+            // Otherwise: an ordinary application.
+            m.konts.push(Kont::CallOp { args: args, env: m.env });
+            m.exp = head;
+            Result::Ok(true)
+        },
+        _ => {
+            m.konts.push(Kont::CallOp { args: args, env: m.env });
+            m.exp = head;
+            Result::Ok(true)
+        },
+    }
+}
+
+fn do_if(m: &mut Machine, args: Val) -> Result<bool, SErr> {
+    match args {
+        Val::Pair(i) => {
+            let test = m.heap.car(i);
+            match m.heap.cdr(i) {
+                Val::Pair(j) => {
+                    let conseq = m.heap.car(j);
+                    match m.heap.cdr(j) {
+                        Val::Nil => {
+                            m.konts.push(Kont::If { conseq: conseq, alt: Val::Unspec, env: m.env });
+                            m.exp = test;
+                            Result::Ok(true)
+                        },
+                        Val::Pair(k) => {
+                            match m.heap.cdr(k) {
+                                Val::Nil => {
+                                    m.konts.push(Kont::If { conseq: conseq, alt: m.heap.car(k), env: m.env });
+                                    m.exp = test;
+                                    Result::Ok(true)
+                                },
+                                _ => Result::Err(argc_err("if")),
+                            }
+                        },
+                        _ => Result::Err(argc_err("if")),
+                    }
+                },
+                _ => Result::Err(argc_err("if")),
+            }
+        },
+        _ => Result::Err(argc_err("if")),
+    }
+}
+
+fn do_define(m: &mut Machine, args: Val) -> Result<bool, SErr> {
+    match args {
+        Val::Pair(i) => {
+            let target = m.heap.car(i);
+            let rest = m.heap.cdr(i);
+            match target {
+                Val::Sym(id) => {
+                    // (define name expr)
+                    let valexpr = one_arg(&m.heap, rest, "define")?;
+                    m.konts.push(Kont::DefName { sym: id, env: m.env });
+                    m.exp = valexpr;
+                    Result::Ok(true)
+                },
+                Val::Pair(t) => {
+                    // (define (name . params) . body) — sugar for lambda.
+                    let fname = m.heap.car(t);
+                    match fname {
+                        Val::Sym(id) => {
+                            let fparams = m.heap.cdr(t);
+                            match rest {
+                                Val::Nil => Result::Err(form_err("define", "empty body")),
+                                _ => {
+                                    check_params(m, fparams)?;
+                                    let clo = m.heap.closure_new(fparams, rest, m.env);
+                                    env_define(m, id, clo);
+                                    m.val = Val::Unspec;
+                                    Result::Ok(false)
+                                },
+                            }
+                        },
+                        _ => Result::Err(form_err("define", "malformed name")),
+                    }
+                },
+                _ => Result::Err(form_err("define", "malformed")),
+            }
+        },
+        _ => Result::Err(argc_err("define")),
+    }
+}
+
+fn do_set(m: &mut Machine, args: Val) -> Result<bool, SErr> {
+    match args {
+        Val::Pair(i) => {
+            match m.heap.car(i) {
+                Val::Sym(id) => {
+                    let valexpr = one_arg(&m.heap, m.heap.cdr(i), "set!")?;
+                    m.konts.push(Kont::SetName { sym: id, env: m.env });
+                    m.exp = valexpr;
+                    Result::Ok(true)
+                },
+                _ => Result::Err(form_err("set!", "not a symbol")),
+            }
+        },
+        _ => Result::Err(argc_err("set!")),
+    }
+}
+
+fn do_lambda(m: &mut Machine, args: Val) -> Result<bool, SErr> {
+    match args {
+        Val::Pair(i) => {
+            let params = m.heap.car(i);
+            let body = m.heap.cdr(i);
+            match body {
+                Val::Nil => Result::Err(form_err("lambda", "empty body")),
+                _ => {
+                    check_params(m, params)?;
+                    m.val = m.heap.closure_new(params, body, m.env);
+                    Result::Ok(false)
+                },
+            }
+        },
+        _ => Result::Err(argc_err("lambda")),
+    }
+}
+
+// Parameter lists: a proper or dotted list of symbols, or a lone symbol.
+fn check_params(m: &mut Machine, params: Val) -> Result<(), SErr> {
+    let mut cur = params;
+    loop {
+        match cur {
+            Val::Nil => { return Result::Ok(()); },
+            Val::Sym(_) => { return Result::Ok(()); },
+            Val::Pair(i) => {
+                match m.heap.car(i) {
+                    Val::Sym(_) => {},
+                    _ => { return Result::Err(form_err("lambda", "parameters must be symbols")); },
+                }
+                cur = m.heap.cdr(i);
+            },
+            _ => { return Result::Err(form_err("lambda", "malformed parameters")); },
+        }
+    }
+}
+
+// ------------------------------------------------------------ let family ---
+
+// Validate a bindings list and unzip it into (names, exprs), both in
+// REVERSE order — callers that evaluate front-to-back re-reverse.
+fn unzip_bindings(m: &mut Machine, bindings: Val, whose: &str) -> Result<(Val, Val), SErr> {
+    match m.heap.len_proper(bindings) {
+        Option::Some(_) => {},
+        Option::None => { return Result::Err(form_err(whose, "malformed bindings")); },
+    }
+    let mut names: Val = Val::Nil;
+    let mut exprs: Val = Val::Nil;
+    let mut cur = bindings;
+    loop {
+        match cur {
+            Val::Nil => { break; },
+            Val::Pair(p) => {
+                match m.heap.car(p) {
+                    Val::Pair(q) => {
+                        let name = m.heap.car(q);
+                        match name {
+                            Val::Sym(_) => {},
+                            _ => { return Result::Err(form_err(whose, "binding name must be a symbol")); },
+                        }
+                        let bval = one_arg(&m.heap, m.heap.cdr(q), whose)?;
+                        names = mcons(m, name, names);
+                        exprs = mcons(m, bval, exprs);
+                    },
+                    _ => { return Result::Err(form_err(whose, "malformed binding")); },
+                }
+                cur = m.heap.cdr(p);
+            },
+            _ => { return Result::Err(form_err(whose, "malformed bindings")); },
+        }
+    }
+    Result::Ok((names, exprs))
+}
+
+fn do_let(m: &mut Machine, args: Val) -> Result<bool, SErr> {
+    match args {
+        Val::Pair(i) => {
+            let first = m.heap.car(i);
+            let rest = m.heap.cdr(i);
+            match first {
+                Val::Sym(name) => {
+                    // (let name ((v e) …) body …) — the named let.
+                    match rest {
+                        Val::Pair(j) => {
+                            let bindings = m.heap.car(j);
+                            let body = m.heap.cdr(j);
+                            match body {
+                                Val::Nil => { return Result::Err(form_err("let", "empty body")); },
+                                _ => {},
+                            }
+                            let (names, exprs) = unzip_bindings(m, bindings, "let")?;
+                            named_let_start(m, name, names, exprs, body)
+                        },
+                        _ => Result::Err(argc_err("let")),
+                    }
+                },
+                _ => {
+                    match rest {
+                        Val::Nil => { return Result::Err(form_err("let", "empty body")); },
+                        _ => {},
+                    }
+                    let (names, exprs) = unzip_bindings(m, first, "let")?;
+                    let ordered = m.heap.rev_onto(exprs, Val::Nil);
+                    match ordered {
+                        Val::Nil => splice(m, rest, Val::Unspec),
+                        Val::Pair(p) => {
+                            m.konts.push(Kont::LetEval {
+                                names: names, exprs: m.heap.cdr(p), acc: Val::Nil,
+                                body: rest, oenv: m.env,
+                            });
+                            m.exp = m.heap.car(p);
+                            Result::Ok(true)
+                        },
+                        _ => Result::Err(form_err("let", "malformed bindings")),
+                    }
+                },
+            }
+        },
+        _ => Result::Err(argc_err("let")),
+    }
+}
+
+// Named let: bind `name` to a placeholder in fenv (so the closure can
+// close over itself), evaluate the inits in the *outer* environment, then
+// patch the placeholder with the closure and call it.
+fn named_let_start(m: &mut Machine, name: taddr, names: Val, exprs: Val, body: Val) -> Result<bool, SErr> {
+    let binding = mcons(m, Val::Sym(name), Val::Unspec);
+    let cell: taddr = match binding { Val::Pair(p) => p, _ => 0 };
+    let fframe = mcons(m, binding, Val::Nil);
+    let fenv = mcons(m, fframe, m.env);
+    let ordered = m.heap.rev_onto(exprs, Val::Nil);
+    match ordered {
+        Val::Nil => named_let_finish(m, names, Val::Nil, cell, body, fenv),
+        Val::Pair(p) => {
+            m.konts.push(Kont::NamedLetCall {
+                names: names, exprs: m.heap.cdr(p), acc: Val::Nil,
+                cell: cell, body: body, ienv: m.env, fenv: fenv,
+            });
+            m.exp = m.heap.car(p);
+            Result::Ok(true)
+        },
+        _ => Result::Err(form_err("let", "malformed bindings")),
+    }
+}
+
+// All inits known (acc reversed, names reversed — the reversals align):
+// close the knot and enter the body.
+fn named_let_finish(m: &mut Machine, names: Val, acc: Val, cell: taddr, body: Val, fenv: Val) -> Result<bool, SErr> {
+    let params = m.heap.rev_onto(names, Val::Nil);
+    let clo = m.heap.closure_new(params, body, fenv);
+    m.heap.set_cdr(cell, clo);
+    let f = frame_of(m, names, acc);
+    m.env = mcons(m, f, fenv);
+    splice(m, body, Val::Unspec)
+}
+
+fn do_let_star(m: &mut Machine, args: Val) -> Result<bool, SErr> {
+    match args {
+        Val::Pair(i) => {
+            let bindings = m.heap.car(i);
+            let body = m.heap.cdr(i);
+            match body {
+                Val::Nil => { return Result::Err(form_err("let*", "empty body")); },
+                _ => {},
+            }
+            let (names, exprs) = unzip_bindings(m, bindings, "let*")?;
+            let onames = m.heap.rev_onto(names, Val::Nil);
+            let oexprs = m.heap.rev_onto(exprs, Val::Nil);
+            // One fresh frame now; each binding is appended to it by
+            // LetStarBind as its value arrives — the sequential scope.
+            m.env = mcons(m, Val::Nil, m.env);
+            match oexprs {
+                Val::Nil => splice(m, body, Val::Unspec),
+                Val::Pair(p) => {
+                    let n0 = hcar(&m.heap, onames);
+                    let nm0: taddr = match n0 { Val::Sym(s) => s, _ => 0 };
+                    m.konts.push(Kont::LetStarBind {
+                        name: nm0,
+                        names: hcdr(&m.heap, onames), exprs: m.heap.cdr(p), body: body,
+                    });
+                    m.exp = m.heap.car(p);
+                    Result::Ok(true)
+                },
+                _ => Result::Err(form_err("let*", "malformed bindings")),
+            }
+        },
+        _ => Result::Err(argc_err("let*")),
+    }
+}
+
+fn do_letrec(m: &mut Machine, args: Val) -> Result<bool, SErr> {
+    match args {
+        Val::Pair(i) => {
+            let bindings = m.heap.car(i);
+            let body = m.heap.cdr(i);
+            match body {
+                Val::Nil => { return Result::Err(form_err("letrec", "empty body")); },
+                _ => {},
+            }
+            let (names, exprs) = unzip_bindings(m, bindings, "letrec")?;
+            // Tie every name BEFORE any init runs: a frame of fresh
+            // (name . unspecified) pairs, in the same (reversed) order as
+            // exprs, re-reversed together so the two stay aligned.
+            let mut f: Val = Val::Nil;
+            let mut pairs: Val = Val::Nil;
+            let mut cur = names;
+            loop {
+                match cur {
+                    Val::Nil => { break; },
+                    Val::Pair(p) => {
+                        let b = mcons(m, m.heap.car(p), Val::Unspec);
+                        f = mcons(m, b, f);
+                        pairs = mcons(m, b, pairs);
+                        cur = m.heap.cdr(p);
+                    },
+                    _ => { break; },
+                }
+            }
+            let fenv = mcons(m, f, m.env);
+            let oexprs = m.heap.rev_onto(exprs, Val::Nil);
+            match oexprs {
+                Val::Nil => {
+                    m.env = fenv;
+                    splice(m, body, Val::Unspec)
+                },
+                Val::Pair(p) => {
+                    m.konts.push(Kont::LetrecBind {
+                        bindings: pairs, exprs: m.heap.cdr(p), body: body, fenv: fenv,
+                    });
+                    m.exp = m.heap.car(p);
+                    m.env = fenv;
+                    Result::Ok(true)
+                },
+                _ => Result::Err(form_err("letrec", "malformed bindings")),
+            }
+        },
+        _ => Result::Err(argc_err("letrec")),
+    }
+}
+
+// ------------------------------------------------------------ cond/and/or ---
+
+fn do_cond(m: &mut Machine, args: Val) -> Result<bool, SErr> {
+    cond_clause(m, args)
+}
+
+// Inspect the next clause: rewrite m.exp directly when the test needs no
+// value-dependant dispatch, else push the frame that continues the cond.
+fn cond_clause(m: &mut Machine, clauses: Val) -> Result<bool, SErr> {
+    match clauses {
+        Val::Nil => { m.val = Val::Unspec; Result::Ok(false) },
+        Val::Pair(i) => {
+            let clause = m.heap.car(i);
+            let rest = m.heap.cdr(i);
+            match clause {
+                Val::Pair(c) => {
+                    let test = m.heap.car(c);
+                    let bodyf = m.heap.cdr(c);
+                    if named(&m.syms, test, "else") {
+                        match rest {
+                            Val::Nil => {},
+                            _ => { return Result::Err(form_err("cond", "else must be last")); },
+                        }
+                        return splice(m, bodyf, Val::Bool(true));
+                    }
+                    match bodyf {
+                        Val::Nil => {
+                            // (test) — its value is the answer when true.
+                            m.konts.push(Kont::CondNext { rest: rest, body: Val::Nil, env: m.env });
+                            m.exp = test;
+                            Result::Ok(true)
+                        },
+                        Val::Pair(b) => {
+                            if named(&m.syms, m.heap.car(b), "=>") {
+                                let recip = one_arg(&m.heap, m.heap.cdr(b), "cond =>")?;
+                                m.konts.push(Kont::CondRecv { rest: rest, expr: recip, env: m.env });
+                                m.exp = test;
+                                return Result::Ok(true);
+                            }
+                            m.konts.push(Kont::CondNext { rest: rest, body: bodyf, env: m.env });
+                            m.exp = test;
+                            Result::Ok(true)
+                        },
+                        _ => Result::Err(form_err("cond", "malformed clause")),
+                    }
+                },
+                _ => Result::Err(form_err("cond", "malformed clause")),
+            }
+        },
+        _ => Result::Err(form_err("cond", "malformed clauses")),
+    }
+}
+
+fn do_and(m: &mut Machine, args: Val) -> Result<bool, SErr> {
+    match args {
+        Val::Nil => { m.val = Val::Bool(true); Result::Ok(false) },
+        Val::Pair(i) => {
+            let e = m.heap.car(i);
+            match m.heap.cdr(i) {
+                Val::Nil => { m.exp = e; Result::Ok(true) },        // tail
+                rest => {
+                    m.konts.push(Kont::AndRest { rest: rest, env: m.env });
+                    m.exp = e;
+                    Result::Ok(true)
+                },
+            }
+        },
+        _ => Result::Err(form_err("and", "malformed")),
+    }
+}
+
+fn do_or(m: &mut Machine, args: Val) -> Result<bool, SErr> {
+    match args {
+        Val::Nil => { m.val = Val::Bool(false); Result::Ok(false) },
+        Val::Pair(i) => {
+            let e = m.heap.car(i);
+            match m.heap.cdr(i) {
+                Val::Nil => { m.exp = e; Result::Ok(true) },        // tail
+                rest => {
+                    m.konts.push(Kont::OrRest { rest: rest, env: m.env });
+                    m.exp = e;
+                    Result::Ok(true)
+                },
+            }
+        },
+        _ => Result::Err(form_err("or", "malformed")),
+    }
+}
+
+fn do_when(m: &mut Machine, args: Val, sense: bool) -> Result<bool, SErr> {
+    match args {
+        Val::Pair(i) => {
+            let test = m.heap.car(i);
+            let body = m.heap.cdr(i);
+            match body {
+                Val::Nil => Result::Err(argc_err("when")),
+                _ => {
+                    m.konts.push(Kont::WhenRest { body: body, env: m.env, sense: sense });
+                    m.exp = test;
+                    Result::Ok(true)
+                },
+            }
+        },
+        _ => Result::Err(argc_err("when")),
+    }
+}
+
+// ------------------------------------------------------------ quasiquote ---
+
+// The quasiquote expander: Trust-recursive over template structure. The
+// template's depth is the reader's depth, fenced at 3^9, so the native
+// stack admits it — the reader's fence doing double duty.
+fn quasi(m: &mut Machine, t: Val, env: Val, depth: t27) -> Result<Val, SErr> {
+    match t {
+        Val::Pair(i) => {
+            let a = m.heap.car(i);
+            let d = m.heap.cdr(i);
+            match a {
+                Val::Sym(_) => {
+                    if named(&m.syms, a, "unquote") {
+                        let x = one_arg(&m.heap, d, "unquote")?;
+                        if depth == 1 {
+                            return eval_value(m, x, env);
+                        }
+                        let inner = quasi(m, x, env, depth - 1)?;
+                        let tail = mcons(m, inner, Val::Nil);
+                        return Result::Ok(mcons(m, a, tail));
+                    }
+                    if named(&m.syms, a, "quasiquote") {
+                        let x = one_arg(&m.heap, d, "quasiquote")?;
+                        let inner = quasi(m, x, env, depth + 1)?;
+                        let tail = mcons(m, inner, Val::Nil);
+                        return Result::Ok(mcons(m, a, tail));
+                    }
+                    if named(&m.syms, a, "unquote-splicing") {
+                        if depth == 1 {
+                            return Result::Err(form_err("unquote-splicing", "needs a list position"));
+                        }
+                        let nd = quasi_list(m, d, env, depth)?;
+                        return Result::Ok(mcons(m, a, nd));
+                    }
+                    let na = quasi(m, a, env, depth)?;
+                    let nd = quasi_list(m, d, env, depth)?;
+                    Result::Ok(mcons(m, na, nd))
+                },
+                _ => {
+                    let na = quasi(m, a, env, depth)?;
+                    let nd = quasi_list(m, d, env, depth)?;
+                    Result::Ok(mcons(m, na, nd))
+                },
+            }
+        },
+        Val::Vec(i) => {
+            // `#(…)` — expand a list spelling of the elements, then pack
+            // the result into a fresh vector.
+            let n = m.heap.vec_len(i);
+            let mut lst: Val = Val::Nil;
+            let mut k = n;
+            while k > 0 {
+                k -= 1;
+                lst = mcons(m, m.heap.vec_at(i, k), lst);
+            }
+            let built = quasi(m, lst, env, depth)?;
+            match m.heap.len_proper(built) {
+                Option::Some(len) => {
+                    let nv = m.heap.vec_new(len, Val::Unspec);
+                    match nv {
+                        Val::Vec(vi) => {
+                            let mut cur = built;
+                            let mut j: taddr = 0;
+                            loop {
+                                match cur {
+                                    Val::Pair(p) => {
+                                        m.heap.vec_set(vi, j, m.heap.car(p));
+                                        cur = m.heap.cdr(p);
+                                        j += 1;
+                                    },
+                                    _ => { break; },
+                                }
+                            }
+                            Result::Ok(nv)
+                        },
+                        _ => Result::Err(err("quasiquote: vector")),
+                    }
+                },
+                Option::None => Result::Err(err("quasiquote: vector")),
+            }
+        },
+        _ => Result::Ok(t),
+    }
+}
+
+// quasi for a list spine (the cdr side): splicing and dotted unquotes fire
+// at this level.
+fn quasi_list(m: &mut Machine, t: Val, env: Val, depth: t27) -> Result<Val, SErr> {
+    match t {
+        Val::Pair(i) => {
+            let a = m.heap.car(i);
+            let d = m.heap.cdr(i);
+            match a {
+                Val::Sym(_) => {
+                    // (x . ,y) reached here as the spine (unquote y): a
+                    // dotted unquote is the whole tail's value.
+                    if depth == 1 && named(&m.syms, a, "unquote") {
+                        let x = one_arg(&m.heap, d, "unquote")?;
+                        return eval_value(m, x, env);
+                    }
+                    if depth == 1 && named(&m.syms, a, "unquote-splicing") {
+                        return Result::Err(form_err("unquote-splicing", "needs a list position"));
+                    }
+                    let na = quasi(m, a, env, depth)?;
+                    let nd = quasi_list(m, d, env, depth)?;
+                    Result::Ok(mcons(m, na, nd))
+                },
+                Val::Pair(p) => {
+                    match m.heap.car(p) {
+                        Val::Sym(s0) => {
+                            let spliced = {
+                                let nm = m.syms.name(s0);
+                                nm.same("unquote-splicing")
+                            };
+                            if depth == 1 && spliced {
+                                let x = one_arg(&m.heap, m.heap.cdr(p), "unquote-splicing")?;
+                                let v = eval_value(m, x, env)?;
+                                match v {
+                                    Val::Nil => { return quasi_list(m, d, env, depth); },
+                                    Val::Pair(_) => {
+                                        let nd = quasi_list(m, d, env, depth)?;
+                                        return Result::Ok(append2(m, v, nd));
+                                    },
+                                    _ => { return Result::Err(form_err("unquote-splicing", "needs a list")); },
+                                }
+                            }
+                            let na = quasi(m, a, env, depth)?;
+                            let nd = quasi_list(m, d, env, depth)?;
+                            Result::Ok(mcons(m, na, nd))
+                        },
+                        _ => {
+                            let na = quasi(m, a, env, depth)?;
+                            let nd = quasi_list(m, d, env, depth)?;
+                            Result::Ok(mcons(m, na, nd))
+                        },
+                    }
+                },
+                _ => {
+                    // Atoms expand to themselves (quasi's `_` arm); a Vec
+                    // element descends into the vector template — `(1 #(2 ,x))
+                    // must answer (1 #(2 3)).
+                    let na = quasi(m, a, env, depth)?;
+                    let nd = quasi_list(m, d, env, depth)?;
+                    Result::Ok(mcons(m, na, nd))
+                },
+            }
+        },
+        Val::Vec(_) => quasi(m, t, env, depth),
+        _ => Result::Ok(t),
+    }
+}
+
+// (append x y) where sharing x's elements is safe: copy x's spine onto y.
+fn append2(m: &mut Machine, x: Val, y: Val) -> Val {
+    let rev = m.heap.rev_onto(x, Val::Nil);
+    m.heap.rev_onto(rev, y)
+}
+
+// ------------------------------------------------------------ environments ---
+
+// An environment is a list of frames; a frame is a list of (name . value)
+// pairs. Lookup walks frames innermost-first.
+pub fn env_lookup(m: &Machine, env: Val, id: taddr) -> Option<Val> {
+    let mut cur = env;
+    loop {
+        match cur {
+            Val::Nil => { return Option::None; },
+            Val::Pair(f) => {
+                let mut bcur = m.heap.car(f);
+                loop {
+                    match bcur {
+                        Val::Nil => { break; },
+                        Val::Pair(b) => {
+                            match m.heap.car(b) {
+                                Val::Pair(pair) => {
+                                    match m.heap.car(pair) {
+                                        Val::Sym(s) => {
+                                            if s == id {
+                                                return Option::Some(m.heap.cdr(pair));
+                                            }
+                                        },
+                                        _ => {},
+                                    }
+                                },
+                                _ => {},
+                            }
+                            bcur = m.heap.cdr(b);
+                        },
+                        _ => { break; },
+                    }
+                }
+                cur = m.heap.cdr(f);
+            },
+            _ => { return Option::None; },
+        }
+    }
+}
+
+// Search the whole chain; a found binding updates in place (set!'s rule).
+fn env_update(m: &mut Machine, env: Val, id: taddr, v: Val) -> bool {
+    let mut cur = env;
+    loop {
+        match cur {
+            Val::Nil => { return false; },
+            Val::Pair(f) => {
+                let mut bcur = m.heap.car(f);
+                loop {
+                    match bcur {
+                        Val::Nil => { break; },
+                        Val::Pair(b) => {
+                            match m.heap.car(b) {
+                                Val::Pair(pair) => {
+                                    match m.heap.car(pair) {
+                                        Val::Sym(s) => {
+                                            if s == id {
+                                                m.heap.set_cdr(pair, v);
+                                                return true;
+                                            }
+                                        },
+                                        _ => {},
+                                    }
+                                },
+                                _ => {},
+                            }
+                            bcur = m.heap.cdr(b);
+                        },
+                        _ => { break; },
+                    }
+                }
+                cur = m.heap.cdr(f);
+            },
+            _ => { return false; },
+        }
+    }
+}
+
+// define: into the FIRST frame — the current one (a lambda's define is
+// local; a top-level one is global, because genv's chain starts with its
+// own frame). Redefinition updates in place.
+pub fn env_define(m: &mut Machine, id: taddr, v: Val) {
+    match m.env {
+        Val::Pair(f) => {
+            let mut bcur = m.heap.car(f);
+            loop {
+                match bcur {
+                    Val::Nil => { break; },
+                    Val::Pair(b) => {
+                        match m.heap.car(b) {
+                            Val::Pair(pair) => {
+                                match m.heap.car(pair) {
+                                    Val::Sym(s) => {
+                                        if s == id {
+                                            m.heap.set_cdr(pair, v);
+                                            return;
+                                        }
+                                    },
+                                    _ => {},
+                                }
+                            },
+                            _ => {},
+                        }
+                        bcur = m.heap.cdr(b);
+                    },
+                    _ => { break; },
+                }
+            }
+            let binding = mcons(m, Val::Sym(id), v);
+            let old = m.heap.car(f);
+            let extended = mcons(m, binding, old);
+            m.heap.set_car(f, extended);
+        },
+        _ => {
+            // No frame at all (a genv that is still empty): make one and
+            // claim it as the global chain.
+            let binding = mcons(m, Val::Sym(id), v);
+            let frame = mcons(m, binding, Val::Nil);
+            m.env = mcons(m, frame, Val::Nil);
+            match m.genv {
+                Val::Nil => { m.genv = m.env; },
+                _ => {},
+            }
+        },
+    }
+}
+
+// Build one frame (an alist) from names and values walked in parallel; both
+// arrive reversed from the same source list, so the reversals align.
+fn frame_of(m: &mut Machine, names: Val, vals: Val) -> Val {
+    let mut f: Val = Val::Nil;
+    let mut ns = names;
+    let mut vs = vals;
+    loop {
+        match ns {
+            Val::Pair(i) => {
+                match vs {
+                    Val::Pair(j) => {
+                        let b = mcons(m, m.heap.car(i), m.heap.car(j));
+                        f = mcons(m, b, f);
+                        vs = m.heap.cdr(j);
+                    },
+                    _ => {},
+                }
+                ns = m.heap.cdr(i);
+            },
+            _ => { break; },
+        }
+    }
+    f
+}
+
+// ----------------------------------------------------------- continuations ---
+
+// Fire frames until one asks for a new expression (Ok(true)) or none
+// remain (Ok(false) — halt, m.val is the answer). A frame that turns
+// m.val into another value just keeps the loop turning.
+fn step_konts(m: &mut Machine) -> Result<bool, SErr> {
+    loop {
+        let frame = match m.konts.pop() {
+            Option::Some(k) => k,
+            Option::None => { return Result::Ok(false); },
+        };
+        match frame {
+            Kont::If { conseq, alt, env } => {
+                m.env = env;
+                if m.heap.true_of(m.val) {
+                    m.exp = conseq;
+                } else {
+                    m.exp = alt;
+                }
+                return Result::Ok(true);
+            },
+            Kont::Seq { rest, env } => {
+                // car(rest) is next; chain while more remain.
+                match rest {
+                    Val::Pair(i) => {
+                        let more = m.heap.cdr(i);
+                        match more {
+                            Val::Pair(_) => {
+                                m.konts.push(Kont::Seq { rest: more, env: env });
+                            },
+                            Val::Nil => {},
+                            _ => { return Result::Err(form_err("begin", "malformed body")); },
+                        }
+                        m.exp = m.heap.car(i);
+                        m.env = env;
+                        return Result::Ok(true);
+                    },
+                    _ => { return Result::Err(form_err("begin", "malformed body")); },
+                }
+            },
+            Kont::DefName { sym, env } => {
+                m.env = env;
+                env_define(m, sym, m.val);
+                m.val = Val::Unspec;
+            },
+            Kont::SetName { sym, env } => {
+                m.env = env;
+                if env_update(m, m.env, sym, m.val) {
+                    m.val = Val::Unspec;
+                } else {
+                    let mut msg = "set!: unbound symbol: ".to_string();
+                    msg.push_str(m.syms.name(sym));
+                    return Result::Err(err_of(msg));
+                }
+            },
+            Kont::CallOp { args, env } => {
+                let op = m.val;
+                match args {
+                    Val::Nil => {
+                        if apply_result(m, op, Val::Nil)? { return Result::Ok(true); }
+                    },
+                    Val::Pair(i) => {
+                        m.konts.push(Kont::CallArg { op: op, rest: m.heap.cdr(i), acc: Val::Nil, env: env });
+                        m.exp = m.heap.car(i);
+                        m.env = env;
+                        return Result::Ok(true);
+                    },
+                    _ => { return Result::Err(err("apply: argument list is improper")); },
+                }
+            },
+            Kont::CallArg { op, rest, acc, env } => {
+                let acc2 = mcons(m, m.val, acc);
+                match rest {
+                    Val::Nil => {
+                        let ordered = m.heap.rev_onto(acc2, Val::Nil);
+                        if apply_result(m, op, ordered)? { return Result::Ok(true); }
+                    },
+                    Val::Pair(i) => {
+                        m.konts.push(Kont::CallArg { op: op, rest: m.heap.cdr(i), acc: acc2, env: env });
+                        m.exp = m.heap.car(i);
+                        m.env = env;
+                        return Result::Ok(true);
+                    },
+                    _ => { return Result::Err(err("apply: argument list is improper")); },
+                }
+            },
+            Kont::CondNext { rest, body, env } => {
+                if m.heap.true_of(m.val) {
+                    match body {
+                        Val::Nil => {},                  // (test): the value answers
+                        _ => {
+                            m.env = env;
+                            if splice(m, body, Val::Bool(true))? { return Result::Ok(true); }
+                        },
+                    }
+                } else {
+                    m.env = env;
+                    if cond_clause(m, rest)? { return Result::Ok(true); }
+                }
+            },
+            Kont::CondRecv { rest, expr, env } => {
+                if m.heap.true_of(m.val) {
+                    let testval = m.val;
+                    let recip = eval_value(m, expr, env)?;
+                    let onearg = mcons(m, testval, Val::Nil);
+                    if apply_result(m, recip, onearg)? { return Result::Ok(true); }
+                } else {
+                    m.env = env;
+                    if cond_clause(m, rest)? { return Result::Ok(true); }
+                }
+            },
+            Kont::AndRest { rest, env } => {
+                if m.heap.true_of(m.val) {
+                    m.env = env;
+                    if do_and(m, rest)? { return Result::Ok(true); }
+                }
+                // false: m.val is the answer — keep firing.
+            },
+            Kont::OrRest { rest, env } => {
+                if !m.heap.true_of(m.val) {
+                    m.env = env;
+                    if do_or(m, rest)? { return Result::Ok(true); }
+                }
+                // true: m.val itself is the answer — keep firing.
+            },
+            Kont::WhenRest { body, env, sense } => {
+                if m.heap.true_of(m.val) == sense {
+                    m.env = env;
+                    if splice(m, body, Val::Unspec)? { return Result::Ok(true); }
+                } else {
+                    m.val = Val::Unspec;
+                }
+            },
+            Kont::LetEval { names, exprs, acc, body, oenv } => {
+                let acc2 = mcons(m, m.val, acc);
+                match exprs {
+                    Val::Nil => {
+                        let f = frame_of(m, names, acc2);
+                        m.env = mcons(m, f, oenv);
+                        if splice(m, body, Val::Unspec)? { return Result::Ok(true); }
+                    },
+                    Val::Pair(i) => {
+                        m.konts.push(Kont::LetEval {
+                            names: names, exprs: m.heap.cdr(i), acc: acc2, body: body, oenv: oenv,
+                        });
+                        m.exp = m.heap.car(i);
+                        m.env = oenv;
+                        return Result::Ok(true);
+                    },
+                    _ => { return Result::Err(form_err("let", "malformed bindings")); },
+                }
+            },
+            Kont::LetStarBind { name, names, exprs, body } => {
+                env_define(m, name, m.val);
+                match exprs {
+                    Val::Nil => {
+                        if splice(m, body, Val::Unspec)? { return Result::Ok(true); }
+                    },
+                    Val::Pair(i) => {
+                        let n1 = hcar(&m.heap, names);
+                        let nm1: taddr = match n1 { Val::Sym(s) => s, _ => 0 };
+                        m.konts.push(Kont::LetStarBind {
+                            name: nm1,
+                            names: hcdr(&m.heap, names), exprs: m.heap.cdr(i), body: body,
+                        });
+                        m.exp = m.heap.car(i);
+                        return Result::Ok(true);
+                    },
+                    _ => { return Result::Err(form_err("let*", "malformed bindings")); },
+                }
+            },
+            Kont::LetrecBind { bindings, exprs, body, fenv } => {
+                match bindings {
+                    Val::Pair(b) => {
+                        match m.heap.car(b) {
+                            Val::Pair(pair) => {
+                                m.heap.set_cdr(pair, m.val);
+                            },
+                            _ => { return Result::Err(form_err("letrec", "malformed binding")); },
+                        }
+                    },
+                    _ => { return Result::Err(form_err("letrec", "malformed bindings")); },
+                }
+                match exprs {
+                    Val::Nil => {
+                        m.env = fenv;
+                        if splice(m, body, Val::Unspec)? { return Result::Ok(true); }
+                    },
+                    Val::Pair(i) => {
+                        m.konts.push(Kont::LetrecBind {
+                            bindings: hcdr(&m.heap, bindings), exprs: m.heap.cdr(i),
+                            body: body, fenv: fenv,
+                        });
+                        m.exp = m.heap.car(i);
+                        m.env = fenv;
+                        return Result::Ok(true);
+                    },
+                    _ => { return Result::Err(form_err("letrec", "malformed bindings")); },
+                }
+            },
+            Kont::NamedLetCall { names, exprs, acc, cell, body, ienv, fenv } => {
+                let acc2 = mcons(m, m.val, acc);
+                match exprs {
+                    Val::Nil => {
+                        if named_let_finish(m, names, acc2, cell, body, fenv)? {
+                            return Result::Ok(true);
+                        }
+                    },
+                    Val::Pair(i) => {
+                        m.konts.push(Kont::NamedLetCall {
+                            names: names, exprs: m.heap.cdr(i), acc: acc2,
+                            cell: cell, body: body, ienv: ienv, fenv: fenv,
+                        });
+                        m.exp = m.heap.car(i);
+                        m.env = ienv;
+                        return Result::Ok(true);
+                    },
+                    _ => { return Result::Err(form_err("let", "malformed bindings")); },
+                }
+            },
+        }
+    }
+}
+
+// --------------------------------------------------------------- apply ---
+
+// The meeting point of closures, primitives, continuations and the control
+// trio. Ok(true) = a new expression is installed; Ok(false) = m.val holds
+// the answer and the caller keeps firing frames.
+fn apply_result(m: &mut Machine, f: Val, args: Val) -> Result<bool, SErr> {
+    match f {
+        Val::Closure(c) => {
+            let params = m.heap.closure_params(c);
+            let body = m.heap.closure_body(c);
+            let base = m.heap.closure_env(c);
+            let f2 = bind_params(m, params, args)?;
+            m.env = mcons(m, f2, base);
+            splice(m, body, Val::Unspec)
+        },
+        Val::Prim(i) => {
+            if i == ID_APPLY || i == ID_EVAL || i == ID_CALLCC {
+                return apply_control(m, i, args);
+            }
+            prim::call(m, i, args)?;
+            Result::Ok(false)
+        },
+        Val::Cont(k) => {
+            let v = one_arg(&m.heap, args, "continuation")?;
+            m.install(k);
+            m.val = v;
+            Result::Ok(false)
+        },
+        _ => Result::Err(err("apply: not a procedure")),
+    }
+}
+
+// apply / eval / call/cc: the three primitives that are control operations
+// (prim.tr binds their names; only eval.tr can move their registers).
+fn apply_control(m: &mut Machine, i: taddr, args: Val) -> Result<bool, SErr> {
+    if i == ID_CALLCC {
+        let f = one_arg(&m.heap, args, "call/cc")?;
+        match f {
+            Val::Closure(_) => {},
+            Val::Prim(_) => {},
+            Val::Cont(_) => {},
+            _ => { return Result::Err(form_err("call/cc", "needs a procedure")); },
+        }
+        let k = m.capture();
+        let onearg = mcons(m, Val::Cont(k), Val::Nil);
+        return apply_result(m, f, onearg);
+    }
+    if i == ID_APPLY {
+        // (apply f a … z) with z a list; spliced argument order preserved.
+        return apply_apply(m, args);
+    }
+    // eval: (eval form) or (eval form environment-specifier). The only
+    // specifier is the interaction environment — this machine's own
+    // global chain, an ordinary value here.
+    match args {
+        Val::Pair(p) => {
+            let form = m.heap.car(p);
+            match m.heap.cdr(p) {
+                Val::Nil => {
+                    let v = eval_value(m, form, m.genv)?;
+                    m.val = v;
+                    Result::Ok(false)
+                },
+                Val::Pair(q) => {
+                    match m.heap.cdr(q) {
+                        Val::Nil => {
+                            let es = m.heap.car(q);
+                            match es {
+                                Val::Nil => {},
+                                Val::Pair(_) => {},
+                                _ => { return Result::Err(form_err("eval", "bad environment specifier")); },
+                            }
+                            let v = eval_value(m, form, es)?;
+                            m.val = v;
+                            Result::Ok(false)
+                        },
+                        _ => Result::Err(argc_err("eval")),
+                    }
+                },
+                _ => Result::Err(argc_err("eval")),
+            }
+        },
+        _ => Result::Err(argc_err("eval")),
+    }
+}
+
+// apply's own dispatch: fixed arguments, then a final list spliced in.
+fn apply_apply(m: &mut Machine, args: Val) -> Result<bool, SErr> {
+    match args {
+        Val::Pair(p) => {
+            let f = m.heap.car(p);
+            let mut fixed: Val = Val::Nil;
+            let mut cur = m.heap.cdr(p);
+            loop {
+                match cur {
+                    Val::Pair(q) => {
+                        let tailish = m.heap.cdr(q);
+                        match tailish {
+                            Val::Nil => {
+                                let last = m.heap.car(q);
+                                match m.heap.len_proper(last) {
+                                    Option::Some(_) => {},
+                                    Option::None => {
+                                        return Result::Err(form_err("apply", "last argument must be a list"));
+                                    },
+                                }
+                                let prefix = m.heap.rev_onto(fixed, Val::Nil);
+                                let all = append2(m, prefix, last);
+                                return apply_result(m, f, all);
+                            },
+                            Val::Pair(_) => {
+                                fixed = mcons(m, m.heap.car(q), fixed);
+                                cur = tailish;
+                            },
+                            _ => {
+                                return Result::Err(form_err("apply", "argument list is improper"));
+                            },
+                        }
+                    },
+                    _ => { return Result::Err(argc_err("apply")); },
+                }
+            }
+        },
+        _ => Result::Err(argc_err("apply")),
+    }
+}
+
+// Bind arguments to a params list, building the frame fresh. A lone symbol
+// takes the whole list; a dotted tail takes what remains.
+fn bind_params(m: &mut Machine, params: Val, args: Val) -> Result<Val, SErr> {
+    let mut f: Val = Val::Nil;
+    let mut ps = params;
+    let mut av = args;
+    loop {
+        match ps {
+            Val::Nil => {
+                match av {
+                    Val::Nil => { return Result::Ok(f); },
+                    _ => { return Result::Err(err("apply: too many arguments")); },
+                }
+            },
+            Val::Sym(id) => {
+                let b = mcons(m, Val::Sym(id), av);
+                f = mcons(m, b, f);
+                return Result::Ok(f);
+            },
+            Val::Pair(i) => {
+                let name = m.heap.car(i);
+                match av {
+                    Val::Pair(j) => {
+                        let b = mcons(m, name, m.heap.car(j));
+                        f = mcons(m, b, f);
+                        av = m.heap.cdr(j);
+                        ps = m.heap.cdr(i);
+                    },
+                    _ => { return Result::Err(err("apply: too few arguments")); },
+                }
+            },
+            _ => { return Result::Err(err("apply: malformed parameters")); },
+        }
+    }
+}

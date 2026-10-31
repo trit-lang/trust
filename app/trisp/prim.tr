@@ -1,0 +1,1565 @@
+// prim.tr — the native primitives: everything Scheme needs that has to
+// touch the machine, the heap, or the port.
+//
+// Primitives are values (`Val::Prim(id)`) bound in the global frame by
+// `install`. Three of them — `apply`, `eval`, `call/cc` — are bound here
+// but *implemented* in eval.tr, because they move the machine's own
+// registers; this file's `call` never sees their ids.
+//
+// What is decided here:
+//
+// - **Errors are values with the operation's name** ("car: not a pair"),
+//   raised eagerly as SErr — the machine has no unwinding, and eval.tr's
+//   spine carries them up.
+// - **Arithmetic is checked t27.** Overflow is "integer overflow", never a
+//   halt. `/` and inexact numbers do not exist: there is no floating point
+//   on this machine (json's header made the same honesty choice), so `/` on
+//   two integers is an error unless the division is exact — use `quotient`,
+//   `remainder`, `modulo` for the three honest rounding modes.
+// - **`quotient`/`remainder` truncate, `modulo` floors.** The machine's
+//   own `/` rounds to *nearest*, so truncation is a correction step (the
+//   comment at `tdiv`); flooring is the prelude's `floor_div`/`floor_mod`,
+//   which exist for exactly this sign hazard (Ch. 1 §4).
+// - **I/O is the port**, always: there is one input stream and one output
+//   stream on this machine. R5RS's optional port arguments are accepted
+//   nowhere — `(display x port)` is an arity error that says so.
+// - **Strings are immutable once published** (val.tr), so there is no
+//   `string-set!` here; `make-string`/`string-copy` build fresh cells.
+
+use err::SErr;
+use err::err;
+use err::err_of;
+use err::push_int;
+use gc::mcons;
+use gc::mstr;
+use machine::Machine;
+use read::number_token;
+use read::read_datum;
+use val::Heap;
+use val::Val;
+use val::equal;
+use val::eq;
+use val::write_to;
+
+// The control trio's ids (eval.tr imports them).
+pub const ID_APPLY: taddr = 133;
+pub const ID_EVAL: taddr = 134;
+pub const ID_CALLCC: taddr = 135;
+
+const ID_CONS: taddr = 0;
+const ID_CAR: taddr = 1;
+const ID_CDR: taddr = 2;
+const ID_SET_CAR: taddr = 3;
+const ID_SET_CDR: taddr = 4;
+const ID_PAIRP: taddr = 5;
+// 6..33: the c[ad]+r compositions, listed with install.
+const ID_CAAR: taddr = 6;
+const ID_NULLP: taddr = 34;
+const ID_LISTP: taddr = 35;
+const ID_LIST: taddr = 36;
+const ID_LENGTH: taddr = 37;
+const ID_APPEND: taddr = 38;
+const ID_REVERSE: taddr = 39;
+const ID_LIST_TAIL: taddr = 40;
+const ID_LIST_REF: taddr = 41;
+const ID_MEMQ: taddr = 42;
+const ID_MEMV: taddr = 43;
+const ID_MEMBER: taddr = 44;
+const ID_ASSQ: taddr = 45;
+const ID_ASSV: taddr = 46;
+const ID_ASSOC: taddr = 47;
+const ID_EQP: taddr = 48;
+const ID_EQVP: taddr = 49;
+const ID_EQUALP: taddr = 50;
+const ID_SYMBOLP: taddr = 51;
+const ID_SYM2STR: taddr = 52;
+const ID_STR2SYM: taddr = 53;
+const ID_NUMBERP: taddr = 54;
+const ID_INTEGERP: taddr = 55;
+const ID_EXACTP: taddr = 56;
+const ID_INEXACTP: taddr = 57;
+const ID_ADD: taddr = 58;
+const ID_SUB: taddr = 59;
+const ID_MUL: taddr = 60;
+const ID_DIV: taddr = 61;
+const ID_QUOTIENT: taddr = 62;
+const ID_REMAINDER: taddr = 63;
+const ID_MODULO: taddr = 64;
+const ID_NUMEQ: taddr = 65;
+const ID_LT: taddr = 66;
+const ID_GT: taddr = 67;
+const ID_LE: taddr = 68;
+const ID_GE: taddr = 69;
+const ID_MAX: taddr = 70;
+const ID_MIN: taddr = 71;
+const ID_NUM2STR: taddr = 72;
+const ID_STR2NUM: taddr = 73;
+const ID_CHARP: taddr = 74;
+const ID_CHAREQ: taddr = 75;
+const ID_CHARLT: taddr = 76;
+const ID_CHARGT: taddr = 77;
+const ID_CHARLE: taddr = 78;
+const ID_CHARGE: taddr = 79;
+const ID_CHARCIEQ: taddr = 80;
+const ID_CHARCILT: taddr = 81;
+const ID_CHARCIGT: taddr = 82;
+const ID_CHARCILE: taddr = 83;
+const ID_CHARCIGE: taddr = 84;
+const ID_CHARALPHAP: taddr = 85;
+const ID_CHARNUMP: taddr = 86;
+const ID_CHARWSP: taddr = 87;
+const ID_CHARUPP: taddr = 88;
+const ID_CHARLOWP: taddr = 89;
+const ID_CHARUP: taddr = 90;
+const ID_CHARDOWN: taddr = 91;
+const ID_CHAR2INT: taddr = 92;
+const ID_INT2CHAR: taddr = 93;
+const ID_BOOLEANP: taddr = 94;
+const ID_STRINGP: taddr = 95;
+const ID_MAKE_STRING: taddr = 96;
+const ID_STRING_LEN: taddr = 97;
+const ID_STRING_REF: taddr = 98;
+const ID_STRING_APPEND: taddr = 99;
+const ID_SUBSTRING: taddr = 100;
+const ID_STRING_COPY: taddr = 101;
+const ID_STR2LIST: taddr = 102;
+const ID_LIST2STR: taddr = 103;
+const ID_STRINGEQ: taddr = 104;
+const ID_STRINGLT: taddr = 105;
+const ID_STRINGGT: taddr = 106;
+const ID_STRINGCIEQ: taddr = 107;
+const ID_STRINGCILT: taddr = 108;
+const ID_STRINGCIGT: taddr = 109;
+const ID_VECTORP: taddr = 110;
+const ID_MAKE_VECTOR: taddr = 111;
+const ID_VECTOR: taddr = 112;
+const ID_VECTOR_LEN: taddr = 113;
+const ID_VECTOR_REF: taddr = 114;
+const ID_VECTOR_SET: taddr = 115;
+const ID_VEC2LIST: taddr = 116;
+const ID_LIST2VEC: taddr = 117;
+const ID_VECTOR_FILL: taddr = 118;
+const ID_PROCEDUREP: taddr = 119;
+const ID_DISPLAY: taddr = 120;
+const ID_WRITE: taddr = 121;
+const ID_NEWLINE: taddr = 122;
+const ID_READ: taddr = 123;
+const ID_WRITE_CHAR: taddr = 124;
+const ID_EOFP: taddr = 125;
+const ID_CHARREADY: taddr = 126;
+const ID_INTERACTION_ENV: taddr = 127;
+const ID_ERROR: taddr = 128;
+const ID_QUIT: taddr = 129;
+const ID_EXIT: taddr = 130;
+const ID_GC: taddr = 131;
+const ID_GC_STATS: taddr = 132;
+
+// ------------------------------------------------------------- install ---
+
+fn bind(m: &mut Machine, f: Val, name: &str, id: taddr) -> Val {
+    let s = m.syms.intern_str(name);
+    let b = mcons(m, Val::Sym(s), Val::Prim(id));
+    mcons(m, b, f)
+}
+
+// The global environment's first frame. Control-trio names bound here are
+// dispatched by eval.tr.
+pub fn install(m: &mut Machine) {
+    let mut f: Val = Val::Nil;
+    f = bind(m, f, "cons", ID_CONS);
+    f = bind(m, f, "car", ID_CAR);
+    f = bind(m, f, "cdr", ID_CDR);
+    f = bind(m, f, "set-car!", ID_SET_CAR);
+    f = bind(m, f, "set-cdr!", ID_SET_CDR);
+    f = bind(m, f, "pair?", ID_PAIRP);
+    // The compositions, contiguous from ID_CAAR.
+    let mut names: Vec<&str> = Vec::new();
+    names.push("caar"); names.push("cadr"); names.push("cdar"); names.push("cddr");
+    names.push("caaar"); names.push("caadr"); names.push("cadar"); names.push("caddr");
+    names.push("cdaar"); names.push("cdadr"); names.push("cddar"); names.push("cdddr");
+    names.push("caaaar"); names.push("caaadr"); names.push("caadar"); names.push("caaddr");
+    names.push("cadaar"); names.push("cadadr"); names.push("caddar"); names.push("cadddr");
+    names.push("cdaaar"); names.push("cdaadr"); names.push("cdadar"); names.push("cdaddr");
+    names.push("cddaar"); names.push("cddadr"); names.push("cdddar"); names.push("cddddr");
+    let mut i: taddr = 0;
+    while i < names.len() {
+        f = bind(m, f, names[i], ID_CAAR + i);
+        i += 1;
+    }
+    f = bind(m, f, "null?", ID_NULLP);
+    f = bind(m, f, "list?", ID_LISTP);
+    f = bind(m, f, "list", ID_LIST);
+    f = bind(m, f, "length", ID_LENGTH);
+    f = bind(m, f, "append", ID_APPEND);
+    f = bind(m, f, "reverse", ID_REVERSE);
+    f = bind(m, f, "list-tail", ID_LIST_TAIL);
+    f = bind(m, f, "list-ref", ID_LIST_REF);
+    f = bind(m, f, "memq", ID_MEMQ);
+    f = bind(m, f, "memv", ID_MEMV);
+    f = bind(m, f, "member", ID_MEMBER);
+    f = bind(m, f, "assq", ID_ASSQ);
+    f = bind(m, f, "assv", ID_ASSV);
+    f = bind(m, f, "assoc", ID_ASSOC);
+    f = bind(m, f, "eq?", ID_EQP);
+    f = bind(m, f, "eqv?", ID_EQVP);
+    f = bind(m, f, "equal?", ID_EQUALP);
+    f = bind(m, f, "symbol?", ID_SYMBOLP);
+    f = bind(m, f, "symbol->string", ID_SYM2STR);
+    f = bind(m, f, "string->symbol", ID_STR2SYM);
+    f = bind(m, f, "number?", ID_NUMBERP);
+    f = bind(m, f, "integer?", ID_INTEGERP);
+    f = bind(m, f, "exact?", ID_EXACTP);
+    f = bind(m, f, "inexact?", ID_INEXACTP);
+    f = bind(m, f, "+", ID_ADD);
+    f = bind(m, f, "-", ID_SUB);
+    f = bind(m, f, "*", ID_MUL);
+    f = bind(m, f, "/", ID_DIV);
+    f = bind(m, f, "quotient", ID_QUOTIENT);
+    f = bind(m, f, "remainder", ID_REMAINDER);
+    f = bind(m, f, "modulo", ID_MODULO);
+    f = bind(m, f, "=", ID_NUMEQ);
+    f = bind(m, f, "<", ID_LT);
+    f = bind(m, f, ">", ID_GT);
+    f = bind(m, f, "<=", ID_LE);
+    f = bind(m, f, ">=", ID_GE);
+    f = bind(m, f, "max", ID_MAX);
+    f = bind(m, f, "min", ID_MIN);
+    f = bind(m, f, "number->string", ID_NUM2STR);
+    f = bind(m, f, "string->number", ID_STR2NUM);
+    f = bind(m, f, "char?", ID_CHARP);
+    f = bind(m, f, "char=?", ID_CHAREQ);
+    f = bind(m, f, "char<?", ID_CHARLT);
+    f = bind(m, f, "char>?", ID_CHARGT);
+    f = bind(m, f, "char<=?", ID_CHARLE);
+    f = bind(m, f, "char>=?", ID_CHARGE);
+    f = bind(m, f, "char-ci=?", ID_CHARCIEQ);
+    f = bind(m, f, "char-ci<?", ID_CHARCILT);
+    f = bind(m, f, "char-ci>?", ID_CHARCIGT);
+    f = bind(m, f, "char-ci<=?", ID_CHARCILE);
+    f = bind(m, f, "char-ci>=?", ID_CHARCIGE);
+    f = bind(m, f, "char-alphabetic?", ID_CHARALPHAP);
+    f = bind(m, f, "char-numeric?", ID_CHARNUMP);
+    f = bind(m, f, "char-whitespace?", ID_CHARWSP);
+    f = bind(m, f, "char-upper-case?", ID_CHARUPP);
+    f = bind(m, f, "char-lower-case?", ID_CHARLOWP);
+    f = bind(m, f, "char-upcase", ID_CHARUP);
+    f = bind(m, f, "char-downcase", ID_CHARDOWN);
+    f = bind(m, f, "char->integer", ID_CHAR2INT);
+    f = bind(m, f, "integer->char", ID_INT2CHAR);
+    f = bind(m, f, "boolean?", ID_BOOLEANP);
+    f = bind(m, f, "string?", ID_STRINGP);
+    f = bind(m, f, "make-string", ID_MAKE_STRING);
+    f = bind(m, f, "string-length", ID_STRING_LEN);
+    f = bind(m, f, "string-ref", ID_STRING_REF);
+    f = bind(m, f, "string-append", ID_STRING_APPEND);
+    f = bind(m, f, "substring", ID_SUBSTRING);
+    f = bind(m, f, "string-copy", ID_STRING_COPY);
+    f = bind(m, f, "string->list", ID_STR2LIST);
+    f = bind(m, f, "list->string", ID_LIST2STR);
+    f = bind(m, f, "string=?", ID_STRINGEQ);
+    f = bind(m, f, "string<?", ID_STRINGLT);
+    f = bind(m, f, "string>?", ID_STRINGGT);
+    f = bind(m, f, "string-ci=?", ID_STRINGCIEQ);
+    f = bind(m, f, "string-ci<?", ID_STRINGCILT);
+    f = bind(m, f, "string-ci>?", ID_STRINGCIGT);
+    f = bind(m, f, "vector?", ID_VECTORP);
+    f = bind(m, f, "make-vector", ID_MAKE_VECTOR);
+    f = bind(m, f, "vector", ID_VECTOR);
+    f = bind(m, f, "vector-length", ID_VECTOR_LEN);
+    f = bind(m, f, "vector-ref", ID_VECTOR_REF);
+    f = bind(m, f, "vector-set!", ID_VECTOR_SET);
+    f = bind(m, f, "vector->list", ID_VEC2LIST);
+    f = bind(m, f, "list->vector", ID_LIST2VEC);
+    f = bind(m, f, "vector-fill!", ID_VECTOR_FILL);
+    f = bind(m, f, "procedure?", ID_PROCEDUREP);
+    f = bind(m, f, "display", ID_DISPLAY);
+    f = bind(m, f, "write", ID_WRITE);
+    f = bind(m, f, "newline", ID_NEWLINE);
+    f = bind(m, f, "read", ID_READ);
+    f = bind(m, f, "write-char", ID_WRITE_CHAR);
+    f = bind(m, f, "eof-object?", ID_EOFP);
+    f = bind(m, f, "char-ready?", ID_CHARREADY);
+    f = bind(m, f, "interaction-environment", ID_INTERACTION_ENV);
+    f = bind(m, f, "error", ID_ERROR);
+    f = bind(m, f, "quit", ID_QUIT);
+    f = bind(m, f, "exit", ID_EXIT);
+    f = bind(m, f, "gc", ID_GC);
+    f = bind(m, f, "gc-stats", ID_GC_STATS);
+    f = bind(m, f, "apply", ID_APPLY);
+    f = bind(m, f, "eval", ID_EVAL);
+    f = bind(m, f, "call/cc", ID_CALLCC);
+    f = bind(m, f, "call-with-current-continuation", ID_CALLCC);
+    m.genv = mcons(m, f, m.genv);
+}
+
+// ------------------------------------------------------------- helpers ---
+
+fn arity(whose: &str) -> SErr {
+    let mut msg = whose.to_string();
+    msg.push_str(": wrong number of arguments");
+    err_of(msg)
+}
+
+fn type_err(whose: &str, wants: &str) -> SErr {
+    let mut msg = whose.to_string();
+    msg.push_str(": not a ");
+    msg.push_str(wants);
+    err_of(msg)
+}
+
+fn one(h: &Heap, args: Val, whose: &str) -> Result<Val, SErr> {
+    match args {
+        Val::Pair(i) => {
+            match h.cdr(i) {
+                Val::Nil => Result::Ok(h.car(i)),
+                _ => Result::Err(arity(whose)),
+            }
+        },
+        _ => Result::Err(arity(whose)),
+    }
+}
+
+fn two(h: &Heap, args: Val, whose: &str) -> Result<(Val, Val), SErr> {
+    match args {
+        Val::Pair(i) => {
+            match h.cdr(i) {
+                Val::Pair(j) => {
+                    match h.cdr(j) {
+                        Val::Nil => Result::Ok((h.car(i), h.car(j))),
+                        _ => Result::Err(arity(whose)),
+                    }
+                },
+                _ => Result::Err(arity(whose)),
+            }
+        },
+        _ => Result::Err(arity(whose)),
+    }
+}
+
+fn three(h: &Heap, args: Val, whose: &str) -> Result<(Val, Val, Val), SErr> {
+    match args {
+        Val::Pair(i) => {
+            match h.cdr(i) {
+                Val::Pair(j) => {
+                    match h.cdr(j) {
+                        Val::Pair(k) => {
+                            match h.cdr(k) {
+                                Val::Nil => Result::Ok((h.car(i), h.car(j), h.car(k))),
+                                _ => Result::Err(arity(whose)),
+                            }
+                        },
+                        _ => Result::Err(arity(whose)),
+                    }
+                },
+                _ => Result::Err(arity(whose)),
+            }
+        },
+        _ => Result::Err(arity(whose)),
+    }
+}
+
+fn num(v: Val, whose: &str) -> Result<t27, SErr> {
+    match v {
+        Val::Num(n) => Result::Ok(n),
+        _ => Result::Err(type_err(whose, "number")),
+    }
+}
+
+fn pr(h: &Heap, v: Val, whose: &str) -> Result<taddr, SErr> {
+    match v {
+        Val::Pair(i) => {
+            let _ = h;
+            Result::Ok(i)
+        },
+        _ => Result::Err(type_err(whose, "pair")),
+    }
+}
+
+fn chr(v: Val, whose: &str) -> Result<char, SErr> {
+    match v {
+        Val::Chr(c) => Result::Ok(c),
+        _ => Result::Err(type_err(whose, "character")),
+    }
+}
+
+fn strid(v: Val, whose: &str) -> Result<taddr, SErr> {
+    match v {
+        Val::Str(i) => Result::Ok(i),
+        _ => Result::Err(type_err(whose, "string")),
+    }
+}
+
+fn vecid(v: Val, whose: &str) -> Result<taddr, SErr> {
+    match v {
+        Val::Vec(i) => Result::Ok(i),
+        _ => Result::Err(type_err(whose, "vector")),
+    }
+}
+
+fn bval(b: bool) -> Val { Val::Bool(b) }
+
+// ASCII case, the machine's honest alphabet.
+fn up(c: char) -> char {
+    let v = c as t27;
+    if v >= 97 && v <= 122 {
+        match char::try_from(v - 32) {
+            Option::Some(u) => u,
+            Option::None => c,
+        }
+    } else {
+        c
+    }
+}
+
+fn down(c: char) -> char {
+    let v = c as t27;
+    if v >= 65 && v <= 90 {
+        match char::try_from(v + 32) {
+            Option::Some(u) => u,
+            Option::None => c,
+        }
+    } else {
+        c
+    }
+}
+
+// Truncating division and remainder — R5RS `quotient`/`remainder`. The
+// machine's `/` rounds to NEAREST (Ch. 1 §4), so truncation is built from
+// absolutes instead of patched afterwards: `floor_div` over two positives
+// is exact (its domain-of-validity is positive operands, and that is all
+// this uses), and the sign is R5RS's — the quotient takes the signs-disagree
+// rule, the remainder then follows the dividend.
+fn tdiv(a: t27, b: t27, whose: &str) -> Result<t27, SErr> {
+    if b == 0 { return Result::Err(type_err(whose, "nonzero divisor")); }
+    let mut x = a;
+    if x < 0 { x = -x; }
+    let mut y = b;
+    if y < 0 { y = -y; }
+    let q = floor_div(x, y);
+    if (a > 0) == (b > 0) { return Result::Ok(q); }
+    Result::Ok(-q)
+}
+
+fn tmod(a: t27, b: t27, whose: &str) -> Result<t27, SErr> {
+    let q = tdiv(a, b, whose)?;
+    Result::Ok(a - q * b)
+}
+
+// c[ad]+r compositions are dispatched as a table (ID_CAAR..+28): the name's
+// inside letters, applied rightmost-first, 'a' = car, 'd' = cdr.
+
+// ------------------------------------------------------------- the call ---
+
+pub fn call(m: &mut Machine, id: taddr, args: Val) -> Result<(), SErr> {
+    // ---------- pairs ----------
+    if id == ID_CONS {
+        let (a, d) = two(&m.heap, args, "cons")?;
+        m.val = mcons(m, a, d);
+        return Result::Ok(());
+    }
+    if id == ID_CAR {
+        let v = one(&m.heap, args, "car")?;
+        let p = pr(&m.heap, v, "car")?;
+        m.val = m.heap.car(p);
+        return Result::Ok(());
+    }
+    if id == ID_CDR {
+        let v = one(&m.heap, args, "cdr")?;
+        let p = pr(&m.heap, v, "cdr")?;
+        m.val = m.heap.cdr(p);
+        return Result::Ok(());
+    }
+    if id == ID_SET_CAR {
+        let (v, x) = two(&m.heap, args, "set-car!")?;
+        let p = pr(&m.heap, v, "set-car!")?;
+        m.heap.set_car(p, x);
+        m.val = Val::Unspec;
+        return Result::Ok(());
+    }
+    if id == ID_SET_CDR {
+        let (v, x) = two(&m.heap, args, "set-cdr!")?;
+        let p = pr(&m.heap, v, "set-cdr!")?;
+        m.heap.set_cdr(p, x);
+        m.val = Val::Unspec;
+        return Result::Ok(());
+    }
+    if id == ID_PAIRP {
+        let v = one(&m.heap, args, "pair?")?;
+        m.val = bval(m.heap.is_pair(v));
+        return Result::Ok(());
+    }
+    if id >= ID_CAAR && id < ID_CAAR + 28 {
+        let names: [&str; 28] = [
+            "caar", "cadr", "cdar", "cddr",
+            "caaar", "caadr", "cadar", "caddr",
+            "cdaar", "cdadr", "cddar", "cdddr",
+            "caaaar", "caaadr", "caadar", "caaddr",
+            "cadaar", "cadadr", "caddar", "cadddr",
+            "cdaaar", "cdaadr", "cdadar", "cdaddr",
+            "cddaar", "cddadr", "cdddar", "cddddr",
+        ];
+        let ix = id - ID_CAAR;
+        let v = one(&m.heap, args, names[ix])?;
+        // The inside letters, between c and r.
+        let full = names[ix].to_string();
+        let mut ops: Vec<char> = Vec::new();
+        let mut k: taddr = 1;
+        while k < full.len() - 1 {
+            ops.push(full[k]);
+            k += 1;
+        }
+        let mut cur = v;
+        let mut i = ops.len();
+        while i > 0 {
+            i -= 1;
+            let p = pr(&m.heap, cur, names[ix])?;
+            if ops[i] == 'a' {
+                cur = m.heap.car(p);
+            } else {
+                cur = m.heap.cdr(p);
+            }
+        }
+        m.val = cur;
+        return Result::Ok(());
+    }
+    if id == ID_NULLP {
+        let v = one(&m.heap, args, "null?")?;
+        m.val = bval(match v { Val::Nil => true, _ => false });
+        return Result::Ok(());
+    }
+    if id == ID_LISTP {
+        let v = one(&m.heap, args, "list?")?;
+        m.val = bval(m.heap.is_list(v));
+        return Result::Ok(());
+    }
+    if id == ID_LIST {
+        m.val = args;
+        return Result::Ok(());
+    }
+    if id == ID_LENGTH {
+        let v = one(&m.heap, args, "length")?;
+        match m.heap.len_proper(v) {
+            Option::Some(n) => {
+                m.val = Val::Num(n as t27);
+                return Result::Ok(());
+            },
+            Option::None => { return Result::Err(type_err("length", "proper list")); },
+        }
+    }
+    if id == ID_REVERSE {
+        let v = one(&m.heap, args, "reverse")?;
+        match m.heap.len_proper(v) {
+            Option::Some(_) => {},
+            Option::None => { return Result::Err(type_err("reverse", "proper list")); },
+        }
+        m.val = m.heap.rev_onto(v, Val::Nil);
+        return Result::Ok(());
+    }
+    if id == ID_APPEND {
+        // Fold right: (append a b c) = a ++ (b ++ c); the last is shared.
+        let mut acc: Val = Val::Nil;
+        let mut rev_args = m.heap.rev_onto(args, Val::Nil);
+        let mut first = true;
+        loop {
+            match rev_args {
+                Val::Pair(i) => {
+                    if first {
+                        acc = m.heap.car(i);
+                        first = false;
+                    } else {
+                        let lst = m.heap.car(i);
+                        match m.heap.len_proper(lst) {
+                            Option::Some(_) => {},
+                            Option::None => {
+                                return Result::Err(type_err("append", "proper list"));
+                            },
+                        }
+                        let rev = m.heap.rev_onto(lst, Val::Nil);
+                        acc = m.heap.rev_onto(rev, acc);
+                    }
+                    rev_args = m.heap.cdr(i);
+                },
+                _ => { break; },
+            }
+        }
+        m.val = acc;
+        return Result::Ok(());
+    }
+    if id == ID_LIST_TAIL || id == ID_LIST_REF {
+        let (v, kv) = two(&m.heap, args, "list-tail")?;
+        let k = num(kv, "list-ref")?;
+        if k < 0 { return Result::Err(type_err("list-tail", "valid index")); }
+        let mut cur = v;
+        let mut i: t27 = 0;
+        loop {
+            if i == k {
+                m.val = if id == ID_LIST_REF {
+                    match cur {
+                        Val::Pair(p) => m.heap.car(p),
+                        _ => { return Result::Err(type_err("list-ref", "long enough list")); },
+                    }
+                } else {
+                    cur
+                };
+                return Result::Ok(());
+            }
+            match cur {
+                Val::Pair(p) => { cur = m.heap.cdr(p); },
+                _ => { return Result::Err(type_err("list-ref", "long enough list")); },
+            }
+            i += 1;
+        }
+    }
+    if id == ID_MEMQ || id == ID_MEMV || id == ID_MEMBER {
+        let (x, lst) = two(&m.heap, args, "member")?;
+        let mut cur = lst;
+        loop {
+            match cur {
+                Val::Pair(p) => {
+                    let hit = if id == ID_MEMBER {
+                        equal(&m.heap, &m.syms, m.heap.car(p), x)
+                    } else {
+                        eq(&m.heap, m.heap.car(p), x)
+                    };
+                    if hit {
+                        m.val = cur;
+                        return Result::Ok(());
+                    }
+                    cur = m.heap.cdr(p);
+                },
+                Val::Nil => {
+                    m.val = Val::Bool(false);
+                    return Result::Ok(());
+                },
+                _ => { return Result::Err(type_err("member", "proper list")); },
+            }
+        }
+    }
+    if id == ID_ASSQ || id == ID_ASSV || id == ID_ASSOC {
+        let (x, lst) = two(&m.heap, args, "assoc")?;
+        let mut cur = lst;
+        loop {
+            match cur {
+                Val::Pair(p) => {
+                    let entry = m.heap.car(p);
+                    match entry {
+                        Val::Pair(e) => {
+                            let hit = if id == ID_ASSOC {
+                                equal(&m.heap, &m.syms, m.heap.car(e), x)
+                            } else {
+                                eq(&m.heap, m.heap.car(e), x)
+                            };
+                            if hit {
+                                m.val = entry;
+                                return Result::Ok(());
+                            }
+                        },
+                        _ => {},
+                    }
+                    cur = m.heap.cdr(p);
+                },
+                Val::Nil => {
+                    m.val = Val::Bool(false);
+                    return Result::Ok(());
+                },
+                _ => { return Result::Err(type_err("assoc", "proper list")); },
+            }
+        }
+    }
+
+    // ---------- equality ----------
+    if id == ID_EQP || id == ID_EQVP {
+        let (a, b) = two(&m.heap, args, "eq?")?;
+        m.val = bval(eq(&m.heap, a, b));
+        return Result::Ok(());
+    }
+    if id == ID_EQUALP {
+        let (a, b) = two(&m.heap, args, "equal?")?;
+        m.val = bval(equal(&m.heap, &m.syms, a, b));
+        return Result::Ok(());
+    }
+
+    // ---------- symbols ----------
+    if id == ID_SYMBOLP {
+        let v = one(&m.heap, args, "symbol?")?;
+        m.val = bval(match v { Val::Sym(_) => true, _ => false });
+        return Result::Ok(());
+    }
+    if id == ID_SYM2STR {
+        let v = one(&m.heap, args, "symbol->string")?;
+        match v {
+            Val::Sym(s) => {
+                // NB: bind before chaining — `m.syms.name(s).to_string()` is
+                // the same trap shape eval.tr's named() documents, and it
+                // compiles to a wild access here (F_ALIGN). The local dodges.
+                let nm = m.syms.name(s);
+                let owned = nm.to_string();
+                m.val = mstr(m, &owned);
+                return Result::Ok(());
+            },
+            _ => { return Result::Err(type_err("symbol->string", "symbol")); },
+        }
+    }
+    if id == ID_STR2SYM {
+        let v = one(&m.heap, args, "string->symbol")?;
+        let i = strid(v, "string->symbol")?;
+        let mut text: Vec<char> = Vec::new();
+        let mut k: taddr = 0;
+        while k < m.heap.str_len(i) {
+            text.push(m.heap.str_at(i, k));
+            k += 1;
+        }
+        m.val = Val::Sym(m.syms.intern(&text));
+        return Result::Ok(());
+    }
+
+    // ---------- numbers ----------
+    if id == ID_NUMBERP || id == ID_INTEGERP || id == ID_EXACTP {
+        let v = one(&m.heap, args, "number?")?;
+        m.val = bval(match v { Val::Num(_) => true, _ => false });
+        return Result::Ok(());
+    }
+    if id == ID_INEXACTP {
+        let v = one(&m.heap, args, "inexact?")?;
+        let _ = v;
+        m.val = Val::Bool(false);           // there is no inexact here
+        return Result::Ok(());
+    }
+    if id == ID_ADD || id == ID_MUL {
+        let mut acc: t27 = if id == ID_ADD { 0 } else { 1 };
+        let mut cur = args;
+        loop {
+            match cur {
+                Val::Nil => { break; },
+                Val::Pair(p) => {
+                    let n = num(m.heap.car(p), "+")?;
+                    let r = if id == ID_ADD { acc.checked_add(n) } else { acc.checked_mul(n) };
+                    match r {
+                        Option::Some(t) => { acc = t; },
+                        Option::None => { return Result::Err(err("integer overflow")); },
+                    }
+                    cur = m.heap.cdr(p);
+                },
+                _ => { return Result::Err(arity("+")); },
+            }
+        }
+        m.val = Val::Num(acc);
+        return Result::Ok(());
+    }
+    if id == ID_SUB || id == ID_DIV {
+        match args {
+            Val::Nil => { return Result::Err(arity("-")); },
+            Val::Pair(p0) => {
+                let a0 = num(m.heap.car(p0), "-")?;
+                let mut acc = a0;
+                let mut cur = m.heap.cdr(p0);
+                match cur {
+                    Val::Nil => {
+                        if id == ID_SUB {
+                            m.val = Val::Num(-acc);
+                            return Result::Ok(());
+                        }
+                        // (/ x): the reciprocal — undefined on integers.
+                        return Result::Err(err("/: no inexact numbers on this machine"));
+                    },
+                    _ => {},
+                }
+                loop {
+                    match cur {
+                        Val::Nil => { break; },
+                        Val::Pair(p) => {
+                            let n = num(m.heap.car(p), "-")?;
+                            if id == ID_SUB {
+                                match acc.checked_sub(n) {
+                                    Option::Some(t) => { acc = t; },
+                                    Option::None => { return Result::Err(err("integer overflow")); },
+                                }
+                            } else {
+                                // Exact division only: no inexact numbers.
+                                let q = tdiv(acc, n, "/")?;
+                                if q * n != acc {
+                                    return Result::Err(err("/: not an exact division"));
+                                }
+                                acc = q;
+                            }
+                            cur = m.heap.cdr(p);
+                        },
+                        _ => { return Result::Err(arity("-")); },
+                    }
+                }
+                m.val = Val::Num(acc);
+                return Result::Ok(());
+            },
+            _ => { return Result::Err(arity("-")); },
+        }
+    }
+    if id == ID_QUOTIENT || id == ID_REMAINDER || id == ID_MODULO {
+        let (av, bv) = two(&m.heap, args, "quotient")?;
+        let a = num(av, "quotient")?;
+        let b = num(bv, "quotient")?;
+        if id == ID_QUOTIENT {
+            m.val = Val::Num(tdiv(a, b, "quotient")?);
+        } else if id == ID_REMAINDER {
+            m.val = Val::Num(tmod(a, b, "remainder")?);
+        } else {
+            if b == 0 { return Result::Err(type_err("modulo", "nonzero divisor")); }
+            // Floor remainder: sign follows the DIVISOR. The nearest
+            // quotient leaves |r| <= |b|/2 with a sign that may differ from
+            // b's; the correction is one b. (The prelude's floor_div only
+            // claims positive divisors, so the rule lives here in full.)
+            let q0 = a / b;
+            let r0 = a - q0 * b;
+            let r = if r0 != 0 && (r0 < 0) != (b < 0) { r0 + b } else { r0 };
+            m.val = Val::Num(r);
+        }
+        return Result::Ok(());
+    }
+    if id == ID_NUMEQ || id == ID_LT || id == ID_GT || id == ID_LE || id == ID_GE {
+        match args {
+            Val::Nil => {
+                m.val = Val::Bool(true);
+                return Result::Ok(());
+            },
+            Val::Pair(p0) => {
+                let mut prev = num(m.heap.car(p0), "=")?;
+                let mut cur = m.heap.cdr(p0);
+                loop {
+                    match cur {
+                        Val::Nil => { break; },
+                        Val::Pair(p) => {
+                            let n = num(m.heap.car(p), "=")?;
+                            let ok = if id == ID_NUMEQ { prev == n }
+                                else if id == ID_LT { prev < n }
+                                else if id == ID_GT { prev > n }
+                                else if id == ID_LE { prev <= n }
+                                else { prev >= n };
+                            if !ok {
+                                m.val = Val::Bool(false);
+                                return Result::Ok(());
+                            }
+                            prev = n;
+                            cur = m.heap.cdr(p);
+                        },
+                        _ => { return Result::Err(arity("=")); },
+                    }
+                }
+                m.val = Val::Bool(true);
+                return Result::Ok(());
+            },
+            _ => { return Result::Err(arity("=")); },
+        }
+    }
+    if id == ID_MAX || id == ID_MIN {
+        match args {
+            Val::Pair(p0) => {
+                let mut best = num(m.heap.car(p0), "max")?;
+                let mut cur = m.heap.cdr(p0);
+                loop {
+                    match cur {
+                        Val::Nil => { break; },
+                        Val::Pair(p) => {
+                            let n = num(m.heap.car(p), "max")?;
+                            if id == ID_MAX {
+                                if n > best { best = n; }
+                            } else {
+                                if n < best { best = n; }
+                            }
+                            cur = m.heap.cdr(p);
+                        },
+                        _ => { return Result::Err(arity("max")); },
+                    }
+                }
+                m.val = Val::Num(best);
+                return Result::Ok(());
+            },
+            _ => { return Result::Err(arity("max")); },
+        }
+    }
+    if id == ID_NUM2STR {
+        let (v, rv) = two_or_one(&m.heap, args, "number->string")?;
+        let n = num(v, "number->string")?;
+        let radix = match rv {
+            Option::Some(r) => num(r, "number->string")?,
+            Option::None => 10,
+        };
+        let mut out: Vec<char> = Vec::new();
+        push_radix(&mut out, n, radix)?;
+        m.val = mstr(m, &out);
+        return Result::Ok(());
+    }
+    if id == ID_STR2NUM {
+        let (v, rv) = two_or_one(&m.heap, args, "string->number")?;
+        let i = strid(v, "string->number")?;
+        let mut text: Vec<char> = Vec::new();
+        let mut k: taddr = 0;
+        while k < m.heap.str_len(i) {
+            text.push(m.heap.str_at(i, k));
+            k += 1;
+        }
+        let radix = match rv {
+            Option::Some(r) => num(r, "string->number")?,
+            Option::None => 10,
+        };
+        match parse_radix(&text, radix) {
+            Option::Some(n) => {
+                m.val = Val::Num(n);
+                return Result::Ok(());
+            },
+            Option::None => {
+                m.val = Val::Bool(false);
+                return Result::Ok(());
+            },
+        }
+    }
+
+    // ---------- characters ----------
+    if id == ID_CHARP {
+        let v = one(&m.heap, args, "char?")?;
+        m.val = bval(match v { Val::Chr(_) => true, _ => false });
+        return Result::Ok(());
+    }
+    if id == ID_CHAREQ || id == ID_CHARLT || id == ID_CHARGT || id == ID_CHARLE || id == ID_CHARGE
+        || id == ID_CHARCIEQ || id == ID_CHARCILT || id == ID_CHARCIGT || id == ID_CHARCILE || id == ID_CHARCIGE {
+        let (av, bv) = two(&m.heap, args, "char=?")?;
+        let ca = chr(av, "char=?")? as t27;
+        let cb = chr(bv, "char=?")? as t27;
+        let x = if id >= ID_CHARCIEQ { up(match char::try_from(ca) { Option::Some(c) => c, Option::None => ' ' }) as t27 } else { ca };
+        let y = if id >= ID_CHARCIEQ { up(match char::try_from(cb) { Option::Some(c) => c, Option::None => ' ' }) as t27 } else { cb };
+        let r = if id == ID_CHAREQ || id == ID_CHARCIEQ { x == y }
+            else if id == ID_CHARLT || id == ID_CHARCILT { x < y }
+            else if id == ID_CHARGT || id == ID_CHARCIGT { x > y }
+            else if id == ID_CHARLE || id == ID_CHARCILE { x <= y }
+            else { x >= y };
+        m.val = bval(r);
+        return Result::Ok(());
+    }
+    if id == ID_CHARALPHAP || id == ID_CHARNUMP || id == ID_CHARWSP || id == ID_CHARUPP || id == ID_CHARLOWP {
+        let v = one(&m.heap, args, "char-alphabetic?")?;
+        let c = chr(v, "char-alphabetic?")?;
+        let cv = c as t27;
+        let r = if id == ID_CHARALPHAP {
+            (cv >= 65 && cv <= 90) || (cv >= 97 && cv <= 122)
+        } else if id == ID_CHARNUMP {
+            cv >= 48 && cv <= 57
+        } else if id == ID_CHARWSP {
+            cv == 32 || cv == 9 || cv == 10 || cv == 13
+        } else if id == ID_CHARUPP {
+            cv >= 65 && cv <= 90
+        } else {
+            cv >= 97 && cv <= 122
+        };
+        m.val = bval(r);
+        return Result::Ok(());
+    }
+    if id == ID_CHARUP || id == ID_CHARDOWN {
+        let v = one(&m.heap, args, "char-upcase")?;
+        let c = chr(v, "char-upcase")?;
+        m.val = Val::Chr(if id == ID_CHARUP { up(c) } else { down(c) });
+        return Result::Ok(());
+    }
+    if id == ID_CHAR2INT {
+        let v = one(&m.heap, args, "char->integer")?;
+        let c = chr(v, "char->integer")?;
+        m.val = Val::Num(c as t27);
+        return Result::Ok(());
+    }
+    if id == ID_INT2CHAR {
+        let v = one(&m.heap, args, "integer->char")?;
+        let n = num(v, "integer->char")?;
+        match char::try_from(n) {
+            Option::Some(c) => {
+                m.val = Val::Chr(c);
+                return Result::Ok(());
+            },
+            Option::None => { return Result::Err(type_err("integer->char", "scalar value")); },
+        }
+    }
+
+    // ---------- booleans ----------
+    if id == ID_BOOLEANP {
+        let v = one(&m.heap, args, "boolean?")?;
+        m.val = bval(match v { Val::Bool(_) => true, _ => false });
+        return Result::Ok(());
+    }
+
+    // ---------- strings ----------
+    if id == ID_STRINGP {
+        let v = one(&m.heap, args, "string?")?;
+        m.val = bval(match v { Val::Str(_) => true, _ => false });
+        return Result::Ok(());
+    }
+    if id == ID_MAKE_STRING {
+        let (v, cv) = two_or_one(&m.heap, args, "make-string")?;
+        let n = num(v, "make-string")?;
+        if n < 0 { return Result::Err(type_err("make-string", "valid length")); }
+        let fill = match cv {
+            Option::Some(c) => chr(c, "make-string")?,
+            Option::None => ' ',
+        };
+        let mut text: Vec<char> = Vec::new();
+        let mut k: t27 = 0;
+        while k < n {
+            text.push(fill);
+            if k + 1 > 14348907 { return Result::Err(err("make-string: absurd length")); }
+            k += 1;
+        }
+        m.val = mstr(m, &text);
+        return Result::Ok(());
+    }
+    if id == ID_STRING_LEN {
+        let v = one(&m.heap, args, "string-length")?;
+        let i = strid(v, "string-length")?;
+        m.val = Val::Num(m.heap.str_len(i) as t27);
+        return Result::Ok(());
+    }
+    if id == ID_STRING_REF {
+        let (v, kv) = two(&m.heap, args, "string-ref")?;
+        let i = strid(v, "string-ref")?;
+        let k = num(kv, "string-ref")?;
+        if k < 0 || k >= m.heap.str_len(i) as t27 {
+            return Result::Err(type_err("string-ref", "valid index"));
+        }
+        m.val = Val::Chr(m.heap.str_at(i, k as taddr));
+        return Result::Ok(());
+    }
+    if id == ID_STRING_APPEND {
+        let mut out: Vec<char> = Vec::new();
+        let mut cur = args;
+        loop {
+            match cur {
+                Val::Nil => { break; },
+                Val::Pair(p) => {
+                    let i = strid(m.heap.car(p), "string-append")?;
+                    let mut k: taddr = 0;
+                    while k < m.heap.str_len(i) {
+                        out.push(m.heap.str_at(i, k));
+                        k += 1;
+                    }
+                    cur = m.heap.cdr(p);
+                },
+                _ => { return Result::Err(arity("string-append")); },
+            }
+        }
+        m.val = mstr(m, &out);
+        return Result::Ok(());
+    }
+    if id == ID_SUBSTRING {
+        let (v, av, bv) = three(&m.heap, args, "substring")?;
+        let i = strid(v, "substring")?;
+        let a = num(av, "substring")?;
+        let b = num(bv, "substring")?;
+        if a < 0 || b < a || b > m.heap.str_len(i) as t27 {
+            return Result::Err(type_err("substring", "valid range"));
+        }
+        m.val = m.heap.str_from_span(i, a as taddr, (b - a) as taddr);
+        return Result::Ok(());
+    }
+    if id == ID_STRING_COPY {
+        let v = one(&m.heap, args, "string-copy")?;
+        let i = strid(v, "string-copy")?;
+        m.val = m.heap.str_from_span(i, 0, m.heap.str_len(i));
+        return Result::Ok(());
+    }
+    if id == ID_STR2LIST {
+        let v = one(&m.heap, args, "string->list")?;
+        let i = strid(v, "string->list")?;
+        let mut out: Val = Val::Nil;
+        let mut k = m.heap.str_len(i);
+        while k > 0 {
+            k -= 1;
+            out = mcons(m, Val::Chr(m.heap.str_at(i, k)), out);
+        }
+        m.val = out;
+        return Result::Ok(());
+    }
+    if id == ID_LIST2STR {
+        let v = one(&m.heap, args, "list->string")?;
+        let mut out: Vec<char> = Vec::new();
+        let mut cur = v;
+        loop {
+            match cur {
+                Val::Nil => { break; },
+                Val::Pair(p) => {
+                    let c = chr(m.heap.car(p), "list->string")?;
+                    out.push(c);
+                    cur = m.heap.cdr(p);
+                },
+                _ => { return Result::Err(type_err("list->string", "proper list")); },
+            }
+        }
+        m.val = mstr(m, &out);
+        return Result::Ok(());
+    }
+    if id == ID_STRINGEQ || id == ID_STRINGLT || id == ID_STRINGGT
+        || id == ID_STRINGCIEQ || id == ID_STRINGCILT || id == ID_STRINGCIGT {
+        let (av, bv) = two(&m.heap, args, "string=?")?;
+        let a = strid(av, "string=?")?;
+        let b = strid(bv, "string=?")?;
+        let ci = id >= ID_STRINGCIEQ;
+        let c = str_cmp(&m.heap, a, b, ci);
+        let r = if id == ID_STRINGEQ || id == ID_STRINGCIEQ { c == 0 }
+            else if id == ID_STRINGLT || id == ID_STRINGCILT { c < 0 }
+            else { c > 0 };
+        m.val = bval(r);
+        return Result::Ok(());
+    }
+
+    // ---------- vectors ----------
+    if id == ID_VECTORP {
+        let v = one(&m.heap, args, "vector?")?;
+        m.val = bval(match v { Val::Vec(_) => true, _ => false });
+        return Result::Ok(());
+    }
+    if id == ID_MAKE_VECTOR {
+        let (v, fv) = two_or_one(&m.heap, args, "make-vector")?;
+        let n = num(v, "make-vector")?;
+        if n < 0 { return Result::Err(type_err("make-vector", "valid length")); }
+        let fill = match fv {
+            Option::Some(x) => x,
+            Option::None => Val::Num(0),
+        };
+        m.val = m.heap.vec_new(n as taddr, fill);
+        return Result::Ok(());
+    }
+    if id == ID_VECTOR {
+        match m.heap.len_proper(args) {
+            Option::Some(n) => {
+                let v = m.heap.vec_new(n, Val::Unspec);
+                match v {
+                    Val::Vec(i) => {
+                        let mut cur = args;
+                        let mut k: taddr = 0;
+                        loop {
+                            match cur {
+                                Val::Pair(p) => {
+                                    m.heap.vec_set(i, k, m.heap.car(p));
+                                    cur = m.heap.cdr(p);
+                                    k += 1;
+                                },
+                                _ => { break; },
+                            }
+                        }
+                        m.val = v;
+                        return Result::Ok(());
+                    },
+                    _ => { return Result::Err(err("vector: internal")); },
+                }
+            },
+            Option::None => { return Result::Err(arity("vector")); },
+        }
+    }
+    if id == ID_VECTOR_LEN {
+        let v = one(&m.heap, args, "vector-length")?;
+        let i = vecid(v, "vector-length")?;
+        m.val = Val::Num(m.heap.vec_len(i) as t27);
+        return Result::Ok(());
+    }
+    if id == ID_VECTOR_REF {
+        let (v, kv) = two(&m.heap, args, "vector-ref")?;
+        let i = vecid(v, "vector-ref")?;
+        let k = num(kv, "vector-ref")?;
+        if k < 0 || k >= m.heap.vec_len(i) as t27 {
+            return Result::Err(type_err("vector-ref", "valid index"));
+        }
+        m.val = m.heap.vec_at(i, k as taddr);
+        return Result::Ok(());
+    }
+    if id == ID_VECTOR_SET {
+        let (v, kv, x) = three(&m.heap, args, "vector-set!")?;
+        let i = vecid(v, "vector-set!")?;
+        let k = num(kv, "vector-set!")?;
+        if k < 0 || k >= m.heap.vec_len(i) as t27 {
+            return Result::Err(type_err("vector-set!", "valid index"));
+        }
+        m.heap.vec_set(i, k as taddr, x);
+        m.val = Val::Unspec;
+        return Result::Ok(());
+    }
+    if id == ID_VEC2LIST {
+        let v = one(&m.heap, args, "vector->list")?;
+        let i = vecid(v, "vector->list")?;
+        let mut out: Val = Val::Nil;
+        let mut k = m.heap.vec_len(i);
+        while k > 0 {
+            k -= 1;
+            out = mcons(m, m.heap.vec_at(i, k), out);
+        }
+        m.val = out;
+        return Result::Ok(());
+    }
+    if id == ID_LIST2VEC {
+        let v = one(&m.heap, args, "list->vector")?;
+        match m.heap.len_proper(v) {
+            Option::Some(n) => {
+                let vec = m.heap.vec_new(n, Val::Unspec);
+                match vec {
+                    Val::Vec(i) => {
+                        let mut cur = v;
+                        let mut k: taddr = 0;
+                        loop {
+                            match cur {
+                                Val::Pair(p) => {
+                                    m.heap.vec_set(i, k, m.heap.car(p));
+                                    cur = m.heap.cdr(p);
+                                    k += 1;
+                                },
+                                _ => { break; },
+                            }
+                        }
+                        m.val = vec;
+                        return Result::Ok(());
+                    },
+                    _ => { return Result::Err(err("list->vector: internal")); },
+                }
+            },
+            Option::None => { return Result::Err(type_err("list->vector", "proper list")); },
+        }
+    }
+    if id == ID_VECTOR_FILL {
+        let (v, x) = two(&m.heap, args, "vector-fill!")?;
+        let i = vecid(v, "vector-fill!")?;
+        let mut k: taddr = 0;
+        while k < m.heap.vec_len(i) {
+            m.heap.vec_set(i, k, x);
+            k += 1;
+        }
+        m.val = Val::Unspec;
+        return Result::Ok(());
+    }
+
+    // ---------- procedures ----------
+    if id == ID_PROCEDUREP {
+        let v = one(&m.heap, args, "procedure?")?;
+        m.val = bval(match v {
+            Val::Closure(_) => true,
+            Val::Prim(_) => true,
+            Val::Cont(_) => true,
+            _ => false,
+        });
+        return Result::Ok(());
+    }
+
+    // ---------- I/O ----------
+    if id == ID_DISPLAY || id == ID_WRITE {
+        let v = one(&m.heap, args, "display")?;
+        let mut buf: Vec<char> = Vec::new();
+        write_to(&mut m.heap, &m.syms, v, id == ID_DISPLAY, &mut buf);
+        emit(m, &buf);
+        m.val = Val::Unspec;
+        return Result::Ok(());
+    }
+    if id == ID_NEWLINE {
+        match args {
+            Val::Nil => {},
+            _ => { return Result::Err(arity("newline")); },
+        }
+        let nl = "\n".to_string();
+        emit(m, &nl);
+        m.val = Val::Unspec;
+        return Result::Ok(());
+    }
+    if id == ID_WRITE_CHAR {
+        let v = one(&m.heap, args, "write-char")?;
+        let c = chr(v, "write-char")?;
+        let mut buf: Vec<char> = Vec::new();
+        buf.push(c);
+        emit(m, &buf);
+        m.val = Val::Unspec;
+        return Result::Ok(());
+    }
+    if id == ID_READ {
+        match args {
+            Val::Nil => {},
+            _ => { return Result::Err(arity("read")); },
+        }
+        match read_datum(&mut m.rdr, &mut m.heap, &mut m.syms, 0) {
+            Result::Ok(v) => {
+                match v {
+                    Option::Some(d) => { m.val = d; },
+                    Option::None => { m.val = Val::Eof; },
+                }
+                return Result::Ok(());
+            },
+            Result::Err(e) => { return Result::Err(e); },
+        }
+    }
+    if id == ID_EOFP {
+        let v = one(&m.heap, args, "eof-object?")?;
+        m.val = bval(match v { Val::Eof => true, _ => false });
+        return Result::Ok(());
+    }
+    if id == ID_CHARREADY {
+        // One blocking stream: a character that EOF'd is answered #f; the
+        // VM gives no peek, so #t is the best honest answer otherwise.
+        m.val = Val::Bool(true);
+        return Result::Ok(());
+    }
+
+    // ---------- environment / control ----------
+    if id == ID_INTERACTION_ENV {
+        m.val = m.genv;
+        return Result::Ok(());
+    }
+    if id == ID_ERROR {
+        // (error msg irritant …): the message text, then each irritant in
+        // write form.
+        match args {
+            Val::Pair(p0) => {
+                let mut msg: Vec<char> = Vec::new();
+                let first = m.heap.car(p0);
+                match first {
+                    Val::Str(i) => {
+                        let mut k: taddr = 0;
+                        while k < m.heap.str_len(i) {
+                            msg.push(m.heap.str_at(i, k));
+                            k += 1;
+                        }
+                    },
+                    _ => {
+                        write_to(&mut m.heap, &m.syms, first, false, &mut msg);
+                    },
+                }
+                let mut cur = m.heap.cdr(p0);
+                loop {
+                    match cur {
+                        Val::Nil => { break; },
+                        Val::Pair(p) => {
+                            msg.push(' ');
+                            let entry = m.heap.car(p);
+                            write_to(&mut m.heap, &m.syms, entry, false, &mut msg);
+                            cur = m.heap.cdr(p);
+                        },
+                        _ => { break; },
+                    }
+                }
+                return Result::Err(err_of(msg));
+            },
+            _ => { return Result::Err(arity("error")); },
+        }
+    }
+    if id == ID_QUIT || id == ID_EXIT {
+        m.halted = true;
+        match args {
+            Val::Nil => { m.exit_code = 0; },
+            Val::Pair(p) => {
+                m.exit_code = num(m.heap.car(p), "exit")?;
+            },
+            _ => { return Result::Err(arity("exit")); },
+        }
+        m.val = Val::Unspec;
+        return Result::Ok(());
+    }
+    if id == ID_GC {
+        gc::collect(m);
+        m.val = Val::Unspec;
+        return Result::Ok(());
+    }
+    if id == ID_GC_STATS {
+        let (p, s, v, c) = gc::collect(m);
+        let l4 = mcons(m, Val::Num(c as t27), Val::Nil);
+        let l3 = mcons(m, Val::Num(v as t27), l4);
+        let l2 = mcons(m, Val::Num(s as t27), l3);
+        let l1 = mcons(m, Val::Num(p as t27), l2);
+        m.val = l1;
+        return Result::Ok(());
+    }
+
+    // The control trio never arrives here: eval.tr intercepts them.
+    if id == ID_APPLY || id == ID_EVAL || id == ID_CALLCC {
+        return Result::Err(err("internal: control primitive escaped to prim"));
+    }
+    Result::Err(err("unknown primitive"))
+}
+
+// Where display's bytes go: the port normally, the capture buffer when a
+// test asked for it (main.tr's harness pins printed output this way).
+fn emit(m: &mut Machine, buf: &Vec<char>) {
+    if m.capturing {
+        m.capture.push_str(buf);
+    } else {
+        print(buf);
+    }
+}
+
+// (f x) or (f x y): the one-or-two argument shape.
+fn two_or_one(h: &Heap, args: Val, whose: &str) -> Result<(Val, Option<Val>), SErr> {
+    match args {
+        Val::Pair(i) => {
+            match h.cdr(i) {
+                Val::Nil => Result::Ok((h.car(i), Option::None)),
+                Val::Pair(j) => {
+                    match h.cdr(j) {
+                        Val::Nil => Result::Ok((h.car(i), Option::Some(h.car(j)))),
+                        _ => Result::Err(arity(whose)),
+                    }
+                },
+                _ => Result::Err(arity(whose)),
+            }
+        },
+        _ => Result::Err(arity(whose)),
+    }
+}
+
+// String order: −1, 0, +1, the machine's own compare, `ci` folding ASCII.
+fn str_cmp(h: &Heap, a: taddr, b: taddr, ci: bool) -> t27 {
+    let la = h.str_len(a);
+    let lb = h.str_len(b);
+    let mut k: taddr = 0;
+    loop {
+        let more_a = k < la;
+        let more_b = k < lb;
+        if !more_a && !more_b { return 0; }
+        if !more_a { return -1; }
+        if !more_b { return 1; }
+        let mut ca = h.str_at(a, k);
+        let mut cb = h.str_at(b, k);
+        if ci {
+            ca = up(ca);
+            cb = up(cb);
+        }
+        if ca < cb { return -1; }
+        if ca > cb { return 1; }
+        k += 1;
+    }
+}
+
+// number->string's radices. 10: signed decimal. 3: balanced ternary in the
+// machine's own canonical spelling (`0t1T0` = 6) — the t27 `%` rounds to
+// nearest, and for a divisor of three the nearest quotient leaves the
+// balanced digits −1, 0, +1 behind it *for free*, which is the whole point
+// of the notation. 27: heptavintimal, the same trick one digit wider
+// (`0hJ` = 6, `D` the zero). 2/8/16: unsigned-magnitude with a sign, the
+// interchange radices R5RS reads.
+fn push_radix(out: &mut Vec<char>, n: t27, radix: t27) -> Result<(), SErr> {
+    if radix == 10 {
+        push_int(out, n);
+        return Result::Ok(());
+    }
+    if radix == 3 {
+        if n == 0 {
+            out.push_str("0t0");
+            return Result::Ok(());
+        }
+        let mut digits: Vec<char> = Vec::new();
+        let mut v = n;
+        loop {
+            let d = v % 3;                      // −1, 0 or +1: balanced!
+            let c = if d == 0 {
+                '0'
+            } else if d == 1 {
+                '1'
+            } else if d == -1 {
+                'T'
+            } else {
+                // Round-to-nearest leaves q one closER to zero on a tie;
+                // normalize the stray ±2 (|d| < 3 always, so ±2 is the only
+                // residue possible past the balanced set).
+                if d == 2 { 'T' } else { '1' }
+            };
+            digits.push(c);
+            v = (v - d) / 3;
+            if v == 0 { break; }
+        }
+        out.push('0');
+        out.push('t');
+        let mut i = digits.len();
+        while i > 0 {
+            i -= 1;
+            out.push(digits[i]);
+        }
+        return Result::Ok(());
+    }
+    if radix == 27 {
+        if n == 0 {
+            out.push_str("0hD");
+            return Result::Ok(());
+        }
+        let mut digits: Vec<char> = Vec::new();
+        let mut v = n;
+        loop {
+            let d = v % 27;                     // −13…+13: balanced again
+            let c = hept_digit(d);
+            digits.push(c);
+            let nv = (v - d) / 27;
+            v = nv;
+            if v == 0 { break; }
+        }
+        out.push('0');
+        out.push('h');
+        let mut i = digits.len();
+        while i > 0 {
+            i -= 1;
+            out.push(digits[i]);
+        }
+        return Result::Ok(());
+    }
+    if radix == 2 || radix == 8 || radix == 16 {
+        let mut v = n;
+        if v < 0 { v = -v; }
+        let mut digits: Vec<char> = Vec::new();
+        loop {
+            let d = floor_mod(v, radix);
+            let c = if d < 10 { d + 48 } else { d + 87 };
+            match char::try_from(c) {
+                Option::Some(x) => digits.push(x),
+                Option::None => {},
+            }
+            v = floor_div(v, radix);
+            if v == 0 { break; }
+        }
+        if n < 0 { out.push('-'); }
+        let mut i = digits.len();
+        while i > 0 {
+            i -= 1;
+            out.push(digits[i]);
+        }
+        return Result::Ok(());
+    }
+    Result::Err(type_err("number->string", "radix in {2,3,8,10,16,27}"))
+}
+
+// The heptavintimal digit for −13…+13: 0-9 A-Q, D the zero (Ch. 1 §3.1).
+fn hept_digit(d: t27) -> char {
+    let v = if d == 0 {
+        68                          // 'D'
+    } else if d > 0 {
+        68 + d                      // E..Q for 1..13
+    } else if d >= -3 {
+        64 - d                      // A..C for −1..−3 (65,66,67)
+    } else {
+        61 + d                      // 0..9 for −13..−4 (48…57)
+    };
+    match char::try_from(v) {
+        Option::Some(c) => c,
+        Option::None => '?',
+    }
+}
+
+// string->number across the same radices: lean on the reader's tokenizer —
+// a bare token becomes the prefixed spelling the reader already knows.
+fn parse_radix(text: &Vec<char>, radix: t27) -> Option<t27> {
+    if radix == 10 {
+        return number_token(text);
+    }
+    let mut t: Vec<char> = Vec::new();
+    // An explicit prefix overrides the radix argument.
+    if text.len() > 1 && text[0] == '#' {
+        return number_token(text);
+    }
+    if text.len() > 2 && text[0] == '0' && (text[1] == 't' || text[1] == 'T' || text[1] == 'h' || text[1] == 'H') {
+        return number_token(text);
+    }
+    if radix == 3 { t.push_str("0t"); }
+    else if radix == 27 { t.push_str("0h"); }
+    else if radix == 16 { t.push_str("#x"); }
+    else if radix == 8 { t.push_str("#o"); }
+    else if radix == 2 { t.push_str("#b"); }
+    else { return Option::None; }
+    let mut k: taddr = 0;
+    while k < text.len() {
+        t.push(text[k]);
+        k += 1;
+    }
+    number_token(&t)
+}
+

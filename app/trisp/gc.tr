@@ -1,0 +1,306 @@
+// gc.tr — the garbage collector: mark-sweep over the three arenas and the
+// continuation arena.
+//
+// The allocation rule that makes this simple, stated once: **a collection
+// may only happen at the boundary of the outermost eval loop.** There —
+// and only there — the machine's registers (genv, exp, env, val, konts,
+// conts) are a complete root set: nothing lives in a Trust local across a
+// step boundary. eval.tr's `run` enforces it by calling `maybe_collect`
+// from the outer loop only; the quasiquote expander, `eval_value`'s nested
+// runs, the reader and the primitives allocate as they please and never
+// collect, because their half-built values sit in locals the marker cannot
+// see. This is the same discipline a copying collector's "safepoint" is,
+// chosen as a rule of the code rather than a property the compiler knows.
+//
+// Marking is iterative over an explicit worklist: structure depth is
+// bounded by the heap, not the native stack (val.tr's printer makes the
+// same choice, and the pairing heap's comment says why this matters on
+// this machine).
+//
+// Sweeping rebuilds each freelist from scratch — every cell, live or dead,
+// is visited exactly once in arena order, so there is no "already on the
+// freelist" case to distinguish: unmarked cells are threaded onto the new
+// freelist wholesale, and marked cells drop their mark for next time.
+//
+// Pace: `m.gc_since` counts allocations that went through `mcons`/`mstr`/
+// `mvec` (the evaluator's paths; the reader's own conses and val.tr's
+// `rev_onto` are steady-state scratch that reuses the freelist and is left
+// uncounted). After each collection the budget becomes three times the
+// number of live pairs — a collection buys room proportional to what
+// survived, the power-of-three being this machine's idea of a growth
+// factor.
+
+use machine::Kont;
+use machine::Machine;
+use val::FREE;
+use val::Val;
+
+// Allocations that count toward the next collection.
+
+pub fn mcons(m: &mut Machine, a: Val, d: Val) -> Val {
+    m.gc_since += 1;
+    m.heap.cons(a, d)
+}
+
+pub fn mstr(m: &mut Machine, text: &Vec<char>) -> Val {
+    m.gc_since += 1;
+    m.heap.str_new(text)
+}
+
+pub fn mvec(m: &mut Machine, len: taddr, fill: Val) -> Val {
+    m.gc_since += 1;
+    m.heap.vec_new(len, fill)
+}
+
+// The outer-loop boundary check: collect when the pace says so.
+pub fn maybe_collect(m: &mut Machine) {
+    if m.gc_since >= m.gc_limit {
+        collect(m);
+    }
+}
+
+// A full collection. Answers (pairs, strings, vectors, continuations) live
+// after the sweep — the census the `gc-stats` primitive prints and the
+// no-leak tests pin.
+pub fn collect(m: &mut Machine) -> (taddr, taddr, taddr, taddr) {
+    let mut work: Vec<Val> = Vec::new();
+    // The root set, whole.
+    work.push(m.genv);
+    work.push(m.exp);
+    work.push(m.env);
+    work.push(m.val);
+    let mut i: taddr = 0;
+    while i < m.konts.len() {
+        kont_roots(&m.konts[i], &mut work);
+        i += 1;
+    }
+    mark(m, &mut work);
+    let pairs = sweep_pairs(m);
+    let strs = sweep_strs(m);
+    let vecs = sweep_vecs(m);
+    let conts = sweep_conts(m);
+    m.gc_since = 0;
+    // The next budget: three times what survived, with a floor of 3^10 so
+    // a tiny program does not collect every other allocation.
+    let mut budget = pairs * 3;
+    if budget < 59049 { budget = 59049; }
+    m.gc_limit = budget;
+    (pairs, strs, vecs, conts)
+}
+
+// Every Val a Kont keeps alive.
+fn kont_roots(k: &Kont, work: &mut Vec<Val>) {
+    match k {
+        Kont::If { conseq, alt, env } => {
+            work.push(conseq);
+            work.push(alt);
+            work.push(env);
+        },
+        Kont::Seq { rest, env } => {
+            work.push(rest);
+            work.push(env);
+        },
+        Kont::DefName { sym: _, env } => {
+            work.push(env);
+        },
+        Kont::SetName { sym: _, env } => {
+            work.push(env);
+        },
+        Kont::CallOp { args, env } => {
+            work.push(args);
+            work.push(env);
+        },
+        Kont::CallArg { op, rest, acc, env } => {
+            work.push(op);
+            work.push(rest);
+            work.push(acc);
+            work.push(env);
+        },
+        Kont::CondNext { rest, body, env } => {
+            work.push(rest);
+            work.push(body);
+            work.push(env);
+        },
+        Kont::CondRecv { rest, expr, env } => {
+            work.push(rest);
+            work.push(expr);
+            work.push(env);
+        },
+        Kont::AndRest { rest, env } => {
+            work.push(rest);
+            work.push(env);
+        },
+        Kont::OrRest { rest, env } => {
+            work.push(rest);
+            work.push(env);
+        },
+        Kont::WhenRest { body, env, sense: _ } => {
+            work.push(body);
+            work.push(env);
+        },
+        Kont::LetEval { names, exprs, acc, body, oenv } => {
+            work.push(names);
+            work.push(exprs);
+            work.push(acc);
+            work.push(body);
+            work.push(oenv);
+        },
+        Kont::LetStarBind { name: _, names, exprs, body } => {
+            work.push(names);
+            work.push(exprs);
+            work.push(body);
+        },
+        Kont::LetrecBind { bindings, exprs, body, fenv } => {
+            work.push(bindings);
+            work.push(exprs);
+            work.push(body);
+            work.push(fenv);
+        },
+        Kont::NamedLetCall { names, exprs, acc, cell: _, body, ienv, fenv } => {
+            work.push(names);
+            work.push(exprs);
+            work.push(acc);
+            work.push(body);
+            work.push(ienv);
+            work.push(fenv);
+        },
+    }
+}
+
+// Iterative mark phase.
+fn mark(m: &mut Machine, work: &mut Vec<Val>) {
+    loop {
+        let v = match work.pop() {
+            Option::Some(v) => v,
+            Option::None => { return; },
+        };
+        match v {
+            Val::Pair(i) => {
+                if !m.heap.cell_mark(i) {
+                    m.heap.cell_set_mark(i, true);
+                    work.push(m.heap.cell_car(i));
+                    work.push(m.heap.cell_cdr(i));
+                }
+            },
+            Val::Closure(i) => {
+                // A closure is pairs: mark the spine, and both its fields
+                // flow through the same pushes as an ordinary cell.
+                if !m.heap.cell_mark(i) {
+                    m.heap.cell_set_mark(i, true);
+                    work.push(m.heap.cell_car(i));
+                    work.push(m.heap.cell_cdr(i));
+                }
+            },
+            Val::Str(i) => {
+                m.heap.str_cell_set_mark(i, true);
+            },
+            Val::Vec(i) => {
+                if !m.heap.vec_cell_mark(i) {
+                    m.heap.vec_cell_set_mark(i, true);
+                    let n = m.heap.vec_len(i);
+                    let base = m.heap.span_start_vec(i);
+                    let mut k: taddr = 0;
+                    while k < n {
+                        work.push(m.heap.vec_elem(base + k));
+                        k += 1;
+                    }
+                }
+            },
+            Val::Cont(c) => {
+                if m.conts[c].live && !m.conts[c].mark {
+                    m.conts[c].mark = true;
+                    let mut j: taddr = 0;
+                    let n = m.conts[c].ks.len();
+                    while j < n {
+                        // The box's frames are roots of their own: gather
+                        // their Vals without holding a borrow across pushes.
+                        let mut tmp: Vec<Val> = Vec::new();
+                        kont_roots(&m.conts[c].ks[j], &mut tmp);
+                        let mut t: taddr = 0;
+                        while t < tmp.len() {
+                            work.push(tmp[t]);
+                            t += 1;
+                        }
+                        j += 1;
+                    }
+                    let _ = n;
+                }
+            },
+            _ => {},
+        }
+    }
+}
+
+// Rebuild a freelist from a whole arena: marked cells survive (mark
+// cleared), the rest thread onto the new freelist. Pairs.
+fn sweep_pairs(m: &mut Machine) -> taddr {
+    let mut free = FREE;
+    let mut live: taddr = 0;
+    let mut i: taddr = 0;
+    let n = m.heap.pairs_len();
+    while i < n {
+        if m.heap.cell_mark(i) {
+            m.heap.cell_set_mark(i, false);
+            live += 1;
+        } else {
+            m.heap.cell_set_next(i, free);
+            free = i;
+        }
+        i += 1;
+    }
+    m.heap.set_pairs_free(free);
+    live
+}
+
+fn sweep_strs(m: &mut Machine) -> taddr {
+    let mut free = FREE;
+    let mut live: taddr = 0;
+    let mut i: taddr = 0;
+    let n = m.heap.strs_len();
+    while i < n {
+        if m.heap.str_cell_mark(i) {
+            m.heap.str_cell_set_mark(i, false);
+            live += 1;
+        } else {
+            m.heap.str_cell_set_next(i, free);
+            free = i;
+        }
+        i += 1;
+    }
+    m.heap.set_strs_free(free);
+    live
+}
+
+fn sweep_vecs(m: &mut Machine) -> taddr {
+    let mut free = FREE;
+    let mut live: taddr = 0;
+    let mut i: taddr = 0;
+    let n = m.heap.vecs_len();
+    while i < n {
+        if m.heap.vec_cell_mark(i) {
+            m.heap.vec_cell_set_mark(i, false);
+            live += 1;
+        } else {
+            m.heap.vec_cell_set_next(i, free);
+            free = i;
+        }
+        i += 1;
+    }
+    m.heap.set_vecs_free(free);
+    live
+}
+
+fn sweep_conts(m: &mut Machine) -> taddr {
+    let mut live: taddr = 0;
+    let mut i: taddr = 0;
+    while i < m.conts.len() {
+        if m.conts[i].mark {
+            m.conts[i].mark = false;
+            live += 1;
+        } else {
+            m.conts[i].live = false;
+        }
+        i += 1;
+    }
+    live
+}

@@ -1,0 +1,776 @@
+// val.tr — values, the heap, printing, and structural equality.
+//
+// Everything the evaluator manipulates is a `Val`, and a `Val` is Copy:
+// twelve variants, every payload a scalar. Objects that are "really" data —
+// pairs, strings, vectors, closures — are *indices into arenas* the `Heap`
+// owns, which is the decision the whole interpreter rests on:
+//
+// - **The borrow checker never sees the object graph.** Mutation goes
+//   through `h.pairs[i].car = v`, an index into a `Vec` — no `&mut` chains
+//   through objects, no aliasing questions, and Ch. 3's rules stay out of
+//   the hot path entirely.
+// - **GC is mark-sweep over three `Vec`s** (gc.tr), roots in machine.tr, and
+//   every address a program will ever print is a deterministic function of
+//   the allocations before it — the target's allocator is bump+freelist and
+//   deterministic, so census numbers can be *pinned in tests*.
+// - **Closures are pairs.** `Val::Closure(i)` points at a cons cell laid out
+//   `((params) . (body . env))`, so the heap needs no fourth arena and the GC
+//   no fourth rule. Continuations are the exception (`Val::Cont`): they hold
+//   a snapshot of the kont stack — a `Vec<Kont>` — which lives beside the
+//   heap in machine.tr.
+//
+// Layout note: negative word is the freelist sentinel (`-1`), which costs
+// nothing on a signed machine and needs no `Option` two-word cell.
+
+use err::push_int;
+use sym::Intern;
+
+pub enum Val {
+    Nil,
+    Num(t27),
+    Sym(taddr),
+    Str(taddr),
+    Pair(taddr),
+    Vec(taddr),
+    Chr(char),
+    Bool(bool),
+    Unspec,                     // what define/set!/etc. answer — never printed
+    Eof,
+    Prim(taddr),                // index into prim.tr's table
+    Closure(taddr),             // a pair index — ((params) . (body . env))
+    Cont(taddr),                // index into machine.tr's continuation arena
+}
+
+// One pair cell. `next` links the freelist; it is −1 while the cell is live.
+pub struct Pair { pub car: Val, pub cdr: Val, pub mark: bool, pub next: taddr }
+
+// One string or vector: a span of the packed buffer. Strings are immutable
+// once published (header decision: no `string-set!`), so a span's contents
+// never change and spans are never reused — sweeping frees the *cell*, and
+// buffer space grows at the tail. Stated here because it is a choice.
+pub struct Span { pub start: taddr, pub len: taddr, pub mark: bool, pub next: taddr }
+
+pub struct Heap {
+    pairs: Vec<Pair>,
+    pairs_free: taddr,
+    strs: Vec<Span>,
+    strs_free: taddr,
+    strbuf: Vec<char>,
+    vecs: Vec<Span>,
+    vecs_free: taddr,
+    vecbuf: Vec<Val>,
+}
+
+pub const FREE: taddr = 0 - 1;
+
+impl Heap {
+    fn new() -> Heap {
+        Heap {
+            pairs: Vec::new(),
+            pairs_free: FREE,
+            strs: Vec::new(),
+            strs_free: FREE,
+            strbuf: Vec::new(),
+            vecs: Vec::new(),
+            vecs_free: FREE,
+            vecbuf: Vec::new(),
+        }
+    }
+
+    // ------------------------------------------------------------- pairs ---
+
+    fn cons(&mut self, car: Val, cdr: Val) -> Val {
+        if self.pairs_free != FREE {
+            let i = self.pairs_free;
+            self.pairs_free = self.pairs[i].next;
+            self.pairs[i].car = car;
+            self.pairs[i].cdr = cdr;
+            self.pairs[i].mark = false;
+            self.pairs[i].next = FREE;
+            return Val::Pair(i);
+        }
+        self.pairs.push(Pair { car: car, cdr: cdr, mark: false, next: FREE });
+        Val::Pair(self.pairs.len() - 1)
+    }
+
+    fn car(&self, i: taddr) -> Val { self.pairs[i].car }
+    fn cdr(&self, i: taddr) -> Val { self.pairs[i].cdr }
+    fn is_pair(&self, v: Val) -> bool {
+        match v { Val::Pair(_) => true, _ => false }
+    }
+    fn set_car(&mut self, i: taddr, v: Val) { self.pairs[i].car = v; }
+    fn set_cdr(&mut self, i: taddr, v: Val) { self.pairs[i].cdr = v; }
+
+    // `(list a b c)` spelled without varargs, longest first.
+    fn list1(&mut self, a: Val) -> Val { self.cons(a, Val::Nil) }
+    fn list2(&mut self, a: Val, b: Val) -> Val {
+        let t = self.list1(b);
+        self.cons(a, t)
+    }
+    fn list3(&mut self, a: Val, b: Val, c: Val) -> Val {
+        let t = self.list2(b, c);
+        self.cons(a, t)
+    }
+
+    // The length of a proper list; `None` for a dotted or cyclic one.
+    fn len_proper(&self, v: Val) -> Option<taddr> {
+        let mut n: taddr = 0;
+        let mut cur = v;
+        loop {
+            match cur {
+                Val::Nil => { return Option::Some(n); },
+                Val::Pair(i) => {
+                    cur = self.pairs[i].cdr;
+                    n += 1;
+                    if n > self.pairs.len() { return Option::None; }   // cycle
+                },
+                _ => { return Option::None; },
+            }
+        }
+    }
+
+    // Copy `v`'s spine onto `acc`, reversing it: (a b) onto c is (b a . c).
+    fn rev_onto(&mut self, v: Val, acc: Val) -> Val {
+        let mut out = acc;
+        let mut cur = v;
+        loop {
+            match cur {
+                Val::Pair(i) => {
+                    out = self.cons(self.pairs[i].car, out);
+                    cur = self.pairs[i].cdr;
+                },
+                _ => { return out; },
+            }
+        }
+    }
+
+    // A proper, non-cyclic list?
+    fn is_list(&self, v: Val) -> bool {
+        // Tortoise and hare — the answer must not chase a cycle forever.
+        let mut slow = v;
+        let mut fast = v;
+        loop {
+            match fast {
+                Val::Pair(i) => {
+                    let once = self.pairs[i].cdr;
+                    match once {
+                        Val::Pair(j) => {
+                            fast = self.pairs[j].cdr;
+                        },
+                        Val::Nil => { return true; },
+                        _ => { return false; },
+                    }
+                    match slow {
+                        Val::Pair(k) => { slow = self.pairs[k].cdr; },
+                        _ => { return false; },
+                    }
+                    match slow {
+                        Val::Pair(a) => {
+                            match fast {
+                                Val::Pair(b) => {
+                                    if a == b { return false; }
+                                },
+                                _ => {},
+                            }
+                        },
+                        _ => {},
+                    }
+                },
+                Val::Nil => { return true; },
+                _ => { return false; },
+            }
+        }
+    }
+
+    // ----------------------------------------------------------- strings ---
+
+    fn str_new(&mut self, text: &Vec<char>) -> Val {
+        let start = self.strbuf.len();
+        let mut i: taddr = 0;
+        while i < text.len() {
+            self.strbuf.push(text[i]);
+            i += 1;
+        }
+        self.str_cell(start, text.len())
+    }
+
+    fn str_cell(&mut self, start: taddr, len: taddr) -> Val {
+        if self.strs_free != FREE {
+            let i = self.strs_free;
+            self.strs_free = self.strs[i].next;
+            self.strs[i].start = start;
+            self.strs[i].len = len;
+            self.strs[i].mark = false;
+            self.strs[i].next = FREE;
+            return Val::Str(i);
+        }
+        self.strs.push(Span { start: start, len: len, mark: false, next: FREE });
+        Val::Str(self.strs.len() - 1)
+    }
+
+    fn str_len(&self, i: taddr) -> taddr { self.strs[i].len }
+
+    fn str_at(&self, i: taddr, k: taddr) -> char {
+        self.strbuf[self.strs[i].start + k]
+    }
+
+    // From a `start..start + len` window of the packed buffer — substring's
+    // whole operation, since a published string never changes under it.
+    fn str_from_span(&mut self, src: taddr, from: taddr, len: taddr) -> Val {
+        let start = self.strbuf.len();
+        let base = self.strs[src].start;
+        let mut k: taddr = 0;
+        while k < len {
+            self.strbuf.push(self.strbuf[base + from + k]);
+            k += 1;
+        }
+        self.str_cell(start, len)
+    }
+
+    fn str_eq(&self, a: taddr, b: taddr) -> bool {
+        if self.strs[a].len != self.strs[b].len { return false; }
+        let mut k: taddr = 0;
+        while k < self.strs[a].len {
+            if self.strbuf[self.strs[a].start + k] != self.strbuf[self.strs[b].start + k] {
+                return false;
+            }
+            k += 1;
+        }
+        true
+    }
+
+    // ----------------------------------------------------------- vectors ---
+
+    fn vec_new(&mut self, len: taddr, fill: Val) -> Val {
+        let start = self.vecbuf.len();
+        let mut k: taddr = 0;
+        while k < len {
+            self.vecbuf.push(fill);
+            k += 1;
+        }
+        if self.vecs_free != FREE {
+            let i = self.vecs_free;
+            self.vecs_free = self.vecs[i].next;
+            self.vecs[i].start = start;
+            self.vecs[i].len = len;
+            self.vecs[i].mark = false;
+            self.vecs[i].next = FREE;
+            return Val::Vec(i);
+        }
+        self.vecs.push(Span { start: start, len: len, mark: false, next: FREE });
+        Val::Vec(self.vecs.len() - 1)
+    }
+
+    fn vec_len(&self, i: taddr) -> taddr { self.vecs[i].len }
+
+    fn vec_at(&self, i: taddr, k: taddr) -> Val {
+        self.vecbuf[self.vecs[i].start + k]
+    }
+
+    fn vec_set(&mut self, i: taddr, k: taddr, v: Val) {
+        self.vecbuf[self.vecs[i].start + k] = v;
+    }
+
+    // ---------------------------------------------------------- closures ---
+    //
+    // A closure is two cells: `((params) . (body . env))`, where body is a
+    // non-empty list of forms. Kept as pairs so marking needs nothing new.
+
+    fn closure_new(&mut self, params: Val, body: Val, env: Val) -> Val {
+        let be = self.cons(body, env);
+        Val::Closure(self.cons_id(params, be))
+    }
+
+    // cons answers Val::Pair; the closure wants the bare index.
+    fn cons_id(&mut self, car: Val, cdr: Val) -> taddr {
+        match self.cons(car, cdr) {
+            Val::Pair(i) => i,
+            _ => 0,         // cons's answer is a pair cell by construction
+        }
+    }
+
+    fn closure_params(&self, i: taddr) -> Val { self.pairs[i].car }
+    fn closure_body(&self, i: taddr) -> Val { self.pairs[self.pairs_id(i)].car }
+    fn closure_env(&self, i: taddr) -> Val { self.pairs[self.pairs_id(i)].cdr }
+
+    // The second cell of the closure pair.
+    fn pairs_id(&self, i: taddr) -> taddr {
+        match self.pairs[i].cdr {
+            Val::Pair(j) => j,
+            _ => 0,
+        }
+    }
+
+    // ------------------------------------------------------------ access ---
+    //
+    // The GC walks cells directly, so its reads live here behind-names.
+
+    fn pairs_len(&self) -> taddr { self.pairs.len() }
+    fn strs_len(&self) -> taddr { self.strs.len() }
+    fn vecs_len(&self) -> taddr { self.vecs.len() }
+    fn strbuf_len(&self) -> taddr { self.strbuf.len() }
+
+    fn cell_car(&self, i: taddr) -> Val { self.pairs[i].car }
+    fn cell_cdr(&self, i: taddr) -> Val { self.pairs[i].cdr }
+    fn cell_mark(&self, i: taddr) -> bool { self.pairs[i].mark }
+    fn cell_set_mark(&mut self, i: taddr, m: bool) { self.pairs[i].mark = m; }
+    fn cell_next(&self, i: taddr) -> taddr { self.pairs[i].next }
+    fn cell_set_next(&mut self, i: taddr, n: taddr) { self.pairs[i].next = n; }
+
+    fn str_cell_mark(&self, i: taddr) -> bool { self.strs[i].mark }
+    fn str_cell_set_mark(&mut self, i: taddr, m: bool) { self.strs[i].mark = m; }
+    fn str_cell_next(&self, i: taddr) -> taddr { self.strs[i].next }
+    fn str_cell_set_next(&mut self, i: taddr, n: taddr) { self.strs[i].next = n; }
+
+    fn vec_cell_mark(&self, i: taddr) -> bool { self.vecs[i].mark }
+    fn vec_cell_set_mark(&mut self, i: taddr, m: bool) { self.vecs[i].mark = m; }
+    fn vec_cell_next(&self, i: taddr) -> taddr { self.vecs[i].next }
+    fn vec_cell_set_next(&mut self, i: taddr, n: taddr) { self.vecs[i].next = n; }
+    fn vec_elem(&self, i: taddr) -> Val { self.vecbuf[i] }
+    fn span_start(&self, i: taddr) -> taddr { self.strs[i].start }
+    fn span_start_vec(&self, i: taddr) -> taddr { self.vecs[i].start }
+
+    fn set_pairs_free(&mut self, f: taddr) { self.pairs_free = f; }
+    fn get_pairs_free(&self) -> taddr { self.pairs_free }
+    fn set_strs_free(&mut self, f: taddr) { self.strs_free = f; }
+    fn get_strs_free(&self) -> taddr { self.strs_free }
+    fn set_vecs_free(&mut self, f: taddr) { self.vecs_free = f; }
+    fn get_vecs_free(&self) -> taddr { self.vecs_free }
+
+    // -------------------------------------------------------- truthiness ---
+
+    // Scheme's one rule: `#f` is false, and *everything else is true* — the
+    // empty list, zero, the empty string, all of it.
+    fn true_of(&self, v: Val) -> bool {
+        match v {
+            Val::Bool(b) => b,
+            _ => true,
+        }
+    }
+}
+
+// ------------------------------------------------------------- printing ---
+//
+// Iterative over an explicit worklist: a structure's depth is bounded only by
+// the heap, and the machine's stack is not the heap's size, so no printer —
+// this one, `equal?` below — may recurse over structure. Cycles are detected
+// with the cell's own mark bit: set on entry, cleared on exit, and a marked
+// cell revisited prints as `#<cycle>`. The marks belong to a collection only
+// while one runs, so borrowing them here is sound (and restores them).
+
+// The `bool` on Close is "emit the matching close paren": only the cell a
+// `(` was opened for (by write_one) owns one; the spine cells a Cdr walk
+// passes through are just unmarked — one open, one close, per list.
+pub enum PJob { V(Val), C(char), Cdr(taddr), Close(taddr, bool), InVec(taddr, taddr) }
+
+pub fn write_to(h: &mut Heap, syms: &Intern, v: Val, display: bool, out: &mut Vec<char>) {
+    let mut todo: Vec<PJob> = Vec::new();
+    todo.push(PJob::V(v));
+    loop {
+        let job = match todo.pop() {
+            Option::Some(j) => j,
+            Option::None => { break; },
+        };
+        match job {
+            PJob::V(x) => write_one(h, syms, x, display, out, &mut todo),
+            PJob::C(c) => out.push(c),
+            PJob::Cdr(i) => {
+                let c = h.cdr(i);
+                match c {
+                    Val::Nil => {},
+                    Val::Pair(j) => {
+                        if h.cell_mark(j) {
+                            push_str(out, " . ");
+                            todo.push(PJob::V(c));
+                        } else {
+                            out.push(' ');
+                            h.cell_set_mark(j, true);
+                            todo.push(PJob::Close(j, false));
+                            todo.push(PJob::Cdr(j));
+                            todo.push(PJob::V(h.car(j)));
+                        }
+                    },
+                    _ => {
+                        push_str(out, " . ");
+                        todo.push(PJob::V(c));
+                    },
+                }
+            },
+            PJob::Close(i, paren) => {
+                h.cell_set_mark(i, false);
+                if paren { out.push(')'); }
+            },
+            PJob::InVec(i, k) => {
+                if k >= h.vec_len(i) {
+                    h.vec_cell_set_mark(i, false);
+                    out.push(')');
+                } else {
+                    if k > 0 { out.push(' '); }
+                    todo.push(PJob::InVec(i, k + 1));
+                    todo.push(PJob::V(h.vec_at(i, k)));
+                }
+            },
+        }
+    }
+}
+
+fn write_one(h: &mut Heap, syms: &Intern, v: Val, display: bool,
+             out: &mut Vec<char>, todo: &mut Vec<PJob>) {
+    match v {
+        Val::Nil => { out.push('('); out.push(')'); },
+        Val::Num(n) => push_int(out, n),
+        Val::Sym(id) => push_str(out, syms.name(id)),
+        Val::Str(i) => {
+            if display {
+                push_span(h, i, out);
+            } else {
+                out.push('"');
+                let mut k: taddr = 0;
+                while k < h.str_len(i) {
+                    push_escaped(out, h.str_at(i, k));
+                    k += 1;
+                }
+                out.push('"');
+            }
+        },
+        Val::Pair(i) => {
+            if h.cell_mark(i) {
+                push_str(out, "#<cycle>");
+            } else {
+                h.cell_set_mark(i, true);
+                out.push('(');
+                todo.push(PJob::Close(i, true));
+                todo.push(PJob::Cdr(i));
+                todo.push(PJob::V(h.car(i)));
+            }
+        },
+        Val::Vec(i) => {
+            if h.vec_cell_mark(i) {
+                push_str(out, "#<cycle>");
+            } else {
+                h.vec_cell_set_mark(i, true);
+                out.push('#');
+                out.push('(');
+                todo.push(PJob::InVec(i, 0));
+            }
+        },
+        Val::Chr(c) => {
+            if display {
+                out.push(c);
+            } else {
+                push_str(out, "#\\");
+                match c {
+                    '\n' => push_str(out, "newline"),
+                    ' ' => push_str(out, "space"),
+                    '\t' => push_str(out, "tab"),
+                    _ => out.push(c),
+                }
+            }
+        },
+        Val::Bool(b) => {
+            out.push('#');
+            out.push(if b { 't' } else { 'f' });
+        },
+        Val::Unspec => push_str(out, "#<unspecified>"),
+        Val::Eof => push_str(out, "#<eof>"),
+        Val::Prim(_) => push_str(out, "#<primitive>"),
+        Val::Closure(_) => push_str(out, "#<procedure>"),
+        Val::Cont(_) => push_str(out, "#<continuation>"),
+    }
+}
+
+fn push_span(h: &Heap, i: taddr, out: &mut Vec<char>) {
+    let mut k: taddr = 0;
+    while k < h.str_len(i) {
+        out.push(h.str_at(i, k));
+        k += 1;
+    }
+}
+
+// A string character in `write` form: the short escapes where they exist,
+// `\u` hexadecimal for the rest of the control range, raw past it.
+fn push_escaped(out: &mut Vec<char>, c: char) {
+    match c {
+        '"' => push_str(out, "\\\""),
+        '\\' => push_str(out, "\\\\"),
+        '\n' => push_str(out, "\\n"),
+        '\t' => push_str(out, "\\t"),
+        '\r' => push_str(out, "\\r"),
+        _ => {
+            let v = c as t27;
+            if v < 32 || v == 127 {
+                push_str(out, "\\u{");
+                push_hex(out, v);
+                out.push('}');
+            } else {
+                out.push(c);
+            }
+        },
+    }
+}
+
+fn push_hex(out: &mut Vec<char>, n: t27) {
+    let mut digits: Vec<char> = Vec::new();
+    let mut v = n;
+    loop {
+        let d = v % 16;                     // v ≥ 0 everywhere this is called
+        let c = if d < 10 { d + 48 } else { d + 87 };
+        digits.push(char::try_from(c).unwrap());
+        v = v / 16;
+        if v == 0 { break; }
+    }
+    let mut i = digits.len();
+    while i > 0 {
+        i -= 1;
+        out.push(digits[i]);
+    }
+}
+
+fn push_str(out: &mut Vec<char>, s: &str) {
+    out.push_str(s);
+}
+
+// ------------------------------------------------------------ equality ---
+//
+// `equal?` is structural, on the same worklist discipline as the printer:
+// a pair of values is equal when their kinds agree and their parts are. A
+// budget of one visit per cell bounds the walk, so cyclic input answers #f
+// rather than never answering (R5RS leaves cycles unspecified; this is the
+// honest version of an answer). Strings compare by content, vectors
+// elementwise, procedures by identity — R5RS's "unspecified" made concrete.
+
+pub fn equal(h: &Heap, syms: &Intern, a: Val, b: Val) -> bool {
+    let mut budget: taddr = h.pairs_len() + h.vecs_len() + 1;
+    let mut todo: Vec<(Val, Val)> = Vec::new();
+    todo.push((a, b));
+    loop {
+        let (x, y) = match todo.pop() {
+            Option::Some(p) => p,
+            Option::None => { return true; },
+        };
+        if !equal_one(h, syms, x, y, &mut todo) { return false; }
+        budget -= 1;
+        if budget < 0 { return false; }
+    }
+}
+
+fn equal_one(h: &Heap, syms: &Intern, x: Val, y: Val, todo: &mut Vec<(Val, Val)>) -> bool {
+    match x {
+        Val::Nil => match y { Val::Nil => true, _ => false },
+        Val::Num(n) => match y { Val::Num(m) => n == m, _ => false },
+        Val::Sym(i) => match y { Val::Sym(j) => i == j, _ => false },
+        Val::Chr(c) => match y { Val::Chr(d) => c == d, _ => false },
+        Val::Bool(p) => match y { Val::Bool(q) => p == q, _ => false },
+        Val::Str(i) => match y { Val::Str(j) => h.str_eq(i, j), _ => false },
+        Val::Pair(i) => match y {
+            Val::Pair(j) => {
+                if i == j { return true; }
+                todo.push((h.cell_cdr(i), h.cell_cdr(j)));
+                todo.push((h.cell_car(i), h.cell_car(j)));
+                true
+            },
+            _ => false,
+        },
+        Val::Vec(i) => match y {
+            Val::Vec(j) => {
+                if i == j { return true; }
+                if h.vec_len(i) != h.vec_len(j) { return false; }
+                let mut k: taddr = 0;
+                while k < h.vec_len(i) {
+                    todo.push((h.vec_at(i, k), h.vec_at(j, k)));
+                    k += 1;
+                }
+                true
+            },
+            _ => false,
+        },
+        Val::Eof => match y { Val::Eof => true, _ => false },
+        Val::Unspec => match y { Val::Unspec => true, _ => false },
+        Val::Prim(i) => match y { Val::Prim(j) => i == j, _ => false },
+        Val::Closure(i) => match y { Val::Closure(j) => i == j, _ => false },
+        Val::Cont(i) => match y { Val::Cont(j) => i == j, _ => false },
+    }
+}
+
+// `eq?` — pointer equality on cells, value equality on atoms. `eqv?` is the
+// same answer here: one representation per number/character means the two
+// predicates never get to differ, which val.tr says once rather than twice.
+
+pub fn eq(h: &Heap, a: Val, b: Val) -> bool {
+    match a {
+        Val::Nil => match b { Val::Nil => true, _ => false },
+        Val::Num(n) => match b { Val::Num(m) => n == m, _ => false },
+        Val::Sym(i) => match b { Val::Sym(j) => i == j, _ => false },
+        Val::Chr(c) => match b { Val::Chr(d) => c == d, _ => false },
+        Val::Bool(p) => match b { Val::Bool(q) => p == q, _ => false },
+        Val::Str(i) => match b { Val::Str(j) => i == j, _ => false },
+        Val::Pair(i) => match b { Val::Pair(j) => i == j, _ => false },
+        Val::Vec(i) => match b { Val::Vec(j) => i == j, _ => false },
+        Val::Eof => match b { Val::Eof => true, _ => false },
+        Val::Unspec => match b { Val::Unspec => true, _ => false },
+        Val::Prim(i) => match b { Val::Prim(j) => i == j, _ => false },
+        Val::Closure(i) => match b { Val::Closure(j) => i == j, _ => false },
+        Val::Cont(i) => match b { Val::Cont(j) => i == j, _ => false },
+    }
+}
+
+// -------------------------------------------------------------- tests ---
+
+#[test]
+fn cons_cells_round_trip_and_reuse_freed_ones() {
+    let mut h = Heap::new();
+    let a = h.cons(Val::Num(1), Val::Nil);
+    let b = h.cons(Val::Num(2), a);
+    match b {
+        Val::Pair(i) => {
+            match h.car(i) {
+                Val::Num(n) => { if n != 2 { trap(); } },
+                _ => { trap(); },
+            }
+            match h.cdr(i) {
+                Val::Pair(j) => {
+                    match h.car(j) {
+                        Val::Num(n) => { if n != 1 { trap(); } },
+                        _ => { trap(); },
+                    }
+                },
+                _ => { trap(); },
+            }
+        },
+        _ => { trap(); },
+    }
+    if h.pairs_len() != 2 { trap(); }
+}
+
+#[test]
+fn proper_lists_have_lengths_and_improper_ones_do_not() {
+    let mut h = Heap::new();
+    let one = h.list1(Val::Num(1));
+    match h.len_proper(one) {
+        Option::Some(n) => { if n != 1 { trap(); } },
+        Option::None => { trap(); },
+    }
+    let dotted = h.cons(Val::Num(1), Val::Num(2));
+    match h.len_proper(dotted) {
+        Option::Some(_) => { trap(); },
+        Option::None => {},
+    }
+    if !h.is_list(one) { trap(); }
+    if h.is_list(dotted) { trap(); }
+    match dotted {
+        Val::Pair(i) => {
+            let cyc = h.cons(Val::Num(0), dotted);
+            match cyc {
+                Val::Pair(j) => {
+                    // (0 . (1 . 2)) is fine; make (1 . *) point at itself.
+                    h.set_cdr(i, dotted);
+                    if h.is_list(dotted) { trap(); }
+                    match h.len_proper(dotted) {
+                        Option::Some(_) => { trap(); },
+                        Option::None => {},
+                    }
+                    match cyc { Val::Pair(_) => {}, _ => { trap(); } }
+                },
+                _ => { trap(); },
+            }
+        },
+        _ => { trap(); },
+    }
+}
+
+#[test]
+fn strings_pack_and_compare() {
+    let mut h = Heap::new();
+    let hello = "hello".to_string();
+    let hello2 = "hello".to_string();
+    let world = "world".to_string();
+    let a = h.str_new(&hello);
+    let b = h.str_new(&hello2);
+    let c = h.str_new(&world);
+    let i = match a { Val::Str(x) => x, _ => { trap(); } };
+    let j = match b { Val::Str(x) => x, _ => { trap(); } };
+    let k = match c { Val::Str(x) => x, _ => { trap(); } };
+    if !h.str_eq(i, j) { trap(); }          // content equality
+    if h.str_eq(i, k) { trap(); }
+    if i == j { trap(); }                   // different cells
+    if h.str_len(i) != 5 { trap(); }
+    if h.str_at(i, 1) != 'e' { trap(); }
+}
+
+#[test]
+fn vectors_fill_read_and_write() {
+    let mut h = Heap::new();
+    let v = h.vec_new(3, Val::Num(9));
+    match v {
+        Val::Vec(i) => {
+            if h.vec_len(i) != 3 { trap(); }
+            match h.vec_at(i, 0) {
+                Val::Num(n) => { if n != 9 { trap(); } },
+                _ => { trap(); },
+            }
+            h.vec_set(i, 1, Val::Num(4));
+            match h.vec_at(i, 1) {
+                Val::Num(n) => { if n != 4 { trap(); } },
+                _ => { trap(); },
+            }
+        },
+        _ => { trap(); },
+    }
+}
+
+#[test]
+fn printing_is_canonical_and_cycle_safe() {
+    let mut h = Heap::new();
+    let mut syms = Intern::new();
+    let foo = syms.intern_str("foo");
+    let abtext = "a\"b".to_string();
+    let s = h.str_new(&abtext);
+    let si: taddr = match s { Val::Str(x) => x, _ => trap() };
+    let s2 = h.str_from_span(si, 0, 3);
+    let tail = h.list2(Val::Num(2), Val::Sym(foo));
+    let head = h.cons(Val::Num(1), tail);
+    let v = h.list3(s2, head, Val::Bool(false));
+    let mut out: Vec<char> = Vec::new();
+    write_to(&mut h, &syms, v, false, &mut out);
+    if !out.same("(\"a\\\"b\" (1 2 foo) #f)") { trap(); }
+
+    // display drops the quoting and escapes.
+    let mut out2: Vec<char> = Vec::new();
+    write_to(&mut h, &syms, s, true, &mut out2);
+    if !out2.same("a\"b") { trap(); }
+
+    // A cycle prints, and terminates.
+    let x = h.list1(Val::Num(1));
+    match x {
+        Val::Pair(i) => h.set_cdr(i, x),
+        _ => { trap(); },
+    }
+    let mut out3: Vec<char> = Vec::new();
+    write_to(&mut h, &syms, x, false, &mut out3);
+    if !out3.same("(1 . #<cycle>)") { trap(); }
+}
+
+#[test]
+fn equality_is_structural_for_data_and_identical_for_procedures() {
+    let mut h = Heap::new();
+    let mut syms = Intern::new();
+    let a = h.list2(Val::Num(1), Val::Num(2));
+    let b = h.list2(Val::Num(1), Val::Num(2));
+    if !equal(&h, &syms, a, b) { trap(); }
+    if eq(&h, a, b) { trap(); }                  // different cells
+    if !eq(&h, a, a) { trap(); }
+    if !eq(&h, Val::Num(3), Val::Num(3)) { trap(); }
+    if eq(&h, Val::Num(3), Val::Num(4)) { trap(); }
+    let c = h.cons(Val::Num(1), Val::Nil);
+    match c {
+        Val::Pair(i) => h.set_cdr(i, c),        // a one-cell cycle
+        _ => { trap(); },
+    }
+    let d = h.cons(Val::Num(1), Val::Nil);
+    match d {
+        Val::Pair(i) => h.set_cdr(i, d),
+        _ => { trap(); },
+    }
+    if equal(&h, &syms, c, d) { trap(); }       // bounded: answers #f
+    if !equal(&h, &syms, c, c) { trap(); }      // identity short-circuits
+}

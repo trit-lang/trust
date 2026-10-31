@@ -1,0 +1,57 @@
+// err.tr — the interpreter's error value.
+//
+// The machine has no unwinding (Ch. 5 §4), so an error is a *value* carried
+// up through the evaluator's `Result<Val, SErr>` spine to the read-eval loop,
+// which prints `error: <msg>` and continues with the next form. A message is
+// built eagerly — at the raise site, where the offending object still exists
+// — because a fn cannot return a reference that is not rooted in a parameter
+// (Ch. 3 §4.1), so the "build it lazily at the top" pattern is not writable.
+
+pub struct SErr { pub msg: Vec<char> }
+
+pub fn err(text: &str) -> SErr {
+    SErr { msg: text.to_string() }
+}
+
+pub fn err_of(msg: Vec<char>) -> SErr {
+    SErr { msg: msg }
+}
+
+// "prefix: detail" assembled in one buffer — the common shape.
+pub fn err2(prefix: &str, detail: &str) -> SErr {
+    let mut m = prefix.to_string();
+    m.push_str(detail);
+    SErr { msg: m }
+}
+
+// n pushed decimal. `floor_mod`/`floor_div`, NOT the machine's own `%`:
+// the nearest-quotient rule makes 7 % 10 equal −3 (7/10 rounds UP to 1),
+// which prints a digit of 7 as "- spliced into place — the exact trap
+// Ch. 1 §4 wrote the prelude's floor pair for.
+pub fn push_int(out: &mut Vec<char>, n: t27) {
+    let mut v = n;
+    if v < 0 { v = -v; }
+    let mut digits: Vec<char> = Vec::new();
+    loop {
+        let d = floor_mod(v, 10);
+        digits.push(char::try_from(d + 48).unwrap());
+        v = floor_div(v, 10);
+        if v == 0 { break; }
+    }
+    if n < 0 { out.push('-'); }
+    let mut i = digits.len();
+    while i > 0 {
+        i -= 1;
+        out.push(digits[i]);
+    }
+}
+
+pub fn push_addr(out: &mut Vec<char>, a: taddr) {
+    push_int(out, a as t27);
+}
+
+pub fn err_pos(prefix: &str, at: taddr) -> SErr {
+    let mut m = prefix.to_string();
+    push_int(&mut m, at as t27);
+    SErr { msg: m }
+}

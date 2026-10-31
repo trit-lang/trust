@@ -1,0 +1,789 @@
+// read.tr — the reader: characters in, datums out.
+//
+// One `Reader` serves both the port (the REPL's stdin, pulled one UTF-8
+// scalar at a time through `getchar`, decoded here) and from-string sources
+// (the embedded prelude, every test), because a `(read)` form and the REPL
+// itself must share one stream and one position. The two modes differ only
+// in where `ensure` gets more text; everything past it is one code path,
+// which is the whole point: nothing reader-shaped is test-only behaviour.
+//
+// What is decided here:
+//
+// - **Integers are t27, checked.** A literal that does not fit is `bad
+//   number`, never a halt (recalc's rule). Decimal by default; `0t` reads
+//   balanced ternary (digits `1` `0` `T`, where `T` is −1 — the machine's
+//   own spelling, Ch. 1 §3), `0h` reads heptavintimal (digits `0-9` `A-Q`,
+//   balanced −13…+13 with `D` the zero — `0h0J` is −345, not 6), and
+//   `#b` `#o` `#d` `#x` read R5RS interchange radices. Only a ternary
+//   machine gets to spell six as `0hJ`, so this reader does.
+// - **Depth is fenced at 3⁹ = 19683**, the same reason json's is: nesting
+//   past that is `too deep`, an answer rather than a stack against the heap.
+// - **Symbols are case-sensitive** (R7RS's default rather than R5RS's fold);
+//   the `#`-dispatch letters are matched either case.
+// - **UTF-8 decode happens once**, at the port, replacing invalid sequences
+//   with U+FFFD — an interchange boundary doing what Ch. 5 §1.5 says
+//   boundaries do. From-string sources are already `char`s.
+
+use err::SErr;
+use err::err;
+use err::err_pos;
+use sym::Intern;
+use val::Heap;
+use val::Val;
+
+fn getchar() -> t9;             // declared here, defined in runtime.t27
+
+pub const DEPTH_MAX: t27 = 19683;           // 3^9
+
+pub struct Reader {
+    buf: Vec<char>,
+    at: taddr,
+    port: bool,
+    closed: bool,
+}
+
+impl Reader {
+    // A reader over already-decoded text: the prelude, tests.
+    fn from_str(s: &Vec<char>) -> Reader {
+        Reader { buf: s.to_string(), at: 0, port: false, closed: false }
+    }
+
+    // A reader over the machine's input port.
+    fn port() -> Reader {
+        Reader { buf: Vec::new(), at: 0, port: true, closed: false }
+    }
+
+    fn position(&self) -> taddr { self.at }
+
+    // True when `k` more characters can be peeked. Refills from the port,
+    // one scalar at a time, UTF-8 decoded.
+    fn ensure(&mut self, k: taddr) -> bool {
+        while self.buf.len() < self.at + k {
+            if self.closed || !self.port { return false; }
+            match read_scalar() {
+                Option::Some(c) => self.buf.push(c),
+                Option::None => {
+                    self.closed = true;
+                    return false;
+                },
+            }
+        }
+        true
+    }
+
+    fn peek(&mut self) -> Option<char> {
+        if !self.ensure(1) { return Option::None; }
+        Option::Some(self.buf[self.at])
+    }
+
+    // The second character, when tokenisation needs it (`,@`, `#x…`).
+    fn peek2(&mut self) -> Option<char> {
+        if !self.ensure(2) { return Option::None; }
+        Option::Some(self.buf[self.at + 1])
+    }
+
+    fn take(&mut self) -> Option<char> {
+        let c = self.peek();
+        match c {
+            Option::Some(_) => { self.at += 1; },
+            Option::None => {},
+        }
+        c
+    }
+}
+
+// One UTF-8 scalar from the port, or None at end of input. Invalid bytes or
+// sequences become U+FFFD — the standard answer for a decode that must go on.
+fn read_scalar() -> Option<char> {
+    let b0 = getchar();
+    if b0 < 0 { return Option::None; }
+    if b0 < 128 {
+        return char::try_from(b0 as t27);
+    }
+    let mut scalar: t27 = 0;
+    let mut need: taddr = 0;
+    if b0 >= 192 && b0 < 224 {
+        scalar = (b0 as t27) - 192;
+        need = 1;
+    } else if b0 >= 224 && b0 < 240 {
+        scalar = (b0 as t27) - 224;
+        need = 2;
+    } else if b0 >= 240 && b0 < 248 {
+        scalar = (b0 as t27) - 240;
+        need = 3;
+    } else {
+        // A continuation byte first, or C0/C1 (overlong): replace.
+        return char::try_from(65533);
+    }
+    let mut got: taddr = 0;
+    while got < need {
+        let bx = getchar();
+        if bx < 0 { return char::try_from(65533); }
+        if bx < 128 || bx >= 192 { return char::try_from(65533); }
+        scalar = scalar * 64 + ((bx as t27) - 128);
+        got += 1;
+    }
+    if need == 1 && scalar < 128 { return char::try_from(65533); }      // overlong
+    if need == 2 && scalar < 2048 { return char::try_from(65533); }     // overlong
+    if need == 3 && scalar < 65536 { return char::try_from(65533); }    // overlong
+    match char::try_from(scalar) {
+        Option::Some(c) => Option::Some(c),
+        Option::None => char::try_from(65533),
+    }
+}
+
+// ----------------------------------------------------------- whitespace ---
+
+fn is_ws(c: char) -> bool {
+    c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+fn is_delim(c: char) -> bool {
+    if is_ws(c) { return true; }
+    c == '(' || c == ')' || c == '"' || c == ';' || c == '\'' || c == '`' || c == ','
+}
+
+// Whitespace and comments: `;` to end of line, `#| … |#` nested, and `#;`
+// datum comments (handled at datum level, since a datum must be skipped).
+fn skip_ws(r: &mut Reader) {
+    loop {
+        match r.peek() {
+            Option::Some(c) => {
+                if is_ws(c) {
+                    r.take();
+                } else if c == ';' {
+                    loop {
+                        match r.take() {
+                            Option::Some(d) => { if d == '\n' { break; } },
+                            Option::None => { break; },
+                        }
+                    }
+                } else if c == '#' {
+                    match r.peek2() {
+                        Option::Some(d) => {
+                            if d == '|' {
+                                r.take();
+                                r.take();
+                                skip_block_comment(r);
+                            } else { return; }
+                        },
+                        Option::None => { return; },
+                    }
+                } else { return; }
+            },
+            Option::None => { return; },
+        }
+    }
+}
+
+fn skip_block_comment(r: &mut Reader) {
+    let mut depth: taddr = 1;
+    loop {
+        match r.take() {
+            Option::Some(c) => {
+                if c == '#' {
+                    match r.peek() {
+                        Option::Some(d) => {
+                            if d == '|' { r.take(); depth += 1; }
+                        },
+                        Option::None => { return; },
+                    }
+                } else if c == '|' {
+                    match r.peek() {
+                        Option::Some(d) => {
+                            if d == '#' {
+                                r.take();
+                                depth -= 1;
+                                if depth == 0 { return; }
+                            }
+                        },
+                        Option::None => { return; },
+                    }
+                }
+            },
+            Option::None => { return; },        // unterminated: ends quietly
+        }
+    }
+}
+
+// -------------------------------------------------------------- numbers ---
+
+fn digit_value(c: char, radix: t27) -> Option<t27> {
+    c.to_digit(radix)
+}
+
+// Balanced ternary after `0t`: digits `1`, `0`, `T` — each worth one trit,
+// most significant first (Ch. 1 §3). `0t1T0` = 6.
+fn trit_digit(c: char) -> Option<t27> {
+    if c == '1' { return Option::Some(1); }
+    if c == '0' { return Option::Some(0); }
+    if c == 'T' || c == 't' { return Option::Some(0 - 1); }
+    Option::None
+}
+
+fn parse_ternary(s: &Vec<char>, from: taddr) -> Option<t27> {
+    let mut v: t27 = 0;
+    let mut i = from;
+    let mut any = false;
+    while i < s.len() {
+        let d = match trit_digit(s[i]) {
+            Option::Some(d) => d,
+            Option::None => { return Option::None; },
+        };
+        match v.checked_mul(3) {
+            Option::Some(t) => { v = t; },
+            Option::None => { return Option::None; },
+        }
+        match v.checked_add(d) {
+            Option::Some(t) => { v = t; },
+            Option::None => { return Option::None; },
+        }
+        any = true;
+        i += 1;
+    }
+    if !any { return Option::None; }
+    Option::Some(v)
+}
+
+// Heptavintimal after `0h`: digits 0-9 A-Q, balanced −13…+13, `D` = 0 —
+// `0hJ` = 6 and `0h0J` = −345 (Ch. 1 §3.1's own warning, implemented as
+// written: leading zeros change the value).
+// A heptavintimal digit's balanced value: 0-9 are −13…−4 with D the zero,
+// A-C −3…−1, E-Q +1…+13 (spec table, Ch. 1 §3.1's `0hJ` = 6).
+fn hept_value(c: char) -> Option<t27> {
+    let cv = c as t27;
+    if c >= '0' && c <= '9' { return Option::Some(cv - 61); }
+    if c >= 'A' && c <= 'Q' { return Option::Some(cv - 68); }
+    if c >= 'a' && c <= 'q' { return Option::Some(cv - 100); }
+    Option::None
+}
+
+fn parse_heptavintimal(s: &Vec<char>, from: taddr) -> Option<t27> {
+    let mut v: t27 = 0;
+    let mut i = from;
+    let mut any = false;
+    while i < s.len() {
+        let d = match hept_value(s[i]) {
+            Option::Some(d) => d,
+            Option::None => { return Option::None; },
+        };
+        match v.checked_mul(27) {
+            Option::Some(t) => { v = t; },
+            Option::None => { return Option::None; },
+        }
+        match v.checked_add(d) {
+            Option::Some(t) => { v = t; },
+            Option::None => { return Option::None; },
+        }
+        any = true;
+        i += 1;
+    }
+    if !any { return Option::None; }
+    Option::Some(v)
+}
+
+// Classify a scanned token: a number, or nothing (a symbol, to the caller).
+// Sign may lead, and may repeat after a radix prefix (`#x-f`, `-0t1T`).
+pub fn number_token(s: &Vec<char>) -> Option<t27> {
+    if s.len() == 0 { return Option::None; }
+    let mut i: taddr = 0;
+    let mut neg = false;
+    if s[i] == '+' || s[i] == '-' {
+        neg = s[i] == '-';
+        i += 1;
+        if i >= s.len() { return Option::None; }       // bare sign: a symbol
+    }
+    let mut v: Option<t27> = Option::None;
+    if i + 1 < s.len() && s[i] == '#' {
+        let rc = s[i + 1];
+        let radix: t27 = if rc == 'x' || rc == 'X' {
+            16
+        } else if rc == 'o' || rc == 'O' {
+            8
+        } else if rc == 'b' || rc == 'B' {
+            2
+        } else if rc == 'd' || rc == 'D' {
+            10
+        } else {
+            0
+        };
+        if radix > 0 {
+            let mut from = i + 2;
+            let mut neg2 = false;
+            if from < s.len() && (s[from] == '+' || s[from] == '-') {
+                neg2 = s[from] == '-';
+                from += 1;
+            }
+            if from >= s.len() { return Option::None; }
+            v = parse_digits_borrow(s, from, radix);
+            match v {
+                Option::Some(n) => {
+                    let m = if neg2 { -n } else { n };
+                    let m = if neg { -m } else { m };
+                    return Option::Some(m);
+                },
+                Option::None => { return Option::None; },
+            }
+        }
+        return Option::None;
+    }
+    if i + 1 < s.len() && s[i] == '0' && (s[i + 1] == 't' || s[i + 1] == 'T') {
+        v = parse_ternary(s, i + 2);
+    } else if i + 1 < s.len() && s[i] == '0' && (s[i + 1] == 'h' || s[i + 1] == 'H') {
+        v = parse_heptavintimal(s, i + 2);
+    } else if s[i] >= '0' && s[i] <= '9' {
+        v = parse_digits_borrow(s, i, 10);
+    } else {
+        return Option::None;
+    }
+    match v {
+        Option::Some(n) => {
+            let m = if neg { -n } else { n };
+            Option::Some(m)
+        },
+        Option::None => Option::None,
+    }
+}
+
+// parse_digits without the r: &Reader parameter (kept separate so token
+// classification does not carry a reader it does not use).
+fn parse_digits_borrow(s: &Vec<char>, from: taddr, radix: t27) -> Option<t27> {
+    let mut v: t27 = 0;
+    let mut i = from;
+    while i < s.len() {
+        match digit_value(s[i], radix) {
+            Option::Some(x) => {
+                match v.checked_mul(radix) {
+                    Option::Some(t) => { v = t; },
+                    Option::None => { return Option::None; },
+                }
+                match v.checked_add(x) {
+                    Option::Some(t) => { v = t; },
+                    Option::None => { return Option::None; },
+                }
+            },
+            Option::None => { return Option::None; },
+        }
+        i += 1;
+    }
+    Option::Some(v)
+}
+
+// --------------------------------------------------------------- reader ---
+
+// The one entry point: the next datum, or `None` at end of input (only at
+// top level; inside a list, end of input is an error).
+pub fn read_datum(r: &mut Reader, h: &mut Heap, syms: &mut Intern,
+                  depth: t27) -> Result<Option<Val>, SErr> {
+    skip_ws(r);
+    let at = r.position();
+    let c = match r.take() {
+        Option::Some(c) => c,
+        Option::None => { return Result::Ok(Option::None); },
+    };
+    if c == '(' {
+        if depth > DEPTH_MAX { return Result::Err(err_pos("too deep at ", at)); }
+        let v = read_list(r, h, syms, depth)?;
+        return Result::Ok(Option::Some(v));
+    }
+    if c == ')' {
+        return Result::Err(err_pos("unexpected ) at ", at));
+    }
+    if c == '\'' {
+        let d = read_required(r, h, syms, depth, at)?;
+        return Result::Ok(Option::Some(abbrev(h, syms, "quote", d)));
+    }
+    if c == '`' {
+        let d = read_required(r, h, syms, depth, at)?;
+        return Result::Ok(Option::Some(abbrev(h, syms, "quasiquote", d)));
+    }
+    if c == ',' {
+        let mut name = "unquote";
+        match r.peek() {
+            Option::Some(d) => { if d == '@' { r.take(); name = "unquote-splicing"; } },
+            Option::None => {},
+        }
+        let d = read_required(r, h, syms, depth, at)?;
+        return Result::Ok(Option::Some(abbrev(h, syms, name, d)));
+    }
+    if c == '"' {
+        let v = read_string(r, h, at)?;
+        return Result::Ok(Option::Some(v));
+    }
+    if c == '#' {
+        return read_hash(r, h, syms, depth, at);
+    }
+    // Anything else: scan a token to the next delimiter and classify it.
+    let mut tok: Vec<char> = Vec::new();
+    tok.push(c);
+    loop {
+        match r.peek() {
+            Option::Some(d) => {
+                if is_delim(d) { break; }
+                tok.push(d);
+                r.take();
+            },
+            Option::None => { break; },
+        }
+    }
+    classify(r, h, syms, tok, at)
+}
+
+// A datum that must be there: quote's argument, `,`'s. `at` is where the
+// abbreviation opened, for the error.
+fn read_required(r: &mut Reader, h: &mut Heap, syms: &mut Intern,
+                 depth: t27, at: taddr) -> Result<Val, SErr> {
+    match read_datum(r, h, syms, depth)? {
+        Option::Some(v) => Result::Ok(v),
+        Option::None => Result::Err(err_pos("unexpected end of input after ", at)),
+    }
+}
+
+fn abbrev(h: &mut Heap, syms: &mut Intern, name: &str, d: Val) -> Val {
+    let s = Val::Sym(syms.intern_str(name));
+    let tail = h.list1(d);
+    h.cons(s, tail)
+}
+
+fn classify(r: &mut Reader, h: &mut Heap, syms: &mut Intern,
+            tok: Vec<char>, at: taddr) -> Result<Option<Val>, SErr> {
+    if tok[0] >= '0' && tok[0] <= '9' {
+        match number_token(&tok) {
+            Option::Some(n) => { return Result::Ok(Option::Some(Val::Num(n))); },
+            Option::None => { return Result::Err(err_pos("bad number at ", at)); },
+        }
+    }
+    if tok.len() > 1 && (tok[0] == '+' || tok[0] == '-') {
+        if tok[1] >= '0' && tok[1] <= '9' {
+            match number_token(&tok) {
+                Option::Some(n) => { return Result::Ok(Option::Some(Val::Num(n))); },
+                Option::None => { return Result::Err(err_pos("bad number at ", at)); },
+            }
+        }
+    }
+    if tok.len() > 2 && tok[0] == '0' && (tok[1] == 't' || tok[1] == 'T' || tok[1] == 'h' || tok[1] == 'H') {
+        match number_token(&tok) {
+            Option::Some(n) => { return Result::Ok(Option::Some(Val::Num(n))); },
+            Option::None => { return Result::Err(err_pos("bad number at ", at)); },
+        }
+    }
+    if tok[0] == '.' && tok.len() == 1 {
+        return Result::Err(err_pos("unexpected . at ", at));
+    }
+    Result::Ok(Option::Some(Val::Sym(syms.intern(&tok))))
+}
+
+fn read_list(r: &mut Reader, h: &mut Heap, syms: &mut Intern,
+             depth: t27) -> Result<Val, SErr> {
+    read_list_at(r, h, syms, depth, true)
+}
+
+// The spine after `(`. `first` holds only at the head position, and it is
+// what keeps the dot grammar honest: a `.` there is a lone dot (a lexical
+// error in R5RS), never the start of a dotted tail; and a dotted tail is
+// `.` <datum> `)` with the dot standing alone as a token, so `(1 .x)`
+// errors rather than silently rewriting itself to `(1 x)`.
+fn read_list_at(r: &mut Reader, h: &mut Heap, syms: &mut Intern,
+                depth: t27, first: bool) -> Result<Val, SErr> {
+    skip_ws(r);
+    let at = r.position();
+    match r.peek() {
+        Option::Some(c) => {
+            if c == ')' {
+                r.take();
+                return Result::Ok(Val::Nil);
+            }
+            if c == '.' {
+                if first { return Result::Err(err_pos("unexpected . at ", at)); }
+                r.take();
+                match r.peek() {
+                    Option::Some(d) => {
+                        if is_delim(d) {
+                            let tail = read_required(r, h, syms, depth, at)?;
+                            skip_ws(r);
+                            match r.take() {
+                                Option::Some(e) => {
+                                    if e != ')' {
+                                        return Result::Err(err_pos("expected ) after dotted tail at ", at));
+                                    }
+                                },
+                                Option::None => {
+                                    return Result::Err(err_pos("unexpected end of input inside a list at ", at));
+                                },
+                            }
+                            return Result::Ok(tail);
+                        }
+                        return Result::Err(err_pos("unexpected . at ", at));
+                    },
+                    Option::None => {
+                        return Result::Err(err_pos("unexpected end of input inside a list at ", at));
+                    },
+                }
+            }
+        },
+        Option::None => {
+            return Result::Err(err_pos("unexpected end of input inside a list at ", at));
+        },
+    }
+    let head = read_required(r, h, syms, depth + 1, at)?;
+    if depth > DEPTH_MAX { return Result::Err(err_pos("too deep at ", at)); }
+    let rest = read_list_at(r, h, syms, depth, false)?;
+    Result::Ok(h.cons(head, rest))
+}
+
+fn read_string(r: &mut Reader, h: &mut Heap, at: taddr) -> Result<Val, SErr> {
+    let mut out: Vec<char> = Vec::new();
+    loop {
+        match r.take() {
+            Option::Some(c) => {
+                if c == '"' {
+                    return Result::Ok(h.str_new(&out));
+                }
+                if c == '\\' {
+                    match r.take() {
+                        Option::Some(e) => {
+                            if e == 'n' { out.push('\n'); }
+                            else if e == 't' { out.push('\t'); }
+                            else if e == 'r' { out.push('\r'); }
+                            else if e == '"' { out.push('"'); }
+                            else if e == '\\' { out.push('\\'); }
+                            else if e == '0' { out.push('\0'); }
+                            else { return Result::Err(err_pos("bad escape at ", at)); }
+                        },
+                        Option::None => {
+                            return Result::Err(err_pos("unterminated string at ", at));
+                        },
+                    }
+                } else {
+                    out.push(c);
+                }
+            },
+            Option::None => {
+                return Result::Err(err_pos("unterminated string at ", at));
+            },
+        }
+    }
+}
+
+// After `#`: booleans, characters, vectors, radix numbers, datum comments.
+// `#t` and `#f` are R5RS's boolean spellings, and a spelling must end at
+// a delimiter: `#true` is not "true" — it is a port from R7RS, and the
+// reader answers with an error instead of silently splitting it into a
+// `#t` and the symbol `rue`.
+fn hash_bool(r: &mut Reader, v: bool, at: taddr) -> Result<Option<Val>, SErr> {
+    match r.peek() {
+        Option::Some(d) => {
+            if !is_delim(d) {
+                return Result::Err(err_pos("bad boolean spelling at ", at));
+            }
+        },
+        Option::None => {},
+    }
+    Result::Ok(Option::Some(Val::Bool(v)))
+}
+
+fn read_hash(r: &mut Reader, h: &mut Heap, syms: &mut Intern,
+             depth: t27, at: taddr) -> Result<Option<Val>, SErr> {
+    let c = match r.take() {
+        Option::Some(c) => c,
+        Option::None => { return Result::Err(err_pos("unexpected end of input after # at ", at)); },
+    };
+    if c == 't' || c == 'T' { return hash_bool(r, true, at); }
+    if c == 'f' || c == 'F' { return hash_bool(r, false, at); }
+    if c == '(' {
+        // A vector is a list with a different close — read it as one, then
+        // copy the spine into a fresh vector cell.
+        let items = read_list(r, h, syms, depth + 1)?;
+        let n = match h.len_proper(items) {
+            Option::Some(n) => n,
+            Option::None => { return Result::Err(err_pos("bad vector at ", at)); },
+        };
+        let v = h.vec_new(n, Val::Num(0));
+        match v {
+            Val::Vec(i) => {
+                let mut cur = items;
+                let mut k: taddr = 0;
+                loop {
+                    match cur {
+                        Val::Pair(p) => {
+                            h.vec_set(i, k, h.car(p));
+                            cur = h.cdr(p);
+                            k += 1;
+                        },
+                        _ => { break; },
+                    }
+                }
+            },
+            _ => {},
+        }
+        return Result::Ok(Option::Some(v));
+    }
+    if c == '\\' {
+        let mut name: Vec<char> = Vec::new();
+        loop {
+            match r.peek() {
+                Option::Some(d) => {
+                    if is_delim(d) { break; }
+                    name.push(d);
+                    r.take();
+                },
+                Option::None => { break; },
+            }
+        }
+        if name.len() == 0 { return Result::Err(err_pos("bad character at ", at)); }
+        if name.len() == 1 {
+            return Result::Ok(Option::Some(Val::Chr(name[0])));
+        }
+        if name.same("space") { return Result::Ok(Option::Some(Val::Chr(' '))); }
+        if name.same("newline") { return Result::Ok(Option::Some(Val::Chr('\n'))); }
+        if name.same("tab") { return Result::Ok(Option::Some(Val::Chr('\t'))); }
+        // A longer name is R5RS's named-character territory; past the three
+        // above, accept it by spelling (#\x stays #\x).
+        return Result::Err(err_pos("unknown character name at ", at));
+    }
+    if c == ';' {
+        // A datum comment: read one datum, drop it, answer the next.
+        match read_datum(r, h, syms, depth)? {
+            Option::Some(_) => { return read_datum(r, h, syms, depth); },
+            Option::None => { return Result::Err(err_pos("unexpected end of input after #; at ", at)); },
+        }
+    }
+    if c == 'x' || c == 'X' || c == 'o' || c == 'O' || c == 'b' || c == 'B' || c == 'd' || c == 'D' {
+        let mut tok: Vec<char> = Vec::new();
+        tok.push('#');
+        tok.push(c);
+        loop {
+            match r.peek() {
+                Option::Some(d) => {
+                    if is_delim(d) { break; }
+                    tok.push(d);
+                    r.take();
+                },
+                Option::None => { break; },
+            }
+        }
+        match number_token(&tok) {
+            Option::Some(n) => { return Result::Ok(Option::Some(Val::Num(n))); },
+            Option::None => { return Result::Err(err_pos("bad number at ", at)); },
+        }
+    }
+    Result::Err(err_pos("unknown # syntax at ", at))
+}
+
+// -------------------------------------------------------------- tests ---
+
+// Read every datum to EOF; the error case surfaces as a trap, so tests pin
+// success shapes only — error cases get their own harness below.
+fn read_all_text(text: &str, h: &mut Heap, syms: &mut Intern) -> Vec<Val> {
+    let src = text.to_string();
+    let mut r = Reader::from_str(&src);
+    let mut out: Vec<Val> = Vec::new();
+    loop {
+        match read_datum(&mut r, h, syms, 0) {
+            Result::Ok(v) => {
+                match v {
+                    Option::Some(d) => out.push(d),
+                    Option::None => { break; },
+                }
+            },
+            Result::Err(e) => {
+                print(&e.msg);
+                trap();
+            },
+        }
+    }
+    out
+}
+
+#[test]
+fn atoms_read_as_themselves() {
+    let mut h = Heap::new();
+    let mut syms = Intern::new();
+    let ds = read_all_text("42 -7 foo bar9 + - ...", &mut h, &mut syms);
+    if ds.len() != 7 { trap(); }
+    match ds[0] { Val::Num(n) => { if n != 42 { trap(); } }, _ => { trap(); } }
+    match ds[1] { Val::Num(n) => { if n != -7 { trap(); } }, _ => { trap(); } }
+    let n2 = syms.name(match ds[2] { Val::Sym(i) => i, _ => trap() });
+    let n3 = syms.name(match ds[3] { Val::Sym(i) => i, _ => trap() });
+    let n4 = syms.name(match ds[4] { Val::Sym(i) => i, _ => trap() });
+    let n5 = syms.name(match ds[5] { Val::Sym(i) => i, _ => trap() });
+    let n6 = syms.name(match ds[6] { Val::Sym(i) => i, _ => trap() });
+    if !n2.same("foo") { trap(); }
+    if !n3.same("bar9") { trap(); }
+    if !n4.same("+") { trap(); }
+    if !n5.same("-") { trap(); }
+    if !n6.same("...") { trap(); }
+}
+
+#[test]
+fn the_machines_own_radices_read_back() {
+    let mut h = Heap::new();
+    let mut syms = Intern::new();
+    let ds = read_all_text("0t1T0 0tT1 0hJ 0h0J #xff #b101 #o17 #d99", &mut h, &mut syms);
+    if ds.len() != 8 { trap(); }
+    let want: [t27; 8] = [6, 0 - 2, 6, 0 - 345, 255, 5, 15, 99];
+    let mut i: taddr = 0;
+    while i < 8 {
+        match ds[i] {
+            Val::Num(n) => { if n != want[i] { trap(); } },
+            _ => { trap(); },
+        }
+        i += 1;
+    }
+}
+
+#[test]
+fn lists_sugar_and_comments() {
+    let mut h = Heap::new();
+    let mut syms = Intern::new();
+    let ds = read_all_text("(a (b c) . d) 'x `(1 ,y ,@z) ; gone\n#;lost kept #| block #| nest |# done |#", &mut h, &mut syms);
+    if ds.len() != 4 { trap(); }
+    let mut out: Vec<char> = Vec::new();
+    let mut i: taddr = 0;
+    while i < ds.len() {
+        val::write_to(&mut h, &syms, ds[i], false, &mut out);
+        out.push('|');
+        i += 1;
+    }
+    if !out.same("(a (b c) . d)|(quote x)|(quasiquote (1 (unquote y) (unquote-splicing z)))|kept|") { trap(); }
+}
+
+#[test]
+fn strings_chars_vectors_and_booleans() {
+    let mut h = Heap::new();
+    let mut syms = Intern::new();
+    let ds = read_all_text("\"a\\nb\\\"c\" #\\a #\\space #\\newline #(1 two \"3\") #t #f", &mut h, &mut syms);
+    if ds.len() != 7 { trap(); }
+    let mut out: Vec<char> = Vec::new();
+    let mut i: taddr = 0;
+    while i < ds.len() {
+        val::write_to(&mut h, &syms, ds[i], false, &mut out);
+        out.push('|');
+        i += 1;
+    }
+    if !out.same("\"a\\nb\\\"c\"|#\\a|#\\space|#\\newline|#(1 two \"3\")|#t|#f|") { trap(); }
+}
+
+#[test]
+fn errors_are_values_with_positions() {
+    let cases: [&str; 6] = ["(", "(a . b c)", "\"open", "#\\what?", "01x2", ")"];
+    let mut i: taddr = 0;
+    while i < 6 {
+        let mut h = Heap::new();
+        let mut syms = Intern::new();
+        let src = cases[i].to_string();
+        let mut r = Reader::from_str(&src);
+        match read_datum(&mut r, &mut h, &mut syms, 0) {
+            Result::Ok(v) => {
+                match v {
+                    Option::Some(_) => { trap(); },   // all six must fail
+                    Option::None => { trap(); },
+                }
+            },
+            Result::Err(e) => {
+                if e.msg.len() < 5 { trap(); }
+            },
+        }
+        i += 1;
+    }
+}
